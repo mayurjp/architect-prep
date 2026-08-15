@@ -12,7 +12,8 @@
 function currentTheme() {
   var attr = document.documentElement.getAttribute("data-theme");
   if (attr) return attr;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  var prefersDark = typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  return prefersDark ? "dark" : "light";
 }
 
 function updateToggleIcon() {
