@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Architect Prep — Topic</title>
+<link rel="stylesheet" href="assets/css/style.css" />
+</head>
+<body>
+<header class="site">
+  <div class="brand">Architect Prep</div>
+  <nav>
+    <a href="index.html">Today</a>
+    <a href="topics.html">Topics</a>
+    <a href="search.html">Search</a>
+  </nav>
+</header>
+<main>
+  <h1 id="topic-title">Topic</h1>
+  <p id="topic-desc" class="muted"></p>
+  <div id="level-tabs" class="tabs"></div>
+  <div id="question-list"></div>
+</main>
+<script>
+const LEVEL_ORDER = ["beginner", "intermediate", "advanced", "scenario"];
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  const topicId = params.get("t");
+  const [questions, topics] = await Promise.all([
+    fetch("data/questions.json").then((r) => r.json()),
+    fetch("data/topics.json").then((r) => r.json()),
+  ]);
+
+  const topic = topics.find((t) => t.id === topicId);
+  if (!topic) {
+    document.getElementById("topic-title").textContent = "Topic not found";
+    return;
+  }
+  document.getElementById("topic-title").textContent = topic.title;
+  document.getElementById("topic-title").style.color = topic.color;
+  document.getElementById("topic-desc").textContent = topic.description;
+
+  const byLevel = {};
+  for (const q of questions.filter((q) => q.topic === topicId)) {
+    (byLevel[q.level] = byLevel[q.level] || []).push(q);
+  }
+  for (const lvl of Object.keys(byLevel)) byLevel[lvl].sort((a, b) => a.seq - b.seq);
+
+  const availableLevels = LEVEL_ORDER.filter((l) => byLevel[l] && byLevel[l].length);
+  const tabsEl = document.getElementById("level-tabs");
+  const listEl = document.getElementById("question-list");
+
+  if (availableLevels.length === 0) {
+    listEl.innerHTML = '<p class="empty-state">No content yet for this topic.</p>';
+    return;
+  }
+
+  let activeLevel = availableLevels[0];
+
+  function render() {
+    tabsEl.innerHTML = "";
+    for (const lvl of availableLevels) {
+      const btn = document.createElement("button");
+      btn.textContent = `${lvl[0].toUpperCase()}${lvl.slice(1)} (${byLevel[lvl].length})`;
+      btn.className = lvl === activeLevel ? "active" : "";
+      btn.onclick = () => { activeLevel = lvl; render(); };
+      tabsEl.appendChild(btn);
+    }
+
+    listEl.innerHTML = "";
+    for (const q of byLevel[activeLevel]) {
+      const block = document.createElement("div");
+      block.className = "card question-block";
+      const followUpsHtml = (q.followUps || [])
+        .map(
+          (f) => `<div class="followup">
+            <p class="question-text">${escapeHtml(f.question)}</p>
+            <div class="answer-body">${f.answerHtml}</div>
+          </div>`
+        )
+        .join("");
+      if (q.status === "planned") {
+        block.innerHTML = `
+          <span class="badge planned">Planned</span>
+          <p class="question-text">${escapeHtml(q.question)}</p>
+          <p class="muted">Coming soon.</p>`;
+      } else {
+        block.innerHTML = `
+          <span class="badge ${q.level}">${q.level}</span>
+          <p class="question-text">${escapeHtml(q.question)}</p>
+          <div class="answer-body">${q.answerHtml}</div>
+          ${followUpsHtml}`;
+      }
+      listEl.appendChild(block);
+    }
+  }
+
+  render();
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+init();
+</script>
+</body>
+</html>

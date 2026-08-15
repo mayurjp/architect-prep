@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Architect Prep — Search</title>
+<link rel="stylesheet" href="assets/css/style.css" />
+</head>
+<body>
+<header class="site">
+  <div class="brand">Architect Prep</div>
+  <nav>
+    <a href="index.html">Today</a>
+    <a href="topics.html">Topics</a>
+    <a href="search.html">Search</a>
+  </nav>
+</header>
+<main>
+  <h1>Search</h1>
+  <input type="search" id="q" placeholder="Search questions, e.g. &quot;idempotent&quot; or &quot;DbContext&quot;" autofocus />
+  <div id="results" style="margin-top:1.25rem"></div>
+</main>
+<script src="assets/js/search.js"></script>
+<script>
+let questions = [];
+let topicsById = {};
+
+async function init() {
+  const [q, topics] = await Promise.all([
+    fetch("data/questions.json").then((r) => r.json()),
+    fetch("data/topics.json").then((r) => r.json()),
+  ]);
+  questions = q;
+  topicsById = Object.fromEntries(topics.map((t) => [t.id, t]));
+
+  const input = document.getElementById("q");
+  input.addEventListener("input", () => render(input.value));
+  render("");
+}
+
+function render(query) {
+  const results = document.getElementById("results");
+  if (!query.trim()) {
+    results.innerHTML = '<p class="empty-state">Start typing to search the question bank.</p>';
+    return;
+  }
+  const matches = filterQuestions(questions, query).slice(0, 50);
+  if (matches.length === 0) {
+    results.innerHTML = '<p class="empty-state">No matches.</p>';
+    return;
+  }
+  results.innerHTML = matches
+    .map((q) => {
+      const topic = topicsById[q.topic];
+      return `<a class="card" style="display:block" href="topic.html?t=${q.topic}">
+        <span class="badge ${q.status === "planned" ? "planned" : q.level}">${q.status === "planned" ? "planned" : q.level}</span>
+        <span class="muted" style="margin-left:0.5rem">${topic ? topic.title : q.topic}</span>
+        <p class="question-text">${escapeHtml(q.question)}</p>
+      </a>`;
+    })
+    .join("");
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+init();
+</script>
+</body>
+</html>

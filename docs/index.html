@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Architect Prep — Today</title>
+<link rel="stylesheet" href="assets/css/style.css" />
+</head>
+<body>
+<header class="site">
+  <div class="brand">Architect Prep</div>
+  <nav>
+    <a href="index.html">Today</a>
+    <a href="topics.html">Topics</a>
+    <a href="search.html">Search</a>
+  </nav>
+</header>
+<main>
+  <h1>Today's Questions</h1>
+  <p class="muted">One rotating question per topic. Same set for everyone, all day, every UTC day — cycles through the full bank before repeating.</p>
+  <div id="today-list" class="grid"></div>
+</main>
+<script src="assets/js/rotation.js"></script>
+<script>
+async function init() {
+  const [questions, topics] = await Promise.all([
+    fetch("data/questions.json").then((r) => r.json()),
+    fetch("data/topics.json").then((r) => r.json()),
+  ]);
+
+  const today = todayUtcDateString();
+  const container = document.getElementById("today-list");
+  const byTopic = {};
+  for (const q of questions) {
+    if (q.status !== "answered") continue;
+    (byTopic[q.topic] = byTopic[q.topic] || []).push(q);
+  }
+
+  topics.sort((a, b) => a.order - b.order);
+  for (const topic of topics) {
+    const pool = byTopic[topic.id] || [];
+    const card = document.createElement("div");
+    card.className = "card";
+    if (pool.length === 0) {
+      card.innerHTML = `
+        <div class="topic-title" style="color:${topic.color}">${topic.title}</div>
+        <p class="muted">No answered questions yet.</p>
+        <a href="topic.html?t=${topic.id}">View topic →</a>`;
+      container.appendChild(card);
+      continue;
+    }
+    const id = todaysQuestionId(pool, topic.id, today);
+    const q = pool.find((x) => x.id === id);
+    card.innerHTML = `
+      <span class="badge ${q.level}">${q.level}</span>
+      <div class="topic-title" style="color:${topic.color}">${topic.title}</div>
+      <details>
+        <summary class="question-text" style="cursor:pointer;display:inline">${escapeHtml(q.question)}</summary>
+        <div class="answer-body">${q.answerHtml}</div>
+      </details>
+      <div style="margin-top:0.75rem"><a href="topic.html?t=${topic.id}">View all in this topic →</a></div>`;
+    container.appendChild(card);
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+init();
+</script>
+</body>
+</html>

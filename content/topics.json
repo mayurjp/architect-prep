@@ -1,0 +1,79 @@
+[
+  {
+    "id": "csharp-dotnet-fundamentals",
+    "title": "C# & .NET Fundamentals",
+    "description": "Value/reference types, memory & GC, async/await, LINQ, delegates & events, and core CLR mechanics.",
+    "order": 1,
+    "color": "#8B5CF6"
+  },
+  {
+    "id": "oop-design-principles",
+    "title": "OOP & Design Principles",
+    "description": "Encapsulation, inheritance, polymorphism, abstraction, SOLID, and other foundational design principles.",
+    "order": 2,
+    "color": "#6366F1"
+  },
+  {
+    "id": "design-patterns",
+    "title": "Design Patterns",
+    "description": "Creational, structural, and behavioral patterns (Gang of Four) with C# examples.",
+    "order": 3,
+    "color": "#3B82F6"
+  },
+  {
+    "id": "aspnet-mvc",
+    "title": "ASP.NET & ASP.NET MVC",
+    "description": "MVC lifecycle, routing, view engines, model binding/validation, filters, and DI in MVC.",
+    "order": 4,
+    "color": "#0EA5E9"
+  },
+  {
+    "id": "aspnet-webapi-rest-http",
+    "title": "ASP.NET Web API, REST & HTTP/HTTPS",
+    "description": "HTTP fundamentals, REST constraints, Web API controllers, middleware, filters, auth, versioning, async.",
+    "order": 5,
+    "color": "#14B8A6"
+  },
+  {
+    "id": "entity-framework-sql-server",
+    "title": "Entity Framework & SQL Server",
+    "description": "EF Core DbContext/DbSet, migrations, querying, and SQL Server fundamentals through advanced tuning.",
+    "order": 6,
+    "color": "#10B981"
+  },
+  {
+    "id": "nosql",
+    "title": "NoSQL",
+    "description": "Document, key-value, and wide-column stores; when to reach for NoSQL over relational.",
+    "order": 7,
+    "color": "#84CC16"
+  },
+  {
+    "id": "docker",
+    "title": "Docker",
+    "description": "Images, containers, layers, multi-stage builds, networking, volumes, and Docker Compose.",
+    "order": 8,
+    "color": "#F59E0B"
+  },
+  {
+    "id": "kubernetes",
+    "title": "Kubernetes",
+    "description": "Pods, Deployments, Services, probes, autoscaling, deployment strategies, and troubleshooting.",
+    "order": 9,
+    "color": "#F97316"
+  },
+  {
+    "id": "gcp",
+    "title": "Google Cloud Platform",
+    "description": "Core GCP services relevant to .NET workloads: Cloud Run, GKE, Cloud SQL, IAM, networking.",
+    "order": 10,
+    "color": "#EF4444"
+  },
+  {
+    "id": "microservices-system-design",
+    "title": "Microservices & System Design",
+    "description": "Service boundaries, resilience, sagas, events/outbox, CQRS, observability, security, and end-to-end system design.",
+    "order": 11,
+    "color": "#EC4899"
+  }
+]
