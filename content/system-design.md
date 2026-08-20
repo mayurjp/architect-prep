@@ -683,3 +683,28 @@ You need an external, centralized system to coordinate the lock. A Distributed C
 5. Once Instance 2 finishes the job, it deletes the lock key in Redis.
 
 *(Note: In the .NET ecosystem, libraries like **Hangfire** or **Quartz.NET** implement these distributed locking patterns automatically using SQL Server or Redis under the hood).*
+
+---
+
+## Scenario — Question 7
+
+**Q7: Your application relies on a third-party payment gateway. During Black Friday, the payment gateway starts timing out on 50% of requests. Your checkout service blindly retries every failed request 3 times immediately. Soon, all threads in your checkout service are blocked waiting for timeouts, and your entire application crashes. How do you prevent a failing external dependency from taking down your system?**
+
+This is a classic cascading failure caused by synchronous network blocking and aggressive retries.
+
+**The Solution: The Circuit Breaker Pattern**
+
+You must implement a Circuit Breaker (using a library like **Polly** in .NET) to protect your application from the failing third-party service.
+
+**The Mechanism:**
+The Circuit Breaker acts like an electrical switch wrapped around your HTTP calls.
+
+1. **Closed State (Normal):** Traffic flows freely. The Circuit Breaker monitors the responses.
+2. **Open State (Tripped):** If the failure rate exceeds a certain threshold (e.g., 50% of requests fail within 10 seconds), the circuit "trips" and opens. 
+   - While open, *all subsequent calls to the payment gateway fail instantly* without ever actually making the network request. This immediately frees up your threads, saving your checkout service from thread pool starvation.
+   - You can return a fallback response to the user, like "Payment is currently unavailable, please try again later."
+3. **Half-Open State (Testing):** After a cooldown period (e.g., 30 seconds), the circuit enters a Half-Open state. It allows *one* test request through to the payment gateway.
+   - If the test request succeeds, the gateway is deemed healthy, and the circuit closes (normal operation).
+   - If the test request fails, the circuit immediately opens again for another 30 seconds.
+
+By combining Circuit Breakers with **Exponential Backoff and Jitter** (adding randomness to retry delays), you ensure your application remains responsive during third-party outages and avoids contributing to the third-party's overload (the "thundering herd" problem).

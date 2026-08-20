@@ -104,3 +104,21 @@ Serverless platforms like Cloud Run (and Cloud Functions) scale to zero, which s
 1. **Minimum Instances:** The most robust solution is to configure a minimum number of instances (e.g., `--min-instances 1`). Cloud Run will keep at least one container running and ready to serve traffic at all times, completely eliminating cold starts (though you pay for that instance even when idle).
 2. **Optimize Application Startup:** If you must scale to zero, optimize the code. Defer heavy initialization (like loading large machine learning models) until it's strictly needed, or use a lighter runtime (e.g., Go or Native AOT in .NET instead of a heavy Java/Spring Boot container).
 3. **CPU Allocation:** In Cloud Run, CPU is typically only allocated *during* a request. Ensure you aren't doing heavy background work during startup that gets throttled. (Note: Cloud Run now supports "CPU always allocated," which is required if you use minimum instances to keep background threads alive).
+
+---
+
+## Scenario — Question 4
+
+**Q4: You have an App Engine application that connects to a Cloud SQL database using a public IP address. The security team mandates that all database traffic must remain strictly on Google's internal network and cannot traverse the public internet. However, App Engine is a serverless product without a standard VPC attachment. How do you secure this connection?**
+
+Serverless platforms in GCP (like App Engine and Cloud Run) run in Google's managed tenant network, not your custom Virtual Private Cloud (VPC), making private connections tricky by default.
+
+**The Solution: Serverless VPC Access**
+
+You must bridge the gap between Google's serverless environment and your private VPC network.
+
+**The Mechanism:**
+1. **Remove Public IP:** You configure the Cloud SQL instance to only have a Private IP address within your VPC (e.g., `10.0.0.5`).
+2. **Serverless VPC Access Connector:** You provision a Serverless VPC Access Connector in your VPC. This connector provisions a small cluster of internal VMs that act as a bridge.
+3. **Egress Configuration:** You configure your App Engine `app.yaml` (or Cloud Run service) to route its outbound traffic (egress) through this Connector.
+4. **The Flow:** When your App Engine code connects to `10.0.0.5`, the traffic flows from the serverless environment, through the Connector, directly into your VPC, and hits the Cloud SQL instance without ever touching the public internet. This satisfies strict enterprise security and compliance requirements.

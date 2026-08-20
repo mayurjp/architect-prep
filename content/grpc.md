@@ -128,3 +128,33 @@ service UserService {
    - When a JSON request arrives at `/v1/users/5`, the transcoder intercepts it, deserializes the JSON to Protobuf, calls the gRPC method, takes the Protobuf response, serializes it to JSON, and returns a standard `200 OK` HTTP response.
 
 You maintain a single codebase (the gRPC service) while supporting both modern microservices and legacy web clients simultaneously.
+
+---
+
+## Scenario — Question 4
+
+**Q4: A developer notices that a gRPC microservice call takes 500ms to complete. They implement client-side retries using Polly, retrying up to 3 times if it fails. The server processes the request, but the network drops the response. The client retries 3 times, causing the server to process the heavy request 4 times in total. How do you prevent this using native gRPC features?**
+
+This is a problem of blind retries without idempotency or deadline propagation. While client-side retries (like Polly) are good, gRPC offers a powerful built-in mechanism called **Deadlines**.
+
+**The Flaw:**
+The server doesn't know the client gave up or retried. It continues processing the heavy task, wasting CPU, even though the original client connection dropped.
+
+**The Solution: gRPC Deadlines and Cancellation Tokens**
+
+1. **Client-Side Deadline:** The client must attach a strict deadline to the RPC call:
+   ```csharp
+   var response = await client.ProcessDataAsync(request, deadline: DateTime.UtcNow.AddSeconds(1));
+   ```
+2. **Deadline Propagation:** Because gRPC uses HTTP/2, this deadline is transmitted to the server in the headers (`grpc-timeout`).
+3. **Server-Side Cancellation:** In ASP.NET Core gRPC, this deadline is automatically bound to the `ServerCallContext.CancellationToken`. 
+   The server developer MUST pass this token to all database or heavy asynchronous calls:
+   ```csharp
+   public override async Task<Response> ProcessData(Request req, ServerCallContext context) {
+       await _db.HeavyWorkAsync(context.CancellationToken); // Crucial!
+       return new Response();
+   }
+   ```
+
+**Result:**
+If the client's 1-second deadline expires (or the network drops and the client cancels), the HTTP/2 connection immediately signals cancellation to the server. The `CancellationToken` triggers, instantly aborting the database query and freeing the server's CPU, preventing resource exhaustion during retry storms.

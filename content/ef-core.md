@@ -203,3 +203,35 @@ Furthermore, `DbContext` is **not thread-safe**, meaning simultaneous HTTP reque
 
 **The Fix:**
 Always use the default `ServiceLifetime.Scoped` for `DbContext`. The framework will create a new instance at the beginning of an HTTP request and properly dispose of it (and its tracking cache) at the end of the request.
+
+---
+
+## Scenario — Question 4
+
+**Q4: A complex EF Core LINQ query involving multiple `Include` statements and filtering logic executes perfectly on the developer's local machine using a small subset of test data. However, in production with millions of rows, the query causes a massive CPU spike on the web server and eventually throws an `OutOfMemoryException`. Upon investigating the SQL logs, you notice the SQL query being generated is extremely simple and lacks the `WHERE` clauses from your LINQ statement. What caused this?**
+
+This is the dreaded **Client-Side Evaluation** problem (which was partially disabled in EF Core 3.0+, but can still manifest when mixing `IEnumerable` vs `IQueryable` incorrectly).
+
+**The Flaw:**
+If a developer accidentally calls `.AsEnumerable()`, `.ToList()`, or passes the `IQueryable` into a method that only accepts `IEnumerable` *before* applying the `.Where()` filters, the SQL query is immediately executed. 
+EF Core stops translating LINQ to SQL the moment the type shifts from `IQueryable` to `IEnumerable`.
+
+```csharp
+// THE FLAW: Calling ToList() too early!
+var activeUsers = _context.Users
+    .Include(u => u.Orders)
+    .ToList() // <--- FATAL MISTAKE: Executes "SELECT * FROM Users JOIN Orders"
+    .Where(u => u.IsActive && u.Orders.Count > 10); // Filters applied in server RAM
+```
+This forces the database to return all millions of rows over the network to the web server. The web server then consumes gigabytes of RAM instantiating C# objects for every row, only to filter out 99% of them in memory.
+
+**The Solution:**
+Ensure all filtering (`Where`), sorting (`OrderBy`), and pagination (`Skip/Take`) are applied strictly to the `IQueryable` interface *before* invoking terminal execution methods like `.ToList()`, `.ToArray()`, or `FirstOrDefault()`.
+
+```csharp
+// THE FIX: Maintain IQueryable until the end
+var activeUsers = _context.Users
+    .Include(u => u.Orders)
+    .Where(u => u.IsActive && u.Orders.Count > 10) // Translated into SQL WHERE clause
+    .ToList(); // Executes optimized SQL returning only the matching rows
+```

@@ -137,3 +137,21 @@ You must separate configuration from code and inject secrets dynamically at runt
 4. **Application Runtime:** The .NET application reads the secret from the environment variables at startup (`builder.Configuration.AddEnvironmentVariables()`), rather than from the physical `appsettings.json` file. 
 
 Alternatively, the application can use **Managed Identities** to connect directly to Azure Key Vault at runtime to retrieve its own secrets, meaning the CI/CD pipeline never even sees the secrets.
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your company experiences a catastrophic region failure in Azure (East US goes completely offline). You have a Disaster Recovery plan that requires you to redeploy the entire application stack to West US. However, your team used the Azure Portal UI to manually click and configure all 150 resources over the last two years. What DevOps failure does this represent, and how long will recovery take?**
+
+This represents a complete failure to implement **Infrastructure as Code (IaC)**, leading to "ClickOps" and Configuration Drift.
+
+**The Consequence:**
+Recovery will likely take weeks, and it will almost certainly fail on the first few attempts. Because the infrastructure was created manually in the UI, there is no authoritative, version-controlled record of exactly which checkboxes were ticked, what network security group rules were applied, or how the load balancers were configured. The team must rely on memory or outdated wiki documents.
+
+**The DevOps Solution:**
+You must entirely ban manual resource creation in production environments.
+
+1. **Adopt Terraform or Bicep:** Write declarative code that defines the entire infrastructure architecture.
+2. **Automate via CD:** Ensure that the *only* entity with permission to create resources in Azure is the CI/CD Service Principal. Developers should have "Reader" access in production.
+3. **The Result:** If East US fails, the Disaster Recovery process takes minutes. You simply change a single variable in your Terraform script (`region = "westus"`) and run the CI/CD pipeline. The pipeline automatically provisions the identical 150 resources in the new region, flawlessly and consistently.

@@ -115,3 +115,37 @@ Cassandra relies on a **Last Write Wins (LWW)** conflict resolution strategy.
 
 **The Flaw (Clock Drift):**
 This system relies entirely on the system clocks of the servers being perfectly synchronized. If Node A's clock is 5 minutes faster than Node B's clock, a write to Node A will always "win" over a write to Node B, even if Node B's write actually occurred later in real time. To mitigate this, servers running Cassandra must use Network Time Protocol (NTP) to keep their clocks synchronized to within milliseconds.
+
+---
+
+## Scenario — Question 4
+
+**Q4: You are migrating a relational database to a NoSQL Document Store (MongoDB). In the SQL database, you had a `Users` table and an `Addresses` table, connected by a Foreign Key, requiring a `JOIN` to query. A developer proposes replicating this exact structure in MongoDB by creating a `Users` collection and an `Addresses` collection, and doing manual "joins" in the application code. Why is this an anti-pattern in NoSQL, and what is the correct approach?**
+
+This is the classic mistake of applying relational modeling paradigms to a non-relational database. 
+
+**The Anti-Pattern:**
+NoSQL databases like MongoDB do not support efficient server-side JOINs across distributed collections. If you try to normalize data (like SQL) and do manual joins in your C# code, you will introduce massive network latency (the N+1 query problem). Fetching 100 users would require 101 database queries to assemble the data.
+
+**The Correct Approach: Denormalization (Embedding)**
+In document databases, data that is accessed together should be stored together.
+
+You should **embed** the address directly inside the User document as a sub-document or an array of sub-documents.
+
+```json
+{
+  "_id": "user123",
+  "name": "Jane Doe",
+  "addresses": [
+    {
+      "type": "Home",
+      "street": "123 Main St",
+      "city": "Seattle"
+    }
+  ]
+}
+```
+
+**Result:**
+When you query the user, you get all their relevant data in a single, fast disk read and network round trip. This heavily optimizes for read performance, which is exactly what NoSQL document stores are designed to do. 
+*(Note: You only normalize via references in MongoDB if the sub-document is unbounded and grows infinitely, like a user's activity log, to avoid hitting the 16MB document size limit).*

@@ -243,3 +243,26 @@ public class OrderProcessor {
 You can now easily switch to `FileLogger` by configuring your DI container at application startup. For unit testing, you can inject a mock `ILogger` that writes to memory, making the tests fast and reliable without database dependencies.
 
 ---
+
+## Scenario — Question 3
+
+**Q3: A developer implements an `Invoice` class that contains methods to calculate the total (`CalculateTotal()`), format the invoice as a PDF (`PrintPDF()`), and save the invoice to the database (`SaveToDb()`). Over time, the class grows to 2,000 lines. Bugs introduced in the PDF formatting logic are now accidentally breaking the tax calculation logic. Which SOLID principle is violated, and how do you fix it?**
+
+This design violates the **Single Responsibility Principle (SRP)**.
+
+**The Flaw:**
+SRP states that a class should have one, and only one, reason to change. The `Invoice` class currently has three entirely separate reasons to change:
+1. Business Rules (Tax laws change).
+2. Presentation/Formatting (The PDF layout needs a new logo).
+3. Persistence (Switching from SQL Server to MongoDB).
+
+By bundling all these into one class, the code becomes extremely fragile. A developer changing the PDF formatting might accidentally modify a shared private field used by the tax calculator, causing financial errors.
+
+**The Fix:**
+You must decompose the class into separate, cohesive classes based on their responsibility.
+
+1. **The Domain Model:** The `Invoice` class should *only* contain data (LineItems, Date) and pure business logic (`CalculateTotal()`).
+2. **The Output Service:** Create an `InvoicePdfFormatter` class whose sole responsibility is taking an `Invoice` object and returning a PDF stream.
+3. **The Repository:** Create an `InvoiceRepository` class whose sole responsibility is handling the database INSERT/UPDATE operations.
+
+By splitting these responsibilities, a bug introduced while updating the PDF logo physically cannot affect the tax calculation logic, making the system much more robust.

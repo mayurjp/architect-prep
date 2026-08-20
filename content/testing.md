@@ -175,8 +175,23 @@ public void CalculateDiscount_OnFriday_Returns10PercentOff() {
     
     var service = new DiscountService(fakeTime);
 
-    // Act & Assert
-    Assert.Equal(90m, service.CalculateDiscount(100m));
-}
-```
 Now the test is 100% deterministic and will pass forever, regardless of when it is run.
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your team uses xUnit for testing. You have an `OrderProcessorTests` class with 50 tests. To save time, you initialize a mock database context in the class constructor so all 50 tests can share it. Randomly, tests start failing. When you run a failing test individually, it passes. When you run the whole suite, it fails. Why is this happening, and how do you fix it?**
+
+This is caused by **Shared State Mutation** across parallel test executions.
+
+**The Flaw:**
+By default, xUnit runs all test classes in parallel, but it runs tests *within the same class* sequentially. However, xUnit creates a **new instance of the test class for every single test method**. 
+If you initialize a mock database in the constructor, it is re-created for every test, which is safe. *Unless* you declare that mock database as `static`, or you are testing a singleton service that retains state across the AppDomain. If Test A adds an order to the shared static mock DB, and Test B expects the DB to be empty, Test B will fail if it runs after Test A.
+
+**The Solution:**
+Tests must be completely isolated and idempotent. 
+
+1. **Never use static state** for dependencies in unit tests.
+2. **xUnit Fixtures:** If you intentionally want to share expensive setup (like a real database connection in an integration test) across multiple tests *safely*, you must use xUnit's `IClassFixture<T>` or `ICollectionFixture<T>`. 
+   - When you use a Fixture, xUnit creates the dependency exactly once, passes it to the constructor of the test class for every test, and ensures that the shared state is managed properly. However, even with a Fixture, you must still ensure that your tests clean up after themselves (e.g., Test A inserts an order, asserts, and then deletes the order) so it doesn't pollute the database for Test B.

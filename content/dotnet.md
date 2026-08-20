@@ -297,3 +297,19 @@ When `await` hits an I/O boundary (the network call to SQL Server), the compiler
 While avoiding the async state machine might save 1 microsecond of CPU time on a single request, blocking the thread destroys the server's ability to scale. Using `async/await` allows a web server with only 50 threads to easily handle thousands of concurrent I/O-bound requests.
 
 ---
+
+## Scenario — Question 3
+
+**Q3: You are designing an ASP.NET Core application that calculates highly complex financial reports using large data sets in memory. This calculation takes 10 seconds of 100% CPU usage. You wrap the method call in `await Task.Run(() => CalculateReport())` in your API controller. While testing, you notice that if 20 users request a report simultaneously, the entire web application becomes completely unresponsive, and simple health check endpoints timeout. Why?**
+
+This is the anti-pattern of using `Task.Run` for CPU-bound work on a web server thread pool.
+
+**The Flaw:**
+`Task.Run` queues the work to the Thread Pool. ASP.NET Core relies on this exact same Thread Pool to process incoming HTTP requests. 
+When 20 users request the report, 20 Thread Pool threads are instantly consumed and locked at 100% CPU for 10 seconds. If your Thread Pool only has 20 active threads, there are zero threads left to accept new incoming HTTP connections. The server is completely starved and deadlocks until a calculation finishes.
+
+**The Solution:**
+Web servers should *never* execute long-running, CPU-bound work on the Thread Pool.
+
+1. **Background Service / Worker Service:** The most robust solution is to offload the calculation entirely. The API controller should drop a message into a queue (like RabbitMQ) and immediately return a `202 Accepted`. A separate Worker Service (running in a different process or even on a different machine) listens to the queue, performs the heavy CPU calculation, and saves the result to a database or cache.
+2. **Dedicated Threads (If it must be in-process):** If you absolutely must process it within the web application, you should spawn a dedicated background thread (`new Thread()`) with a lower priority, explicitly keeping it off the Thread Pool so ASP.NET Core can continue serving normal web requests unhindered.

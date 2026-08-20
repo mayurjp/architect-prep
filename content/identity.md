@@ -124,3 +124,25 @@ You must remove token management from the frontend JavaScript entirely.
 Because of the `HttpOnly` flag, it is fundamentally impossible for *any* JavaScript running in the browser to read the cookie. Even if an attacker successfully executes an XSS attack, they cannot steal the token. 
 
 *(Note: Using cookies introduces a vulnerability to **Cross-Site Request Forgery (CSRF)**, which must be mitigated by using anti-CSRF tokens or relying heavily on `SameSite=Strict` cookie policies).*
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your API relies on JWTs for authorization. An employee is fired, and their account is instantly deactivated in the database. However, the employee is still able to access the API for another 45 minutes and download confidential data. Why did this happen, and how do you fix it without sacrificing the performance benefits of JWTs?**
+
+This is the classic **JWT Revocation Problem**.
+
+**The Flaw:**
+JWTs are completely stateless and self-contained. When the API receives a JWT, it validates the signature mathematically. It *does not* check the database. Because the JWT was issued with a 1-hour expiration time and the employee was fired 15 minutes into that hour, the token remains mathematically valid for another 45 minutes, regardless of the database state.
+
+**The Solution:**
+You must implement a hybrid approach that balances stateless performance with security revocation.
+
+1. **Keep Access Tokens Short-Lived:** First and foremost, reduce the JWT lifespan. An Access Token should live for 5 to 15 minutes max. 45 minutes is too long for a critical system.
+2. **Revoke the Refresh Token:** When the employee is fired, immediately delete/revoke their long-lived Refresh Token in the database. When their 5-minute JWT expires, they will be unable to get a new one, permanently locking them out.
+3. **The "Blacklist" or "Deny List" (For Immediate Action):** If 5 minutes is still too long to wait, you can implement an in-memory Redis blacklist.
+   - When a critical security event happens (like firing an employee), you write their `UserId` or `SessionId` (the `jti` claim) to Redis with a TTL matching the token expiration.
+   - The API middleware still validates the JWT signature statelessly (fast).
+   - Before granting access, it makes a microsecond check to Redis: "Is this `UserId` blacklisted?" If yes, it rejects the request.
+   - This adds a tiny bit of statefulness, but Redis is so fast it barely impacts performance, providing the best of both worlds.

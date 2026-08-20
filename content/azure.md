@@ -123,3 +123,23 @@ This scenario requires decoupling the services and implementing a **Queue-Based 
 - **Dead-Lettering and Retries:** Service Bus natively supports message peek-lock and retries. If Service B processes a message and throws an exception (because a downstream database is locked), the message is safely abandoned and returns to the queue. Service Bus will automatically retry delivery up to a configured `MaxDeliveryCount`. If it repeatedly fails, the message is automatically moved to a **Dead-Letter Queue (DLQ)** for manual inspection, ensuring no data is ever lost.
 - **Load Leveling:** If a burst of traffic hits Service A, the queue absorbs the shock. Service B won't be overwhelmed because it only pulls messages as fast as it can process them.
 - **Resilience:** If Service B goes completely offline for maintenance, Service A can continue operating normally, writing messages to the queue. When Service B comes back online, it simply processes the backlog.
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your web application hosted on Azure App Service frequently crashes due to a memory leak in a third-party library that you cannot fix. Until the vendor provides a patch, you need a temporary workaround to ensure the application stays online for users. How do you configure Azure App Service to automatically mitigate this?**
+
+You must use **Azure App Service Auto-Heal (Proactive Auto-Heal)**.
+
+**The Solution:**
+Auto-Heal is a built-in feature of Azure App Service that automatically takes action when specific unhealthy conditions are met within the worker process.
+
+**The Mechanism:**
+1. Navigate to the **Diagnose and solve problems** blade in the Azure Portal for your App Service.
+2. Select **Auto-Heal**.
+3. **Set the Trigger Condition:** You configure a rule to monitor memory. For example: "If the Private Memory of the `w3wp.exe` (or `dotnet`) process exceeds 800 MB for more than 30 seconds."
+4. **Set the Action:** You configure the action to be **Recycle Process**.
+
+**Result:**
+When the memory leak causes the application's RAM usage to spike past 800MB, Azure instantly intercepts the metric and automatically recycles the application pool. The process restarts, instantly freeing all leaked memory, before the application ever reaches the point of an `OutOfMemoryException` crash. This ensures minimal disruption to end users while you wait for the permanent code fix.

@@ -254,3 +254,30 @@ app.UseAuthorization();
 ```
 
 By explicitly whitelisting `https://myfrontend.com`, the browser will block the malicious request from `evilhacker.com` before it ever reaches your API controllers.
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your ASP.NET Core API handles file uploads. During a penetration test, the auditor uploads a 5GB file to the endpoint. The server immediately runs out of RAM and crashes, resulting in a Denial of Service (DoS) for all other users. How do you protect the ASP.NET Core application from this?**
+
+This happens because, by default, ASP.NET Core attempts to buffer the incoming HTTP request body entirely into memory or disk before binding it to your Controller's parameters (like `IFormFile`).
+
+**The Solution:**
+You must implement strict Request Size Limits and, for large files, use Streaming.
+
+1. **Request Size Limits (Kestrel):**
+   By default, Kestrel restricts the maximum request body size to ~30MB. If the attacker bypassed this, it means a developer explicitly removed the limit or misconfigured IIS/NGINX. Ensure the limit is enforced globally, or restrict it via attributes on specific endpoints:
+   ```csharp
+   [HttpPost]
+   [RequestSizeLimit(10_000_000)] // Limit this specific endpoint to 10MB
+   public IActionResult Upload(IFormFile file) { ... }
+   ```
+
+2. **Disable Buffering (Streaming):**
+   If you legitimately need to accept 5GB files (e.g., video uploads), you cannot use `IFormFile`, because `IFormFile` buffers. You must stream the file directly from the network socket to the destination (like Azure Blob Storage or disk) without loading it into RAM.
+   - You apply the `[DisableFormValueModelBinding]` attribute.
+   - You read the multipart boundary directly from `Request.Body` using `MultipartReader`.
+   - You copy the stream asynchronously: `await section.Body.CopyToAsync(fileStream)`. 
+   
+This allows the server to process a 5GB file using only a few kilobytes of RAM, completely mitigating the DoS attack.

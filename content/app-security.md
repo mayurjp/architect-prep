@@ -212,3 +212,23 @@ public IActionResult GetInvoice(int id) {
 }
 ```
 2. **Use GUIDs/UUIDs (Defense in Depth):** While ownership validation is the primary fix, replacing predictable integer IDs (`1042`, `1043`) with unpredictable GUIDs (`d3b07384-d9a...`) makes it mathematically impossible for an attacker to guess another user's invoice ID in the first place. However, GUIDs do *not* replace the need for proper ownership checks.
+
+---
+
+## Scenario — Question 5
+
+**Q5: A developer uses the `MD5` hashing algorithm to store user passwords in the database because it is very fast. A database backup is stolen by hackers. Within 10 minutes, the hackers have cracked 90% of the passwords. Why did this happen, and what hashing algorithm characteristic was missing?**
+
+This represents a critical failure in cryptographic design.
+
+**The Flaw:**
+MD5 (and SHA-1, SHA-256) are **Message Digest** algorithms designed for data integrity and speed. They are deliberately extremely fast. An off-the-shelf gaming GPU can calculate billions of MD5 hashes per second.
+When the database is stolen, the hackers don't guess passwords by hand. They use a dictionary of 10 billion common passwords, hash all of them using MD5, and compare the results to the stolen database. Because MD5 is so fast, cracking the database takes minutes.
+
+**The Solution: Key Derivation Functions (KDFs)**
+
+Password hashing requires algorithms that are deliberately **slow and computationally expensive** (often called "Work Factor" or "Key Stretching").
+
+1. **Use BCrypt, Argon2, or PBKDF2:** These algorithms are specifically designed for passwords.
+2. **Work Factor:** They include a configurable "cost" parameter. You configure the algorithm so that hashing a single password takes exactly 250 milliseconds on your server.
+3. **The Result:** 250ms is unnoticeable to a user logging in. However, if a hacker steals the database, it now takes them 250ms to test a single guess. Testing a dictionary of 10 billion passwords would now take hundreds of years instead of 10 minutes, rendering the stolen database useless.

@@ -149,3 +149,32 @@ Data access is an infrastructure concern and must be pushed to the outermost Inf
 2. **Implement in Infrastructure:** In the Infrastructure layer, implement the `UserRepository` which injects the `DbContext` and uses EF Core to execute the database operations.
 3. **Use the Interface:** The Application layer's Command/Query handlers use the `IUserRepository` interface to persist data without knowing how it actually happens. 
 The Domain layer remains pure, focusing only on business rules, while the Infrastructure layer handles the messy details of translating objects into SQL.
+
+---
+
+## Scenario — Question 4
+
+**Q4: In your Clean Architecture application, a user creates an order. When the order is successfully saved to the database, you need to send a confirmation email. The developer injects an `IEmailService` into the Application Layer's `CreateOrderCommandHandler`, saves the order to the database, and then immediately calls `_emailService.Send()`. Why is this problematic, and what is the better architectural pattern?**
+
+This is problematic because it violates the **Single Responsibility Principle** and creates issues with transaction boundaries and resilience.
+
+**The Flaw:**
+If the database save succeeds, but the `_emailService.Send()` fails (e.g., SendGrid is down), the `CreateOrderCommandHandler` throws an exception. This might bubble up and return a 500 Error to the user, even though their order *was* actually created in the database. Furthermore, the handler is now responsible for orchestrating side effects (sending emails) rather than just executing the core use case.
+
+**The Solution: Domain Events**
+You should decouple the side effect from the primary action using Domain Events.
+
+1. **Raise the Event:** Inside the `Order` aggregate (in the Domain Layer), when the order is successfully created, it adds an `OrderCreatedEvent` to an internal list of events.
+   ```csharp
+   public class Order : AggregateRoot {
+       public Order() {
+           // Core business logic...
+           AddDomainEvent(new OrderCreatedEvent(this.Id));
+       }
+   }
+   ```
+2. **Publish the Event (Infrastructure/Application Layer):** When you call `SaveChanges()` on the DbContext, you intercept it (using an EF Core Interceptor or overriding `SaveChanges`). Before actually committing to the database, you extract all Domain Events from tracked entities and publish them using a mediator (like MediatR).
+3. **Handle the Event (Application Layer):** You create a completely separate `OrderCreatedEventHandler` that implements `INotificationHandler<OrderCreatedEvent>`. This handler injects the `IEmailService` and sends the email.
+
+**Benefits:**
+The `CreateOrderCommandHandler` only cares about saving the order. The `OrderCreatedEventHandler` only cares about sending the email. You can easily add more side effects (e.g., `UpdateInventoryEventHandler`) without ever modifying the original command handler. (For absolute reliability, you would combine this with the Outbox Pattern).

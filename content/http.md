@@ -127,3 +127,19 @@ There are two common ways to paginate via HTTP: Offset Pagination and Cursor Pag
    - The database executes `WHERE Id > 987 LIMIT 50`.
    - *Pros:* Extremely fast regardless of depth (uses database indexes efficiently). Immune to data shifting from new inserts.
    - *Cons:* You cannot jump directly to "Page 100". You can only go "next" or "previous". This is the standard for infinite-scroll UIs (like Twitter or Facebook).
+
+---
+
+## Scenario — Question 3
+
+**Q3: You are designing an HTTP API for an IoT thermometer that reports the temperature every 10 seconds. The API endpoint receives a JSON payload like `{"temp": 72.5}` and updates the database. A junior developer argues that you should use `POST` because you are sending data to the server. You argue that `PUT` is the correct RESTful choice. Why is `PUT` better here?**
+
+The decision between `POST` and `PUT` hinges on **Idempotency** and **Resource Identity**.
+
+**The Flaw with POST:**
+`POST` means "Create a new subordinate resource." If you `POST /api/thermometers/1/temperature`, it implies you are adding a new entry to a historical log of temperatures. If the network drops and the IoT device retries the request 3 times, `POST` would theoretically create 3 identical temperature entries.
+
+**Why PUT is Correct:**
+`PUT` means "Replace the resource at this exact URL with the provided payload." 
+If your endpoint represents the *current* state of the thermometer (e.g., `PUT /api/thermometers/1/currentTemperature`), then applying `{"temp": 72.5}` means "make the current temperature 72.5". 
+If the network drops and the IoT device retries the `PUT` request 3 times, the end result is exactly the same: the current temperature is 72.5. It is inherently **idempotent**, which perfectly aligns with the unreliable network connections typical of IoT devices.

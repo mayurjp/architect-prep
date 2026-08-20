@@ -113,6 +113,27 @@ Instead of building one massive, monolithic GraphQL server that connects to ever
 **The Mechanism (Federation):**
 1. **The Subgraphs:** The `UserService` defines the `User` type. The `OrderService` defines the `Order` type, but it also *extends* the `User` type to add an `orders` field, even though it doesn't own the core `User` data.
 2. **The Gateway:** You deploy an Apollo Router or a HotChocolate Gateway. It pulls the schemas from all subgraphs and stitches them together into one unified schema.
-3. **The Execution:** When a client sends a single query asking for a User and their Orders, the Gateway intelligently breaks the query apart. It routes the `User` part to the `UserService`, takes the returned `ID`, routes the `Orders` part to the `OrderService`, merges the two JSON responses back together, and returns the final unified result to the client.
-
 This allows frontend teams to query data as if it were a monolith, while backend teams maintain completely decoupled microservices.
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your GraphQL API allows clients to fetch a `Post` and its `Author`. When 50 posts are fetched, the server executes 1 query for the posts, and 50 separate queries to fetch the author for each post, crippling database performance. What is this problem, and what specific GraphQL pattern solves it?**
+
+This is the classic **N+1 Problem**, which is significantly more dangerous in GraphQL than REST because the client dictates the depth of the query.
+
+**The Flaw:**
+In REST, the server developer hardcodes the SQL joins. In GraphQL, the `PostResolver` fetches 50 posts. Then, the GraphQL execution engine iterates over those 50 posts, calling the `AuthorResolver` one by one. If `AuthorResolver` executes `SELECT * FROM Authors WHERE Id = @id`, it runs 50 times.
+
+**The Solution: DataLoader Pattern**
+
+You must batch and cache these individual resolver requests.
+
+**The Mechanism:**
+1. You implement a `DataLoader` (e.g., `AuthorDataLoader` in HotChocolate).
+2. Inside the DataLoader, you write a single method that accepts an array of IDs: `GetAuthorsByIdsAsync(IReadOnlyList<int> authorIds)`. This method executes a single SQL query: `SELECT * FROM Authors WHERE Id IN (1, 2, 3...)`.
+3. In your `AuthorResolver`, instead of querying the database directly, you ask the DataLoader: `return dataLoader.LoadAsync(post.AuthorId)`.
+4. The GraphQL engine runs all 50 `AuthorResolvers` simultaneously. The DataLoader captures all 50 requested IDs, batches them into a single list, executes the one massive SQL query, and distributes the results back to the individual resolvers. 
+
+This reduces 51 database queries down to exactly 2, completely solving the N+1 problem.

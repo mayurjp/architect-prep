@@ -246,3 +246,33 @@ public class ReportGenerator {
 
 **The Result:**
 The `ReportGenerator` now only has one responsibility: orchestrating the generation process. If you decide to switch from SQL to MongoDB, or from PDF to Excel, you simply create new classes implementing the interfaces and inject them. The core `ReportGenerator` logic remains completely untouched.
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your team is building a microservice. A developer creates a `ConfigurationManager` static class that reads the `appsettings.json` file. Throughout the entire codebase, hundreds of classes call `ConfigurationManager.GetConnectionString()` directly. When the team decides to migrate to Azure Key Vault, they realize they have to modify 300 different files. Which core design principle was violated?**
+
+This is a severe violation of the **Dependency Inversion Principle (DIP)**, specifically relying on **Hidden Dependencies** rather than explicit ones.
+
+**The Flaw:**
+When a class calls a static method like `ConfigurationManager.GetConnectionString()`, it tightly couples itself to that specific static implementation. The dependency is "hidden" because it doesn't appear in the class's constructor. The client using the class has no idea it needs a configuration file to run. 
+
+**The Fix:**
+Dependencies should be explicit and inverted. High-level modules should depend on abstractions (interfaces), and those abstractions should be injected.
+
+1. **Extract an Interface:** In .NET, this is already done for you: `IConfiguration` or the `IOptions<T>` pattern.
+2. **Constructor Injection:** Every class that needs configuration should demand it in its constructor.
+   ```csharp
+   public class DatabaseService {
+       private readonly string _connectionString;
+       
+       // Explicit dependency!
+       public DatabaseService(IOptions<DatabaseSettings> options) {
+           _connectionString = options.Value.ConnectionString;
+       }
+   }
+   ```
+
+**The Result:**
+If the application switches to Azure Key Vault, you only change the configuration provider setup in `Program.cs`. None of the 300 classes need to be touched, because they all rely on the abstract `IOptions<T>`, completely oblivious to where the actual data came from.

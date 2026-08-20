@@ -178,3 +178,27 @@ Instead of the main `ProductsController` doing all this heavy lifting (which vio
 - **Separation of Concerns:** The `ProductsController` now only cares about fetching products.
 - **Reusability:** You can easily drop the `@await Component.InvokeAsync("Weather")` code into the `Cart.cshtml` view without duplicating the HTTP call logic in the `CartController`.
 - **Parallel Execution:** While the main controller processes products, View Components can be fetched asynchronously during view compilation, potentially improving response times.
+
+---
+
+## Scenario — Question 3
+
+**Q3: You have an ASP.NET Core MVC application with a `[HttpPost]` action that accepts a complex `UserRegistrationViewModel`. A hacker discovers this endpoint and writes a Python script that submits 50,000 fake registrations per minute. Because the registration process does expensive password hashing and database inserts, your database CPU hits 100% and the entire website goes offline. How do you protect the application?**
+
+This is an application-layer Denial of Service (DoS) attack, and relying on basic model validation is not enough to stop it.
+
+**The Solution: Rate Limiting & Anti-Forgery**
+
+You must implement defenses at the earliest possible point in the request pipeline.
+
+1. **Implement Rate Limiting:**
+   - In ASP.NET Core 7.0+, use the built-in Rate Limiting middleware (`app.UseRateLimiter()`).
+   - Configure a policy (e.g., `FixedWindowRateLimiter`) that restricts POST requests to `/Account/Register` to a maximum of 5 requests per minute per IP address.
+   - If the Python script attempts 50,000 requests, 49,995 of them will be instantly rejected by the middleware with a `429 Too Many Requests` status code *before* the MVC Controller ever executes, saving your CPU and database.
+
+2. **Enforce Anti-Forgery Tokens (CSRF Protection):**
+   - Ensure the endpoint has the `[ValidateAntiForgeryToken]` attribute and the Razor view includes `<form asp-antiforgery="true">`.
+   - While primarily for Cross-Site Request Forgery, this also prevents simple, unauthenticated bots from easily hitting the endpoint directly, as they must first scrape a valid token from a GET request and maintain the session cookie.
+
+3. **Implement CAPTCHA (Application-level defense):**
+   - For public registration endpoints, rate limiting by IP isn't always enough (attackers can use botnets with thousands of IPs). Adding a CAPTCHA (like Google reCAPTCHA or Cloudflare Turnstile) ensures that the submitter is a human, definitively stopping automated scripts.

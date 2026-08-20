@@ -148,3 +148,37 @@ It caches this heavy plan. Now, when normal users (with 2 orders) run the proced
 1. **`OPTION (RECOMPILE)`:** Append this to the problematic query inside the stored procedure. It tells SQL Server to throw away the cache and generate a fresh plan every single time based on the specific parameter provided. This costs a bit of CPU to compile, but guarantees the optimal plan.
 2. **`OPTION (OPTIMIZE FOR UNKNOWN)`:** Forces SQL Server to use statistical averages rather than the specific parameter passed in on the first run, leading to a "good enough" plan for everyone.
 3. **Local Variables:** Mask the parameter by assigning it to a local variable inside the proc (e.g., `DECLARE @localId INT = @CustomerID`) and using the local variable in the `WHERE` clause. This achieves a similar effect to `OPTIMIZE FOR UNKNOWN`.
+
+---
+
+## Scenario — Question 4
+
+**Q4: You are migrating a massive `Logs` table with 500 million rows to a new schema. You write a script to `DELETE FROM Logs WHERE CreatedDate < '2023-01-01'`. The script runs for 4 hours, during which the transaction log file (`.ldf`) grows from 5GB to 500GB, exhausting the server's disk space and crashing the entire database engine. What caused this, and how should you perform massive deletes?**
+
+This is caused by SQL Server's Transaction Log behavior during massive, unbounded operations.
+
+**The Flaw:**
+SQL Server guarantees Atomicity and Durability (ACID). When you issue a single `DELETE` statement for 100 million rows, SQL Server treats it as one massive transaction. Before deleting a row, it writes the old data to the Transaction Log so it can roll back if the query is cancelled. The transaction log grows continuously until the single commit finishes. If it runs out of disk space, the transaction fails and begins a multi-hour rollback process, crippling the server.
+
+**The Solution: Batch Processing (Chunking)**
+
+You must never perform massive inserts, updates, or deletes in a single unbounded transaction. You must chunk the work.
+
+```sql
+SET NOCOUNT ON;
+DECLARE @RowsDeleted INT = 1;
+
+WHILE @RowsDeleted > 0
+BEGIN
+    DELETE TOP (5000) FROM Logs 
+    WHERE CreatedDate < '2023-01-01';
+
+    SET @RowsDeleted = @@ROWCOUNT;
+    
+    -- Optional: Add a brief delay to allow other queries to execute
+    -- WAITFOR DELAY '00:00:01'; 
+END
+```
+
+**Why this works:**
+By deleting in batches of 5,000, each `DELETE TOP (5000)` is its own fully contained transaction. It completes in milliseconds, writes 5,000 records to the log, commits, and frees that space in the log (assuming Simple Recovery model or regular log backups). The log file remains small and stable, and the database remains highly responsive to other users throughout the entire migration process.

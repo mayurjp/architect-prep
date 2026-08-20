@@ -263,3 +263,24 @@ In environments with a `SynchronizationContext` (like UI threads in WPF/WinForms
 **The Solutions:**
 1. **Async All The Way (Preferred):** Never block on async code. Change the calling method to `async` and use `await _userService.GetUserAsync(id)`.
 2. **ConfigureAwait(false):** If you are writing a library, you should append `.ConfigureAwait(false)` to your awaits (e.g., `await _client.GetAsync(url).ConfigureAwait(false);`). This tells the Task that it does *not* need to resume on the original context; it can resume on any random Thread Pool thread. This prevents the deadlock, as the Task no longer waits for the blocked main thread.
+
+---
+
+## Scenario — Question 4
+
+**Q4: You have a C# method that loops through a massive array of 100 million integers to find the maximum value. It runs too slowly. A junior developer changes the `foreach` loop to use `Parallel.ForEach` to speed it up. Suddenly, the method returns incorrect maximum values randomly. Why is it failing and how do you correctly parallelize this operation in C#?**
+
+This is a classic **Race Condition** caused by unsynchronized access to shared state across multiple threads.
+
+**The Flaw:**
+The junior developer likely has a shared variable (e.g., `int max = 0;`) outside the loop, and inside the `Parallel.ForEach`, they are doing `if (item > max) max = item;`.
+When multiple threads execute this simultaneously, they read and write to `max` at the exact same microsecond. Thread A might read `max` as 50, but before it can write its new value of 60, Thread B writes 55, and then Thread A overwrites it with 60, losing track of intermediate states. The updates are not atomic.
+
+**The Solution: Thread-Local State**
+To fix this efficiently without using a slow `lock` statement (which would serialize the loop and destroy the performance benefits of parallelization), you must use **Thread-Local State** in `Parallel.ForEach`, or use PLINQ.
+
+Using PLINQ (Parallel LINQ) is the easiest and safest way in C#:
+```csharp
+int max = array.AsParallel().Max();
+```
+Under the hood, `.AsParallel()` partitions the array. Each thread independently calculates the maximum of its own partition without sharing any state. Once all threads finish their partitions, PLINQ aggregates the local maximums to find the final global maximum. This guarantees thread safety and achieves maximum CPU utilization.

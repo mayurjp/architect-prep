@@ -277,3 +277,24 @@ var myPc = new ComputerBuilder()
 
 **Why it's better:**
 It makes the code infinitely more readable, entirely eliminates `null` parameter spam, and allows you to enforce validation logic inside the `.Build()` method before the object is ever created (e.g., throwing an exception if a CPU was not set).
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your system fetches heavy financial data from a slow third-party API. To improve performance, you write a `CachedFinancialApi` class. It checks a local dictionary for the data. If it exists, it returns it; if not, it calls the real `FinancialApi`, stores the result, and returns it. Both classes implement `IFinancialApi`. Which design pattern does this implement?**
+
+This is a textbook implementation of the **Proxy Pattern**.
+
+**The Concept:**
+The Proxy pattern provides a surrogate or placeholder for another object to control access to it. It has the exact same interface as the real object, meaning the client is completely unaware that they are talking to a proxy.
+
+**The Mechanism:**
+In this specific case, it is a **Caching Proxy**. 
+1. The `CachedFinancialApi` (Proxy) implements `IFinancialApi`.
+2. It holds a reference to the real `FinancialApi` object.
+3. When the client calls `GetStockPrice()`, the proxy intercepts the call.
+4. It performs its caching logic. Only if necessary does it forward the call to the real object.
+
+**How it differs from Decorator:**
+While structurally identical (both wrap an object and implement its interface), their *intent* is different. A Decorator *adds behavior* (like logging or formatting) to an object dynamically at runtime. A Proxy *controls access* (lazy loading, caching, security checks) to an object, often managing the lifecycle of the real object itself.

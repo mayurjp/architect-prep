@@ -109,3 +109,21 @@ When a worker pulls a message from a robust broker like Service Bus or RabbitMQ,
 **The Solution:**
 1. **Increase the Lock Duration:** Configure the queue's lock duration to a value higher than the maximum expected processing time (e.g., 5 minutes).
 2. **Lock Renewal (Heartbeat):** If the processing time is highly variable or extremely long, increasing the lock duration too much can delay the processing of genuinely failed messages. Instead, write your consumer logic to periodically "renew" the lock. Every 30 seconds, the worker sends a signal to the broker: "I'm still working on this, give me another 60 seconds." Modern SDKs often have features like `MaxAutoRenewDuration` that handle this background lock renewal automatically.
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your system uses RabbitMQ. You have a `UserUpdates` exchange that routes messages to two queues: `AnalyticsQueue` and `EmailQueue`. Suddenly, the Email service crashes and is down for 4 hours. The `EmailQueue` fills up with 10 million messages, consuming all RAM on the RabbitMQ server, causing the broker to crash and bringing down the entire system, including the healthy Analytics service. How do you prevent this catastrophic failure?**
+
+This is a classic resource exhaustion failure caused by an unmonitored or infinitely growing queue.
+
+**The Solution:**
+You must configure broker-level limits and a **Dead Letter Exchange (DLX)** to handle message overflows gracefully.
+
+1. **Queue Length Limits (Max Length):** Configure the `EmailQueue` to have a maximum length (e.g., 100,000 messages) or a maximum byte size. 
+2. **Message TTL (Time-To-Live):** Configure a TTL on the messages in the queue (e.g., 1 hour). If an email is delayed by more than an hour, it might no longer be relevant anyway.
+3. **Dead Letter Routing:** When the queue hits its max length (or a message hits its TTL), you don't just drop the message into the void. You configure RabbitMQ to route the dropped messages to a Dead Letter Exchange.
+   - The DLX routes the messages to a secure `EmailQueue_DeadLetter` queue backed by a slow, cheap disk (not RAM).
+   - This keeps the primary broker's RAM healthy, preventing the crash. 
+   - When the Email service comes back online after 4 hours, an administrator can manually inspect the DLQ and decide whether to replay those 10 million old messages or safely discard them.
