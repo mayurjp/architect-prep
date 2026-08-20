@@ -230,3 +230,92 @@ MongoDB automatically creates one index entry *per array element*, so a query li
 **Common Pitfall:** assuming a compound index in MongoDB is equally useful regardless of field order, the same way people sometimes assume for SQL Server — MongoDB compound indexes are only useful for queries/sorts that follow a **left-to-right prefix** of the indexed fields, exactly analogous to SQL Server's compound index prefix rule. An index on `{ category: 1, price: -1 }` serves queries filtering on `category` alone, or `category` + `price` together, but does **not** efficiently serve a query filtering on `price` alone.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is Schema-on-Read versus Schema-on-Write, and how does this distinction explain NoSQL's "flexible schema" reputation?**
+
+Relational databases are Schema-on-Write: the table's structure (columns, types, constraints) is defined *before* any data is inserted, and every row must conform to it at write time. Most NoSQL document stores are Schema-on-Read: there's no enforced structure at write time — the *application code* decides how to interpret whatever fields happen to be present when it later reads a document.
+
+**Schema-on-Write (SQL Server) — the database enforces structure upfront:**
+```sql
+CREATE TABLE Products (Id INT PRIMARY KEY, Name NVARCHAR(100) NOT NULL, Price DECIMAL(10,2) NOT NULL);
+INSERT INTO Products VALUES (1, 'Keyboard', 29.99); -- MUST match the defined columns/types, or the insert fails
+```
+
+**Schema-on-Read (MongoDB) — the database accepts whatever shape you send it:**
+```javascript
+db.products.insertOne({ name: "Keyboard", price: 29.99 });
+db.products.insertOne({ name: "Mouse", price: 15.50, color: "black" }); // extra field, no problem
+db.products.insertOne({ name: "Monitor" }); // missing price entirely, ALSO no problem
+```
+The database itself never validates that every document has a `price` field or that `price` is always a number — it's the application's read-side code that decides how to handle a document missing an expected field (default it? treat as an error? ignore it?).
+
+**Why this is a genuine trade-off, not an unconditional win:** Schema-on-Read makes it trivially easy to evolve document shape over time without a migration step — but it also means data-integrity bugs that a relational schema would catch at write time (a typo'd field name, a string accidentally stored where a number was expected) only surface later, at read time, potentially in production, rather than being rejected immediately at insertion.
+
+**Common Pitfall:** treating "no enforced schema" as "no schema at all" — in practice, a NoSQL application still has an implicit schema (the shape the application code expects to read), it's just enforced by application logic and discipline rather than the database engine; many teams layer a validation library (or MongoDB's own optional `$jsonSchema` validation rules) on top specifically to recover some of Schema-on-Write's safety without giving up the flexibility.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is a "hot partition" in a NoSQL database, and how does it happen even when the overall partition key strategy seems reasonable on paper?**
+
+A hot partition occurs when a disproportionate share of read/write traffic lands on one specific partition (or a small handful), overwhelming that partition's throughput capacity while the rest of the cluster sits comparatively idle — even a partition key that distributes *distinct values* evenly can still produce a hot partition if traffic *volume* per key is uneven.
+
+**Where an "obviously fine" key choice still goes hot:**
+```json
+// Partitioned by CustomerId -- looks reasonable, evenly distributes distinct customers
+{ "orderId": "o1", "customerId": "acme-corp", "total": 500 }
+```
+If `acme-corp` happens to be a massive enterprise customer generating 40% of all order traffic, while thousands of other customers each generate a trickle, the partition holding `acme-corp`'s data becomes a hot partition — the *key* distributes evenly across distinct values, but the *traffic volume* per value is wildly skewed, which the partitioning strategy alone can't fix.
+
+**A time-based key producing an even worse, more obvious hot partition:**
+```json
+// Partitioned by "OrderDate" -- ALL of today's traffic hits ONE partition
+{ "orderId": "o1", "orderDate": "2026-08-20", "total": 99.99 }
+```
+Every single write for the current day lands on the same partition, while partitions for past dates receive zero new writes — a textbook hot-partition pattern that's common precisely because a date-based key feels natural for time-series-like data.
+
+**Mitigations:**
+- **Composite/salted keys** — append a random or hashed suffix to spread a single logical entity's writes across multiple physical partitions (e.g., `orderDate + "#" + (hash % 10)`), trading some read complexity (now you must query 10 partitions and merge) for write-side load distribution.
+- **Choosing a key with naturally high cardinality AND even traffic distribution** — not just many distinct values, but many distinct values that each receive comparable traffic volume.
+
+**Common Pitfall:** diagnosing uneven cluster load as "we picked the wrong number of shards" and simply adding more partitions, without addressing that the underlying key still concentrates traffic on whichever specific value is currently busiest — more partitions don't help if the hot value's traffic still lands entirely on one of them.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is Multi-Document ACID Transaction support in modern MongoDB, and why was this historically considered impossible for a distributed document database?**
+
+Early NoSQL databases (including early MongoDB) only guaranteed atomicity at the **single-document** level — a write to one document either fully succeeds or fully fails, but there was no way to atomically update *multiple* documents (potentially across different collections or shards) as one all-or-nothing unit, the way a SQL `BEGIN TRAN`/`COMMIT` spans multiple rows and tables freely.
+
+**Single-document atomicity (always available, even in early MongoDB):**
+```javascript
+db.accounts.updateOne(
+  { _id: "acct1" },
+  { $inc: { balance: -100 } }
+); // this single document update is always atomic
+```
+
+**Multi-document transactions (MongoDB 4.0+ for replica sets, 4.2+ for sharded clusters):**
+```javascript
+const session = client.startSession();
+session.startTransaction();
+try {
+  await accounts.updateOne({ _id: "acct1" }, { $inc: { balance: -100 } }, { session });
+  await accounts.updateOne({ _id: "acct2" }, { $inc: { balance: 100 } }, { session });
+  await session.commitTransaction(); // BOTH updates commit together, or neither does
+} catch {
+  await session.abortTransaction(); // rolls back BOTH if anything failed
+}
+```
+
+**Why this was historically considered architecturally very hard for a distributed database:** coordinating a transaction that might span documents living on *different physical shards* requires a distributed consensus protocol (ensuring every shard involved agrees to commit or abort together) — exactly the kind of expensive, latency-adding coordination that horizontally-scaled NoSQL databases were originally designed specifically to avoid in favor of raw throughput and availability. MongoDB's later versions implemented this using a two-phase commit protocol internally, accepting the added latency cost as an explicit, opt-in trade-off rather than the default behavior of every write.
+
+**The performance trade-off:** multi-document transactions carry meaningfully higher latency than single-document writes, precisely because of that coordination overhead — MongoDB's own guidance is to use them only where a genuine multi-document invariant must hold (the account transfer above), not as a default habit for every write, since most NoSQL modeling (per the earlier denormalization discussion) is specifically designed to keep related data in one document exactly to avoid needing multi-document atomicity in the first place.
+
+**Common Pitfall:** reaching for multi-document transactions as a substitute for proper data modeling — if a design frequently needs multi-document transactions to maintain consistency, that's often a sign the data should have been embedded together in one document (per NoSQL's core modeling philosophy) rather than split across documents that now require expensive coordinated writes to stay consistent.
+
+---

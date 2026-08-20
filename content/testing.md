@@ -315,3 +315,92 @@ public void ApplyDiscount_ReturnsExpectedPrice(decimal price, string tier, decim
 **Common Pitfall:** using `[MemberData]` with a data source that yields *mutable shared objects* across test cases — if two `object[]` entries reference the same underlying object and one test mutates it, other test cases (and test runs, since xUnit may reuse data across parallel runs) can see unexpected cross-contamination. Prefer yielding fresh instances per case.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is the Arrange-Act-Assert (AAA) pattern, and why does structuring every test this way matter?**
+
+AAA is a simple, consistent structural convention for organizing a unit test into three clearly separated phases — **Arrange** (set up the inputs and dependencies), **Act** (execute the thing being tested), **Assert** (verify the outcome) — making tests easier to read, write, and diagnose when they fail.
+
+```csharp
+[Fact]
+public void ApplyDiscount_ForPremiumCustomer_Returns10PercentOff()
+{
+    // Arrange
+    var customer = new Customer { Tier = "Premium" };
+    var calculator = new DiscountCalculator();
+
+    // Act
+    var result = calculator.Apply(100m, customer);
+
+    // Assert
+    Assert.Equal(90m, result);
+}
+```
+
+**Why the separation matters beyond just readability:**
+- A test mixing setup, execution, and assertions together (`Assert.Equal(90m, new DiscountCalculator().Apply(100m, new Customer { Tier = "Premium" }))`) is harder to scan quickly to understand *what's actually being tested* versus *what's just plumbing*.
+- When a test fails, a clearly separated Assert section makes it immediately obvious which specific expectation didn't hold, rather than having to mentally untangle setup logic from the actual check.
+- It naturally discourages testing multiple unrelated behaviors in one test method — a test that needs three separate "Act" blocks to exercise three different behaviors is a signal it should probably be three separate test methods instead.
+
+**Common Pitfall:** letting the Arrange section grow into a large, unfocused block of unrelated setup "just in case something needs it" — a bloated Arrange phase makes it hard to tell which specific pieces of setup are actually relevant to *this* test's Assert, and often indicates the class under test has too many dependencies or the test is trying to cover too much at once.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is Integration Testing "the database layer" using an in-memory provider, and why is EF Core's own documentation cautious about recommending it for anything beyond the simplest cases?**
+
+EF Core ships an `InMemory` database provider specifically marketed for testing — it lets you swap a real SQL Server connection for an in-process, ephemeral data store, avoiding the need for an actual database server during tests. But it's a genuinely different database engine underneath, not SQL Server running in memory, which creates real behavioral gaps.
+
+```csharp
+var options = new DbContextOptionsBuilder<AppDbContext>()
+    .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString()) // fresh, isolated store per test
+    .Options;
+
+using var context = new AppDbContext(options);
+context.Products.Add(new Product { Name = "Keyboard", Price = 29.99m });
+context.SaveChanges();
+```
+
+**Why this can pass tests while the real database would fail (or vice versa):**
+- **The InMemory provider doesn't enforce relational constraints** the way SQL Server does — a test inserting data that violates a foreign key or a unique index constraint in real SQL Server might succeed silently against InMemory, giving false confidence.
+- **LINQ query translation differs** — some LINQ expressions that EF Core translates into valid (if inefficient) SQL against SQL Server might behave differently, or not translate the same way at all, against the InMemory provider's own query engine, since it isn't actually running EF Core's SQL Server translation layer.
+- **No real transaction/isolation-level behavior** — tests relying on specific locking or isolation-level semantics (validating concurrency-token conflict detection, for example) can't meaningfully exercise that against a provider with no real transactional engine underneath.
+
+**The modern recommended alternative — Testcontainers with a real SQL Server:**
+```csharp
+var container = new MsSqlBuilder().Build();
+await container.StartAsync(); // a REAL SQL Server instance in Docker, disposable per test run
+```
+This costs more setup time and a Docker dependency, but tests run against the actual database engine your production code targets — catching constraint violations, query translation quirks, and concurrency behavior the InMemory provider structurally cannot.
+
+**Common Pitfall:** using the InMemory provider for tests specifically meant to validate database-level correctness (constraint enforcement, complex query behavior) rather than pure business-logic tests that happen to touch a `DbContext` — InMemory is reasonable for the latter, actively misleading for the former.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is Mutation Testing, and how does it expose a blind spot that code coverage metrics alone cannot detect?**
+
+Code coverage tells you which lines of code *executed* during a test run — it says nothing about whether those lines were actually *verified* to behave correctly. Mutation Testing addresses this gap directly: it automatically introduces small, deliberate bugs ("mutants") into the production code and checks whether the existing test suite actually catches each one.
+
+**The mechanism:**
+```csharp
+// Original code
+public bool IsEligibleForDiscount(int orderCount) => orderCount >= 10;
+
+// A mutation tool (e.g., Stryker.NET) automatically generates variants like:
+public bool IsEligibleForDiscount(int orderCount) => orderCount > 10;   // changed >= to >
+public bool IsEligibleForDiscount(int orderCount) => orderCount <= 10;  // changed >= to <=
+public bool IsEligibleForDiscount(int orderCount) => true;              // removed the condition entirely
+```
+For each mutant, the tool re-runs the full test suite. If **at least one test fails**, the mutant is "killed" — the test suite successfully caught that specific behavioral change. If **every test still passes** despite the code now behaving differently, the mutant "survives" — a strong signal that no test actually verifies the boundary condition that mutant altered.
+
+**Why this catches what coverage metrics miss:** a test that calls `IsEligibleForDiscount(15)` and asserts `true` achieves 100% line coverage of that one-line method — but if it never also tests the boundary (`orderCount == 10`, or `orderCount == 9`), the mutant changing `>=` to `>` would silently survive, revealing that "100% covered" didn't actually mean "100% correctly verified." Coverage only proves code *ran*; mutation testing proves whether tests would actually *notice* if that code's behavior changed.
+
+**The practical trade-off:** running a full test suite once per generated mutant, potentially generating dozens or hundreds of mutants per file, is computationally expensive — mutation testing is typically run periodically (nightly builds, before major releases) rather than on every single commit the way unit tests themselves are, specifically because of this cost.
+
+**Common Pitfall:** treating "kill 100% of mutants" as a hard target the way "100% code coverage" is sometimes (mis)treated — some surviving mutants represent genuinely equivalent code changes with no observable behavioral difference (a mutant that can never actually be distinguished by any test, because the code paths produce identical results), and chasing an artificial 100% mutation-kill score can lead to writing tests that verify implementation details rather than genuine behavior, the same anti-pattern coverage-chasing produces.
+
+---

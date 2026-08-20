@@ -296,3 +296,108 @@ If this matches millions of rows, SQL Server escalates from row locks to a full 
 Yes — `ALTER TABLE Orders SET (LOCK_ESCALATION = DISABLE)` prevents escalation for that table entirely (use with caution — it trades memory usage for concurrency), or `LOCK_ESCALATION = AUTO` lets SQL Server escalate at the partition level instead of the whole table for partitioned tables.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is a Foreign Key constraint, and what happens if you try to insert a row that violates it?**
+
+A Foreign Key (FK) is a column (or set of columns) that references the Primary Key of another table, enforcing that a value in the referencing table must actually exist in the referenced table — the database engine itself guarantees this, rather than relying on application code to check it correctly every time.
+
+```sql
+CREATE TABLE Customers (
+    Id INT PRIMARY KEY,
+    Name NVARCHAR(100)
+);
+
+CREATE TABLE Orders (
+    Id INT PRIMARY KEY,
+    CustomerId INT NOT NULL,
+    CONSTRAINT FK_Orders_Customers FOREIGN KEY (CustomerId) REFERENCES Customers(Id)
+);
+```
+
+**What happens on a violation:**
+```sql
+INSERT INTO Orders (Id, CustomerId) VALUES (1, 999); -- CustomerId 999 doesn't exist in Customers
+-- Msg 547: The INSERT statement conflicted with the FOREIGN KEY constraint
+```
+SQL Server rejects the insert entirely and raises an error — the row is never written, preventing an "orphaned" order that points to a customer who doesn't exist.
+
+**What happens on a delete of a referenced row (by default):**
+```sql
+DELETE FROM Customers WHERE Id = 1; -- Customer 1 has existing Orders
+-- Msg 547: The DELETE statement conflicted with the REFERENCE constraint
+```
+By default, SQL Server blocks deleting a customer who still has orders referencing them — you must either delete the dependent orders first, or configure a cascade behavior:
+```sql
+CONSTRAINT FK_Orders_Customers FOREIGN KEY (CustomerId)
+    REFERENCES Customers(Id) ON DELETE CASCADE -- deleting a Customer auto-deletes their Orders too
+```
+
+**Common Pitfall:** using `ON DELETE CASCADE` casually without considering the blast radius — a cascading delete on a deeply-referenced table (e.g., deleting a `Customer` that cascades through `Orders` → `OrderLines` → `Payments`) can silently remove far more data than intended if the cascade chain is longer than the developer realized when writing the original constraint.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What are SQL Server Views, and what's the difference between a regular view and an Indexed (Materialized) View?**
+
+A View is a saved, named SQL query that behaves like a virtual table — querying the view runs the underlying query fresh each time, it doesn't store data of its own by default.
+
+**A regular View — just a saved query, re-executed every time it's queried:**
+```sql
+CREATE VIEW ActiveCustomerOrders AS
+SELECT o.Id, o.Total, c.Name
+FROM Orders o
+JOIN Customers c ON c.Id = o.CustomerId
+WHERE c.IsActive = 1;
+
+SELECT * FROM ActiveCustomerOrders WHERE Total > 100; -- runs the JOIN fresh, every single time
+```
+This is purely a convenience/abstraction layer — hiding a complex join behind a simple name — with no inherent performance benefit over writing the join directly, since SQL Server executes the underlying query every time regardless.
+
+**An Indexed (Materialized) View — SQL Server actually stores and maintains the result set:**
+```sql
+CREATE VIEW ActiveCustomerOrdersIndexed WITH SCHEMABINDING AS
+SELECT o.Id, o.Total, c.Name
+FROM dbo.Orders o
+JOIN dbo.Customers c ON c.Id = o.CustomerId
+WHERE c.IsActive = 1;
+GO
+CREATE UNIQUE CLUSTERED INDEX IX_ActiveCustomerOrdersIndexed ON ActiveCustomerOrdersIndexed(Id);
+```
+Creating a clustered index on the view forces SQL Server to physically materialize and store the view's result set on disk, automatically keeping it in sync whenever the underlying `Orders`/`Customers` tables change — queries against the indexed view can be dramatically faster since the join has already been computed, at the cost of extra storage and slightly slower writes to the base tables (since the materialized view must be updated too).
+
+**Why `WITH SCHEMABINDING` is required:** it locks the underlying tables' schema so they can't be altered in a way that would break the view (e.g., dropping a column the view depends on) without first dropping the view — a necessary safety guarantee for a structure SQL Server is actively maintaining physical storage for.
+
+**Common Pitfall:** creating an Indexed View on a heavily-written table expecting only read-side benefits — every `INSERT`/`UPDATE`/`DELETE` on the underlying tables now also has to update the materialized view's stored data, which can meaningfully slow down write-heavy workloads; Indexed Views are best suited for read-heavy scenarios querying relatively stable data.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What are SQL Server Statistics, and how does a stale statistics object cause the query optimizer to choose a bad execution plan?**
+
+Statistics are lightweight metadata objects describing the **distribution of values** in a column or index (e.g., "this column has 500,000 distinct values, ranging from 1 to 500,000, roughly evenly distributed") — the Query Optimizer relies entirely on these estimates, not the actual live data, to decide things like whether an Index Seek or a full Table Scan will be cheaper for a given query.
+
+**How stale statistics cause a bad plan:**
+```sql
+-- Statistics were last updated when the Orders table had 1,000 rows
+SELECT * FROM Orders WHERE CustomerId = 42;
+-- The optimizer estimates (based on STALE stats) that ~1 row matches -> chooses an Index Seek
+
+-- But the table has since grown to 10 million rows, and CustomerId 42 now has 50,000 matching orders
+-- The chosen Index Seek + many individual Key Lookups is now FAR slower than a Table Scan would have been
+```
+The optimizer isn't "wrong" given the information it had — it made the best decision based on statistics that no longer reflect reality, producing a plan that was optimal for the old data volume/distribution but is badly mismatched for the current one.
+
+**SQL Server's automatic statistics maintenance:** by default, `AUTO_UPDATE_STATISTICS` refreshes statistics automatically once a sufficient percentage of rows have changed since the last update — but for very large tables, that threshold can represent a large *absolute* number of changed rows before a refresh triggers, meaning statistics can lag noticeably stale for a meaningful window on big, frequently-changing tables.
+
+**Manually forcing a refresh when you suspect stale stats are the culprit:**
+```sql
+UPDATE STATISTICS Orders WITH FULLSCAN; -- recompute using every row, not a sample
+```
+
+**Common Pitfall:** diagnosing a sudden query slowdown as an indexing problem (adding more indexes) when the actual cause is stale statistics causing the optimizer to *mis-estimate* row counts and pick a poor plan despite perfectly good indexes already existing — checking the *estimated* vs *actual* row counts in an execution plan (a large mismatch between the two is the tell-tale sign) should come before assuming an index is missing.
+
+---

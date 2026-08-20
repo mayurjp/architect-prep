@@ -270,3 +270,81 @@ public struct Counters
 **Common Pitfall:** "fixing" false sharing speculatively in ordinary application code where threads rarely write to adjacent fields under real contention — the padding itself costs memory and adds complexity, and it's only worth diagnosing (via a profiler showing unexpectedly high cache-miss rates on a hot multi-threaded loop) and fixing in genuinely contended, allocation-free, tight-loop scenarios like custom concurrent counters or lock-free ring buffers.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is the difference between latency and throughput, and why can optimizing for one sometimes make the other worse?**
+
+**Latency** measures how long a single operation takes from start to finish (e.g., "this API request took 120ms"). **Throughput** measures how many operations a system completes per unit of time (e.g., "this API handles 5,000 requests per second"). They sound related, but optimizing one in isolation can genuinely hurt the other.
+
+**Where they align:** reducing unnecessary work in a request (removing a redundant database call) typically improves both — faster individual requests, and more requests handleable per second with the same hardware.
+
+**Where they trade off against each other — batching:**
+```csharp
+// Optimized for LATENCY: process each item immediately as it arrives
+public async Task ProcessOrder(Order order) => await SaveToDbAsync(order); // ~5ms per call
+
+// Optimized for THROUGHPUT: batch multiple items into fewer, larger DB round-trips
+public async Task ProcessOrders(List<Order> orders)
+{
+    await _db.BulkInsertAsync(orders); // one round-trip for 100 orders instead of 100 round-trips
+}
+```
+Batching dramatically improves throughput (far fewer expensive round-trips overall) but *increases* the latency of any individual order, since it now has to wait in a buffer for the batch to fill up (or a timeout to elapse) before it's actually processed — a single order that would have taken 5ms now might wait 200ms for its batch window to close.
+
+**Why this matters for system design decisions:** a payment confirmation API (where a human is waiting on the response) should prioritize low latency even if it means lower raw throughput per server; a background log-ingestion pipeline (where nothing is waiting synchronously) can batch aggressively for much higher throughput, since nothing user-facing depends on any single log line's individual processing time.
+
+**Common Pitfall:** benchmarking a system change using only one of the two metrics and declaring it an unconditional improvement — a caching layer that improves average latency dramatically but adds enough memory pressure to reduce the number of concurrent requests a server can sustain (lower throughput under load) is a trade-off, not a pure win, and needs to be evaluated against what the specific workload actually needs more of.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is a memory profiler's "Retention Path" (or "Path to GC Root"), and how do you use it to actually find the cause of a memory leak rather than just observing that one exists?**
+
+Simply knowing "there are 50,000 leaked `Order` objects" doesn't tell you *why* the garbage collector can't reclaim them — a Retention Path (shown by profilers like dotMemory or the Visual Studio Diagnostic Tools) traces the exact chain of object references keeping a specific object alive, from a GC Root all the way down to the leaked instance.
+
+**What a Retention Path actually shows:**
+```text
+GC Root: static field OrderCache.Instance
+   └─ Dictionary<int, Order> _cache
+        └─ Order[Id=4821]
+             └─ EventHandler OnStatusChanged
+                  └─ (this leaked Order is subscribed to a long-lived event source)
+```
+Reading this chain top-to-bottom reveals the actual bug: some static cache (`OrderCache.Instance`) holds a dictionary that's never being evicted, and the `Order` objects inside it are also subscribed to an event on something long-lived — either issue alone would explain the leak, and the retention path shows precisely which reference chain to go fix.
+
+**The workflow for using this in practice:**
+1. Take a heap snapshot under normal operation, and a second one after suspected leak-triggering activity (e.g., processing 1,000 orders).
+2. Diff the two snapshots — the profiler highlights object *types* whose instance count grew between snapshots without shrinking back down.
+3. Pick one instance of the suspiciously-growing type and ask the profiler for its Retention Path (equivalently: "Path to GC Root").
+4. The resulting chain names the exact field/collection/event subscription responsible — that's the line of code to go fix, not a guess.
+
+**Why this beats guessing from code review alone:** memory leaks in managed languages are specifically about *unexpected* references keeping something alive — by definition, the developer didn't realize that reference existed, or they wouldn't have written the leak in the first place. A retention path makes the invisible reference chain visible and concrete, rather than relying on manually re-reading code hoping to spot the mistake.
+
+**Common Pitfall:** stopping at "found the type that's leaking" without following the full retention path to its root cause — knowing `Order` objects are accumulating doesn't tell you whether the fix is unsubscribing an event, evicting from a cache, or disposing something; the specific chain is what tells you which of those (or something else entirely) is actually the culprit.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is Native AOT (Ahead-of-Time) compilation in modern .NET, and what performance characteristics does it trade away to achieve near-instant startup?**
+
+Native AOT compiles an entire .NET application directly to native machine code at publish time, producing a fully self-contained executable with **no JIT compiler and no separate .NET runtime needed at all** — a fundamentally different execution model from the normal JIT-based .NET runtime, trading some flexibility for startup speed and a smaller footprint.
+
+**Publishing with Native AOT:**
+```bash
+dotnet publish -r linux-x64 -p:PublishAot=true
+```
+The output is a single native executable, not a `.dll` requiring `dotnet MyApp.dll` to launch — there's no IL byte-code being JIT-compiled at startup, because there's no IL left at all; everything was compiled to native code ahead of time during the build.
+
+**Why this eliminates the "cold start" problem covered earlier:** JIT compilation, EF Core model building, and assembly loading from disk were the main contributors to slow first-request latency in a normal .NET app — Native AOT removes JIT entirely (code is already native) and typically starts in single-digit milliseconds, making it especially compelling for serverless functions and CLI tools where startup time directly impacts cost or perceived responsiveness.
+
+**What gets traded away:**
+- **No runtime code generation** — `System.Reflection.Emit`, dynamic proxy generation (used by some mocking libraries and older ORMs), and anything else that generates and JITs code *at runtime* simply doesn't work, since there's no JIT present to compile it.
+- **Limited/no runtime Reflection-based serialization** — libraries relying on unconstrained runtime reflection over arbitrary types (older Newtonsoft.Json usage patterns, for instance) often need to switch to source-generated serialization (`System.Text.Json`'s source generator) instead, since AOT needs to know ahead of time exactly which types will need reflection-like access.
+- **Larger binary size for what IS included** — because there's no shared, already-installed runtime to rely on, the executable bundles everything it needs, trading the normal shared-runtime model's smaller per-app footprint for full self-containment.
+
+**Common Pitfall:** attempting to Native-AOT-compile an existing application without auditing its dependencies for reflection-heavy libraries first — a codebase using heavy runtime reflection, dynamic proxies (common in some DI/mocking setups), or non-source-generated JSON serialization will fail to publish or throw `NotSupportedException` at runtime in ways that are often only discovered after attempting the AOT publish, not from reading the application's source code alone.
+
+---

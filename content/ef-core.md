@@ -338,3 +338,87 @@ optionsBuilder.UseSqlServer(connectionString)
 **Common Pitfall:** forgetting to regenerate the compiled model after changing your entity classes or `OnModelCreating` configuration — the compiled model is a point-in-time snapshot, and EF Core will throw a runtime exception at startup if the compiled model's shape doesn't match what your `DbContext` actually declares, since it can no longer safely assume the two are in sync.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is the difference between `SaveChanges()` and `SaveChangesAsync()`, and does it actually matter for a simple console app versus an ASP.NET Core API?**
+
+Both persist the `DbContext`'s tracked changes to the database — the difference is purely about whether the calling thread blocks while waiting for the database round-trip.
+
+```csharp
+context.SaveChanges();       // blocks the calling thread until the DB responds
+await context.SaveChangesAsync(); // frees the thread to do other work while waiting
+```
+
+**Why it matters enormously in ASP.NET Core, and barely at all in a simple console app:**
+- In a web API, the calling thread is a **Thread Pool thread** shared across potentially thousands of concurrent requests. Calling the synchronous `SaveChanges()` blocks that thread for the entire database round-trip — under load, this is exactly the thread-pool-starvation problem covered elsewhere (many blocked threads waiting on I/O, no threads left to handle new incoming requests).
+- In a simple single-threaded console app or a one-off script, there's no thread pool being shared across concurrent work — blocking "the" thread while it's the only thing happening anyway costs essentially nothing, since there was no other work that thread could have picked up instead.
+
+**Common Pitfall:** using synchronous EF Core methods (`ToList()`, `SaveChanges()`, `Find()`) inside an ASP.NET Core controller action out of habit or copy-pasted from a console-app tutorial — this is one of the most common sources of the "thread pool starvation under load" performance bug, precisely because it works fine in local testing (low concurrency) and only degrades once real production traffic arrives.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is a Global Query Filter in EF Core, and what's a common pitfall when combining it with `.Include()` for related entities?**
+
+A Global Query Filter is a `Where` clause EF Core automatically applies to **every** query against a given entity type, configured once in `OnModelCreating` — commonly used for soft-delete (`IsDeleted == false`) or multi-tenancy (`TenantId == currentTenant`) so every developer doesn't have to remember to add that filter manually to every single query.
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<Order>().HasQueryFilter(o => !o.IsDeleted);
+}
+
+var orders = context.Orders.ToList(); // automatically becomes: WHERE IsDeleted = 0
+```
+
+**The pitfall — filters on related entities loaded via `.Include()` still apply, sometimes surprisingly:**
+```csharp
+modelBuilder.Entity<OrderLine>().HasQueryFilter(l => !l.IsDeleted);
+
+var order = context.Orders.Include(o => o.Lines).First(o => o.Id == 5);
+// If Order #5 has 3 lines but one is soft-deleted, `order.Lines` only contains 2 --
+// the OrderLine's OWN query filter silently applied even though you only filtered on Order
+```
+This is usually the *desired* behavior (a soft-deleted line shouldn't appear anywhere), but it surprises developers who expect `.Include()` to load *all* related rows verbatim — the filter applies transparently to every entity type that has one configured, regardless of how deeply it's loaded via navigation properties.
+
+**Bypassing the filter when you genuinely need to see filtered-out rows (e.g., an admin "restore deleted item" screen):**
+```csharp
+var allOrdersIncludingDeleted = context.Orders.IgnoreQueryFilters().ToList();
+```
+
+**Common Pitfall:** forgetting that a Global Query Filter referencing a scoped/injected value (like the current tenant ID) requires that value to be available for the *entire lifetime* of the `DbContext` — if the tenant context changes mid-request in a way the `DbContext` doesn't pick up, queries can silently keep filtering by a stale tenant ID until a new `DbContext` instance is created for the next request.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is the difference between `IQueryable<T>` composition and calling `.AsEnumerable()` partway through a query chain, and why does the order of operations matter so much for performance?**
+
+Both eventually produce results, but where you switch from `IQueryable<T>` (translated to SQL) to `IEnumerable<T>` (executed in application memory) determines whether filtering/sorting happens in the database or after pulling potentially large amounts of data into the app's RAM.
+
+**Filtering entirely in the database — efficient:**
+```csharp
+var results = context.Orders
+    .Where(o => o.Status == "Pending")   // still IQueryable -- becomes part of the SQL WHERE clause
+    .OrderBy(o => o.CreatedDate)          // still IQueryable -- becomes SQL ORDER BY
+    .ToList();                             // NOW executes -- one optimized SQL query, only matching rows returned
+```
+
+**Switching to `IEnumerable` too early — filtering happens in application memory instead:**
+```csharp
+var results = context.Orders
+    .AsEnumerable()                        // switches to IEnumerable HERE
+    .Where(o => o.Status == "Pending")     // now a plain C# LINQ-to-Objects filter, NOT SQL
+    .OrderBy(o => o.CreatedDate)
+    .ToList();
+// The database returns EVERY row in Orders first, THEN the app filters/sorts in memory
+```
+The moment `.AsEnumerable()` (or `.ToList()`, or passing to a method typed as `IEnumerable<T>`) is called, every subsequent LINQ operator uses the plain in-memory LINQ-to-Objects implementation rather than EF Core's SQL-translating provider — the database has already sent back the *entire* unfiltered table by that point, and all the "filtering" happening afterward is just discarding most of what was needlessly transferred over the network.
+
+**Why this sometimes happens accidentally, not just as an obvious mistake:** calling a method containing custom logic EF Core's SQL translator doesn't understand (a private C# helper method, a complex conditional not expressible in SQL) forces an implicit switch to client-side evaluation for that specific step — EF Core 3.0+ throws an exception for this rather than silently doing it (older EF Core versions silently client-evaluated, which was its own performance trap), but developers unaware of *why* their query throws sometimes "fix" it by prematurely calling `.AsEnumerable()`/`.ToList()` far earlier in the chain than necessary, reintroducing the exact performance problem the exception was trying to prevent.
+
+**Common Pitfall:** treating any `IQueryable`-breaking exception as "just call `.ToList()` right before the problematic line" without checking whether that materializes the *entire* table first — the fix should isolate exactly which single operation needs client-side evaluation and keep everything else, including any filtering that can stay server-side, translated to SQL for as long as possible.
+
+---
