@@ -621,3 +621,77 @@ When the token was originally issued, the client generated a public/private key 
 **Common Pitfall:** implementing DPoP but allowing an overly generous validity window on each proof (or failing to check proof replay via a `jti`-style uniqueness check) — a DPoP proof is meant to be single-use and short-lived; without proper replay protection, an attacker who intercepts *one* valid request (token + its accompanying DPoP proof, together) within the proof's validity window could still replay that exact request once, even without ever obtaining the private key itself — the security benefit specifically depends on correctly enforcing proof freshness and single-use, not merely requiring a proof to exist at all.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between "Authentication" and "Authorization," and why is a system that only implements one of them fundamentally incomplete?**
+
+Authentication answers "who are you?" — verifying an identity is genuinely who it claims to be (checking a password, validating a token's signature). Authorization answers "what are you allowed to do?" — deciding whether an already-verified identity has permission to perform a specific action or access a specific resource. A system needs both: Authentication alone verifies identity but doesn't decide what that identity can do; Authorization alone has no reliable identity to base its decisions on.
+
+```csharp
+[HttpDelete("orders/{id}")]
+[Authorize] // AUTHENTICATION only -- confirms the caller is SOMEONE with a valid token
+public async Task<IActionResult> DeleteOrder(int id)
+{
+    var order = await _repository.GetAsync(id);
+
+    // AUTHORIZATION check -- confirms THIS SPECIFIC authenticated user is ALLOWED to delete THIS order
+    if (order.OwnerId != User.GetUserId() && !User.IsInRole("Admin"))
+        return Forbid();
+
+    await _repository.DeleteAsync(id);
+    return NoContent();
+}
+```
+`[Authorize]` alone confirms the request carries a genuinely valid, authenticated identity — but says nothing about whether *that specific* identity should be allowed to delete *this specific* order; the explicit ownership/role check afterward is the actual Authorization decision, and omitting it (relying on `[Authorize]` alone) would let any authenticated user delete any other user's orders.
+
+**Common Pitfall:** treating `[Authorize]` (or equivalent authentication-only checks) as sufficient protection for an endpoint, without adding the corresponding authorization logic verifying the authenticated user is actually permitted to act on the *specific* resource being requested — this is the exact root cause of the Broken Object Level Authorization vulnerability class (covered under application security), where "you're logged in" is mistakenly treated as equivalent to "you're allowed to do this to any resource."
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is the OAuth 2.0 "Refresh Token," and how does its longer lifetime (compared to a short-lived Access Token) let a client obtain new Access Tokens WITHOUT requiring the user to re-authenticate?**
+
+An Access Token is deliberately short-lived (minutes to an hour) to limit the damage window if it's stolen — but requiring the user to log in again every time it expires would be a poor experience. A Refresh Token, issued alongside the Access Token but with a much longer lifetime, lets the client silently obtain a fresh Access Token from the Authorization Server without any user interaction at all.
+
+```http
+POST /token
+grant_type=refresh_token&refresh_token=<the long-lived refresh token>&client_id=...
+```
+```json
+{
+  "access_token": "<A BRAND NEW, freshly-issued, short-lived access token>",
+  "refresh_token": "<possibly a NEW refresh token too, if rotation is enabled>",
+  "expires_in": 3600
+}
+```
+The client presents its Refresh Token directly to the Authorization Server (not to any resource server) and receives a fresh Access Token in response — no username/password re-entry, no user-visible login screen at all; this happens transparently, often triggered automatically just before the current Access Token is about to expire.
+
+**Why Refresh Token Rotation matters as a security hardening on top of the basic mechanism:** with rotation enabled, every time a Refresh Token is used, the Authorization Server issues a brand new one and immediately invalidates the old one — if a stolen Refresh Token is ever used by an attacker, the legitimate client's *next* attempt to use its now-invalidated Refresh Token fails, which itself is a detectable signal that a theft has occurred (since two parties now believe they hold "the" valid refresh token, but only one attempt can succeed).
+
+**Common Pitfall:** storing a long-lived Refresh Token somewhere insecure (like browser `localStorage`, accessible to any JavaScript running on the page, including injected via XSS) — because a Refresh Token grants the ability to mint fresh Access Tokens indefinitely (or until it expires/is revoked), it's an even higher-value target for theft than an Access Token itself; it warrants storage at least as secure as the Access Token (an HttpOnly cookie, or a platform-specific secure credential store), not casual client-side storage.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is "Continuous Access Evaluation" (CAE), and how does it let an Identity Provider REVOKE an already-issued, still-technically-valid access token's effective access in near-real-time, rather than waiting for the token's own expiry?**
+
+Ordinarily, once an Access Token is issued, it remains valid until its own expiration, regardless of what happens to the underlying account in the meantime — a user's account could be disabled, their password changed after a suspected compromise, or their location flagged as suspicious, but their still-unexpired Access Token would normally continue granting access until it naturally expires. Continuous Access Evaluation closes this gap by having resource providers actively check for critical events and revoke access in near-real-time, rather than passively waiting out the token's stated lifetime.
+
+```text
+1. User authenticates, receives an Access Token valid for 1 hour
+2. 5 minutes later: security team disables the user's account (suspected compromise detected)
+3. WITHOUT CAE: the token remains valid for the REMAINING 55 minutes, regardless of the disablement
+4. WITH CAE: the Identity Provider pushes a near-real-time signal ("this user's session is revoked")
+   -> the resource provider (Microsoft Graph, for instance) re-evaluates and REJECTS
+      the token almost IMMEDIATELY, despite it not having technically expired yet
+```
+Rather than relying solely on short token lifetimes to bound the risk window (the traditional mitigation, forcing frequent re-authentication as a blunt instrument), CAE lets critical, security-relevant events propagate from the Identity Provider to resource providers essentially in real-time, allowing access to be revoked the moment a disqualifying event is known, independent of whatever lifetime the token was originally issued with.
+
+**Why this specifically improves on "just use very short token lifetimes" as a mitigation:** very short-lived tokens reduce risk exposure but at the cost of far more frequent token-refresh traffic and, in stricter implementations, more frequent user-visible re-authentication — CAE instead allows tokens to have a more normal, less aggressively short lifetime, while still achieving near-real-time revocation specifically when it actually matters (a genuine security event), rather than paying the operational/UX cost of very short lifetimes at all times regardless of whether anything suspicious ever happens.
+
+**Common Pitfall:** assuming CAE is a drop-in security guarantee available automatically for any OAuth/OIDC deployment — it requires both the Identity Provider and the specific resource providers/APIs involved to explicitly support and correctly implement the CAE signaling protocol; a resource server that doesn't participate in CAE will simply continue honoring a token for its full stated lifetime regardless of any revocation signal the Identity Provider attempts to push, meaning CAE's benefit depends entirely on end-to-end support across the specific components actually deployed.
+
+---

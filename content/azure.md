@@ -567,3 +567,68 @@ Because Availability Zones within one region are physically close enough (typica
 **Common Pitfall:** assuming Zone-Redundant configuration alone is sufficient disaster-recovery protection and skipping cross-region replication entirely "since we already have redundancy" — Zone-Redundancy explicitly does not protect against a genuine region-wide outage (all zones within a region can theoretically be affected by sufficiently large-scale events), which is exactly the gap cross-region replication is specifically designed to close.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is Azure Resource Manager (ARM) and a "Resource Group," and how does grouping related resources together simplify lifecycle management (like deleting an entire environment at once)?**
+
+A Resource Group is a logical container holding related Azure resources (a web app, its database, its storage account) that share the same lifecycle — Azure Resource Manager treats operations on the group (like deletion) as applying to every resource inside it, letting an entire environment be torn down with a single command rather than deleting each resource individually.
+
+```bash
+az group create --name my-app-dev --location eastus
+
+az webapp create --resource-group my-app-dev --name my-app --plan my-plan
+az sql db create --resource-group my-app-dev --server my-server --name my-db
+
+# Later, tearing down the ENTIRE dev environment -- every resource inside the group -- in ONE command:
+az group delete --name my-app-dev --yes
+```
+Every resource created "inside" `my-app-dev` (the web app, the database, and anything else) is deleted together when the group itself is deleted — without Resource Groups, tearing down a temporary dev/test environment would require individually locating and deleting every resource that belonged to it, an error-prone, easy-to-miss-something process.
+
+**Why this matters for cost control specifically:** a common source of unexpected cloud spend is "orphaned" resources left behind after a project or environment is supposedly decommissioned — organizing resources into Resource Groups by environment/project from the start makes "delete everything related to this temporary environment" a single, complete, low-risk operation, rather than a manual audit trying to remember every individual resource that was created.
+
+**Common Pitfall:** mixing unrelated resources (belonging to entirely different applications or environments) into a single, shared Resource Group for convenience — this defeats the exact benefit Resource Groups provide, since deleting "everything related to Project A" now risks accidentally deleting Project B's resources too if they were placed in the same group; Resource Groups should be scoped along genuine lifecycle boundaries (same environment, same application, decommissioned together), not organized arbitrarily.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is Azure Managed Identity, and how does it let an application authenticate to other Azure services WITHOUT any credential (connection string, secret, certificate) ever being stored in the application's configuration at all?**
+
+Managed Identity assigns an Azure resource (a VM, an App Service, a Function) its own identity in Microsoft Entra ID, automatically — code running on that resource can request an access token for other Azure services directly from the platform's own metadata endpoint, with Azure handling the underlying credential issuance and rotation entirely behind the scenes, invisible to the application.
+
+```csharp
+// NO connection string, NO secret, NO certificate anywhere in configuration:
+var credential = new DefaultAzureCredential(); // automatically uses the resource's own Managed Identity
+var client = new SecretClient(new Uri("https://my-vault.vault.azure.net/"), credential);
+var secret = await client.GetSecretAsync("db-password"); // authenticates via Managed Identity, transparently
+```
+The application code never handles, stores, or even sees any actual credential — `DefaultAzureCredential` transparently obtains a short-lived access token from the Azure platform itself (via the instance metadata service), scoped to whatever Azure resources the Managed Identity has been granted access to, with Azure automatically rotating the underlying credential material without any application-level involvement at all.
+
+**Why this eliminates an entire category of secret-management risk:** without Managed Identity, an application needs *some* credential (a connection string, an API key) to authenticate to a dependency, and that credential must be stored *somewhere* (configuration, a secrets vault, an environment variable) — anywhere it's stored is a place it could potentially leak (committed to source control by accident, exposed in logs); Managed Identity removes the need for the application to handle any long-lived credential at all for Azure-to-Azure authentication.
+
+**Common Pitfall:** assuming Managed Identity eliminates the need for a secrets vault (like Key Vault) entirely — it specifically solves Azure-resource-to-Azure-resource authentication; the application may still need to manage genuine secrets for non-Azure dependencies (a third-party API key, for instance) that Managed Identity has no bearing on, so a secrets vault often remains necessary alongside Managed Identity, just with a meaningfully smaller set of secrets actually requiring storage.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is Azure Front Door's "Split TCP" / anycast-based architecture, and how does terminating a client's TCP/TLS connection at the NEAREST edge location (rather than at the origin) reduce the impact of long-distance network latency on connection setup?**
+
+A typical direct client-to-origin connection means the full TCP handshake and TLS negotiation (each requiring one or more round trips) travel the *entire* physical distance between client and origin. Azure Front Door instead terminates the client's connection at the nearest Azure edge location (using anycast routing to direct the client to the closest one automatically), then uses an already-established, persistent, optimized connection from that edge location to the origin for the remainder of the journey.
+
+```text
+WITHOUT Front Door:
+  Client (Sydney) <-- full TCP handshake + TLS negotiation, EVERY round trip crossing the FULL distance --> Origin (Virginia)
+
+WITH Front Door:
+  Client (Sydney) <-- TCP handshake + TLS negotiation, LOCAL round trips only --> Nearest Edge (Sydney)
+                                    Edge (Sydney) <-- persistent, pre-optimized connection --> Origin (Virginia)
+```
+The expensive, multi-round-trip connection setup (TCP handshake, TLS negotiation) happens entirely over the *short*, local distance between the client and the nearest edge — the long-distance leg (edge to origin) reuses an already-established, kept-alive connection that Front Door itself maintains, meaning the client's actual perceived connection-setup latency is dominated by the short local hop, not the long cross-continental one.
+
+**Why this specifically helps HTTPS/TLS more than plain HTTP:** TLS negotiation alone can require multiple additional round trips beyond the basic TCP handshake — for a connection spanning a genuinely long physical distance, this compounds into meaningfully higher latency before any actual data even begins transferring; terminating that negotiation at a nearby edge collapses those round trips down to the short local distance instead.
+
+**Common Pitfall:** assuming a CDN or edge network like Front Door only helps by *caching content* — the Split TCP/connection-termination benefit described here applies even to entirely dynamic, non-cacheable content, since it's optimizing the *connection setup* itself, not the content delivery; conflating "CDN" purely with "content caching" misses this separate, connection-level latency benefit that applies broadly, even to APIs returning uncacheable, per-request data.
+
+---

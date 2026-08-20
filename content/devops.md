@@ -601,3 +601,76 @@ The code can be sitting in production, fully deployed, for days before 100% of u
 **Common Pitfall:** treating "we do Continuous Deployment" and "we do Progressive Delivery" as the same maturity level — genuine Progressive Delivery requires meaningfully more tooling investment (feature flag infrastructure, automated canary analysis, ring/cohort management) than Continuous Deployment alone requires; a team can have excellent CI/CD automation (fast, reliable, frequent deploys) while still exposing every change to 100% of users the instant it deploys, which is Continuous Deployment without the additional exposure-control layer Progressive Delivery specifically adds on top.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is a "Pipeline as Code" (like a Jenkinsfile or a GitHub Actions YAML file), and why does storing a CI/CD pipeline's DEFINITION in version control alongside the application code matter?**
+
+Pipeline as Code means the CI/CD pipeline's steps (build, test, deploy) are defined in a text file committed to the same repository as the application code, rather than configured through a CI server's UI/click-based configuration that lives only inside that tool.
+
+```yaml
+# .github/workflows/build.yml -- committed to the SAME repo as the application code
+name: Build and Test
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: dotnet build
+      - run: dotnet test
+```
+Because this file lives in the repository itself, it's versioned alongside the code it builds — a branch can modify its own pipeline definition (adding a new test step, for instance) without affecting any other branch's pipeline, and the pipeline's history (who changed what, and why) is visible through ordinary `git log`/`git blame`, exactly like any other source file.
+
+**Why this matters compared to UI-configured pipelines:** a pipeline configured purely through a CI tool's web UI has no version history of its own, can't be code-reviewed via a pull request the way a `.yml` file change can, and isn't automatically consistent across branches (a feature branch experimenting with a new build step would need someone to manually reconfigure the UI, rather than simply committing a change to the pipeline file within that branch).
+
+**Common Pitfall:** configuring critical pipeline behavior (deployment approval gates, secret injection) through a CI tool's UI settings that live outside the repository, while the bulk of the pipeline is defined as code — this splits the pipeline's actual behavior across two different places (the versioned YAML file, and the un-versioned UI configuration), making the true, complete behavior of the pipeline harder to see, reason about, or reproduce from the repository alone.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is "Trunk-Based Development," and how does its practice of very short-lived (or nonexistent) feature branches address the "merge hell" problem long-lived feature branches tend to produce?**
+
+Trunk-Based Development has developers commit small, frequent changes directly to a single shared branch (`main`/`trunk`), either with no feature branches at all or with branches that live for at most a day or two before merging back — as opposed to long-lived feature branches that diverge from `main` for weeks, accumulating a large volume of changes before attempting to merge.
+
+```text
+Long-lived feature branch approach:
+  feature/new-checkout branches off main, developed for 3 WEEKS in isolation
+  -> meanwhile, main has received dozens of OTHER unrelated changes
+  -> merging feature/new-checkout back requires reconciling THREE WEEKS of accumulated divergence
+     -> "merge hell": large, complex conflicts, hard to review, high risk of subtle merge mistakes
+
+Trunk-Based Development approach:
+  Small changes committed DIRECTLY to main, or via branches living HOURS, not weeks
+  -> main NEVER diverges far from any single developer's local work
+  -> conflicts, when they occur, are SMALL and easy to resolve, because so little time has passed
+```
+The size of a merge conflict scales roughly with how much *both* sides have changed since diverging — a branch living three weeks accumulates a correspondingly large volume of potential conflicts with everything else that changed on `main` during those same three weeks; a branch (or direct commit) living hours has almost no time to diverge, so there's very little to reconcile.
+
+**Why this requires a supporting practice (Feature Flags, covered earlier) to actually work for larger features:** committing directly to `main` frequently means incomplete features would otherwise be visible/active in production before they're ready — Trunk-Based Development typically pairs with Feature Flags specifically to solve this: the incomplete feature's code merges to `main` continuously (avoiding merge hell), but stays hidden behind a flag until it's actually complete and ready to expose to users.
+
+**Common Pitfall:** adopting Trunk-Based Development's short-branch/frequent-merge discipline without also adopting Feature Flags for larger, multi-day features — without flags, a large feature either needs to be built and merged in one large, risky commit at the very end (reintroducing exactly the merge-hell problem Trunk-Based Development is meant to avoid), or gets shipped incomplete/broken to production, since there's no mechanism to hide unfinished work that's already merged to `main`.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is a "Deployment Ring" strategy (as distinct from percentage-based Canary rollout), and how does grouping deployments by DELIBERATE COHORT (like "internal employees," then "early adopters," then "everyone") differ from a purely RANDOM percentage-based rollout?**
+
+A percentage-based Canary rollout exposes a new version to a random sample of traffic (5%, then 25%, and so on) — a Ring-based strategy instead exposes it to deliberately-chosen, meaningful groups in sequence (Ring 0: internal employees dogfooding the change, Ring 1: opted-in early adopters, Ring 2: everyone), rather than a random slice of the overall population.
+
+```text
+Ring 0 (Canary/Internal): company employees only -- often OPT-IN, highly engaged testers who
+                            will actively notice and report issues, not just passively experience them
+Ring 1 (Early Adopters):   users who explicitly opted into "early access" -- more tolerant of rough edges,
+                            more likely to give direct feedback than typical end users
+Ring 2 (General Availability): everyone else -- only reached once Rings 0 and 1 have validated the change
+```
+Because Ring 0/1 populations are deliberately chosen to be more engaged and more tolerant of issues (and often actively looking for and reporting them), problems surface from people specifically motivated to catch them — a purely random 5% sample, by contrast, might happen to include users who are far less likely to notice or report a subtle issue, or who have a meaningfully worse experience with no expectation that they're testing something new.
+
+**Why Rings and percentage-based Canary are often used TOGETHER, not as alternatives:** a Ring strategy determines *who* gets a change first (a meaningful, engaged cohort) — percentage-based Canary analysis can still be applied *within* a given ring's rollout (releasing to 10% of Ring 1 first, then ramping to 100% of Ring 1, before proceeding to Ring 2) — the two techniques answer different questions ("which population?" versus "what fraction of that population, and how do we know it's healthy?") and combine naturally rather than competing.
+
+**Common Pitfall:** relying solely on a Ring strategy's cohort selection without also applying percentage-based, health-metric-gated ramping *within* each ring — even a well-chosen Ring 0 (internal employees) rolled out to 100% all at once, with no gradual ramp or automated health check, still risks a broad-within-that-ring outage if something goes wrong; Rings determine a thoughtful *sequence* of populations, but still benefit from the same gradual, metric-gated exposure increase within each one.
+
+---

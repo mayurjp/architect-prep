@@ -546,3 +546,78 @@ This is a stronger, more intuitive guarantee than typical distributed "strong co
 **Common Pitfall:** treating "Strong Consistency" and Spanner's "External Consistency" as interchangeable marketing terms for the same thing — External Consistency is a specifically *stronger*, real-world-time-anchored guarantee that most other "strongly consistent" distributed databases (lacking TrueTime's specific atomic-clock infrastructure) cannot actually provide, even when they also market themselves as strongly consistent; the distinction matters specifically for applications with genuine real-world causality/ordering requirements across globally-distributed transactions.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is Google Cloud IAM's distinction between a "Role" and a "Permission," and how does binding a Role (rather than individual Permissions) to a user simplify access management at scale?**
+
+A Permission is the finest-grained unit ("can read this type of resource," "can delete that type of resource") — a Role is a named, curated bundle of many individual Permissions. Rather than granting a user dozens of individual Permissions one at a time, an administrator grants a Role, which bundles all the relevant Permissions together in one assignment.
+
+```bash
+# Binding a PREDEFINED role (bundles MANY individual permissions together) to a user:
+gcloud projects add-iam-policy-binding my-project \
+  --member="user:alice@example.com" \
+  --role="roles/storage.objectViewer"   # bundles storage.objects.get, storage.objects.list, etc.
+```
+`roles/storage.objectViewer` bundles together every individual Permission needed to read objects in Cloud Storage — an administrator granting this one Role gives Alice everything she needs for "can view Storage objects," without needing to know or individually specify each of the underlying granular Permissions that role actually comprises.
+
+**Why this matters at organizational scale:** an organization with hundreds of users and dozens of distinct job functions would face an enormous, error-prone administrative burden individually assigning every relevant Permission to every user — Roles let administrators reason and grant access in terms of meaningful job functions ("Storage Viewer," "Database Admin") rather than needing deep familiarity with the full, granular list of underlying Permissions each function actually requires.
+
+**Common Pitfall:** granting an overly broad, built-in Role (like `roles/editor`, which bundles a very large number of permissions across many services) purely because it's convenient and "definitely includes what's needed" — this typically grants far more access than actually required, violating least-privilege; a Custom Role (or a more narrowly-scoped predefined Role) bundling only the specific Permissions genuinely needed is usually the more secure choice, even though it requires more deliberate curation upfront.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is Google Cloud Pub/Sub's "At-Least-Once" delivery guarantee, and why does this specifically mean subscriber code MUST be written to handle receiving the SAME message more than once?**
+
+Pub/Sub guarantees a published message will be delivered to a subscriber **at least once** — but under certain conditions (a subscriber acknowledging a message just as it crashes, network issues delaying an acknowledgment), the same message can be redelivered and processed by the subscriber a second time. This means subscriber logic must be written to be idempotent — safe to process the identical message multiple times without producing an incorrect result.
+
+```csharp
+// WRONG -- processing the same message twice would double-charge the customer
+public void ProcessPaymentMessage(PaymentMessage msg)
+{
+    _paymentGateway.Charge(msg.CustomerId, msg.Amount); // NOT idempotent -- redelivery = double charge!
+}
+
+// CORRECT -- uses the message's own unique ID to detect and skip a redelivered duplicate
+public void ProcessPaymentMessage(PaymentMessage msg)
+{
+    if (_processedMessageIds.Contains(msg.MessageId)) return; // already handled this exact message -- skip
+    _paymentGateway.Charge(msg.CustomerId, msg.Amount);
+    _processedMessageIds.Add(msg.MessageId);
+}
+```
+Because Pub/Sub's guarantee is explicitly "at least once," not "exactly once" (though Pub/Sub does offer an opt-in exactly-once delivery mode with its own trade-offs), subscriber code that assumes every message arrives exactly one time is silently vulnerable to duplicate-processing bugs that may not surface during normal, low-volume testing but become a real problem in production under the specific conditions (crashes, network retries) that trigger redelivery.
+
+**Why achieving TRUE "exactly-once" processing semantics is a genuinely hard distributed systems problem:** guaranteeing a message is delivered and processed exactly one time, globally, across a distributed system with network partitions and crashes, is one of the harder problems in distributed computing — most messaging systems (Pub/Sub included, for its default mode) instead offer "at-least-once" delivery and push the responsibility for idempotent processing onto the subscriber, which is a more practically achievable guarantee at the infrastructure level.
+
+**Common Pitfall:** writing subscriber logic that assumes messages always arrive exactly once, based on this appearing to be true during initial development/testing at low message volume — redelivery-triggering conditions (crashes mid-acknowledgment, network blips) are comparatively rare events, meaning a non-idempotent subscriber can pass all normal testing and only reveal its duplicate-processing bug rarely, in production, under exactly the conditions least convenient for debugging.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is Google Cloud's "VPC Service Controls," and how does it protect against DATA EXFILTRATION even by a credential-holder who has otherwise legitimate IAM permissions to access a resource?**
+
+VPC Service Controls creates a security perimeter around specific Google Cloud resources (a Cloud Storage bucket, a BigQuery dataset) that restricts data movement across that perimeter's boundary — critically, this is enforced *independently* of IAM permissions: even a user or service account with legitimate IAM access to a resource inside the perimeter cannot move that data *outside* the perimeter boundary (to an external project, the public internet, or a compromised third-party destination).
+
+```text
+Perimeter: "financial-data-perimeter"
+Resources INSIDE: BigQuery dataset "financial_records", Cloud Storage bucket "financial-exports"
+
+A service account with legitimate IAM permission to READ "financial_records" can:
+  - Query the data from WITHIN the perimeter (allowed)
+  - Export results to another resource ALSO within the perimeter (allowed)
+
+The SAME service account, even with valid IAM credentials, CANNOT:
+  - Export that data to a Cloud Storage bucket in a DIFFERENT project outside the perimeter (BLOCKED)
+  - Copy the data to the public internet via an API call reaching outside the perimeter (BLOCKED)
+```
+This specifically protects against a scenario ordinary IAM permissions alone cannot: a legitimately-authorized service account or its credentials being compromised (leaked, phished, or misused by an insider) and used to exfiltrate data *outside* the organization's controlled boundary — IAM alone only controls *who* can access data, while VPC Service Controls additionally controls *where* that data is allowed to move to, as a second, independent layer of defense.
+
+**Why this is specifically valuable as defense against credential compromise, not just misconfiguration:** even a perfectly correctly-configured IAM policy (least-privilege, exactly the right permissions granted) provides no protection if the credentials themselves are stolen and used by an attacker from outside the organization's network — VPC Service Controls adds a boundary that constrains data movement regardless of whether the credentials being used are legitimate or stolen, specifically closing the exfiltration path that IAM's access-control model alone cannot address.
+
+**Common Pitfall:** treating IAM permissions as sufficient protection for genuinely sensitive data (financial records, health data, regulated PII) without an additional perimeter control like VPC Service Controls — IAM excels at controlling *who* can access what, but says nothing about preventing that access from being used to move data to an uncontrolled destination; genuinely sensitive datasets typically warrant this additional layer specifically because credential compromise (not just IAM misconfiguration) is a realistic threat model IAM alone cannot fully address.
+
+---
