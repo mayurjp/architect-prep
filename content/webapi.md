@@ -468,3 +468,108 @@ This sets `Cache-Control: public, max-age=30` on the response, which client brow
 **Common Pitfall:** applying Output Caching to endpoints returning user-specific or authenticated data without a proper **vary-by** configuration (`builder.SetVaryByHeader("Authorization")`) — without it, the first user's response could be served to every subsequent user hitting the same cached endpoint, a serious data-leakage bug rather than a performance win.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the `[ApiController]` attribute's automatic inference of `[FromBody]`, and how can it produce surprising behavior when an action has multiple complex-type parameters?**
+
+`[ApiController]` (covered earlier) infers binding sources automatically — simple types (`int`, `string`) default to `[FromRoute]`/`[FromQuery]`, and complex types default to `[FromBody]`. This inference has a specific, easy-to-miss limitation: only **one** parameter per action can ever be inferred as `[FromBody]`, since an HTTP request has exactly one body.
+
+**Works fine — a single complex-type parameter, correctly inferred as `[FromBody]`:**
+```csharp
+[HttpPost]
+public IActionResult Create(Product product) // inferred: [FromBody] Product product
+{
+    // 'product' is deserialized from the request's JSON body
+}
+```
+
+**The surprising case — two complex-type parameters in the same action:**
+```csharp
+[HttpPost]
+public IActionResult Create(Product product, ShippingInfo shipping) // BOTH are complex types!
+{
+    // This throws an InvalidOperationException at startup:
+    // "Actions cannot have more than one parameter inferred as FromBody"
+}
+```
+`[ApiController]`'s inference has no way to guess which of the two complex-type parameters should read from the (singular) request body — rather than guessing, it simply fails fast at startup with a clear error, forcing the developer to be explicit.
+
+**The fix — be explicit about binding sources when you have more than one complex-type parameter:**
+```csharp
+[HttpPost]
+public IActionResult Create([FromBody] Product product, [FromServices] IShippingCalculator calculator)
+{
+    // Only ONE actual [FromBody] parameter now; the other complex-type "parameter"
+    // is a service resolved via DI, not from the request body at all
+}
+```
+If you genuinely need multiple pieces of data from the body, the conventional fix is combining them into a single wrapper DTO (`CreateProductRequest { Product, ShippingInfo }`) rather than trying to bind two separate objects from one JSON body.
+
+**Common Pitfall:** adding a second complex-type parameter to an existing, working action (perhaps a new options object) and being confused by a startup-time exception referencing "FromBody inference" — this is `[ApiController]`'s inference rule catching an ambiguous binding request at the earliest possible point (application startup) rather than letting it silently misbehave at request time.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is API Explorer, and how does it feed both Swagger/OpenAPI generation and API versioning's per-version documentation simultaneously?**
+
+`IApiDescriptionGroupCollectionProvider` (commonly just called "API Explorer") is the underlying ASP.NET Core service that inspects every registered controller/action (or Minimal API endpoint) and builds a structured, in-memory description of the entire API surface — parameters, return types, HTTP methods, routes — which both Swashbuckle (Swagger generation) and the versioning package's documentation tooling consume as their shared source of truth, rather than each reimplementing endpoint discovery independently.
+
+**How it's populated, largely automatically:**
+```csharp
+builder.Services.AddEndpointsApiExplorer(); // registers API Explorer for Minimal APIs
+// (controller-based APIs get this automatically via AddControllers())
+```
+Once registered, API Explorer reflects over every mapped endpoint, extracting its route template, HTTP method, expected parameter types (and their inferred binding sources, per the previous question), and response types (from `[ProducesResponseType]` attributes) — building a complete, structured model of the API without either Swashbuckle or the versioning tooling needing their own separate reflection logic.
+
+**Why sharing this single source of truth matters:** if Swashbuckle and the API versioning package each independently reflected over controllers using slightly different logic, they could easily disagree about details (which parameters exist, which are optional) — by both consuming API Explorer's unified description, Swagger's generated documentation and the versioning package's per-version API listings stay consistent with each other and with the actual runtime behavior, since they're describing the exact same underlying model.
+
+**A concrete consumer beyond Swagger — generating typed API clients:** tools like NSwag or Kiota that auto-generate strongly-typed C#/TypeScript client SDKs from an API also consume this same API Explorer-derived description (usually via the OpenAPI document it produces), meaning a single, accurate API Explorer model ultimately drives documentation, versioned discovery, *and* client code generation from one consistent source.
+
+**Common Pitfall:** manually maintaining a separate, hand-written API documentation file alongside `[ApiController]`-based endpoints — since API Explorer already derives an accurate model directly from the actual running code (parameter types, routes, response shapes), a hand-maintained parallel document inevitably drifts out of sync with the real API as the code evolves, while the API-Explorer-driven Swagger/OpenAPI output cannot drift, since it's generated from the same code that actually executes.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is Problem Details (RFC 7807 / RFC 9457), and how does ASP.NET Core's `[ApiController]` use it to standardize error response shapes across an entire API?**
+
+Problem Details is a standardized JSON shape for representing HTTP API errors — instead of every endpoint inventing its own ad-hoc error format, RFC 7807 (updated by RFC 9457) defines a consistent structure that any client can parse generically, regardless of which specific endpoint or API produced the error.
+
+**Without a standard — every team/endpoint invents its own error shape:**
+```json
+{ "error": "Product not found" }
+{ "message": "Validation failed", "fields": ["Name"] }
+{ "errorCode": 404, "errorMessage": "Not Found" }
+```
+A client consuming multiple endpoints (or multiple APIs across different teams) needs bespoke error-parsing logic for each one, since there's no shared convention for what an error response looks like.
+
+**The standardized Problem Details shape ASP.NET Core produces automatically:**
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Product with ID 5 was not found.",
+  "traceId": "00-8f9a2b1c3d4e5f6a-1a2b3c4d5e6f7a8b-00"
+}
+```
+`[ApiController]`'s automatic `400 Bad Request` on model validation failure (covered at the very start of this topic) already returns this shape by default (as `ValidationProblemDetails`, which extends the base shape with a `errors` dictionary per invalid field) — and `Results.Problem()` / `Results.ValidationProblem()` in Minimal APIs produce the same standardized structure explicitly.
+
+**Customizing the Problem Details response globally:**
+```csharp
+builder.Services.AddProblemDetails(options =>
+{
+    options.CustomizeProblemDetails = context =>
+    {
+        context.ProblemDetails.Extensions["instance"] = context.HttpContext.Request.Path;
+    };
+});
+```
+
+**Why standardizing on this shape matters beyond just following an RFC:** any client-side error-handling code (a shared HTTP client wrapper, a global error interceptor in a frontend framework) can be written **once**, generically, against the Problem Details shape — reliably extracting `title`/`status`/`detail` regardless of which specific endpoint produced the error, rather than needing endpoint-specific or team-specific error-parsing logic scattered throughout client code.
+
+**Common Pitfall:** returning Problem Details' standardized shape for validation/client errors, but falling back to an unhandled exception's default (non-standardized) shape for unexpected server-side exceptions — a global exception-handling middleware (`app.UseExceptionHandler()` combined with `AddProblemDetails()`) is needed to ensure genuinely *every* error path, including unhandled exceptions, produces the same consistent Problem Details shape, not just the specific ones `[ApiController]` handles automatically.
+
+---

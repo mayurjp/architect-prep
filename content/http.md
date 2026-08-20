@@ -350,3 +350,90 @@ No cache, browser history mechanism, or intermediary is permitted to keep a copy
 **Common Pitfall:** using `no-cache` when the actual intent was `no-store` (a very common naming-confusion mistake, given `no-cache` sounds like it should mean "don't cache this") — a response containing genuinely sensitive data marked only `no-cache` can still end up written to a shared proxy's disk cache (pending revalidation), which may not meet the actual security requirement the developer intended.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between a URI, a URL, and a URN — terms often used interchangeably but with a specific, formal relationship?**
+
+**URI** (Uniform Resource Identifier) is the umbrella term — any string that identifies a resource. **URL** (Uniform Resource *Locator*) and **URN** (Uniform Resource *Name*) are both specific kinds of URI, distinguished by whether they tell you *where* to find something versus just *what it's called*.
+
+**URL — identifies a resource AND tells you how/where to retrieve it:**
+```text
+https://api.example.com/products/5
+```
+This is both an identifier *and* a location — it specifies the scheme (`https`), the host, and a path, giving you everything needed to actually go fetch the resource.
+
+**URN — identifies a resource by name, with no information about where to find it:**
+```text
+urn:isbn:9780134685991
+```
+This names a specific book (via its ISBN) uniquely and persistently, but says nothing about *where* to retrieve it — a URN's job is stable, location-independent identification, not retrieval instructions.
+
+**The formal relationship:**
+```text
+URI (the umbrella category)
+├── URL — a URI that also specifies a retrieval mechanism/location
+└── URN — a URI that names a resource without specifying location
+```
+Every URL is a URI; every URN is a URI; but not every URI is necessarily a URL (a URN isn't) or a URN (a URL isn't).
+
+**Why this distinction rarely matters in everyday REST API work:** almost everything web developers deal with day-to-day are URLs (they need to actually locate and fetch something) — URNs show up more in specialized identifier systems (ISBNs, legal citations, certain XML namespace declarations) where stable naming matters more than direct retrievability.
+
+**Common Pitfall:** using "URL" and "URI" as if they mean exactly the same thing in casual conversation (which is harmless almost all the time, since nearly everything discussed in REST API contexts genuinely is a URL) — but worth knowing the precise distinction exists, since some specifications and standards (including parts of the REST/HTTP specs themselves) are deliberately precise about writing "URI" specifically because they mean to include URN-like identifiers too, not just locatable URLs.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is HTTP Basic Authentication, and why is it now considered largely obsolete for anything beyond very narrow, low-risk use cases?**
+
+Basic Authentication is the oldest, simplest HTTP authentication scheme — credentials are sent as a Base64-encoded (not encrypted) string in the `Authorization` header on **every single request**, a design with genuine, structural security weaknesses by modern standards.
+
+**The mechanism:**
+```http
+GET /api/orders
+Authorization: Basic YWxpY2U6cGFzc3dvcmQxMjM=
+```
+Decoding that Base64 string reveals `alice:password123` — literally the username and password, separated by a colon, encoded (not encrypted, per the earlier encoding-vs-encryption distinction) directly in the header.
+
+**Why this is structurally weak by modern standards:**
+- **The actual password travels on every single request** — unlike a token-based scheme (JWT/OAuth) where a compromised token can be revoked without affecting the underlying password, a compromised Basic Auth header exposes the user's *actual* password directly, usable to log in anywhere else that same password is reused.
+- **No built-in expiration** — the credential doesn't naturally expire the way a short-lived bearer token does; it remains valid until the password itself is changed.
+- **No scope/permission granularity** — Basic Auth authenticates as "this specific user," with no equivalent to OAuth's scoped, limited-purpose access tokens (a token that can only read orders, for instance).
+- **Relies entirely on TLS for any confidentiality at all** — since Base64 provides zero protection on its own, Basic Auth is only remotely acceptable over HTTPS, and even then, it exposes the raw password to every single service/proxy that terminates or inspects that TLS connection along the way.
+
+**Where it's still reasonably used today:** simple, low-risk, internal service-to-service authentication (a health-check endpoint, an internal batch job hitting a single trusted internal API) where the operational simplicity outweighs the security gaps, and genuinely nothing more sensitive than that specific narrow use justifies the overhead of implementing a full token-based scheme.
+
+**Common Pitfall:** using Basic Authentication for a public-facing, user-authenticated API "because it's simple to implement" — the direct exposure of the actual reusable password on every request (rather than a scoped, revocable, short-lived token) is a meaningfully worse security posture than JWT/OAuth for anything beyond narrow internal/service-to-service scenarios.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is HTTP Request Smuggling, and how does it exploit disagreements between a front-end proxy and a back-end server about where one request ends and the next begins?**
+
+HTTP Request Smuggling exploits ambiguity in how two different systems (typically a front-end proxy/load balancer and a back-end application server) each independently parse the boundary between HTTP requests on a shared, reused (keep-alive) TCP connection — if the two systems disagree about where one request ends, an attacker can "smuggle" a hidden, malicious second request that only the back-end sees, hidden inside what the front-end believes is a single, complete request.
+
+**The core ambiguity — `Content-Length` versus `Transfer-Encoding: chunked`:**
+```http
+POST /checkout HTTP/1.1
+Host: example.com
+Content-Length: 13
+Transfer-Encoding: chunked
+
+0
+
+SMUGGLED_REQUEST_HERE
+```
+This request maliciously includes **both** headers, which contradict each other about how to determine the body's length. If the front-end proxy uses `Content-Length` to determine the request is 13 bytes long (and forwards exactly that much, believing the request is complete), but the back-end server instead honors `Transfer-Encoding: chunked` and interprets the `0\r\n\r\n` as an end-of-chunks marker followed by *another, separate request* — the two systems now disagree about where this request ends and the next one begins on the shared connection.
+
+**Why this enables real attacks:** because the front-end and back-end have desynchronized their understanding of request boundaries, an attacker's smuggled hidden request can get processed by the back-end as if it came from a *different*, legitimate user's subsequent request on that same reused connection — potentially allowing session hijacking, cache poisoning, or bypassing front-end security controls (a WAF rule that only inspects what the front-end believes is "the request," never seeing the smuggled portion at all).
+
+**Mitigations:**
+- **Reject any request containing both `Content-Length` and `Transfer-Encoding` headers** — the HTTP specification itself says this combination should be treated as invalid/ambiguous, and modern, well-configured proxies and servers do reject it outright rather than trying to guess which header to trust.
+- **Use HTTP/2 end-to-end where possible** — HTTP/2's binary framing format doesn't have this specific text-based parsing ambiguity between `Content-Length` and chunked encoding, since request/response boundaries are expressed structurally in the binary frame format rather than via potentially-conflicting text headers.
+- **Keep front-end and back-end HTTP parsing implementations consistent** — using the same well-tested, actively maintained HTTP libraries/versions on both sides reduces the chance the two systems interpret ambiguous edge cases differently in the first place.
+
+**Common Pitfall:** assuming this is purely a "proxy configuration problem" unrelated to application code — while proxy/gateway configuration is the primary mitigation surface, an application server with lenient, non-standard HTTP parsing (accepting malformed requests a stricter parser would reject) can still be the "back-end" side of the disagreement that makes smuggling possible, even behind an otherwise well-configured front-end.
+
+---

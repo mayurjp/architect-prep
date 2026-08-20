@@ -1250,3 +1250,99 @@ Vary: Accept
 **Common Pitfall:** implementing content negotiation (varying responses by `Accept`, `Accept-Language`, or a custom header like `Accept-Version`) without also setting the matching `Vary` header — the API works correctly for direct, uncached requests, but silently serves wrong/stale representations to some clients the moment a shared cache or CDN sits in front of it, a bug that's easy to miss in development (no cache in the loop) and only surfaces once real caching infrastructure is added in production.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between a 4xx and a 5xx status code at a conceptual level, and why does getting this classification right matter for how clients (and monitoring systems) react?**
+
+Both ranges signal something went wrong, but they answer a fundamentally different question about *whose fault* the failure was — 4xx means "the client's request was the problem," 5xx means "the server failed to handle a request that was otherwise fine."
+
+**4xx — client error, the request itself was invalid or unauthorized:**
+```http
+400 Bad Request    -- malformed request syntax or invalid data
+401 Unauthorized    -- missing or invalid authentication
+403 Forbidden       -- authenticated, but not permitted
+404 Not Found       -- the requested resource doesn't exist
+409 Conflict        -- request conflicts with the resource's current state
+```
+A well-behaved client generally should **not** blindly retry a 4xx — retrying the exact same malformed request or invalid credentials will simply produce the exact same 4xx again; the client needs to *change something* about the request before trying again.
+
+**5xx — server error, the server failed despite receiving a perfectly valid request:**
+```http
+500 Internal Server Error -- an unhandled exception or bug on the server
+502 Bad Gateway            -- an upstream service the server depends on returned an invalid response
+503 Service Unavailable    -- the server is temporarily overloaded or down for maintenance
+504 Gateway Timeout        -- an upstream dependency took too long to respond
+```
+A 5xx often *is* reasonable to retry (possibly with backoff) — the request itself was fine, and a transient server-side issue might resolve on its own by the next attempt.
+
+**Why the classification matters beyond just documentation:** automated monitoring/alerting systems typically treat 5xx rates as a genuine service-health signal worth paging someone about, while 4xx rates are usually treated as expected, routine "clients sending bad requests" noise — misclassifying a genuine server bug as a 4xx (or a client validation issue as a 500) can cause monitoring to miss a real outage, or trigger false alarms for normal client-side mistakes.
+
+**Common Pitfall:** returning `500 Internal Server Error` for what's actually invalid client input (a missing required field) simply because the exception happened to originate from an unhandled exception in server code — the *root cause* being a server-side exception doesn't automatically make it a 5xx-appropriate situation if the actual underlying problem was the client sending bad data; the response code should reflect who's actually at fault, which sometimes requires catching that exception and translating it into the correct 4xx.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is the `Link` header, and how does it provide a lightweight alternative to embedding full HATEOAS `_links` objects in every response body?**
+
+The `Link` HTTP header (RFC 8288) lets a response communicate related resources/actions via response *headers* rather than embedding them in the JSON body — useful specifically for pagination and a handful of other common relations, without committing to a full hypermedia format like HAL for the entire API.
+
+**Using `Link` headers for pagination, instead of a `_links` object in the body:**
+```http
+GET /api/products?page=2
+```
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Link: <https://api.example.com/products?page=1>; rel="prev",
+      <https://api.example.com/products?page=3>; rel="next",
+      <https://api.example.com/products?page=10>; rel="last"
+
+[ { "id": 21, "name": "Keyboard" }, ... ]
+```
+The response body stays a clean, plain array of products — no `_links` wrapper object needed — while the `Link` header carries the pagination relations (`prev`, `next`, `last`) that a client can parse generically, since `Link` header syntax is a standard, not a bespoke JSON convention this specific API invented.
+
+**Why this is a genuinely lighter-weight alternative to full HATEOAS:** it doesn't require restructuring the entire response body around a hypermedia envelope (like HAL's `_links`/`_embedded`) — you get standardized "related resource" links for the specific, common cases (pagination being the most frequent) without adopting a comprehensive hypermedia format across the whole API's response shapes.
+
+**Common Pitfall:** using the `Link` header for pagination while *also* duplicating the exact same pagination metadata as fields inside the JSON body (`{"nextPage": "...", "data": [...]}`) — picking one location (header or body) and being consistent about it avoids two sources of truth that could theoretically drift out of sync, and avoids clients needing to check both places just to be safe.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is Media Type Versioning combined with Custom Media Types (e.g., `application/vnd.myapi.v2+json`), and how does it let an API version its response *shape* independently from its URI?**
+
+Beyond the four versioning strategies covered earlier, Custom Media Types let an API define its own specific, named content type per version — treating "the shape of this JSON" as a first-class, negotiable resource representation, the same way `application/json` versus `application/xml` are negotiated, rather than baking the version into the URI or a bespoke header.
+
+**The mechanism — the `Accept` header requests a specific, versioned representation:**
+```http
+GET /api/products/5
+Accept: application/vnd.myapi.v2+json
+```
+```http
+HTTP/1.1 200 OK
+Content-Type: application/vnd.myapi.v2+json
+
+{ "id": 5, "name": "Keyboard", "priceInCents": 2999 }
+```
+versus an older client requesting the v1 shape from the exact same URI:
+```http
+GET /api/products/5
+Accept: application/vnd.myapi.v1+json
+```
+```http
+HTTP/1.1 200 OK
+Content-Type: application/vnd.myapi.v1+json
+
+{ "id": 5, "name": "Keyboard", "price": 29.99 }
+```
+Both requests hit the **exact same URI** (`/api/products/5`) — the version is negotiated entirely through content negotiation (the `Accept`/`Content-Type` headers), which is arguably the most RESTful of all the versioning approaches, since a URI is supposed to identify a *resource* (which product), not encode metadata about API version.
+
+**Why "vnd" specifically:** the `vnd.` prefix is the standard convention (per RFC 6838) for a "vendor-specific" media type — `vnd.myapi.v2+json` tells any generic HTTP tooling "this is JSON (`+json` suffix), specifically shaped according to MyAPI's own v2 convention," distinguishing it from generic `application/json` while still signaling its underlying format.
+
+**The trade-off versus simpler versioning strategies:** this is the most conceptually "pure" REST approach, but it's also the hardest for API consumers to discover and use correctly — most developers reach for a URI path segment (`/api/v2/products`) or a simple custom header specifically because they're far more visible and easier to test manually (in a browser, via `curl`) than crafting a precise `Accept` header value most HTTP client tools don't surface prominently.
+
+**Common Pitfall:** adopting Custom Media Type versioning for its theoretical REST purity without accounting for how much harder it makes onboarding new API consumers — documentation, example code, and tooling all need to explicitly teach developers to set an unusual `Accept` header value, a genuinely higher barrier than a version number visible directly in the URL they're already looking at.
+
+---

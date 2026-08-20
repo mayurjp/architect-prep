@@ -521,3 +521,107 @@ The configuration is directly associated with the `GitHubApiClient` type itself 
 **Common Pitfall:** using named clients purely out of habit from older tutorials when there's a clear 1:1 owning class for that HTTP configuration — typed clients cost nothing extra to set up and remove an entire class of stringly-typed runtime bugs that named clients are exposed to.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the difference between `WebApplication.CreateBuilder()` and `WebApplication.CreateSlimBuilder()`, and when would you choose the latter?**
+
+Both create the foundational builder for a minimal-hosting-model ASP.NET Core app, but `CreateSlimBuilder()` deliberately omits several default features `CreateBuilder()` includes automatically, trading built-in convenience for a smaller startup footprint and reduced memory usage.
+
+**`CreateBuilder()` — full-featured defaults, suitable for most typical web APIs:**
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+// Automatically configures: Kestrel, IIS integration, logging providers (Console, Debug, EventSource),
+// configuration sources (appsettings.json, environment variables, command line), and more
+```
+
+**`CreateSlimBuilder()` — minimal defaults, opt into only what you actually need:**
+```csharp
+var builder = WebApplication.CreateSlimBuilder(args);
+// Starts with a MUCH smaller default feature set -- no IIS integration setup,
+// fewer default logging providers, reduced reflection-based configuration --
+// specifically designed to pair well with Native AOT publishing
+```
+
+**Why this distinction exists at all:** `CreateSlimBuilder()` was introduced specifically to support scenarios prioritizing minimal startup time and memory footprint — small microservices, serverless functions, or Native AOT-published applications (covered earlier) — where every unused default feature adds measurable startup latency and binary size that a lean, high-density deployment doesn't want to pay for.
+
+**Common Pitfall:** reaching for `CreateSlimBuilder()` by default for a typical, full-featured web application "because smaller sounds better," then having to manually re-add several features (that `CreateBuilder()` would have configured automatically) one at a time — `CreateSlimBuilder()` earns its place specifically for size/startup-sensitive deployments, not as a universal default replacement for `CreateBuilder()`.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is the `IOptionsMonitor<T>.OnChange()` callback, and how does it let a Singleton service react to configuration changes without restarting the application?**
+
+Covered earlier, `IOptionsMonitor<T>` gives Singleton-safe access to the *current* configuration value — its `OnChange()` method goes further, letting code run a callback exactly when the underlying configuration source (a reloadable `appsettings.json`, or another provider marked `reloadOnChange: true`) actually changes, without polling or restarting anything.
+
+**Registering a reaction to configuration changes:**
+```csharp
+public class FeatureFlagService
+{
+    private FeatureFlags _current;
+
+    public FeatureFlagService(IOptionsMonitor<FeatureFlags> monitor)
+    {
+        _current = monitor.CurrentValue;
+        monitor.OnChange(updated =>
+        {
+            _current = updated; // runs automatically whenever the underlying config file changes
+            Console.WriteLine("Feature flags reloaded without an app restart.");
+        });
+    }
+}
+```
+If `appsettings.json`'s `FeatureFlags` section is edited on disk while the application is running (and the configuration source was registered with `reloadOnChange: true`), this callback fires automatically — the Singleton service picks up the new value immediately, with no deployment or restart required.
+
+**Why this matters for operational agility:** toggling a feature flag, adjusting a rate limit, or tuning a timeout value becomes a simple file edit (or a change pushed to a centralized config source like Azure App Configuration) that takes effect within moments, rather than requiring a full build-test-deploy cycle just to flip one setting — genuinely useful for values that legitimately need occasional runtime tuning without a release.
+
+**Common Pitfall:** registering multiple `OnChange()` callbacks across different parts of the application that each independently reload and cache their own copy of the same configuration section — without care, different parts of the application can end up observing the *new* value at slightly different, uncoordinated moments (since each callback fires independently), leading to brief windows of inconsistent behavior across the application immediately after a config change; for values needing atomic, coordinated updates, a single centralized owner reacting to the change (and notifying dependents itself) is safer than many independent `OnChange()` subscribers.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is `IHttpContextAccessor`'s reliance on `AsyncLocal<T>`, and why does that make it subtly dangerous to cache or capture in a field for later use?**
+
+`IHttpContextAccessor` (covered earlier for extracting user claims inside a service) works by reading from an `AsyncLocal<HttpContext>` value that ASP.NET Core's request pipeline sets at the start of each request — this mechanism flows correctly across `await` boundaries within one request, but capturing the resulting `HttpContext` for use *outside* that request's lifetime is a common and dangerous mistake.
+
+**The mechanism, briefly:** `AsyncLocal<T>` is like a `ThreadStatic` value, except it correctly follows the *logical* flow of execution across `await` continuations (which might resume on a completely different physical thread) rather than being tied to one specific OS thread — this is precisely what lets `IHttpContextAccessor.HttpContext` return the *correct* request's context even after the code has hopped across several different thread-pool threads during `await`s.
+
+**The danger — capturing `HttpContext` for use after the request ends:**
+```csharp
+public class OrderService
+{
+    private readonly IHttpContextAccessor _accessor;
+    private HttpContext? _capturedContext; // DANGER
+
+    public void StartBackgroundWork()
+    {
+        _capturedContext = _accessor.HttpContext; // captured a reference to THIS request's context
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(5000); // by now, the ORIGINAL HTTP request has already completed and returned!
+            var user = _capturedContext.User; // HttpContext may already be recycled/disposed by the framework
+        });
+    }
+}
+```
+ASP.NET Core pools and recycles `HttpContext` objects aggressively for performance — once the original request completes, the framework considers that `HttpContext` free to reuse (or dispose) for a subsequent, entirely unrelated request. Code that captured a reference to it and uses it later risks reading stale, disposed, or (worse) a *different* request's data entirely, since the same object might now represent someone else's request.
+
+**The correct pattern — extract only the specific values you need immediately, don't hold onto the whole `HttpContext`:**
+```csharp
+public void StartBackgroundWork()
+{
+    var userId = _accessor.HttpContext?.User.FindFirst(ClaimTypes.NameIdentifier)?.Value; // extract NOW
+    _ = Task.Run(async () =>
+    {
+        await Task.Delay(5000);
+        await ProcessForUser(userId); // uses the extracted VALUE, never the HttpContext itself
+    });
+}
+```
+
+**Common Pitfall:** injecting `IHttpContextAccessor` into a class with a lifetime longer than a single request (a Singleton, or a background service) and treating its `.HttpContext` property as something safe to read at any arbitrary later point — outside the scope of the original request that set it, `.HttpContext` may return `null` entirely (there's no "current" request in a background thread's `AsyncLocal` flow) or, worse, a recycled context belonging to a different request.
+
+---

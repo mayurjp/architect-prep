@@ -411,3 +411,115 @@ app.UseResponseCompression(); // must be registered early in the pipeline, befor
 **Common Pitfall:** enabling `EnableForHttps = true` globally across an entire application "for performance" without auditing which responses actually mix reflected/attacker-influenced content with secrets — the safer default is enabling compression selectively for endpoints confirmed not to have this mixing, rather than a blanket application-wide toggle.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the difference between `ViewResult`, `PartialViewResult`, and `ViewComponentResult`, and when does an action method return each?**
+
+All three render some form of HTML back to the browser, but they differ in whether a full HTML document (with `_Layout.cshtml`) wraps the output, and how the piece being rendered was invoked.
+
+**`ViewResult` — a full page, wrapped in the shared layout:**
+```csharp
+public IActionResult Index() => View(); // renders Views/Home/Index.cshtml WITHIN _Layout.cshtml
+```
+This is what a typical top-level page navigation returns — the layout (header, nav, footer) wraps the specific view's content automatically, based on `_ViewStart.cshtml` conventions.
+
+**`PartialViewResult` — a fragment of HTML, no layout wrapper:**
+```csharp
+public IActionResult ProductCard(int id)
+{
+    var product = _repository.GetById(id);
+    return PartialView("_ProductCard", product); // renders JUST the fragment, no _Layout.cshtml
+}
+```
+Used when an action is specifically meant to return a reusable chunk of markup — commonly for AJAX responses that replace one section of an already-loaded page, where re-sending the entire layout (header, nav) on every partial update would be wasteful.
+
+**`ViewComponentResult` — returned from within a View Component's `Invoke`/`InvokeAsync` method (covered earlier), not from a Controller action directly:**
+```csharp
+public class WeatherViewComponent : ViewComponent
+{
+    public async Task<IViewComponentResult> InvokeAsync(string zipCode)
+    {
+        var forecast = await _weather.GetForecastAsync(zipCode);
+        return View(forecast); // this "View()" call here returns a ViewComponentResult, not a ViewResult
+    }
+}
+```
+
+**Common Pitfall:** returning a full `View()` (with its layout dependency) from an action meant to serve an AJAX partial-update request — the client receives an entire HTML document (complete with `<html>`, `<head>`, navigation) when it only wanted the small fragment it's going to insert into an existing page, wasting bandwidth and often breaking the client-side JavaScript expecting just the fragment.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is the `IValidatableObject` interface, and how does it let a model express validation rules that Data Annotations alone can't (cross-property rules)?**
+
+Data Annotation attributes (`[Required]`, `[Range]`, `[StringLength]`) validate individual properties in isolation — they have no natural way to express a rule depending on the relationship *between* two or more properties. `IValidatableObject` lets a model implement its own `Validate()` method, run automatically alongside attribute-based validation, specifically to cover this gap.
+
+**A rule Data Annotations alone can't express:**
+```csharp
+public class EventBooking
+{
+    [Required] public DateTime StartDate { get; set; }
+    [Required] public DateTime EndDate { get; set; }
+    // No single attribute can express "EndDate must be after StartDate" -- it depends on BOTH properties together
+}
+```
+
+**`IValidatableObject` filling that gap:**
+```csharp
+public class EventBooking : IValidatableObject
+{
+    [Required] public DateTime StartDate { get; set; }
+    [Required] public DateTime EndDate { get; set; }
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+    {
+        if (EndDate <= StartDate)
+        {
+            yield return new ValidationResult(
+                "End date must be after the start date.",
+                new[] { nameof(EndDate) }); // associates the error with the EndDate field specifically
+        }
+    }
+}
+```
+ASP.NET Core's model validation pipeline calls `Validate()` automatically as part of the normal `ModelState.IsValid` check — a controller action doesn't need any special code to invoke it; it participates in the same validation flow as `[Required]`/`[Range]` attributes, just expressed as arbitrary C# logic instead of a declarative attribute.
+
+**Why this matters over hand-rolling the check in the controller action itself:** keeping cross-property validation *on the model* (via `IValidatableObject`) rather than scattered across every controller action that happens to receive this model keeps the validation rule in exactly one place, reused automatically everywhere `EventBooking` is bound and validated, rather than needing to be remembered and re-implemented at each individual action method.
+
+**Common Pitfall:** implementing complex, injectable-dependency-requiring business validation (e.g., "this email must not already exist in the database") inside `IValidatableObject.Validate()` — the `ValidationContext` provides access to `IServiceProvider` for exactly this reason, but reaching too far into business/database logic from what's meant to be model-shape validation blurs the line between simple data validation and full business rule enforcement, which often belongs in the Application layer's command handler instead (echoing the earlier Clean Architecture discussion about keeping concerns separated).
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is Endpoint Routing, and how does the separation between `UseRouting()` and `UseEndpoints()` (or their modern implicit equivalent) let middleware run with full knowledge of which endpoint will handle a request?**
+
+Before Endpoint Routing (introduced in ASP.NET Core 3.0), middleware running earlier in the pipeline had no way to know *which* controller/action would eventually handle a request — routing decisions were made much later, deep inside the MVC framework itself. Endpoint Routing splits this into two distinct phases, letting middleware between them make decisions based on full knowledge of the resolved endpoint.
+
+**The two phases:**
+```csharp
+var app = builder.Build();
+
+app.UseRouting(); // PHASE 1: matches the request to an endpoint, but does NOT execute it yet
+
+app.Use(async (context, next) =>
+{
+    var endpoint = context.GetEndpoint(); // middleware HERE can inspect WHICH endpoint was matched
+    var actionName = endpoint?.DisplayName;
+    Console.WriteLine($"About to execute: {actionName}");
+    await next();
+});
+
+app.UseAuthorization(); // can inspect endpoint metadata (e.g., [Authorize] attributes) to decide access
+
+app.MapControllers(); // PHASE 2 (implicit "UseEndpoints"): actually EXECUTES the matched endpoint
+```
+Between `UseRouting()` and the actual endpoint execution, any middleware can call `context.GetEndpoint()` to inspect exactly which controller/action (or Minimal API route) was matched — including reading custom metadata attached to that specific endpoint (like `[Authorize(Policy = "Admin")]`) — **before** that endpoint actually runs.
+
+**Why this specifically matters for `UseAuthorization()`:** the authorization middleware needs to know which specific endpoint's `[Authorize]` requirements apply to *this* request — Endpoint Routing's split lets `UseAuthorization()` sit between routing and execution, reading the matched endpoint's authorization metadata and enforcing it, all before the actual controller action code ever runs. Without this split, authorization middleware would have no clean way to know which specific policy applies until deep inside the MVC framework's own execution — precisely why `UseAuthorization()` must be placed after `UseRouting()` but before `MapControllers()`/`MapGet()`/etc., an ordering requirement that's a direct consequence of this two-phase design.
+
+**Common Pitfall:** placing custom middleware that needs to inspect endpoint metadata (like a custom rate-limiting rule based on a `[RateLimit]` attribute) *before* `UseRouting()` — at that point in the pipeline, no endpoint has been matched yet, so `context.GetEndpoint()` returns `null`, and the middleware silently has no metadata to inspect at all.
+
+---
