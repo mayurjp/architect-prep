@@ -581,3 +581,75 @@ Kafka's transaction coordinator only knows about Kafka's own internal state — 
 **Common Pitfall:** hearing that "Kafka supports Exactly-Once Semantics" and concluding the Outbox pattern is now obsolete for a Kafka-based system — Kafka's EOS is a genuinely powerful guarantee, but strictly scoped to operations within Kafka's own transactional boundary (multiple topics, consume-then-produce chains); it provides zero atomicity guarantee for the extremely common case of "update my own database AND publish an event," which is precisely the scenario the Outbox pattern remains the correct solution for, Kafka or not.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between a Message Queue's "Point-to-Point" delivery model and a Publish/Subscribe (Pub/Sub) model, in terms of how many consumers ultimately process each message?**
+
+In a Point-to-Point queue, each message is delivered to and processed by exactly **one** consumer, even if multiple consumers are listening on the same queue (they compete for messages, each message going to only one of them) — in Pub/Sub, a published message is delivered to **every** subscriber independently, each receiving and processing its own full copy.
+
+```text
+Point-to-Point (a work queue):
+  Producer -> Queue -> [Consumer A, Consumer B, Consumer C compete for messages]
+  Each message goes to exactly ONE of them -- useful for distributing WORK across workers
+
+Pub/Sub (a topic):
+  Producer -> Topic -> Subscriber A (gets its OWN copy)
+                     -> Subscriber B (gets its OWN copy, independently)
+                     -> Subscriber C (gets its OWN copy, independently)
+  Every message goes to EVERY subscriber -- useful for broadcasting EVENTS to multiple interested parties
+```
+Point-to-Point suits distributing discrete units of *work* across a pool of interchangeable workers (any one of them can process any given message, and it should only be processed once) — Pub/Sub suits broadcasting *events* to multiple, independent, differently-interested parties who each need to react to the same occurrence in their own way (an "OrderPlaced" event might need to trigger email notification, inventory update, and analytics tracking, each as a separate, independent subscriber).
+
+**Common Pitfall:** using a Point-to-Point queue for a scenario that actually needs Pub/Sub semantics (multiple independent systems all needing to react to the same event) — with Point-to-Point, only ONE of the competing consumers would receive and process any given message, meaning if inventory-update and email-notification logic both listen on the same queue, only one of them ever actually processes any specific event, silently starving the other of messages it needed to see.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is a "Dead Letter Queue" (DLQ), and how does routing a repeatedly-failing message there (instead of endlessly retrying or silently dropping it) prevent one poison message from blocking an entire queue's processing?**
+
+A Dead Letter Queue is a separate queue where messages that fail processing repeatedly (exceeding a configured retry limit) are automatically routed, instead of being retried forever or discarded silently — this both unblocks the main queue (a "poison message" that can never succeed no longer holds up every message behind it) and preserves the failed message for later investigation, rather than losing it.
+
+```text
+Message arrives -> processing FAILS -> retry #1 fails -> retry #2 fails -> retry #3 fails
+-> after exceeding the configured max-retry count, the message is moved to the DEAD LETTER QUEUE
+   instead of being retried indefinitely OR silently discarded
+-> the MAIN queue can continue processing the NEXT message, unblocked
+-> the DLQ's contents are available later for a developer to investigate WHY this specific message
+   consistently failed (malformed data? a bug triggered only by this specific payload?)
+```
+Without a DLQ, a message that can genuinely never succeed (a deserialization bug triggered by one specific malformed payload, for instance) would either be retried forever (consuming processing capacity indefinitely, and in some queue implementations, blocking every message queued behind it from ever being reached) or discarded silently (losing the failure entirely, with no way to investigate what went wrong or recover the lost data).
+
+**Why DLQ contents require active monitoring, not just existing as a safety net:** a message sitting in a DLQ represents a real, unresolved problem (a bug, bad data, an unexpected edge case) — a DLQ that's never monitored just becomes a silent graveyard where failures accumulate invisibly, providing none of its intended diagnostic value; genuine DLQ usage requires alerting/dashboards on DLQ depth, not merely configuring one and assuming its existence alone solves anything.
+
+**Common Pitfall:** configuring a DLQ but never actually monitoring or alerting on messages landing in it — this just relocates the "silently lost/ignored message" problem from the main queue to the DLQ, rather than solving it; the DLQ's value comes specifically from someone actively investigating *why* messages end up there, not from the mere existence of a safety-net queue that nobody ever looks at.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is "Message Ordering" guarantees in a partitioned message broker (like Kafka), and why is ordering only guaranteed WITHIN a single partition, never across the topic as a whole?**
+
+A partitioned broker like Kafka distributes a topic's messages across multiple partitions for parallelism — but this parallelism is precisely what makes strict, topic-wide ordering impossible to guarantee: messages in different partitions are consumed independently and concurrently, with no coordination ensuring their relative arrival order matches their original send order across partitions. Ordering is only guaranteed **within** a single partition.
+
+```text
+Topic "order-events" with 3 partitions:
+  Partition 0: OrderCreated(order=1) -> OrderShipped(order=1) -- guaranteed IN ORDER, same partition
+  Partition 1: OrderCreated(order=2) -> OrderCancelled(order=2) -- guaranteed IN ORDER, same partition
+  Partition 2: OrderCreated(order=3)
+
+-- But there's NO guarantee about the RELATIVE order between events in DIFFERENT partitions --
+-- "OrderCreated(order=2)" might be CONSUMED before or after "OrderCreated(order=1)",
+   depending purely on each partition's own independent consumption timing
+```
+For ordering guarantees to actually matter for a specific entity (all events about one specific order must be processed in the order they occurred), that entity's events must all be routed to the *same* partition — this is achieved by choosing a partition key (typically the entity's own ID) that Kafka's partitioning function consistently hashes to the same partition every time, ensuring all of that entity's events land together, in order, in one partition.
+
+```csharp
+producer.Produce("order-events", new Message<string, OrderEvent> { Key = orderId, Value = orderEvent });
+// Using orderId AS THE PARTITION KEY guarantees all events for THIS order land in the SAME partition,
+// and are therefore processed in the order they were produced
+```
+**Common Pitfall:** assuming a topic guarantees strict ordering across ALL its messages, then being confused when events for different entities appear to interleave unpredictably — the correct mental model is "ordering is guaranteed per partition-key, not per topic"; if a specific entity's events need strict relative ordering, that entity's ID must be deliberately used as the partition key so all its events consistently land in the same partition, not left to whatever partition assignment the broker's default (often round-robin) behavior would otherwise produce.
+
+---

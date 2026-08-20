@@ -683,3 +683,85 @@ By assigning cost weights that scale with list-size arguments (not just counting
 **Common Pitfall:** implementing only Depth Limiting (the simpler of the two to configure) and considering DoS protection complete — as the `users(first: 1000000)` example demonstrates, this leaves a wide-open, easily-discoverable attack vector that doesn't require any deep nesting at all, just a single field with a large list-size argument, which many real-world GraphQL DoS incidents have specifically exploited precisely because teams implemented Depth Limiting alone without realizing it doesn't address this entirely separate attack dimension.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is a GraphQL "Scalar" type, and how do the built-in scalars (`Int`, `Float`, `String`, `Boolean`, `ID`) differ from an `Object` type in terms of whether a query can request sub-fields from them?**
+
+A Scalar is a "leaf" type in GraphQL's type system — it represents a single, concrete value (a number, a string, a boolean) with no further sub-fields that can be queried from it. An Object type, by contrast, has its own fields, and a query must specify exactly which of those fields it wants (via a nested selection set) whenever it requests an Object-typed field.
+
+```graphql
+type Product {
+    id: ID!            # Scalar -- a query CANNOT ask for sub-fields of an ID
+    name: String!       # Scalar -- likewise, no sub-fields possible
+    price: Float!        # Scalar
+    manufacturer: Manufacturer!  # OBJECT type -- REQUIRES a selection set specifying which sub-fields to fetch
+}
+type Manufacturer { name: String!, country: String! }
+```
+```graphql
+query {
+    product(id: "5") {
+        id            # Scalar -- requested directly, no sub-selection needed or allowed
+        name          # Scalar
+        manufacturer {  # Object -- MUST specify which of ITS fields to fetch
+            name
+            country
+        }
+    }
+}
+```
+Attempting to add a selection set to a Scalar field (`id { something }`) is a schema validation error — Scalars are leaves of the query tree by definition, while Object-typed fields structurally require the query to descend further and specify exactly which of that object's own fields it wants, which is precisely the mechanism that lets GraphQL avoid over-fetching (covered under the REST comparison) in the first place.
+
+**Common Pitfall:** confusing GraphQL's `ID` scalar with an actual foreign-key-style database reference that behaves specially — `ID` is really just a `String` under the hood, serialized as a string over the wire; its distinct name in the schema exists purely for documentation/tooling clarity (signaling "this represents a unique identifier"), not because it has any special runtime validation or behavior beyond what `String` already provides.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is GraphQL Schema Stitching (as distinct from Federation, covered elsewhere), and what specific limitation regarding a CENTRAL, manually-maintained gateway schema led the ecosystem toward Federation instead?**
+
+Schema Stitching combines multiple separate GraphQL schemas into one unified schema by having a central gateway explicitly merge them together, including manually defining how types and fields from different underlying schemas relate to each other — this central gateway must be updated by hand whenever any underlying schema changes its shape or a new cross-schema relationship needs to be expressed.
+
+```javascript
+// Schema Stitching -- the GATEWAY must explicitly define merge/linking logic itself
+const stitchedSchema = stitchSchemas({
+    subschemas: [ordersSchema, usersSchema],
+    typeDefs: `extend type Order { customer: User }`,  // gateway explicitly wires this relationship
+    resolvers: {
+        Order: { customer: { selectionSet: '{ customerId }', resolve: (order, args, context) =>
+            context.loaders.user.load(order.customerId) } }  // gateway owns this cross-schema resolver logic
+    }
+});
+```
+Every cross-schema relationship (like `Order.customer` reaching into the Users service) must be explicitly authored and maintained inside the central gateway's own code — as more underlying services and cross-service relationships accumulate, the gateway becomes an increasingly large, centrally-owned integration point that every team touching any underlying schema must coordinate through.
+
+**Why this specific bottleneck is what led to Federation's different approach:** Federation (covered in more depth elsewhere) instead lets each underlying service declare its own extensions and ownership of shared types directly within its own schema definition (`extend type Order { customer: User @external }`, defined in the Orders service's own schema, not the gateway's) — the gateway composes these declarations automatically rather than requiring hand-written merge/resolver logic centrally, directly addressing Schema Stitching's core limitation of concentrating all cross-schema wiring in one, centrally-maintained location.
+
+**Common Pitfall:** choosing Schema Stitching for an organization anticipating many independently-owned services and frequent cross-service relationship changes — Stitching's centralized merge logic becomes an increasingly heavy maintenance burden and organizational bottleneck exactly as the number of services and cross-service relationships grows, which is precisely the scenario Federation's decentralized, each-service-owns-its-own-extensions approach was specifically designed to address instead.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is a GraphQL "Persisted Query," and how does having the CLIENT send only a QUERY HASH (rather than the full query text) improve both request size AND server-side security posture?**
+
+A Persisted Query replaces sending the full GraphQL query text with every request with sending only a short, previously-registered hash/ID identifying that exact query — the server looks up the actual query text server-side using that hash, meaning the full query document never needs to travel over the network on every single request.
+
+```http
+POST /graphql
+{ "id": "a3f8c9e2...", "variables": { "orderId": "5" } }
+-- NOT the full query text, just a hash identifying a PREVIOUSLY REGISTERED, known query --
+```
+```text
+Server maintains a registry (populated at build/deploy time from the client's own known queries):
+  "a3f8c9e2..." -> "query GetOrder($orderId: ID!) { order(id: $orderId) { id status total } }"
+-- Server looks up the FULL query text using the hash, executes IT, ignores any OTHER query text --
+```
+Beyond the bandwidth savings (a short hash versus a potentially large query document on every request), Persisted Queries provide a meaningful security benefit: if the server is configured to **only** execute queries matching a pre-registered hash (rejecting any arbitrary, ad-hoc query text sent directly), this closes off the entire class of arbitrary, attacker-crafted query attacks (deeply nested queries, alias-based batching abuse) covered under the DoS-prevention questions — an attacker cannot submit a malicious query they invented, since only pre-registered, known-safe queries are ever allowed to execute at all.
+
+**Why this specifically strengthens the DoS defenses (Depth Limiting, Complexity Analysis) covered earlier, rather than replacing them:** Depth Limiting and Complexity Analysis must evaluate and reason about arbitrary, unknown query shapes an attacker might submit — a strict Persisted Query allowlist sidesteps that problem entirely for known clients, since only queries the legitimate client itself registered ahead of time can ever run; the two approaches are complementary; strict persisted-query allowlisting works well for known, controlled clients (a company's own mobile app), while public/exploratory GraphQL APIs (where arbitrary ad-hoc queries are a deliberate feature) still need the depth/complexity-based defenses instead.
+
+**Common Pitfall:** adopting Persisted Queries for bandwidth savings alone without also enabling the strict allowlist enforcement (rejecting non-registered query text outright) — without that enforcement, an attacker can still submit arbitrary, non-persisted query text directly alongside the persisted-query mechanism, gaining none of the security benefit while the legitimate clients merely enjoy a bandwidth optimization; the meaningful security improvement specifically requires the server to refuse execution of anything not matching a pre-registered hash, not merely support persisted queries as an optional convenience.
+
+---

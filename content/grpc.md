@@ -672,3 +672,76 @@ The control plane (which already knows about health checks, recent deployments, 
 **Common Pitfall:** assuming `xds:///` addressing works out of the box without an actual xDS control plane deployed and correctly configured to serve that specific service name — unlike DNS-based addressing (which works against any standard DNS infrastructure already in place), xDS addressing requires a genuine, running xDS-compatible control plane (Istio, a standalone xDS management server) actively serving endpoint data for the referenced service name; without one, `xds:///` resolution simply has nothing to connect to at all.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is a `.proto` file's role as the single source of truth in gRPC, and how does generating client AND server code from the SAME file guarantee both sides agree on the contract?**
+
+A `.proto` file defines a service's contract — its methods, request/response message shapes — once, in one language-neutral file. The `protoc` compiler (or an equivalent build-time tool) generates strongly-typed client stub code *and* server base classes from that exact same file, for whichever language each side is written in, guaranteeing both sides are generated from an identical, single definition rather than hand-written and kept in sync manually.
+
+```protobuf
+// order.proto -- the ONE, single source of truth
+service OrderService {
+    rpc GetOrder (GetOrderRequest) returns (Order);
+}
+message GetOrderRequest { int32 order_id = 1; }
+message Order { int32 id = 1; string status = 2; }
+```
+```bash
+protoc --csharp_out=. --grpc_out=. order.proto   # generates C# client/server code
+protoc --python_out=. --grpc_python_out=. order.proto  # generates PYTHON client/server code, from the SAME file
+```
+Both the C# server and a Python client generated from this identical `order.proto` file agree exactly on the shape of `GetOrderRequest` and `Order` — there's no possibility of the client and server drifting out of sync about field names or types, since both were mechanically generated from the same source rather than two developers independently hand-writing matching classes in two different languages.
+
+**Common Pitfall:** manually hand-writing a client's request/response classes to "match" a server's expected shape, instead of generating them from the actual `.proto` file — this reintroduces exactly the synchronization risk `.proto`-based code generation is meant to eliminate; if the server's `.proto` definition changes and the hand-written client classes aren't updated to match, the mismatch may not surface until a specific field is actually exercised at runtime, rather than being caught immediately at compile time the way regenerating from a changed `.proto` file would.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is gRPC's built-in support for Deadlines (as distinct from a plain client-side timeout), and how does a deadline PROPAGATING across an entire chain of downstream calls prevent wasted work on a request the caller has already given up on?**
+
+A gRPC Deadline specifies an absolute point in time by which a call must complete — critically, when a service receiving a call makes its OWN downstream gRPC calls, the *remaining* time budget from the original deadline propagates automatically to those downstream calls too, rather than each hop getting its own independent, unrelated timeout.
+
+```csharp
+var deadline = DateTime.UtcNow.AddSeconds(5); // caller gives this ENTIRE call chain 5 seconds, total
+var response = await client.GetOrderAsync(request, deadline: deadline);
+
+// Inside OrderService's handler, calling ANOTHER downstream service:
+public override async Task<Order> GetOrder(GetOrderRequest request, ServerCallContext context)
+{
+    // context.Deadline reflects the ORIGINAL caller's deadline, propagated -- if only 1.2 seconds remain,
+    // the downstream call below inherits THAT remaining budget, not a fresh, independent timeout
+    var inventoryResponse = await _inventoryClient.CheckStockAsync(stockRequest, deadline: context.Deadline);
+}
+```
+If the original caller's 5-second deadline has already mostly elapsed by the time `OrderService` makes its own downstream call to `InventoryService`, that downstream call inherits only the *remaining* time budget — rather than a naive, independently-configured "give this downstream call its own fresh 5 seconds," which could let a request the original caller has already abandoned continue consuming resources deep in a downstream chain, well past the point where the answer would even matter to anyone anymore.
+
+**Why this specifically prevents wasted work in a multi-hop call chain:** without deadline propagation, an upstream timeout doesn't stop the *downstream* work already in flight — a caller giving up after 5 seconds doesn't prevent `InventoryService` from continuing to process a request for another 10, 20, or more seconds on its own independent timeout, wastefully consuming resources for an answer nobody is still waiting for; propagated deadlines let every hop in the chain independently recognize "the original caller has already given up" and abort accordingly.
+
+**Common Pitfall:** configuring each service in a call chain with its own independent, disconnected timeout value rather than propagating the actual remaining deadline from the original caller — this can result in a downstream service continuing to do real work for a request whose original caller gave up long ago, wasting compute resources on an answer that will simply be discarded the moment it's finally produced, since nothing is still listening for it.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is gRPC's `grpc.max_connection_age` / `MaxConnectionAge` channel option, and why does periodically forcing even a perfectly healthy, long-lived HTTP/2 connection to reconnect matter for LOAD BALANCING behavior specifically?**
+
+Because gRPC multiplexes many calls over a single, persistent HTTP/2 connection (covered earlier), a connection that stays open indefinitely remains pinned to whichever specific backend instance it originally connected to — even as new instances are added behind a load balancer, an existing long-lived connection has no natural reason to ever move to one of them, potentially leaving newly-scaled-up instances under-utilized while older connections keep hammering the original instances they happened to connect to first.
+
+```csharp
+var channel = GrpcChannel.ForAddress("https://order-service", new GrpcChannelOptions
+{
+    HttpHandler = new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5) }
+    // forces existing connections to be periodically torn down and RE-ESTABLISHED,
+    // giving the load balancer/service discovery mechanism a fresh chance to route to a DIFFERENT,
+    // possibly newer or less-loaded, backend instance
+});
+```
+Forcing a periodic, graceful reconnection (rather than letting a connection persist forever once established) gives the load-balancing/service-discovery layer a recurring opportunity to redistribute where each client's traffic actually lands — without this, a fleet of long-lived client connections established before a scale-up event could remain indefinitely pinned to the original, smaller set of instances, with newly-added instances receiving traffic only from *brand new* connections, never from the pre-existing, long-lived ones.
+
+**Why this specifically matters more for gRPC than for typical HTTP/1.1-based REST APIs:** HTTP/1.1 connections are comparatively short-lived and frequently re-established as a matter of course (fewer requests multiplexed per connection, connections cycling more naturally) — gRPC's connections are deliberately long-lived specifically *because* HTTP/2 multiplexing makes them so efficient to keep open, which is exactly the property that then requires a deliberate, explicit mechanism to periodically force reconnection, something a REST API rarely needs to think about explicitly at all.
+
+**Common Pitfall:** setting `MaxConnectionAge` far too short for a high-throughput service, causing frequent, disruptive reconnection overhead (TCP + TLS handshake cost, temporarily interrupting in-flight streaming calls) that outweighs the load-balancing benefit — the setting needs to be tuned to balance "connections rebalance reasonably often as the backend fleet changes" against "reconnecting too frequently reintroduces real handshake/connection-setup overhead," not simply set aggressively short by default.
+
+---
