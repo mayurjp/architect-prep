@@ -1,3 +1,5 @@
+# Testing Strategy — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is the difference between Unit Testing and Integration Testing?**
@@ -175,6 +177,11 @@ public void CalculateDiscount_OnFriday_Returns10PercentOff() {
     
     var service = new DiscountService(fakeTime);
 
+    // Act & Assert
+    Assert.Equal(price * 0.9m, service.CalculateDiscount(price));
+}
+```
+
 Now the test is 100% deterministic and will pass forever, regardless of when it is run.
 
 ---
@@ -195,3 +202,116 @@ Tests must be completely isolated and idempotent.
 1. **Never use static state** for dependencies in unit tests.
 2. **xUnit Fixtures:** If you intentionally want to share expensive setup (like a real database connection in an integration test) across multiple tests *safely*, you must use xUnit's `IClassFixture<T>` or `ICollectionFixture<T>`. 
    - When you use a Fixture, xUnit creates the dependency exactly once, passes it to the constructor of the test class for every test, and ensures that the shared state is managed properly. However, even with a Fixture, you must still ensure that your tests clean up after themselves (e.g., Test A inserts an order, asserts, and then deletes the order) so it doesn't pollute the database for Test B.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is Test-Driven Development (TDD), and what is the Red-Green-Refactor cycle?**
+
+TDD is a development practice where you write the **test before the implementation**, rather than writing code and testing it afterward — the test itself becomes the specification of what "done" means.
+
+**The Red-Green-Refactor cycle:**
+1. **Red** — write a test for a behavior that doesn't exist yet. Run it; it fails (compiler error or assertion failure) because there's no implementation. This confirms the test can actually detect absence of the feature.
+```csharp
+[Fact]
+public void CalculateTotal_WithTwoItems_ReturnsSum() {
+    var cart = new ShoppingCart();
+    cart.AddItem(new Item { Price = 10 });
+    cart.AddItem(new Item { Price = 15 });
+
+    Assert.Equal(25, cart.CalculateTotal()); // fails: CalculateTotal() doesn't exist yet
+}
+```
+2. **Green** — write the *minimum* code necessary to make the test pass. Not the most elegant solution, just enough to turn the test green.
+```csharp
+public decimal CalculateTotal() => Items.Sum(i => i.Price);
+```
+3. **Refactor** — now that the behavior is locked in by a passing test, clean up the implementation (extract methods, rename, remove duplication) with confidence, since any regression would immediately turn the test red again.
+
+**Why write the test first at all:** it forces you to think about the API/interface from the *caller's* perspective before you've committed to an implementation, and it guarantees every line of production code has at least one test that would fail without it — a guarantee retrofitted tests can't make (a test written after the code can pass even if it's not actually testing the right thing).
+
+**Common Pitfall:** treating TDD as mandatory for every single line of code regardless of context — it pays off most for business logic with real edge cases; exhaustively TDD-ing trivial getters/setters or thin wrapper code adds ceremony without meaningfully improving confidence.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What is the difference between a Mock, a Stub, and a Fake?**
+
+These terms are often used interchangeably (including as "mocking" in general), but they describe distinct kinds of test doubles with different purposes.
+
+**Stub — supplies canned answers, nothing more:**
+```csharp
+var stubRepo = new Mock<IUserRepository>();
+stubRepo.Setup(r => r.GetById(1)).Returns(new User { Id = 1, Name = "Alice" });
+// Just returns canned data. We never check HOW it was called.
+```
+A Stub exists purely to feed the system under test the data it needs to run — you don't assert anything about the Stub itself afterward.
+
+**Mock — a Stub that also records and lets you verify interactions:**
+```csharp
+var mockEmailSender = new Mock<IEmailSender>();
+var service = new OrderService(mockEmailSender.Object);
+service.PlaceOrder(order);
+
+// Verifying the INTERACTION, not just checking a return value
+mockEmailSender.Verify(x => x.SendAsync(order.CustomerEmail), Times.Once);
+```
+A Mock is used when the thing you actually want to test is "did my code call this dependency correctly?" — the assertion is about *behavior*, not just data.
+
+**Fake — a real, working (but simplified) implementation:**
+```csharp
+public class FakeUserRepository : IUserRepository {
+    private readonly Dictionary<int, User> _users = new();
+    public void Add(User u) => _users[u.Id] = u;
+    public User? GetById(int id) => _users.GetValueOrDefault(id);
+}
+```
+A Fake actually implements real logic (an in-memory dictionary standing in for a database) rather than just returning pre-programmed values — it behaves consistently across multiple calls the way a Stub's fixed canned response doesn't (e.g., an item you `Add()` can later be found by `GetById()`).
+
+**Common Pitfall:** overusing Mocks to verify *implementation details* rather than *observable behavior* — asserting "this private helper method was called exactly once" ties the test to the current implementation so tightly that any harmless refactor (even one that doesn't change behavior) breaks the test, defeating the purpose of having a safety net for refactoring.
+
+---
+
+## Advanced — Question 2
+
+**Q2: How do you write parameterized tests in xUnit using `[Theory]`, `[InlineData]`, and `[MemberData]`?**
+
+A `[Fact]` runs once. A `[Theory]` runs the **same test method** once per supplied set of inputs — avoiding copy-pasting near-identical test methods that only differ by input values.
+
+**`[InlineData]` — simple, literal values baked into the attribute:**
+```csharp
+[Theory]
+[InlineData(0, 0, 0)]
+[InlineData(2, 3, 5)]
+[InlineData(-1, 1, 0)]
+public void Add_ReturnsSum(int a, int b, int expected) {
+    Assert.Equal(expected, Calculator.Add(a, b));
+}
+```
+Each `[InlineData(...)]` line runs the method once with those parameters — three inputs, three independently-reported test results in the test runner, not one pass/fail for all three combined.
+
+**`[MemberData]` — for complex or reusable data that can't be expressed as attribute literals:**
+```csharp
+public static IEnumerable<object[]> DiscountCases()
+{
+    yield return new object[] { 100m, "Regular", 100m };
+    yield return new object[] { 100m, "Premium", 90m };
+    yield return new object[] { 100m, "VIP", 80m };
+}
+
+[Theory]
+[MemberData(nameof(DiscountCases))]
+public void ApplyDiscount_ReturnsExpectedPrice(decimal price, string tier, decimal expected)
+{
+    Assert.Equal(expected, DiscountCalculator.Apply(price, tier));
+}
+```
+`[MemberData]` points to a static method/property returning `IEnumerable<object[]>` — useful when test cases involve objects that can't be expressed as C# attribute arguments (attributes only allow compile-time constants), or when the same dataset needs to be shared across multiple test methods.
+
+**Why this matters:** it turns "did we forget an edge case?" into a one-line addition (`[InlineData(...)]`) rather than a whole new copy-pasted test method, and each case is reported individually in CI output, so a single failing edge case doesn't hide among otherwise-passing ones.
+
+**Common Pitfall:** using `[MemberData]` with a data source that yields *mutable shared objects* across test cases — if two `object[]` entries reference the same underlying object and one test mutates it, other test cases (and test runs, since xUnit may reuse data across parallel runs) can see unexpected cross-contamination. Prefer yielding fresh instances per case.
+
+---

@@ -1,3 +1,5 @@
+# Performance & Diagnostics — Q&A
+
 ## Beginner — Question 1
 
 **Q1: Why is asynchronous programming (`async/await`) important for web applications?**
@@ -159,3 +161,112 @@ public async Task<IActionResult> GetProduct(int id)
 }
 ```
 If you must call async code from a synchronous method and cannot change the signature, use `Task.Run` carefully, or ideally, refactor the entire call stack to be `async/await`.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is BenchmarkDotNet, and why is `Stopwatch` unreliable for measuring microbenchmarks?**
+
+Measuring "how fast is this method" sounds simple — wrap it in a `Stopwatch` and time it — but at the microsecond/nanosecond scale, a naive `Stopwatch` measurement is dominated by noise that has nothing to do with your code's actual performance.
+
+**Why naive timing lies to you:**
+```csharp
+var sw = Stopwatch.StartNew();
+var result = MyMethod();
+sw.Stop();
+Console.WriteLine(sw.ElapsedMilliseconds); // unreliable for anything under ~1ms
+```
+- **JIT warm-up:** the very first call to a method runs *interpreted or partially optimized* while the JIT compiler is still working; only after several calls does it reach fully-optimized native code. Timing a single cold call mostly measures JIT overhead, not your algorithm.
+- **GC interference:** a garbage collection pause landing mid-measurement (which you don't control or see) can add milliseconds of noise to a call that should take nanoseconds.
+- **No statistical rigor:** one run tells you nothing about variance — is 1.2ms typical, or was it a lucky/unlucky outlier?
+
+**BenchmarkDotNet solves this properly:**
+```csharp
+[MemoryDiagnoser] // also reports allocations, not just time
+public class StringConcatBenchmarks
+{
+    [Benchmark(Baseline = true)]
+    public string Concatenation() => "a" + "b" + "c";
+
+    [Benchmark]
+    public string StringBuilder() => new StringBuilder().Append("a").Append("b").Append("c").ToString();
+}
+
+// Run via: BenchmarkRunner.Run<StringConcatBenchmarks>();
+```
+It automatically runs a warm-up phase (to let the JIT reach steady state), executes thousands of iterations, computes mean/median/standard deviation, and reports memory allocations per operation — turning "I think this is faster" into a defensible, reproducible number.
+
+**Common Pitfall:** benchmarking in `Debug` configuration — the JIT skips many optimizations in Debug builds, so relative comparisons can be misleading (or even reversed) compared to the `Release` build that actually ships to production. BenchmarkDotNet warns loudly if you try to run it against a Debug assembly.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What is the difference between a memory leak and memory bloat in .NET, and how do you diagnose each?**
+
+Both look identical from the outside ("memory usage keeps climbing"), but they have fundamentally different causes and require different diagnostic approaches.
+
+**Memory Leak — objects that should be collectible are being kept alive by an unintended reference:**
+The GC is working correctly; it just can't collect objects because *something* still (incorrectly) references them — a classic example is unsubscribed event handlers (the "lapsed listener" pattern), a growing `static` cache with no eviction policy, or an `IDisposable` never disposed.
+
+**Memory Bloat — the application genuinely needs that much memory, just inefficiently:**
+No incorrect references exist; the GC could collect everything if asked, but the *live* working set is legitimately large — e.g., loading an entire 2GB CSV file into memory as a `List<string>` instead of streaming it line-by-line, or excessive boxing/duplication of data that could be shared.
+
+**Diagnosing a Leak — look for growth in *retained* object counts across GCs:**
+```bash
+dotnet-counters monitor --process-id 1234 --counters System.Runtime
+# Watch "GC Heap Size" — if it keeps climbing even AFTER several full (Gen 2) collections, that's a leak signal
+```
+In a profiler like **dotMemory**, you take two heap snapshots several minutes apart under steady load and diff them — a genuine leak shows specific object *types* whose instance count keeps growing across snapshots, with a "Path to GC Root" that reveals the unintended reference (e.g., a static dictionary holding them).
+
+**Diagnosing Bloat — look for large *live* allocations at a single point in time:**
+A profiler's single-snapshot view showing "this one `List<byte[]>` accounts for 1.8GB right now" (rather than growing unboundedly over time) points to bloat — the fix is algorithmic (stream instead of buffer, page results, use `Span<T>`/pooling), not a reference-hunting exercise.
+
+**Common Pitfall:** treating rising memory usage as automatically a "leak" and hunting for a missing `Dispose()` call, when a full GC (`GC.Collect()` in a diagnostic/non-production context, or just waiting for one to occur naturally) followed by re-measuring reveals memory drops back down — that's bloat under load, not a leak, and no amount of leak-hunting will fix an algorithmically inefficient allocation pattern.
+
+---
+
+## Advanced — Question 2
+
+**Q2: What is False Sharing, and how do you avoid it in high-performance, multi-threaded C# code?**
+
+False Sharing is a subtle CPU-cache-level performance bug where **independent** variables, modified by **different threads**, silently contend with each other purely because they happen to live in the same CPU cache line — with zero logical relationship between the data.
+
+**The Mechanism:**
+Modern CPUs move memory between RAM and cache in fixed-size chunks called **cache lines** (typically 64 bytes on x86-64). If two `long` counters — each independently incremented by a different thread — happen to sit within the same 64-byte cache line, every write by Thread A invalidates that entire cache line in Thread B's CPU core cache (via the cache-coherency protocol), even though Thread B's counter is a logically distinct variable that Thread A never touched.
+
+```csharp
+public class Counters
+{
+    public long CounterA; // Thread A increments this in a tight loop
+    public long CounterB; // Thread B increments this in a tight loop
+    // CounterA and CounterB likely share a 64-byte cache line -> false sharing!
+}
+```
+Even though Thread A and Thread B never touch each other's actual data, their CPU cores are constantly invalidating and re-fetching the shared cache line from each other, adding memory-bus traffic that can slow the loop down by 10x or more compared to the same counters living on separate cache lines.
+
+**The Fix — padding to force separate cache lines:**
+```csharp
+[StructLayout(LayoutKind.Explicit, Size = 128)] // pad well beyond one 64-byte cache line
+public struct PaddedCounter
+{
+    [FieldOffset(0)] public long Value;
+}
+
+// Or, in modern .NET, use the built-in helper:
+using System.Runtime.CompilerServices;
+
+[StructLayout(LayoutKind.Sequential)]
+public struct Counters
+{
+    public long CounterA;
+    private long _pad1, _pad2, _pad3, _pad4, _pad5, _pad6, _pad7; // pad to next cache line
+    public long CounterB;
+}
+```
+.NET also ships `System.Threading.PaddedReference`-style patterns and `[StructLayout]` padding specifically to combat this in high-throughput scenarios (e.g., per-core counters in a custom lock-free data structure).
+
+**Common Pitfall:** "fixing" false sharing speculatively in ordinary application code where threads rarely write to adjacent fields under real contention — the padding itself costs memory and adds complexity, and it's only worth diagnosing (via a profiler showing unexpectedly high cache-miss rates on a hot multi-threaded loop) and fixing in genuinely contended, allocation-free, tight-loop scenarios like custom concurrent counters or lock-free ring buffers.
+
+---

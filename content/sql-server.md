@@ -1,3 +1,5 @@
+# SQL Server — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What are the ACID properties in a relational database?**
@@ -182,3 +184,115 @@ END
 
 **Why this works:**
 By deleting in batches of 5,000, each `DELETE TOP (5000)` is its own fully contained transaction. It completes in milliseconds, writes 5,000 records to the log, commits, and frees that space in the log (assuming Simple Recovery model or regular log backups). The log file remains small and stable, and the database remains highly responsive to other users throughout the entire migration process.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What are the differences between `DELETE`, `TRUNCATE`, and `DROP`?**
+
+All three remove data, but at completely different granularities and with very different costs.
+
+```sql
+DELETE FROM Orders WHERE Status = 'Cancelled'; -- removes matching rows only
+TRUNCATE TABLE Orders;                          -- removes ALL rows, keeps the table structure
+DROP TABLE Orders;                              -- removes the rows AND the table definition itself
+```
+
+**`DELETE`:**
+- Row-by-row operation; can filter with `WHERE`; fully logged in the transaction log (one log entry per row deleted); fires `DELETE` triggers; can be rolled back mid-transaction.
+- Slowest of the three for removing large volumes of data, since every row's removal is individually logged.
+
+**`TRUNCATE`:**
+- Removes *every* row; cannot use `WHERE`; minimally logged (deallocates data pages rather than logging each row) — dramatically faster for clearing an entire large table.
+- Resets any `IDENTITY` column back to its seed value; does **not** fire `DELETE` triggers; still fully transactional/rollback-able within an explicit transaction.
+- Blocked if the table is referenced by an active Foreign Key from another table with existing rows.
+
+**`DROP`:**
+- Removes the table's data *and* its schema definition (columns, indexes, constraints) entirely — the table no longer exists at all.
+- Also removable via transaction rollback if wrapped in one, but obviously the most destructive of the three.
+
+**Common Pitfall:** reaching for `DELETE FROM BigTable` (with no `WHERE`) to "empty" a huge table for a data-refresh job — it's dramatically slower than `TRUNCATE TABLE BigTable` for the exact same end result, purely because of per-row transaction logging.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is a Common Table Expression (CTE), and how do you use one for a recursive query?**
+
+A CTE is a temporary, named result set defined with a `WITH` clause, scoped to a single statement — think of it as a readable, inline "view" that only exists for the duration of the query that follows it.
+
+**A simple (non-recursive) CTE:**
+```sql
+WITH HighValueCustomers AS (
+    SELECT CustomerId, SUM(Total) AS LifetimeValue
+    FROM Orders
+    GROUP BY CustomerId
+    HAVING SUM(Total) > 10000
+)
+SELECT c.Name, h.LifetimeValue
+FROM HighValueCustomers h
+JOIN Customers c ON c.Id = h.CustomerId;
+```
+This is mostly a readability tool here — you could write the same thing as a subquery, but naming the intermediate result makes complex queries far easier to follow.
+
+**A recursive CTE (its real superpower)** — for traversing hierarchical data (org charts, category trees, bill-of-materials) that plain SQL can't express without knowing the depth in advance:
+```sql
+WITH OrgChart AS (
+    -- Anchor member: the top-level manager (no manager of their own)
+    SELECT EmployeeId, Name, ManagerId, 0 AS Level
+    FROM Employees
+    WHERE ManagerId IS NULL
+
+    UNION ALL
+
+    -- Recursive member: joins back to OrgChart itself, one level down each pass
+    SELECT e.EmployeeId, e.Name, e.ManagerId, o.Level + 1
+    FROM Employees e
+    INNER JOIN OrgChart o ON e.ManagerId = o.EmployeeId
+)
+SELECT * FROM OrgChart ORDER BY Level;
+```
+SQL Server executes this by first running the anchor query, then repeatedly re-running the recursive member against the *previous* iteration's results, accumulating rows, until a pass produces zero new rows.
+
+**Common Pitfall:** an unintentionally infinite recursive CTE (e.g., a data bug creating a circular manager reference) will hit SQL Server's default `MAXRECURSION` limit of 100 and throw an error — a safety net, not something to raise carelessly with `OPTION (MAXRECURSION 0)` (unlimited) without first being sure the data is genuinely acyclic.
+
+---
+
+## Advanced — Question 2
+
+**Q2: How does SQL Server locking work, and what causes lock escalation?**
+
+SQL Server uses locks to enforce isolation between concurrent transactions, applying them at different **granularities** depending on how many rows a query touches.
+
+**Lock granularities (finest to coarsest):**
+- **Row lock (RID/Key)** — locks a single row; most granular, allows maximum concurrency.
+- **Page lock** — locks an 8KB data page (potentially many rows).
+- **Table lock** — locks the entire table; least concurrency, cheapest to manage (one lock instead of thousands).
+
+**Common lock modes:**
+```sql
+-- Shared (S) lock — acquired for reads under Read Committed; allows other readers, blocks writers
+SELECT * FROM Orders WHERE Id = 5;
+
+-- Exclusive (X) lock — acquired for writes; blocks all other readers and writers on that resource
+UPDATE Orders SET Status = 'Shipped' WHERE Id = 5;
+
+-- Intent locks (IS/IX) — placed on the table/page to signal "a more granular lock exists below me,"
+-- letting the engine quickly check for conflicts without scanning every row lock individually
+```
+
+**Lock Escalation:**
+Maintaining thousands of individual row locks consumes real memory (each lock is a small in-memory structure). If a single statement acquires roughly **5,000+ row/page locks** on one table, SQL Server automatically **escalates** them into a single table-level lock to reduce memory overhead.
+
+```sql
+UPDATE Orders SET Status = 'Archived' WHERE OrderDate < '2020-01-01'; -- touches 2 million rows
+```
+If this matches millions of rows, SQL Server escalates from row locks to a full table lock partway through — which then blocks *every other* query trying to touch that table, even ones on completely unrelated rows, for the remainder of the transaction.
+
+**Common Pitfall:** a large batch `UPDATE`/`DELETE` unexpectedly locking an entire table and blocking unrelated OLTP traffic — this is exactly why the batch-chunking pattern (breaking one massive statement into many small ones, each comfortably under the escalation threshold, each its own transaction) matters for both transaction-log growth *and* lock escalation avoidance simultaneously.
+
+#### Follow-up: Can you control or disable lock escalation?
+Yes — `ALTER TABLE Orders SET (LOCK_ESCALATION = DISABLE)` prevents escalation for that table entirely (use with caution — it trades memory usage for concurrency), or `LOCK_ESCALATION = AUTO` lets SQL Server escalate at the partition level instead of the whole table for partitioned tables.
+
+---

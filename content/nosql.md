@@ -1,3 +1,5 @@
+# NoSQL — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What are the primary differences between SQL (Relational) and NoSQL (Non-Relational) databases?**
@@ -149,3 +151,82 @@ You should **embed** the address directly inside the User document as a sub-docu
 **Result:**
 When you query the user, you get all their relevant data in a single, fast disk read and network round trip. This heavily optimizes for read performance, which is exactly what NoSQL document stores are designed to do. 
 *(Note: You only normalize via references in MongoDB if the sub-document is unbounded and grows infinitely, like a user's activity log, to avoid hitting the 16MB document size limit).*
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is a Partition Key (or Shard Key), and why does choosing one well matter so much in NoSQL databases?**
+
+A Partition Key is the field NoSQL databases use to decide **which physical node/shard** a given piece of data lives on — it's the mechanism that makes horizontal scaling possible in the first place.
+
+**The Mechanism:**
+```json
+// Cosmos DB / DynamoDB style document, partitioned by "tenantId"
+{
+  "id": "order123",
+  "tenantId": "acme-corp",
+  "total": 249.99
+}
+```
+The database hashes (or ranges) the partition key value to determine which physical shard stores that document. Every read or write that includes the partition key can be routed directly to the correct shard in one hop; queries that *don't* include it must fan out to **every** shard and merge results — dramatically slower and more expensive.
+
+**Why the choice matters so much:**
+- **Even distribution:** A poorly chosen key (e.g., partitioning orders by `Status`, which only has 3-4 possible values) creates a "hot partition" — most traffic piles onto one or two shards while others sit idle, defeating the entire purpose of horizontal scaling.
+- **Query alignment:** If your most common query is "get all orders for tenant X," partitioning by `tenantId` makes that query single-shard and fast. Partitioning by `orderId` instead would scatter one tenant's orders across every shard, turning that same common query into an expensive fan-out.
+
+**Common Pitfall:** choosing a partition key optimized for *write* distribution (like a random GUID, which spreads writes perfectly evenly) while ignoring your application's actual *read* patterns — if nearly every query needs "all data for tenant X" but the partition key is a random GUID, every single query becomes a full fan-out scan regardless of how evenly the writes were distributed.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: Why is denormalization considered a first-class NoSQL modeling strategy rather than the anti-pattern it would be in a relational database?**
+
+In relational modeling, normalization (splitting data into separate tables to eliminate redundancy) is the default good practice, and duplicating data is generally treated as a bug waiting to happen. NoSQL modeling deliberately inverts this default.
+
+**Why the relational default doesn't transfer:**
+Relational databases are built around cheap, efficient server-side `JOIN`s across normalized tables, backed by strict transactional guarantees that keep duplicated data consistent if it existed. NoSQL databases (particularly document and wide-column stores) are explicitly designed to avoid expensive cross-partition joins entirely — most don't support them at all, or only in limited, expensive forms.
+
+**The NoSQL modeling principle: model around your queries, not your entities.**
+```json
+// Denormalized: the author's name is duplicated into every one of their blog posts
+{
+  "postId": "p1",
+  "title": "Scaling Databases",
+  "author": { "id": "u42", "name": "Jane Doe" }   // duplicated, not referenced
+}
+```
+If you display the author's name on every blog post listing page, embedding it means that page loads with **one** read from **one** partition. The alternative — storing only `authorId` and looking up the name separately — would require a second round-trip (or a fan-out join the database may not even support efficiently) for every single post rendered.
+
+**The trade-off you're explicitly accepting:** if Jane Doe changes her display name, you now must update it in every post document that duplicated it (an "update anomaly" that normalization exists specifically to prevent in SQL). NoSQL modeling accepts this cost deliberately, betting that reads vastly outnumber writes for this particular field, and that eventual, application-driven synchronization (or accepting some staleness) is cheaper than paying a join penalty on every single read.
+
+**Common Pitfall:** denormalizing data that changes frequently and is read relatively rarely — that's the exact inverse of the trade-off that makes denormalization worthwhile, and you end up paying heavy write-amplification cost (updating many duplicated copies) for a read optimization you rarely benefit from.
+
+---
+
+## Advanced — Question 2
+
+**Q2: How do indexes work in MongoDB, and how does that compare conceptually to SQL Server's Clustered/Non-Clustered indexes?**
+
+Both databases use the same underlying data structure — a **B-Tree** — to avoid scanning every document/row, but MongoDB's storage model changes what "having an index" actually means in practice.
+
+**MongoDB indexes:**
+```javascript
+db.products.createIndex({ category: 1, price: -1 }); // compound index: category ascending, price descending
+
+db.products.find({ category: "electronics" }).sort({ price: -1 }); // uses the index directly
+```
+Every MongoDB collection has one mandatory index on `_id` (conceptually similar to a SQL Server clustered index's uniqueness guarantee), but critically, **MongoDB documents are not physically sorted by any secondary index the way a SQL Server clustered index physically sorts table rows.** Every additional index (single-field, compound, multi-key for arrays, text, or geospatial) is a *separate* B-Tree structure mapping key values to document locations — conceptually all MongoDB secondary indexes behave like SQL Server's **non-clustered** indexes; there's no equivalent of "the data rows themselves are the leaf nodes," because MongoDB's storage engine (WiredTiger) organizes documents by insertion/internal-storage order rather than by any queryable key.
+
+**Multi-key indexes (a NoSQL-specific concept with no direct SQL Server equivalent):**
+```javascript
+// A document with an array field
+{ "_id": 1, "tags": ["sale", "electronics", "clearance"] }
+db.products.createIndex({ tags: 1 });
+```
+MongoDB automatically creates one index entry *per array element*, so a query like `db.products.find({ tags: "sale" })` uses the index efficiently — something a traditional relational column (which holds one scalar value, not an array) has no direct equivalent for without a separate join table.
+
+**Common Pitfall:** assuming a compound index in MongoDB is equally useful regardless of field order, the same way people sometimes assume for SQL Server — MongoDB compound indexes are only useful for queries/sorts that follow a **left-to-right prefix** of the indexed fields, exactly analogous to SQL Server's compound index prefix rule. An index on `{ category: 1, price: -1 }` serves queries filtering on `category` alone, or `category` + `price` together, but does **not** efficiently serve a query filtering on `price` alone.
+
+---

@@ -1,3 +1,5 @@
+# Entity Framework Core — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is a `DbContext` and how does it relate to `DbSet`?**
@@ -235,3 +237,104 @@ var activeUsers = _context.Users
     .Where(u => u.IsActive && u.Orders.Count > 10) // Translated into SQL WHERE clause
     .ToList(); // Executes optimized SQL returning only the matching rows
 ```
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is the difference between EF Core and Dapper, and when would you choose each?**
+
+Both are data-access libraries for .NET, but they sit at opposite ends of the abstraction spectrum.
+
+**EF Core (a full ORM):**
+```csharp
+var product = context.Products
+    .Include(p => p.Category)
+    .FirstOrDefault(p => p.Id == 5);
+```
+- Translates LINQ into SQL for you, tracks changes, generates migrations, and manages relationships/navigation properties automatically.
+- Trade-off: more abstraction overhead — the generated SQL isn't always what a human would hand-write, and complex queries can sometimes produce inefficient plans.
+
+**Dapper (a micro-ORM):**
+```csharp
+var product = connection.QueryFirstOrDefault<Product>(
+    "SELECT * FROM Products WHERE Id = @Id", new { Id = 5 });
+```
+- You write the raw SQL yourself; Dapper's only job is mapping the result set's columns onto your C# object's properties efficiently via reflection (cached per type).
+- No change tracking, no migrations, no LINQ translation — just fast, predictable object-mapping on top of ADO.NET.
+
+**When to choose which:**
+- **EF Core** for typical CRUD-heavy application code, where developer productivity, migrations, and maintainability matter more than squeezing out the last millisecond of query time.
+- **Dapper** for performance-critical read paths (reporting dashboards, high-throughput endpoints) where you want full control over the exact SQL executed, or for complex queries EF Core would translate poorly.
+
+**Common Pitfall:** treating this as an all-or-nothing choice. Many production codebases use EF Core for the bulk of the application and drop down to Dapper (or raw ADO.NET / `FromSqlRaw`) for a handful of specific, performance-critical queries — the two coexist fine in the same project.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What are Shadow Properties and Owned Types in EF Core?**
+
+Both let you model data that doesn't map cleanly onto a simple "one property per column" C# class, without resorting to raw SQL.
+
+**Shadow Properties** — a column exists in the database, but *no corresponding property exists on your C# class*. EF Core tracks it internally.
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<Order>().Property<DateTime>("LastModified");
+}
+
+// Reading/writing a shadow property requires the ChangeTracker API, not a normal property:
+context.Entry(order).Property("LastModified").CurrentValue = DateTime.UtcNow;
+```
+Commonly used for audit columns (`CreatedAt`, `LastModified`) that the application shouldn't be able to accidentally set directly — only infrastructure code (like a `SaveChanges` override) touches them.
+
+**Owned Types (Value Objects)** — a class with no identity of its own that's always embedded inside its owner, mapped either as extra columns on the same table (default) or as a separate table.
+```csharp
+public class Address {                 // no Id — not an entity, a value object
+    public string Street { get; set; } = string.Empty;
+    public string City { get; set; } = string.Empty;
+}
+public class Customer {
+    public int Id { get; set; }
+    public Address ShippingAddress { get; set; } = new(); // owned
+}
+
+modelBuilder.Entity<Customer>().OwnsOne(c => c.ShippingAddress);
+// Generates: Customers table with ShippingAddress_Street, ShippingAddress_City columns
+```
+
+**Why this matters:** Owned Types let your domain model stay expressive (a real `Address` class instead of loose `string Street`/`string City` fields scattered on `Customer`) while EF Core still flattens it into simple columns under the hood — no separate table or join required unless you explicitly configure one.
+
+**Common Pitfall:** trying to share a single Owned Type *instance* across two different owners — Owned Types are conceptually "owned" by exactly one entity instance; EF Core will throw if you try to reuse the same object reference for two owners' `ShippingAddress` properties.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What are EF Core Compiled Models, and when do they meaningfully help startup performance?**
+
+Every time your application starts, EF Core has to build an internal in-memory representation of your entire data model (every entity, relationship, and configured convention) by reflecting over your `DbContext` and entity classes — this is the **model-building phase**, and for large models it's surprisingly expensive.
+
+**The Mechanism (without compiled models):**
+On first use, EF Core reflects over all your `OnModelCreating` configuration, Data Annotations, and conventions, builds an `IModel` object graph, and caches it for the app's lifetime. For a model with dozens or hundreds of entities and complex relationships, this reflection-heavy process can take a noticeable chunk of a cold start — hundreds of milliseconds to a few seconds.
+
+**Compiled Models (EF Core 6+):**
+```bash
+dotnet ef dbcontext optimize --output-dir CompiledModels
+```
+This CLI command runs the model-building logic **ahead of time**, at build/publish time, and generates plain C# source files representing the model directly — no reflection needed at runtime.
+
+```csharp
+// Program.cs — opt into the pre-built model
+optionsBuilder.UseSqlServer(connectionString)
+              .UseModel(MyAppContextModel.Instance); // generated compiled model
+```
+
+**When it meaningfully helps:**
+- **Serverless / Azure Functions / short-lived containers** where cold-start latency directly impacts user-facing response time and the app doesn't stay warm long enough to amortize the one-time model-building cost.
+- **Large models** (50+ entity types with complex relationships) — the win is negligible for a handful of entities.
+
+**Common Pitfall:** forgetting to regenerate the compiled model after changing your entity classes or `OnModelCreating` configuration — the compiled model is a point-in-time snapshot, and EF Core will throw a runtime exception at startup if the compiled model's shape doesn't match what your `DbContext` actually declares, since it can no longer safely assume the two are in sync.
+
+---
