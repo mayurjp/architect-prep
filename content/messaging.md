@@ -1,3 +1,5 @@
+# Messaging & Events — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is a Message Queue and why do we use them in distributed systems?**
@@ -127,3 +129,160 @@ You must configure broker-level limits and a **Dead Letter Exchange (DLX)** to h
    - The DLX routes the messages to a secure `EmailQueue_DeadLetter` queue backed by a slow, cheap disk (not RAM).
    - This keeps the primary broker's RAM healthy, preventing the crash. 
    - When the Email service comes back online after 4 hours, an administrator can manually inspect the DLQ and decide whether to replay those 10 million old messages or safely discard them.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is a Dead Letter Queue (DLQ), and why does every production message queue need one?**
+
+A Dead Letter Queue is a separate queue that holds messages a consumer repeatedly fails to process, removing them from the main queue's normal flow so one broken message can't block every message behind it.
+
+**Without a DLQ — a poison message blocks the entire queue:**
+```csharp
+// Consumer keeps failing on THIS message, and keeps retrying it forever
+public async Task Handle(OrderMessage message)
+{
+    await ProcessOrder(message); // throws every time -- e.g. malformed data, or a bug for this one case
+}
+```
+If the broker's default behavior is "redeliver on failure," a single message that always throws creates an infinite retry loop — worse, since brokers typically deliver messages in order, this poison message can block every healthy message queued behind it from ever being processed.
+
+**With a DLQ — bounded retries, then move on:**
+```csharp
+// RabbitMQ: configure a queue with a retry limit and a dead-letter-exchange target
+var arguments = new Dictionary<string, object>
+{
+    { "x-dead-letter-exchange", "orders-dlx" },     // where failed messages get routed
+    { "x-delivery-limit", 5 }                        // after 5 failed attempts, dead-letter it
+};
+channel.QueueDeclare("orders-queue", durable: true, exclusive: false, autoDelete: false, arguments);
+```
+After the configured number of failed attempts, the broker automatically routes the message to the dead-letter destination instead of retrying indefinitely — the main queue keeps flowing, and the problematic message sits somewhere safe for a human to inspect later.
+
+**Why this matters in production:** a DLQ turns "one bad message can take down an entire pipeline" into "one bad message sits quietly in a side queue, and everything else keeps working." Monitoring the DLQ's depth (alerting if it's non-zero) becomes the operational signal that something needs manual attention — a malformed payload, a downstream service bug, or a genuinely invalid business case the consumer never anticipated.
+
+**Common Pitfall:** setting up a DLQ but never actually monitoring it — messages silently pile up there, undetected, until someone notices weeks later that a whole category of orders was never actually processed. A DLQ without alerting is just a slower, quieter way to lose data.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What is the difference between automatic and manual message acknowledgment, and why does manual ack matter for reliability?**
+
+Acknowledgment (ack) tells the broker "I successfully finished processing this message, you can delete/stop tracking it." When and how that happens determines whether a consumer crash mid-processing loses the message or safely redelivers it.
+
+**Auto-ack — the broker considers the message done the moment it's delivered:**
+```csharp
+var consumer = new EventingBasicConsumer(channel);
+channel.BasicConsume(queue: "orders", autoAck: true, consumer: consumer); // acked on delivery, BEFORE processing
+consumer.Received += (model, ea) =>
+{
+    ProcessOrder(ea.Body); // if this throws or the process crashes here, the message is ALREADY gone
+};
+```
+The broker deletes the message as soon as it hands it to the consumer — not after the consumer actually finishes. If the consumer process crashes mid-`ProcessOrder`, that message is permanently lost; the broker has no idea it was never actually completed.
+
+**Manual ack — the consumer explicitly confirms success only after processing completes:**
+```csharp
+channel.BasicConsume(queue: "orders", autoAck: false, consumer: consumer);
+consumer.Received += (model, ea) =>
+{
+    try
+    {
+        ProcessOrder(ea.Body);
+        channel.BasicAck(ea.DeliveryTag, multiple: false);  // only ack AFTER success
+    }
+    catch
+    {
+        channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: true); // put it back for retry
+    }
+};
+```
+If the consumer crashes before calling `BasicAck`, the broker notices the connection dropped without an acknowledgment and automatically redelivers the message to another consumer — no manual recovery needed, because the broker never considered it "done" in the first place.
+
+**The trade-off:** manual ack guarantees at-least-once delivery (a crash means redelivery, not loss) but means a crash *during* processing can cause the message to be redelivered and processed again — which is exactly why idempotent consumers (checking "have I already handled this message ID?") are the standard pairing with manual acknowledgment, not an optional extra.
+
+**Common Pitfall:** using auto-ack for its slightly better throughput on a queue where message loss is unacceptable (payments, order creation) — the performance gain from skipping the ack round-trip is rarely worth trading away delivery guarantees for business-critical messages.
+
+---
+
+## Advanced — Question 2
+
+**Q2: How does Kafka's partitioning work, and how does choosing a message key affect ordering guarantees?**
+
+A Kafka topic is split into multiple **partitions**, each an independently-ordered, append-only log — this is what lets Kafka scale throughput horizontally, but it also means "ordering" is a per-partition guarantee, not a per-topic one.
+
+**Partitioning without a key — round-robin, no ordering guarantee across related messages:**
+```csharp
+await producer.ProduceAsync("orders", new Message<Null, string> { Value = orderJson });
+// Each message lands on a RANDOM partition -- messages for the SAME order could
+// end up on different partitions, and there's no guarantee about their relative order
+```
+
+**Partitioning with a key — same key always routes to the same partition:**
+```csharp
+await producer.ProduceAsync("orders",
+    new Message<string, string> { Key = order.CustomerId, Value = orderJson });
+// Kafka hashes the key (CustomerId) to deterministically pick a partition --
+// EVERY message for this customer always lands on the SAME partition
+```
+Because a given key always hashes to the same partition, and a single partition is strictly ordered, all messages sharing a key (e.g., every event for one customer) are guaranteed to be processed **in the order they were produced** — but there is still no ordering guarantee *between* different customers' messages, since those can land on different partitions entirely.
+
+**Why this design choice matters for consumers:**
+```text
+Topic "orders" with 4 partitions, keyed by CustomerId:
+  Partition 0: Customer A's events (OrderCreated -> OrderPaid -> OrderShipped, IN ORDER)
+  Partition 1: Customer B's events (IN ORDER, but independent timeline from Customer A)
+  Partition 2: Customer C's events
+  Partition 3: Customer D's events
+```
+A Consumer Group can have up to one consumer instance per partition actively consuming at once — so choosing the *right* key isn't just about ordering, it's also the unit of parallelism: a key that's too coarse (e.g., a single constant key for all messages) forces everything onto one partition, eliminating the throughput benefit of partitioning entirely.
+
+**Common Pitfall:** assuming a topic-wide ordering guarantee exists at all — "Kafka preserves order" is only ever true *within a partition*, and a common bug is keying messages by something too broad (like a shared tenant ID across millions of customers) or too narrow/random (defeating grouping entirely), rather than the specific entity whose event sequence actually needs to stay ordered.
+
+---
+
+## Scenario — Question 5
+
+**Q5: Your Kafka consumer group processes `OrderCreated` events with 6 consumer instances across 6 partitions. During a routine rolling deployment, as old pods terminate and new ones start, you notice a burst of duplicate order-processing emails sent to customers — the same order gets processed twice by two different consumer instances. Why does this happen during deployments specifically, and how do you prevent it?**
+
+This is caused by **Consumer Group Rebalancing** colliding with in-flight message processing — a well-known Kafka operational gotcha during any consumer scale-up/scale-down event, including rolling deployments.
+
+**The Mechanism:**
+```text
+1. Pod A (consuming partition 3) is mid-way through processing OrderCreated for Order #500
+2. Kubernetes sends SIGTERM to Pod A as part of the rolling deployment
+3. Pod A hasn't committed its offset yet (it commits AFTER successfully finishing processing)
+4. Kafka detects Pod A left the consumer group -> triggers a REBALANCE
+5. Partition 3 gets reassigned to Pod B (a still-running or newly-started instance)
+6. Pod B starts consuming from the LAST COMMITTED offset -- which is BEFORE Order #500,
+   because Pod A never got to commit it
+7. Pod B re-processes Order #500 -- the customer gets a duplicate email
+```
+The core issue: offset commits happen periodically (or after batches), not after every single message — anything processed *since* the last commit is "unconfirmed" from Kafka's perspective, and a rebalance mid-processing makes that unconfirmed work get redone by whichever consumer inherits the partition.
+
+**Mitigation 1 — commit offsets more precisely, immediately after each message's processing completes (not on a batch/time interval):**
+```csharp
+await consumer.ConsumeAsync(async result =>
+{
+    await ProcessOrder(result.Message.Value);
+    consumer.Commit(result); // commit right after THIS message succeeds, not batched
+});
+```
+This narrows the window of "processed but not yet committed" work that a rebalance could cause to be redone — it doesn't eliminate the possibility entirely (a crash between processing and committing can still happen), but it shrinks it dramatically.
+
+**Mitigation 2 — the real fix: make the consumer idempotent regardless of rebalancing:**
+```csharp
+public async Task ProcessOrder(OrderCreatedEvent e)
+{
+    if (await _inbox.AlreadyProcessed(e.OrderId)) return; // the Inbox pattern, again
+    await SendConfirmationEmail(e);
+    await _inbox.MarkProcessed(e.OrderId);
+}
+```
+Since Kafka only ever guarantees **at-least-once** delivery — rebalancing is just one of several ways duplicates can occur, not the only one — the durable fix is the same one that solves duplicate delivery generally: an idempotent consumer that safely no-ops on a message it's already handled, regardless of *why* it arrived twice.
+
+**Common Pitfall:** trying to solve this purely by tuning rebalance timeouts and `session.timeout.ms`/graceful shutdown hooks to *avoid* rebalances during deploys — that reduces frequency but is fighting a losing battle against Kafka's fundamental at-least-once guarantee; idempotency at the consumer is the only approach that's actually robust to every source of duplicate delivery, not just the rebalancing one.
+
+---

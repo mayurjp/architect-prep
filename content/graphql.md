@@ -1,3 +1,5 @@
+# GraphQL — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is GraphQL and how does it fundamentally differ from REST?**
@@ -137,3 +139,175 @@ You must batch and cache these individual resolver requests.
 4. The GraphQL engine runs all 50 `AuthorResolvers` simultaneously. The DataLoader captures all 50 requested IDs, batches them into a single list, executes the one massive SQL query, and distributes the results back to the individual resolvers. 
 
 This reduces 51 database queries down to exactly 2, completely solving the N+1 problem.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What are GraphQL Fragments, and why do they matter as queries grow larger?**
+
+A Fragment is a reusable, named chunk of fields that can be included in multiple queries — GraphQL's way of avoiding the same set of fields being copy-pasted every time a client needs them.
+
+**Without fragments — duplicated field selections:**
+```graphql
+query {
+  user(id: 1) {
+    id
+    name
+    email
+    profilePicture
+  }
+  recommendedFriend(userId: 1) {
+    id
+    name
+    email
+    profilePicture
+  }
+}
+```
+
+**With a fragment — defined once, reused everywhere:**
+```graphql
+fragment UserFields on User {
+  id
+  name
+  email
+  profilePicture
+}
+
+query {
+  user(id: 1) {
+    ...UserFields
+  }
+  recommendedFriend(userId: 1) {
+    ...UserFields
+  }
+}
+```
+If the client later needs to add `lastLoginDate` to every place a `User` is displayed, it's a one-line change to the `UserFields` fragment definition — every query using `...UserFields` picks up the change automatically, rather than needing to hunt down and update every individual query that happened to list those same fields manually.
+
+**Fragments also enable component-colocated data requirements** in frontend frameworks like React/Relay/Apollo — each UI component can declare its own fragment describing exactly the fields *it* needs, and a parent query composes those fragments together, keeping each component's data dependencies next to the component itself rather than centralized in one giant query file that every team has to coordinate changes to.
+
+**Common Pitfall:** treating fragments purely as a DRY (Don't Repeat Yourself) mechanism for the query author's convenience, while missing their bigger architectural value in component-based frontends — fragment colocation is what lets independent teams each own their own component's data requirements without one team's query change accidentally breaking another team's component that happened to rely on the same hand-written field list.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: Why doesn't GraphQL typically use versioned endpoints (`/v1/graphql`, `/v2/graphql`) the way REST commonly uses `/v1/`, `/v2/`?**
+
+REST versions endpoints because the *server* controls the exact response shape returned to every client — changing that shape risks breaking every client depending on the old shape, so a new version is the safety valve. GraphQL's core design (the client specifies exactly which fields it wants) removes much of that pressure entirely.
+
+**How GraphQL evolves a schema without versioning:**
+```graphql
+type User {
+  id: ID!
+  name: String!
+  email: String!
+  # Adding a new field is always safe -- old queries that don't ask for it are unaffected
+  phoneNumber: String
+}
+```
+Since a client's query only ever receives the fields it explicitly asked for, **adding** a new field to the schema can never break an existing client — an old query for `{ id, name, email }` gets exactly that, regardless of how many new fields have been added to the `User` type since that query was written.
+
+**The genuinely hard case — deprecating or removing a field:**
+```graphql
+type User {
+  id: ID!
+  name: String!
+  """Use `emailAddress` instead. Will be removed after 2026-06-01."""
+  email: String! @deprecated(reason: "Use emailAddress instead")
+  emailAddress: String!
+}
+```
+GraphQL's `@deprecated` directive marks a field as discouraged without removing it — tooling (GraphQL IDE plugins, schema introspection) surfaces the deprecation warning to developers still using the old field, giving them a migration window before the field is eventually actually removed from the schema — a soft, gradual migration path rather than REST's harder "spin up a whole new versioned endpoint" approach.
+
+**Where GraphQL still needs a real breaking change:** changing an existing field's *type* incompatibly, or changing its *semantics* without renaming it, has no safe migration path — those genuinely require either a new field name (and deprecating the old one) or, in rare cases, a genuinely new schema entirely.
+
+**Common Pitfall:** assuming "GraphQL doesn't need versioning" means schema changes are risk-free — while *additive* changes are safe by construction, teams still need governance around deprecation timelines and monitoring which clients are still querying deprecated fields (via server-side usage analytics on field resolution) before actually deleting them, or they'll break clients anyway, just without the visible signal a REST version bump would have provided.
+
+---
+
+## Advanced — Question 1
+
+**Q1: What are GraphQL Subscriptions, and how do they deliver real-time updates over WebSockets?**
+
+Queries and Mutations are both request-response — the client asks once, gets one answer. A Subscription is GraphQL's third root operation type, letting a client establish a long-lived connection over which the server pushes updates whenever a specific event occurs, without the client re-polling.
+
+**Defining a subscription in the schema:**
+```graphql
+type Subscription {
+  orderStatusChanged(orderId: ID!): Order!
+}
+```
+
+**The client subscribes and receives a stream of updates (not just one response):**
+```graphql
+subscription {
+  orderStatusChanged(orderId: "12345") {
+    id
+    status
+    updatedAt
+  }
+}
+```
+
+**The mechanism, in .NET with HotChocolate:**
+```csharp
+public class Subscription
+{
+    [Subscribe]
+    [Topic("OrderStatusChanged_{orderId}")]
+    public Order OrderStatusChanged([EventMessage] Order order, string orderId) => order;
+}
+
+// Elsewhere, when an order's status actually changes:
+await _eventSender.SendAsync($"OrderStatusChanged_{order.Id}", order);
+```
+Unlike Queries/Mutations (served over standard HTTP request/response), Subscriptions require a persistent connection — typically **WebSockets** (via the `graphql-ws` or legacy `subscriptions-transport-ws` protocol), since the server needs to be able to push data to the client at any time, not just in response to a request. When `SendAsync` fires for a given topic, every client currently subscribed to that specific topic (`OrderStatusChanged_12345`) receives the update pushed down their open WebSocket connection immediately.
+
+**Common Pitfall:** using Subscriptions for data that doesn't actually need real-time push semantics — e.g., subscribing to "get the current stock price" when the client only needs to display it once per page load. Subscriptions carry real infrastructural cost (maintaining persistent WebSocket connections at scale, handling reconnection logic, backpressure if a client can't keep up with the message rate) that a simple Query re-fetched occasionally, or a Query plus a lightweight polling interval, often handles more simply for data that doesn't genuinely need sub-second freshness.
+
+---
+
+## Advanced — Question 2
+
+**Q2: How do you implement field-level authorization in GraphQL, and how does that differ from REST's typical endpoint-level authorization?**
+
+In REST, an entire endpoint is usually gated behind one authorization check (`[Authorize(Roles = "Admin")]` on a controller action) — the whole response is either allowed or denied. GraphQL's single endpoint serving arbitrarily-shaped queries means authorization often needs to be enforced *per field*, since different fields on the same type can have completely different access requirements for the same request.
+
+**The problem a single endpoint-level check can't solve:**
+```graphql
+query {
+  user(id: 5) {
+    name           # anyone can see this
+    email          # only the user themselves or an admin can see this
+    salary         # only HR or the user themselves can see this
+  }
+}
+```
+A single "is this request authorized" gate can't express "allow this query, but only populate `salary` if the caller is HR" — REST would need three separate endpoints (or a lot of manual conditional serialization logic) to express what GraphQL can express as three independently-authorized fields on one type.
+
+**Field-level authorization in .NET (HotChocolate):**
+```csharp
+public class UserType : ObjectType<User>
+{
+    protected override void Configure(IObjectTypeDescriptor<User> descriptor)
+    {
+        descriptor.Field(u => u.Name);  // no restriction
+
+        descriptor.Field(u => u.Email)
+            .Authorize(); // requires ANY authenticated user
+
+        descriptor.Field(u => u.Salary)
+            .Authorize(policy: "HRPolicyOnly"); // requires a specific named policy
+    }
+}
+```
+When a query requests `salary` and the caller doesn't satisfy `HRPolicyOnly`, HotChocolate returns a partial response — the fields the caller *is* authorized for still resolve normally, while `salary` comes back as `null` with a specific authorization error attached to that field in the response's `errors` array, rather than failing the entire query.
+
+**Why this matters architecturally:** it lets one schema serve many different callers with different clearance levels through the exact same query shape, with the server enforcing exactly which parts of the graph each caller can see — the authorization logic lives right next to the field it protects (similar to how Domain-Driven Design keeps invariants close to the data they guard), rather than being scattered across many different REST endpoint-level checks that all happen to touch overlapping data.
+
+**Common Pitfall:** relying solely on hiding a field from the schema's introspection for a given caller as a "security" measure, rather than enforcing an actual authorization check on resolution — introspection-based hiding is a discoverability nicety at best; a determined caller who already knows a field's name from documentation or a leaked schema can still query it directly unless the resolver itself enforces the check.
+
+---
