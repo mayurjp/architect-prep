@@ -784,3 +784,21 @@ You should use the **Orchestrated Saga Pattern**.
 5. If the payment fails and replies with `PaymentFailed`, the `OrderService` knows exactly what to do: send a `ReleaseStockCommand` back to the `InventoryService` and mark the order as `Failed`.
 
 This centralizes the complex workflow logic in one place (the orchestrator) rather than distributing implicit dependencies across multiple independent services.
+
+---
+
+## Scenario — Question 4
+
+**Q4: A massive traffic spike caused your `OrderService` to crash because its database ran out of connections. Because the `OrderService` was down, the `CartService` and `CatalogService` also started crashing. Soon, the entire application was returning 500 Internal Server Errors. What architectural flaw caused this, and how do you prevent it?**
+
+This is a classic **Cascading Failure**. It occurs when systems are tightly coupled and lack resilience boundaries.
+
+**The Flaw:**
+If the `CartService` makes synchronous HTTP calls to the `OrderService` while the user is checking out, and it waits infinitely (or uses a very long default timeout) for a response, its threads become blocked. When the `OrderService` goes down, the `CartService`'s thread pool quickly fills up with blocked threads, causing the `CartService` to crash (Thread Starvation). Any service calling the `CartService` then suffers the exact same fate.
+
+**The Solution:**
+You must implement the **Circuit Breaker** and **Bulkhead** patterns.
+
+1.  **Circuit Breaker (Polly):** The `CartService` must monitor its calls to the `OrderService`. If it detects continuous failures or timeouts (e.g., 50% failure rate over 10 seconds), the circuit "trips" (opens). Once open, the `CartService` *immediately* stops making network calls to the `OrderService` and instantly returns a failure (or a fallback response) to its callers. This prevents the `CartService`'s threads from hanging and gives the `OrderService` time to recover.
+2.  **Timeouts:** Never use default timeouts. Network calls must fail fast (e.g., 2-3 seconds max) to free up threads.
+3.  **Bulkhead Pattern:** Isolate resources. Limit the number of concurrent outbound requests to the `OrderService` to a small pool (e.g., 50 threads). Even if the `OrderService` hangs, only those 50 threads in the `CartService` are blocked. The remaining threads can continue serving requests for completely unrelated operations, keeping the application partially functional rather than entirely dead.

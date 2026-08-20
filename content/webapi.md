@@ -198,3 +198,42 @@ When the mobile app (or a CDN) sees this header, it caches the JSON response loc
 
 **Common Pitfalls:**
 Do not use `[ResponseCache]` for user-specific data (like a shopping cart) if `Location = ResponseCacheLocation.Any`. A CDN might cache User A's cart and serve it to User B. For user-specific data, use `Location = ResponseCacheLocation.Client` (sets `Cache-Control: private`), which tells shared proxies/CDNs *not* to cache it, but allows the user's specific browser to cache it.
+
+---
+
+## Scenario — Question 3
+
+**Q3: A mobile application sends a POST request with a massive 50MB JSON payload to your ASP.NET Core API. The payload contains a batch of thousands of records to process. The API is suddenly crashing with `OutOfMemoryException`. Upon investigating, the memory spikes violently exactly when the request arrives, before your controller code even executes. How do you troubleshoot and fix this?**
+
+This is caused by **Buffer Bloat** during Model Binding.
+
+**The Flaw:**
+By default, when you bind a massive JSON payload using `[FromBody] List<Record> records`, ASP.NET Core buffers the entire HTTP request body into memory, deserializes the *entire* 50MB JSON string into a massive memory-hogging object graph (creating hundreds of thousands of small .NET objects), and *then* passes that list into your controller action. This consumes hundreds of megabytes of RAM per request. If 5 users upload at the same time, the server runs out of memory and crashes.
+
+**The Solution:**
+You must bypass Model Binding and stream the JSON payload directly off the network stream, deserializing it asynchronously as it arrives without ever buffering the whole payload into memory.
+
+```csharp
+[HttpPost("batch")]
+public async Task<IActionResult> UploadBatch()
+{
+    // Do NOT use [FromBody]. Instead, read directly from Request.Body
+    
+    // IAsyncEnumerable allows us to stream the JSON array elements one by one
+    var records = JsonSerializer.DeserializeAsyncEnumerable<Record>(
+        Request.Body, 
+        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+    await foreach (var record in records)
+    {
+        // Process each record individually. Memory stays low and flat!
+        _db.Records.Add(record);
+        
+        // Optionally save in chunks to avoid EF Core bloat
+    }
+    
+    await _db.SaveChangesAsync();
+    return Ok();
+}
+```
+This streaming approach ensures that regardless of whether the payload is 5MB or 500MB, the memory footprint remains virtually zero, as objects are immediately garbage collected after processing.

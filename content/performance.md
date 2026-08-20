@@ -122,3 +122,40 @@ This is the classic .NET **Cold Start** problem, which is especially noticeable 
 2. **Always On (Azure App Service):** Ensure the "Always On" setting is enabled, which prevents the server process from spinning down due to idle time.
 3. **Precompiled Queries / DbContext Pooling:** Use EF Core's `AddDbContextPool` to reuse DbContext instances, minimizing instantiation overhead. 
 4. **ReadyToRun (Crossgen):** Publish your application using the `/p:PublishReadyToRun=true` flag. This performs Ahead-of-Time (AOT) compilation during the build process, translating much of the IL into native code before deployment, dramatically reducing the JIT compiler's workload on startup.
+
+---
+
+## Scenario — Question 4
+
+**Q4: Your ASP.NET Core API normally responds in 50ms. However, under load, requests randomly begin taking 5-10 seconds to respond, and some time out entirely. CPU and Memory usage are both low (under 30%), and the database is responding instantly. What is the likely cause of this performance degradation, and how do you fix it?**
+
+If the CPU is idle, memory is fine, and the database is fast, but the application is crawling, you are almost certainly experiencing **Thread Pool Starvation**.
+
+**The Cause: Sync-over-Async Blocking**
+The web server (Kestrel) uses a finite pool of threads (the Thread Pool) to process HTTP requests. If a developer uses `.Result` or `.Wait()` on an asynchronous task, they are explicitly telling the current thread to halt and do absolutely nothing until the background task completes.
+
+```csharp
+// FATAL FLAW: Blocking the thread pool
+public IActionResult GetProduct(int id) 
+{
+    // This blocks a Thread Pool thread while waiting for the network
+    var product = _db.Products.FindAsync(id).Result; 
+    return Ok(product);
+}
+```
+
+Under low traffic, you won't notice this. But under load, if 100 concurrent requests come in, 100 threads hit `.Result` and block. The Thread Pool is now exhausted. When the 101st request arrives, there are no threads left to process it. The Thread Pool injects new threads very slowly (about 1-2 per second) to prevent CPU thrashing. This slow injection causes the massive 5-10 second delays you observe, even though the actual database query takes 2ms.
+
+**The Fix:**
+You must use **"Async All the Way"**. Never block on async code.
+
+```csharp
+// CORRECT: Asynchronous yielding
+public async Task<IActionResult> GetProduct(int id) 
+{
+    // The thread is released back to the pool while waiting for the network
+    var product = await _db.Products.FindAsync(id); 
+    return Ok(product);
+}
+```
+If you must call async code from a synchronous method and cannot change the signature, use `Task.Run` carefully, or ideally, refactor the entire call stack to be `async/await`.
