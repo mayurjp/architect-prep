@@ -1,6 +1,8 @@
 # csharp — Q&A
 
 
+# C# Language Features — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What are access modifiers (public, private, protected, internal)?**
@@ -284,3 +286,99 @@ Using PLINQ (Parallel LINQ) is the easiest and safest way in C#:
 int max = array.AsParallel().Max();
 ```
 Under the hood, `.AsParallel()` partitions the array. Each thread independently calculates the maximum of its own partition without sharing any state. Once all threads finish their partitions, PLINQ aggregates the local maximums to find the final global maximum. This guarantees thread safety and achieves maximum CPU utilization.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What are generic constraints (`where T : ...`), and why would you use them?**
+
+A generic constraint restricts which types can be substituted for a type parameter, letting the compiler enforce (and let you rely on) capabilities that plain `T` wouldn't otherwise guarantee.
+
+```csharp
+public class Repository<T> where T : class, IEntity, new()
+{
+    public T CreateDefault() => new T();          // needs 'new()'
+    public void Validate(T item) => item.Id != 0; // needs IEntity's .Id member
+}
+```
+
+**The common constraint kinds:**
+- `where T : class` / `where T : struct` — restricts to reference or value types.
+- `where T : SomeBaseClass` / `where T : ISomeInterface` — requires inheriting from or implementing a specific type, unlocking its members on `T`.
+- `where T : new()` — requires a public parameterless constructor, enabling `new T()` inside the generic method.
+- `where T : notnull` (C# 8+) — disallows nullable types, useful for dictionary keys.
+- `where T : U` — requires `T` to be, or derive from, another type parameter `U` (rare, used for constraining relationships between multiple generic parameters).
+
+**Why it matters:** without constraints, the compiler only knows `T` is *some* type, so it can't let you call `.Id`, compare with `null` safely, or call `new T()` — you'd be limited to `object`-level operations (`Equals`, `ToString`, `GetType`). Constraints are what let generic code stay both reusable *and* type-safe, instead of falling back to reflection or `dynamic`.
+
+#### Follow-up: Can you combine multiple constraints on one type parameter?
+Yes — `where T : class, IEntity, new()` is valid (class constraint, then interfaces, then `new()` last — `new()` must always come last if present). You cannot combine `class` and `struct` on the same parameter since they're mutually exclusive.
+
+---
+
+## Advanced — Question 2
+
+**Q2: How do C# 9+ `record` types implement value-based equality, and how does that differ for `record class` vs `record struct`?**
+
+A `record` is a reference type (by default) that the compiler augments with synthesized value-equality members, distinguishing it from an ordinary `class` where `Equals`/`==` default to reference equality.
+
+```csharp
+public record Point(int X, int Y);
+
+var a = new Point(1, 2);
+var b = new Point(1, 2);
+Console.WriteLine(a == b);        // True  — value equality, even though it's a reference type
+Console.WriteLine(a.Equals(b));   // True
+Console.WriteLine(ReferenceEquals(a, b)); // False — still two distinct heap objects
+```
+
+**What the compiler generates for a `record`:**
+- An overridden `Equals(object?)` and a strongly-typed `Equals(Point?)` (via `IEquatable<Point>`) that compare every public property field-by-field.
+- An overridden `GetHashCode()` combining all property hash codes.
+- Overloaded `==`/`!=` operators that call the generated `Equals`.
+- A compiler-generated `PrintMembers`/`ToString()` that prints `Point { X = 1, Y = 2 }`.
+- A non-destructive mutation helper: `with` expressions (`var c = a with { X = 5 };`) that clone and selectively override properties.
+
+**`record class` (default) vs `record struct` (C# 10+):**
+- `record class` is a reference type — the value-equality behavior above applies, but the instance itself still lives on the heap and is passed by reference.
+- `record struct` is a value type — it gets the same synthesized `Equals`/`GetHashCode`/`ToString`/`with` support, but assignment copies the whole struct (like any struct), and it's implicitly `readonly` unless you opt out per-member.
+
+**Common Pitfall:** record equality is *shallow per property* but recursive for records-within-records (it calls `.Equals()` on each property, so a nested record compares correctly) — however, if a property is a mutable reference type like `List<T>`, equality falls back to that type's own `Equals` (reference equality for a plain `List<T>`), so two records holding "equal-looking" but different list *instances* will compare as **not equal** unless you supply a custom equality contract.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What are C# Source Generators, and how do they differ from runtime Reflection?**
+
+A Source Generator is a piece of code that runs **during compilation** and produces additional C# source files that get compiled alongside your hand-written code — it's compile-time metaprogramming, not a runtime mechanism.
+
+**The mechanism:**
+1. A generator is a class implementing `IIncrementalGenerator`, packaged as a Roslyn analyzer (a separate assembly referenced as an analyzer, not a normal library).
+2. During compilation, the Roslyn compiler calls into the generator, handing it a read-only view of the syntax trees/semantic model of the project being compiled.
+3. The generator inspects that model (e.g., "find every class marked `[GenerateToString]`") and emits new `.g.cs` source text, which the compiler then compiles *as if you'd typed it yourself*.
+
+```csharp
+[Generator]
+public class ToStringGenerator : IIncrementalGenerator
+{
+    public void Initialize(IncrementalGeneratorInitializationContext context)
+    {
+        // (simplified) find candidate classes, then register source output:
+        context.RegisterSourceOutput(candidates, (spc, classInfo) =>
+        {
+            spc.AddSource($"{classInfo.Name}.g.cs", GenerateToStringMethod(classInfo));
+        });
+    }
+}
+```
+
+**Why prefer this over Reflection:**
+- **Zero runtime cost.** Reflection (`typeof(T).GetProperties()`, etc.) walks metadata at runtime — slow, and it defeats trimming/AOT compilation since the trimmer can't prove which members are needed. Source-generated code is plain, already-compiled C#, so it's as fast as hand-written code and fully trim/NativeAOT-compatible.
+- **Compile-time errors instead of runtime exceptions.** A Reflection-based mapper that references a renamed property fails at runtime; a source generator can raise a compiler diagnostic immediately.
+- **This is exactly how `System.Text.Json`'s source-generated serialization (`JsonSerializerContext`) and the modern `LoggerMessage` source generator work** — both used to exist as pure-Reflection APIs and gained generator-based equivalents specifically for AOT/performance-sensitive scenarios.
+
+**Common Pitfall:** generators only see syntax/semantics available *at compile time* — they cannot generate code based on runtime configuration, database schemas, or anything not knowable until the app actually runs. That's still Reflection's (or runtime codegen's) job.
+
+---

@@ -1,3 +1,5 @@
+# Design Patterns — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What are Design Patterns and what are the three main categories defined by the Gang of Four (GoF)?**
@@ -298,3 +300,106 @@ In this specific case, it is a **Caching Proxy**.
 
 **How it differs from Decorator:**
 While structurally identical (both wrap an object and implement its interface), their *intent* is different. A Decorator *adds behavior* (like logging or formatting) to an object dynamically at runtime. A Proxy *controls access* (lazy loading, caching, security checks) to an object, often managing the lifecycle of the real object itself.
+
+---
+
+## Beginner — Question 2
+
+**Q2: Explain the Observer pattern and where it shows up in everyday .NET code.**
+
+The Observer pattern defines a one-to-many dependency: when one object (the *subject*) changes state, all its registered *observers* are automatically notified, without the subject needing to know any concrete details about who's listening.
+
+**The Mechanism:**
+```csharp
+public class StockTicker {
+    public event Action<decimal> PriceChanged; // the "subject" exposes a notification point
+
+    public void UpdatePrice(decimal newPrice) {
+        PriceChanged?.Invoke(newPrice); // notifies every subscribed observer
+    }
+}
+
+var ticker = new StockTicker();
+ticker.PriceChanged += price => Console.WriteLine($"Dashboard: {price}");
+ticker.PriceChanged += price => Console.WriteLine($"Logger: price changed to {price}");
+```
+
+**Where it's already built into .NET:**
+- C# **events and delegates** are a first-class language implementation of Observer — you rarely hand-roll the classic GoF `IObserver`/`ISubject` interfaces.
+- `IObservable<T>` / `IObserver<T>` (System.Reactive / Rx.NET) is the formalized, composable version — with operators for filtering, throttling, and combining event streams.
+- ASP.NET Core's `IHostApplicationLifetime` events (`ApplicationStarted`, `ApplicationStopping`) are Observer under the hood.
+
+**Common Pitfall:** forgetting to unsubscribe (`-=`) when the observer's lifetime is shorter than the subject's — the subject holds a reference to every subscribed observer, which keeps them alive and causes a memory leak (the same "lapsed listener" problem covered under event handler leaks).
+
+---
+
+## Beginner — Question 3
+
+**Q3: Explain the Facade pattern and how it differs from just "a class with a lot of methods."**
+
+The Facade pattern provides a single, simplified interface to a larger, more complex subsystem made up of multiple interacting classes — the goal is to hide complexity, not to add new capability.
+
+**The Mechanism:**
+```csharp
+// The complex subsystem — several classes that must be coordinated in the right order
+public class InventoryService { public bool Reserve(int productId) => true; }
+public class PaymentService { public bool Charge(decimal amount) => true; }
+public class ShippingService { public void Schedule(int orderId) { } }
+
+// The Facade — one entry point that coordinates all three correctly
+public class OrderFacade {
+    private readonly InventoryService _inventory = new();
+    private readonly PaymentService _payment = new();
+    private readonly ShippingService _shipping = new();
+
+    public bool PlaceOrder(int productId, decimal amount, int orderId) {
+        if (!_inventory.Reserve(productId)) return false;
+        if (!_payment.Charge(amount)) return false;
+        _shipping.Schedule(orderId);
+        return true;
+    }
+}
+
+// The caller doesn't need to know 3 subsystems exist or in what order to call them
+new OrderFacade().PlaceOrder(productId: 5, amount: 99.99m, orderId: 1001);
+```
+
+**How this differs from "just a class with a lot of methods":** a Facade doesn't add new business logic of its own — it only *orchestrates* calls into an existing subsystem in the correct sequence. The individual subsystem classes (`InventoryService`, `PaymentService`, `ShippingService`) remain fully usable on their own for callers who need finer-grained control; the Facade is purely an optional convenience layer, not a replacement.
+
+**Common Pitfall:** letting a Facade slowly accumulate actual business logic over time until it becomes a God Object itself — a Facade should stay a thin coordination layer, not grow decision-making responsibilities that belong in the subsystem classes.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: Explain the Prototype pattern and when cloning is preferable to constructing a new object.**
+
+The Prototype pattern creates new objects by **copying an existing instance** (a "prototype") rather than constructing one from scratch, useful when object creation is expensive or when you want a new object that starts as a variation of a known-good configuration.
+
+**The Mechanism (via .NET's `ICloneable` or a custom `Clone()` method):**
+```csharp
+public class EnemyTemplate {
+    public string Type { get; set; }
+    public int Health { get; set; }
+    public List<string> Abilities { get; set; } = new();
+
+    public EnemyTemplate Clone() => new EnemyTemplate {
+        Type = Type,
+        Health = Health,
+        Abilities = new List<string>(Abilities) // deep-copy the list, not just the reference
+    };
+}
+
+var bossTemplate = new EnemyTemplate { Type = "Dragon", Health = 1000, Abilities = { "Fire Breath" } };
+var boss1 = bossTemplate.Clone(); // fast — no re-running expensive setup logic
+var boss2 = bossTemplate.Clone();
+boss2.Health = 1500; // customize the copy without touching the template or boss1
+```
+
+**When Prototype beats a plain constructor:**
+- The object's construction is expensive (e.g., loaded from a database, computed via a complex algorithm, or built via many configuration steps) and you need many near-identical variations.
+- You want to spawn objects based on a runtime-configured "template" rather than a fixed, compile-time-known constructor signature (e.g., a level editor that spawns enemies from data-driven templates).
+
+**Common Pitfall:** implementing `Clone()` as a shallow copy by default (`MemberwiseClone()`) when the object contains mutable reference-type fields — as with the general shallow-vs-deep-copy issue, forgetting to deep-clone a nested list or object means the "clone" still shares mutable state with the original, causing changes to one to unexpectedly affect the other.
+
+---

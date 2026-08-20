@@ -313,3 +313,75 @@ Web servers should *never* execute long-running, CPU-bound work on the Thread Po
 
 1. **Background Service / Worker Service:** The most robust solution is to offload the calculation entirely. The API controller should drop a message into a queue (like RabbitMQ) and immediately return a `202 Accepted`. A separate Worker Service (running in a different process or even on a different machine) listens to the queue, performs the heavy CPU calculation, and saves the result to a database or cache.
 2. **Dedicated Threads (If it must be in-process):** If you absolutely must process it within the web application, you should spawn a dedicated background thread (`new Thread()`) with a lower priority, explicitly keeping it off the Thread Pool so ASP.NET Core can continue serving normal web requests unhindered.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is the difference between Workstation GC and Server GC in .NET, and when does it matter?**
+
+The .NET Garbage Collector runs in one of two fundamentally different modes, configured via `<ServerGarbageCollection>` in the project file (or `runtimeconfig.json`).
+
+**Workstation GC (default for most apps):**
+- Optimized for low latency on a client machine with few cores.
+- Uses a single heap and (by default) runs GC work on the same thread that triggered the collection, briefly pausing the app.
+- Best for desktop apps, CLI tools, and anything where minimizing per-collection pause time matters more than raw throughput.
+
+**Server GC (default for ASP.NET Core when hosted):**
+- Creates **one heap per logical CPU core** and collects them in parallel on dedicated GC threads.
+- Optimized for throughput on multi-core server hardware, at the cost of higher memory usage (each heap reserves its own segment).
+- Also has a **Concurrent** (background) variant that lets Gen 2 collections run alongside app threads instead of fully pausing them.
+
+```xml
+<PropertyGroup>
+  <ServerGarbageCollection>true</ServerGarbageCollection>
+  <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+</PropertyGroup>
+```
+
+**Common Pitfall:** Running Server GC inside a container with a low CPU limit (e.g., `limits.cpu: "1"` in Kubernetes) can backfire — .NET may still see the *host's* full core count and spin up far more heaps/threads than the container can actually use, wasting memory. Modern .NET respects cgroup limits much better than older versions, but it's still worth verifying `Environment.ProcessorCount` inside the container matches what you expect.
+
+#### Follow-up: How do you check which GC mode is active at runtime?
+`System.Runtime.GCSettings.IsServerGC` returns a bool. You can also inspect `DOTNET_gcServer` / `COMPlus_gcServer` environment variables, which override the project-file setting without a rebuild — useful for A/B testing GC modes in production.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is the difference between an `AppDomain` and an `AssemblyLoadContext` (ALC) in modern .NET?**
+
+`AppDomain` was the .NET Framework's isolation boundary: multiple AppDomains could run in one process, each with its own loaded assemblies, and one could be unloaded without killing the process. **.NET (Core) 5+ removed multi-AppDomain support entirely** — there is only ever one AppDomain per process now.
+
+**The replacement: `AssemblyLoadContext` (ALC).**
+An ALC is a lighter-weight unit for loading and, critically, **unloading** assemblies within that single AppDomain/process.
+
+```csharp
+public class PluginLoadContext : AssemblyLoadContext
+{
+    private readonly AssemblyDependencyResolver _resolver;
+
+    public PluginLoadContext(string pluginPath) : base(isCollectible: true)
+    {
+        _resolver = new AssemblyDependencyResolver(pluginPath);
+    }
+
+    protected override Assembly? Load(AssemblyName name)
+    {
+        string? path = _resolver.ResolveAssemblyToPath(name);
+        return path != null ? LoadFromAssemblyPath(path) : null;
+    }
+}
+
+var context = new PluginLoadContext("plugins/MyPlugin.dll");
+var assembly = context.LoadFromAssemblyPath("plugins/MyPlugin.dll");
+// ... use the plugin ...
+context.Unload(); // marks it collectible; GC reclaims it once nothing holds a reference
+```
+
+**Key differences:**
+- ALCs don't isolate *security* or *configuration* the way AppDomains did — there's no `AppDomain.SetPrincipalPolicy` equivalent. They isolate **type identity and assembly versions** (you can load two different versions of the same assembly side-by-side, each in its own ALC, without them clashing).
+- `isCollectible: true` is what makes an ALC unloadable — without it, assemblies loaded into it live for the process lifetime just like the default ALC.
+
+**Common Pitfall:** Unloading an ALC doesn't happen instantly — `Unload()` only marks it eligible. If any object created from a type in that ALC (or even an open `FileStream` opened by plugin code) is still referenced anywhere in your app, the GC can't collect it, and the "unloaded" plugin assembly silently stays resident. Plugin hosts typically use a `WeakReference` to the ALC itself and poll `IsAlive` in tests to catch leaks.
+
+---

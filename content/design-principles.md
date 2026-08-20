@@ -1,3 +1,5 @@
+# Design Principles — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What are the SOLID design principles?**
@@ -276,3 +278,93 @@ Dependencies should be explicit and inverted. High-level modules should depend o
 
 **The Result:**
 If the application switches to Azure Key Vault, you only change the configuration provider setup in `Program.cs`. None of the 300 classes need to be touched, because they all rely on the abstract `IOptions<T>`, completely oblivious to where the actual data came from.
+
+---
+
+## Beginner — Question 3
+
+**Q3: What is "Tell, Don't Ask" as a design principle?**
+
+"Tell, Don't Ask" says: instead of *asking* an object for its internal data and then making decisions about it from the outside, you should *tell* the object what you want done and let it use its own data to do it.
+
+**Asking (violates the principle):**
+```csharp
+if (account.Balance >= amount) {
+    account.Balance -= amount; // external code manipulates internal state directly
+}
+```
+This exposes `Balance` as public, mutable state, and duplicates the "can I afford this" logic anywhere someone withdraws money — every call site has to remember the rule.
+
+**Telling (follows the principle):**
+```csharp
+public class Account {
+    private decimal _balance;
+    public bool TryWithdraw(decimal amount) {
+        if (amount > _balance) return false;
+        _balance -= amount;
+        return true;
+    }
+}
+
+account.TryWithdraw(amount); // Account owns its own invariant
+```
+
+**Why it matters:** it keeps behavior next to the data it operates on (proper encapsulation), so the invariant ("balance can't go negative") is enforced in exactly one place instead of trusted to every caller. It's a more concrete, actionable restatement of encapsulation — a code-review heuristic for "did we just leak a decision that belongs inside this object?"
+
+**Common Pitfall:** over-applying it to simple, stateless data-holder types (DTOs, view models) where there's no real behavior to "tell" — those are meant to be asked, and wrapping every getter in a method just adds ceremony without benefit.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is the Law of Demeter ("Principle of Least Knowledge"), and what does a violation look like?**
+
+The Law of Demeter says a method should only talk to its "immediate friends" — its own fields, its parameters, objects it creates, and objects held by those — not to objects obtained *through* another object (no "reaching through" a chain of getters).
+
+**A violation — the classic "train wreck":**
+```csharp
+// Violates LoD: reaches through Customer -> Wallet -> Cash
+decimal cash = order.Customer.Wallet.GetCash();
+if (cash >= order.Total) order.Customer.Wallet.Withdraw(order.Total);
+```
+This method now depends on the *entire chain* of internal structure: `Order` has a `Customer`, which has a `Wallet`, which has cash. If any link in that chain changes shape, this code breaks — even though this method never needed to know a `Wallet` exists.
+
+**Following LoD:**
+```csharp
+// Order only talks to its immediate collaborator: Customer
+if (order.Customer.CanAfford(order.Total)) {
+    order.Customer.Pay(order.Total);
+}
+```
+`Customer` now hides how payment actually happens internally (maybe via a `Wallet`, maybe a linked card) — callers don't need to know or care.
+
+**Why it matters:** each "reach-through" is a hidden coupling to a structure that has nothing to do with the calling code's actual job. Changing internal structure anywhere along a long chain ripples out to every caller that "knew" about it.
+
+**Common Pitfall:** LoD is about avoiding chains that traverse *unrelated* object structure — it does **not** forbid fluent APIs or builder chains (`query.Where(...).OrderBy(...).ToList()`), because each call there returns the *same conceptual object* (or an interface the caller was always meant to know about), not a walk through unrelated internal collaborators.
+
+---
+
+## Advanced — Question 2
+
+**Q2: The Open/Closed Principle and the Strategy pattern look almost identical in practice — how do they actually relate?**
+
+They operate at different levels: OCP is a *principle* (a goal — "don't require modification to add behavior"), while Strategy is one specific *pattern* (a mechanism) commonly used to achieve that goal. Not every OCP-compliant design uses Strategy, and Strategy alone doesn't guarantee OCP is upheld correctly.
+
+**How Strategy achieves OCP:**
+```csharp
+public interface IDiscountStrategy { decimal Apply(decimal price); }
+public class PremiumDiscount : IDiscountStrategy { public decimal Apply(decimal p) => p * 0.9m; }
+
+public class Checkout {
+    public decimal Total(decimal price, IDiscountStrategy discount) => discount.Apply(price);
+}
+```
+Adding a new discount type means writing a new `IDiscountStrategy` implementation — `Checkout` is never touched. That's OCP, implemented via Strategy.
+
+**Where they diverge:**
+- OCP can also be achieved through other mechanisms entirely: event/observer hooks, template method (fixed algorithm skeleton with overridable steps), plugin/middleware pipelines, or simple composition — Strategy is just the most common textbook example because it maps so cleanly onto "swap an algorithm."
+- Conversely, you can use the Strategy pattern **without actually achieving OCP** — if the code that *selects* which strategy to instantiate is a giant `switch` statement that must be edited for every new strategy, you've just moved the OCP violation from the algorithm itself into the strategy-selection/factory code. True OCP requires the selection mechanism (often a DI container or a registration-based factory) to also be extensible without modification.
+
+**Common Pitfall:** believing "I used an interface and Strategy, therefore this code is OCP-compliant" without checking whether something else (a factory, a switch, a hardcoded list) still needs editing every time a new variant is added.
+
+---

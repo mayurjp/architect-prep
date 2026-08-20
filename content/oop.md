@@ -1,3 +1,5 @@
+# Object-Oriented Programming — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What are the four main principles of Object-Oriented Programming (OOP)?**
@@ -266,3 +268,103 @@ You must decompose the class into separate, cohesive classes based on their resp
 3. **The Repository:** Create an `InvoiceRepository` class whose sole responsibility is handling the database INSERT/UPDATE operations.
 
 By splitting these responsibilities, a bug introduced while updating the PDF logo physically cannot affect the tax calculation logic, making the system much more robust.
+
+---
+
+## Beginner — Question 3
+
+**Q3: What is the difference between method overloading and method overriding?**
+
+Both let a class present multiple behaviors under related signatures, but they operate at completely different times and for different reasons.
+
+**Method Overloading (compile-time polymorphism):**
+- Multiple methods in the *same* class share a name but differ in parameter list (count, types, or order).
+- The compiler picks which one to call based on the argument types at the call site — resolved entirely at compile time.
+
+```csharp
+public class Calculator {
+    public int Add(int a, int b) => a + b;
+    public double Add(double a, double b) => a + b;
+    public int Add(int a, int b, int c) => a + b + c;
+}
+```
+
+**Method Overriding (runtime polymorphism):**
+- A derived class provides a *new implementation* of a `virtual`/`abstract` method inherited from a base class, using the `override` keyword — same name, same signature.
+- The actual implementation invoked is resolved at runtime based on the object's real type (via the vtable), not the reference type used to call it.
+
+```csharp
+public class Shape { public virtual double Area() => 0; }
+public class Circle : Shape { public override double Area() => Math.PI * Radius * Radius; }
+```
+
+**Common Pitfall:** confusing overloading with overriding when a derived class redeclares a method with a *different* signature than the base — that's just a new overload on the derived class, not an override, and it won't participate in polymorphic dispatch through a base-class reference.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is the difference between a shallow copy and a deep copy of an object, and how do you implement each in C#?**
+
+When you copy an object that contains reference-type fields (like a `List<T>` or a nested class), "copying" is ambiguous — do the copies share the nested objects, or each get their own?
+
+**Shallow Copy:**
+Creates a new object, but copies reference-type fields *by reference* — both the original and the copy point to the same nested objects. `MemberwiseClone()` (protected, from `System.Object`) always performs a shallow copy.
+
+```csharp
+public class Order : ICloneable {
+    public List<string> Items { get; set; } = new();
+    public object Clone() => MemberwiseClone(); // shallow: Items list is SHARED
+}
+
+var a = new Order();
+a.Items.Add("Book");
+var b = (Order)a.Clone();
+b.Items.Add("Pen");
+Console.WriteLine(a.Items.Count); // 2 — both share the same List<string> instance!
+```
+
+**Deep Copy:**
+Recursively copies every referenced object too, so the copy is fully independent of the original. There's no built-in "deep clone" in .NET — you implement it explicitly, typically by cloning each nested member yourself or via serialization round-tripping.
+
+```csharp
+public object DeepClone() {
+    var copy = (Order)MemberwiseClone();
+    copy.Items = new List<string>(Items); // new list instance, independent
+    return copy;
+}
+```
+
+**Common Pitfall:** assuming `MemberwiseClone()` or a naive copy constructor gives you full independence — it silently shares any reference-type field several levels deep unless you explicitly clone each one, which is a frequent source of "mutating a copy also changed the original" bugs.
+
+#### Follow-up: Is record `with` expression a shallow or deep copy?
+Shallow — `with` copies all property values, but if a property is itself a reference type (e.g., a `List<T>`), the new record shares that same list instance with the original, same as `MemberwiseClone()`.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is a "Composition Root," and why does it matter for keeping OOP code testable in a Dependency Injection-based application?**
+
+The Composition Root is the single, specific location in an application (typically near the entry point — `Program.cs` in ASP.NET Core) where all the concrete implementations are wired up to their abstractions and objects are actually constructed.
+
+**The Principle:**
+Everywhere *else* in the codebase, classes should depend only on interfaces/abstractions and receive their dependencies via constructor injection — they should never call `new SomeConcreteClass()` themselves for a collaborator, and they should never reach into a container to resolve their own dependencies. The Composition Root is the *one* deliberate exception: it's allowed (and expected) to know about concrete types, because its entire job is object-graph construction.
+
+```csharp
+// Program.cs — the Composition Root
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddScoped<IOrderRepository, SqlOrderRepository>();
+builder.Services.AddScoped<IPaymentGateway, StripePaymentGateway>();
+builder.Services.AddScoped<OrderProcessor>(); // depends only on the interfaces above
+var app = builder.Build();
+```
+
+**Why it matters:**
+- **Testability:** every class outside the root can be unit tested by injecting fakes/mocks for its interfaces, because it never hardcodes a concrete dependency.
+- **Single point of change:** swapping `SqlOrderRepository` for `MongoOrderRepository` touches exactly one line, in exactly one file.
+- **Prevents the Service Locator anti-pattern:** if classes resolve dependencies from a container themselves (`serviceProvider.GetService<T>()`) scattered throughout the codebase, you effectively have *many* composition roots hiding dependencies, which defeats the purpose of DI entirely.
+
+**Common Pitfall:** treating a DI container's `.Resolve<T>()` call as acceptable anywhere convenient "since the container is already there." If it happens outside the Composition Root, it's the Service Locator anti-pattern wearing a DI container's clothing — the class's real dependencies are hidden from its constructor signature, making it harder to reason about and test.
+
+---
