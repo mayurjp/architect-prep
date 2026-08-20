@@ -1157,3 +1157,96 @@ X-RateLimit-Reset: 1735689660
 **Common Pitfall:** rate-limiting by IP address alone when clients sit behind a shared corporate NAT or mobile carrier gateway — one bad actor can trigger `429`s for every legitimate user sharing that IP. Production systems typically key the limiter by API key / authenticated client ID instead, falling back to IP only for fully anonymous/unauthenticated endpoints.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between a resource's collection URI and its item URI, and what conventions govern how they relate?**
+
+REST models data as **resources**, and a consistent naming convention between a collection of resources and a single resource within it is one of the most immediately visible signs of a well-designed API.
+
+**The convention:**
+```http
+GET /api/products          -> the COLLECTION of all products
+GET /api/products/5        -> a single ITEM within that collection (product with id 5)
+POST /api/products         -> create a NEW item in the collection
+PUT /api/products/5        -> replace the existing item at this specific URI
+DELETE /api/products/5     -> remove the specific item at this URI
+```
+The plural noun (`products`) names the collection; appending an identifier (`/5`) narrows it down to one specific member. This mirrors how you'd talk about the data conversationally — "products" (the set) versus "product #5" (one specific one).
+
+**Nested resources extend the same pattern:**
+```http
+GET /api/products/5/reviews       -> the collection of reviews belonging to product 5
+GET /api/products/5/reviews/42    -> a single specific review within that nested collection
+```
+
+**Common Pitfalls:**
+- **Verbs in the URI** (`GET /api/getProducts`, `POST /api/createProduct`) — REST already expresses the action via the HTTP method; repeating it in the path is redundant and inconsistent with resource-oriented naming.
+- **Inconsistent pluralization** — mixing `/api/product/5` in one endpoint with `/api/products` in another confuses API consumers about which convention to expect.
+- **Deeply nested paths for data that isn't actually a strict parent-child relationship** — `/api/customers/5/orders/10/items/3/reviews` becomes unwieldy; if `reviews` don't conceptually belong exclusively to that one order item, a flatter, independently-addressable resource (`/api/reviews/99`) is usually clearer.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is HAL (Hypertext Application Language), and how does it provide a concrete, standardized format for implementing HATEOAS?**
+
+HATEOAS as a REST constraint says responses should include links describing available actions — but it doesn't itself specify *what that JSON should look like*. HAL is one of the most widely adopted concrete media-type specifications that fills in that gap with an actual, standardized structure.
+
+**A HAL-formatted response:**
+```json
+{
+  "id": 5,
+  "status": "Pending",
+  "total": 99.99,
+  "_links": {
+    "self": { "href": "/api/orders/5" },
+    "cancel": { "href": "/api/orders/5/cancel" }
+  },
+  "_embedded": {
+    "customer": {
+      "id": 42,
+      "name": "Jane Doe",
+      "_links": { "self": { "href": "/api/customers/42" } }
+    }
+  }
+}
+```
+Two reserved, standardized keys carry all the hypermedia information: **`_links`** (available actions/related resources as URIs) and **`_embedded`** (related resources' full representations included inline, avoiding an extra round-trip when the client needs both the order and its customer together).
+
+**Why a standard format like HAL matters over each API inventing its own ad-hoc link structure:** client libraries and tooling can be built generically against the HAL spec once, and reused across any HAL-compliant API — without a shared convention, every API's homegrown "links" field would need bespoke client-side parsing logic, defeating much of HATEOAS's promised benefit of generic, convention-following clients.
+
+**Common Pitfall:** adopting HAL's `_links` structure but never actually using it to drive client behavior (the client still hardcodes URLs itself instead of following the provided links) — at that point, the API is paying HAL's response-size and complexity cost without gaining any of the decoupling benefit that following the links dynamically was supposed to provide.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is Content Negotiation via the `Vary` header, and why is it critical for correctly caching REST responses that support multiple representations?**
+
+When a REST endpoint can return different representations of the same resource depending on a request header (e.g., `Accept: application/json` vs `Accept: application/xml`, or `Accept-Language: en` vs `Accept-Language: fr`), a cache sitting between the client and server needs to know that fact — otherwise it might serve the *wrong* cached representation to a client requesting a different format or language than whoever's request originally populated the cache.
+
+**The problem without `Vary`:**
+```http
+GET /api/products/5
+Accept: application/json
+```
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Cache-Control: public, max-age=3600
+```
+A shared/CDN cache stores this JSON response keyed only by the URI `/api/products/5`. If a *different* client then requests the same URI with `Accept: application/xml`, a cache that doesn't know representation varies by the `Accept` header could incorrectly serve the cached **JSON** response to a client that explicitly asked for XML.
+
+**The fix — declare which request headers affect the response:**
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Cache-Control: public, max-age=3600
+Vary: Accept
+```
+`Vary: Accept` tells any compliant cache: "this response's content depends on the `Accept` header — cache a *separate* copy per distinct `Accept` value you see, rather than one shared copy for the URI alone." A request with a different `Accept` value correctly triggers a fresh cache lookup (and likely a fresh request to the origin server) instead of reusing the wrong cached representation.
+
+**Common Pitfall:** implementing content negotiation (varying responses by `Accept`, `Accept-Language`, or a custom header like `Accept-Version`) without also setting the matching `Vary` header — the API works correctly for direct, uncached requests, but silently serves wrong/stale representations to some clients the moment a shared cache or CDN sits in front of it, a bug that's easy to miss in development (no cache in the loop) and only surfaces once real caching infrastructure is added in production.
+
+---

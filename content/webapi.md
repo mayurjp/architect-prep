@@ -352,3 +352,119 @@ Instead of the client hardcoding "orders can be canceled via `DELETE /api/orders
 **Where it does get used:** large, long-lived public APIs with many independent third-party clients (payment processors like Stripe use hypermedia-*adjacent* patterns), where decoupling client logic from server-side URL structure has real, measurable value over the API's multi-year lifetime.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is Minimal API syntax in ASP.NET Core, and how does it differ from controller-based Web API for building simple endpoints?**
+
+Minimal APIs let you define an HTTP endpoint directly in `Program.cs` as a lambda, without a controller class, action method, or attribute routing scaffolding — introduced in .NET 6 as a lighter-weight alternative for small services and simple endpoints.
+
+**Controller-based (traditional):**
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+public class ProductsController : ControllerBase
+{
+    [HttpGet("{id}")]
+    public IActionResult GetById(int id)
+    {
+        var product = _repository.GetById(id);
+        return product is null ? NotFound() : Ok(product);
+    }
+}
+```
+
+**Minimal API — the same endpoint, no controller class:**
+```csharp
+var app = builder.Build();
+
+app.MapGet("/api/products/{id}", (int id, IProductRepository repository) =>
+{
+    var product = repository.GetById(id);
+    return product is null ? Results.NotFound() : Results.Ok(product);
+});
+
+app.Run();
+```
+Dependencies (`IProductRepository`) are injected as lambda parameters directly, rather than through a constructor — ASP.NET Core's minimal API infrastructure resolves them from the DI container automatically based on parameter type.
+
+**When Minimal APIs fit well:** small microservices with few endpoints, simple CRUD APIs, or scenarios where the ceremony of a full controller class (attributes, base class, separate file) outweighs the benefit for that specific service's size. Minimal APIs also have a measurably smaller startup/memory footprint, relevant for high-density container deployments or serverless functions.
+
+**When controllers still make more sense:** APIs with many related endpoints benefiting from shared controller-level concerns (a common `[Authorize]` attribute, shared constructor-injected dependencies across many actions, model binding conventions), or teams who prefer the more structured, testable shape of a dedicated controller class per resource.
+
+**Common Pitfall:** cramming a large, many-endpoint API entirely into `Program.cs` as dozens of `app.MapGet`/`app.MapPost` lambdas — Minimal APIs support extracting groups of related endpoints into separate extension methods or files (`app.MapProductEndpoints()`), and skipping that organization as the endpoint count grows turns `Program.cs` into an unmaintainable wall of lambdas.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is the `[FromServices]` attribute, and how does it differ from constructor injection in a Web API controller?**
+
+Both retrieve a dependency from the DI container, but `[FromServices]` resolves it at the **action method parameter** level, for a single specific action, rather than for every action in the controller via the constructor.
+
+**Constructor injection — the dependency is available to every action:**
+```csharp
+public class OrdersController : ControllerBase
+{
+    private readonly IOrderService _orderService;
+    public OrdersController(IOrderService orderService) => _orderService = orderService;
+
+    [HttpGet]
+    public IActionResult GetAll() => Ok(_orderService.GetAll()); // available here
+    [HttpPost]
+    public IActionResult Create(Order order) => Ok(_orderService.Create(order)); // and here
+}
+```
+
+**`[FromServices]` — resolved only for the one action that declares it:**
+```csharp
+public class OrdersController : ControllerBase
+{
+    [HttpGet("{id}/audit-log")]
+    public IActionResult GetAuditLog(int id, [FromServices] IAuditLogService auditLog)
+    {
+        return Ok(auditLog.GetForOrder(id)); // only THIS action needs this dependency
+    }
+}
+```
+If `IAuditLogService` is only ever needed by this one rarely-used action, injecting it via the constructor would mean the controller's constructor pulls in and resolves that dependency on **every single request** to **any** action on this controller, even ones that never use it — `[FromServices]` scopes the resolution to only the specific action that actually needs it.
+
+**Common Pitfall:** using `[FromServices]` as a default habit for every dependency "to keep constructors clean" — for a dependency genuinely used across most/all actions in a controller, constructor injection is clearer (the class's dependencies are visible in one place) and avoids repeating `[FromServices]` on every method signature; `[FromServices]` earns its place specifically for dependencies used by only a minority of a controller's actions.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is Output Caching in ASP.NET Core (introduced in .NET 7), and how does it differ from Response Caching?**
+
+Both cache HTTP responses to avoid re-executing an endpoint's logic, but Output Caching stores the cached response **on the server** and can serve it directly without re-running the endpoint at all, whereas Response Caching (the `[ResponseCache]` attribute) primarily sets HTTP headers instructing the **client or an intermediary proxy/CDN** to cache the response — the server itself still has to run the endpoint at least once per client unless a shared cache in between happens to have it.
+
+**Output Caching — the server itself skips re-execution on a cache hit:**
+```csharp
+builder.Services.AddOutputCache(options =>
+{
+    options.AddPolicy("ProductCache", builder => builder.Expire(TimeSpan.FromSeconds(30)));
+});
+
+var app = builder.Build();
+app.UseOutputCache();
+
+app.MapGet("/api/products", (IProductRepository repo) => repo.GetAll())
+   .CacheOutput("ProductCache"); // the endpoint delegate itself is NOT invoked on a cache hit
+```
+On a cache hit, ASP.NET Core's Output Cache middleware returns the previously-generated response directly, without the `IProductRepository` call (or any of the endpoint's logic) running again at all — genuinely saving server-side compute, not just instructing clients to skip a round-trip.
+
+**Response Caching — sets headers, doesn't prevent server-side re-execution by itself:**
+```csharp
+[HttpGet]
+[ResponseCache(Duration = 30, Location = ResponseCacheLocation.Any)]
+public IActionResult GetAll() => Ok(_repository.GetAll()); // this STILL runs on every request
+                                                             // unless a client/CDN cache intercepts it first
+```
+This sets `Cache-Control: public, max-age=30` on the response, which client browsers or intermediary CDNs can honor to avoid even sending the request — but if no such intermediary is in play (a direct server-to-server call, or a client that ignores caching headers), the endpoint logic runs every single time.
+
+**Why Output Caching is often the more robust default for API scenarios:** it guarantees server-side savings regardless of what clients or intermediaries choose to honor, and supports cache invalidation via **tags** (`builder.Tag("products")`, then `outputCacheStore.EvictByTagAsync("products")` when data changes) — a capability Response Caching's header-only approach doesn't have at all, since there's no server-side cache to invalidate in the first place.
+
+**Common Pitfall:** applying Output Caching to endpoints returning user-specific or authenticated data without a proper **vary-by** configuration (`builder.SetVaryByHeader("Authorization")`) — without it, the first user's response could be served to every subsequent user hitting the same cached endpoint, a serious data-leakage bug rather than a performance win.
+
+---

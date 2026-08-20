@@ -274,3 +274,79 @@ In a case like this, the ~1.96 seconds is almost entirely **connection setup** (
 **The fix, once diagnosed:** for connection-setup-dominated latency specifically, options include enabling **connection reuse/keep-alive** so subsequent requests skip the handshake, moving to **HTTP/2 or HTTP/3** to reduce the number of round-trips needed, or serving from a **CDN edge node** physically closer to the mobile client to cut DNS/TCP/TLS round-trip time. None of these are things you'd discover by only looking at server-side application logs — they require reading the HTTP-level timing signals end-to-end.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the difference between HTTP `Cookies` and the `Authorization` header for carrying authentication credentials, and how does the browser treat each differently?**
+
+Both can carry an identity/session token on a request, but they differ fundamentally in *who* attaches them and *when* — a distinction with major implications for CSRF vulnerability and API design.
+
+**Cookies — attached automatically by the browser, on every matching request:**
+```http
+Set-Cookie: session=abc123; HttpOnly; Secure; SameSite=Strict
+```
+Once a server sets this cookie, the **browser itself** automatically includes `Cookie: session=abc123` on every subsequent request to that domain — including requests triggered by a form submission or `<img>` tag on a completely different, potentially malicious website. This automatic attachment is exactly why cookies are vulnerable to CSRF unless mitigated (anti-forgery tokens, `SameSite` attribute).
+
+**`Authorization` header — must be explicitly attached by client code:**
+```http
+GET /api/orders
+Authorization: Bearer eyJhbGci...
+```
+No browser mechanism attaches this automatically — JavaScript code must explicitly read a stored token and set this header on each request via `fetch`/`XMLHttpRequest`. A malicious third-party site's forged form submission has no way to make the victim's browser include an `Authorization` header it doesn't itself know the value of, since (unlike cookies) there's no ambient browser-managed storage that's leaked into every cross-origin request automatically.
+
+**Why this distinction drives API design choices:** a browser-based SPA calling its own API can use either, but the CSRF-exposure difference is why many API-first designs prefer bearer tokens in the `Authorization` header (explicit, JavaScript-controlled) over auth cookies for pure API traffic — while traditional server-rendered web apps often still use cookies specifically *because* the automatic browser attachment is convenient for that use case, accepting the CSRF-mitigation cost that comes with it.
+
+**Common Pitfall:** assuming a bearer token stored in `localStorage` and manually attached via `Authorization` is automatically safer than a cookie in every respect — it trades CSRF exposure for XSS exposure instead (a successful XSS attack can read `localStorage` and steal the token directly, whereas an `HttpOnly` cookie can't be read by any JavaScript at all, malicious or not). Neither option is unconditionally safer; each closes one attack vector while remaining open to a different one.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is HTTP/2 Server Push, and why has it been effectively deprecated by major browsers despite being part of the HTTP/2 spec?**
+
+Server Push let a server proactively send resources to a client *before* the client explicitly requested them — e.g., pushing a page's CSS and JS alongside the initial HTML response, anticipating that the browser would need them next anyway.
+
+**The intended mechanism:**
+```text
+Client: GET /index.html
+Server: sends index.html
+        PLUS proactively pushes style.css and app.js
+        (before the browser has even parsed index.html to discover it needs them)
+```
+The theoretical benefit: eliminating the round-trip of "browser parses HTML, discovers it needs `style.css`, then requests it" — the server just sends it preemptively, in parallel with the HTML itself.
+
+**Why it was deprecated in practice (Chrome removed support in 2022):**
+- **The browser often already has the resource cached** from a previous visit — Server Push has no reliable way to know this in advance, so it frequently pushed resources the browser discarded immediately because it already had a valid cached copy, wasting bandwidth.
+- **Pushed resources compete for the same limited connection bandwidth** as the critical HTML response itself — in practice, aggressively pushing extra resources could actually *slow down* delivery of the main HTML document the browser needed first, the opposite of the intended optimization.
+- **Cache-awareness coordination proved too complex to get right in practice** — proposals to let the browser tell the server "don't bother, I already have this cached" added enough complexity that browser vendors concluded the real-world benefit didn't justify maintaining the feature.
+
+**What replaced the underlying goal:** the `Link: </style.css>; rel=preload` HTTP header (or `<link rel="preload">` in HTML) achieves a similar "tell the browser about this resource early" goal, but as a **hint** the browser can act on using its own cache-awareness — rather than the server unilaterally pushing bytes the browser might not want.
+
+**Common Pitfall:** implementing or relying on HTTP/2 Server Push in new projects today, unaware that major browsers have already stopped honoring it — a server configured to push resources to a modern Chrome/Edge client simply has those push frames ignored, silently providing zero benefit while still consuming server-side complexity to configure.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is the difference between HTTP `Cache-Control: no-cache` and `Cache-Control: no-store`? These are two of the most commonly confused caching directives.**
+
+Despite the similar names, they express very different caching instructions — `no-cache` still permits caching (with a mandatory revalidation step), while `no-store` forbids caching entirely.
+
+**`no-cache` — cache it, but always revalidate with the origin before using the cached copy:**
+```http
+Cache-Control: no-cache
+ETag: "a1b2c3d4"
+```
+A cache (browser or CDN) **is allowed to store** this response, but it must send a conditional revalidation request (`If-None-Match: "a1b2c3d4"`) to the origin server before serving the cached copy on any subsequent request — the origin gets to confirm "yes, that cached copy is still valid" (returning `304 Not Modified`, cheaply) or "no, here's a fresh version" every single time, even though the actual response body might not need to be re-transmitted.
+
+**`no-store` — never persist this response anywhere, full stop:**
+```http
+Cache-Control: no-store
+```
+No cache, browser history mechanism, or intermediary is permitted to keep a copy of this response at all — not even for a revalidation check. This is the directive for genuinely sensitive responses (a page displaying a one-time payment confirmation with card details, a response containing an unencrypted secret) where even a *validated, confirmed-fresh* cached copy sitting on disk is an unacceptable risk.
+
+**The practical distinction in one line:** `no-cache` means "always check back before reusing," `no-store` means "there is nothing to reuse — don't keep a copy in the first place."
+
+**Common Pitfall:** using `no-cache` when the actual intent was `no-store` (a very common naming-confusion mistake, given `no-cache` sounds like it should mean "don't cache this") — a response containing genuinely sensitive data marked only `no-cache` can still end up written to a shared proxy's disk cache (pending revalidation), which may not meet the actual security requirement the developer intended.
+
+---

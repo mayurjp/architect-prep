@@ -318,3 +318,96 @@ public class DashboardController : Controller { }
 **Common Pitfall:** introducing Areas prematurely in a small-to-medium application "for organization." Areas add real friction — view lookup rules become more complex (`_ViewStart.cshtml` and `_Layout.cshtml` need per-area copies or explicit shared references), and route ambiguity between areas and default routes is a common source of confusing 404s. Simple folder organization within `/Controllers` and `/Views` (without Areas) is usually enough until an application genuinely has multiple, clearly distinct sub-applications.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What are Tag Helpers, and how does `asp-for` reduce boilerplate compared to writing raw HTML form inputs?**
+
+Tag Helpers let server-side C# logic participate in generating HTML, using attributes that look like ordinary HTML rather than embedded `@Html.XxxFor(...)` calls — `asp-for` specifically binds a form input to a model property, generating the right `name`, `id`, and current value automatically.
+
+**Without Tag Helpers — manually wiring up every attribute:**
+```html
+<input type="text" name="Email" id="Email" value="@Model.Email" />
+<span class="field-validation-error" data-valmsg-for="Email"></span>
+```
+
+**With `asp-for` — one attribute derives everything from the model:**
+```cshtml
+<input asp-for="Email" />
+<span asp-validation-for="Email" class="text-danger"></span>
+```
+`asp-for="Email"` inspects the bound model's `Email` property via reflection and automatically generates the correct `name="Email"`, `id="Email"`, the current `value` from `Model.Email`, and even the right `type` attribute (e.g., `type="email"` if the property is annotated `[EmailAddress]`, `type="date"` for a `DateTime`).
+
+**Why this matters beyond just typing less:** it ties the HTML directly to the actual C# model — if `Email` is renamed to `EmailAddress` in the model class, `asp-for="Email"` immediately fails to compile (Razor views are compiled), catching the mismatch at build time. The hand-written string version (`name="Email"`) would silently keep referencing the old name with no compiler error, only surfacing as a runtime bug when form submission stops binding correctly.
+
+**Common Pitfall:** manually hardcoding `name`/`id` attributes alongside `asp-for` "just to be safe" — this creates conflicting or duplicate attributes, since `asp-for` already generates them; let the tag helper own those specific attributes entirely.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is Custom Model Binding in ASP.NET Core MVC, and when do you need one instead of relying on the default binder?**
+
+The default model binder handles typical cases (primitives, simple DTOs, nested objects, collections) automatically by matching request data to constructor/property names — a custom `IModelBinder` is needed when the incoming data's shape doesn't map cleanly onto that convention-based process at all.
+
+**A case the default binder can't handle — a comma-separated string that should become a `List<int>`:**
+```text
+GET /api/products?ids=1,2,3
+```
+```csharp
+// Default binding of "ids=1,2,3" to List<int> ids DOESN'T work out of the box --
+// ASP.NET Core's default convention expects ids=1&ids=2&ids=3, not a single comma-separated value
+```
+
+**A custom `IModelBinder` filling that gap:**
+```csharp
+public class CommaSeparatedIntsBinder : IModelBinder
+{
+    public Task BindModelAsync(ModelBindingContext bindingContext)
+    {
+        var value = bindingContext.ValueProvider.GetValue(bindingContext.ModelName).FirstValue;
+        if (string.IsNullOrEmpty(value)) return Task.CompletedTask;
+
+        var ids = value.Split(',').Select(int.Parse).ToList();
+        bindingContext.Result = ModelBindingResult.Success(ids);
+        return Task.CompletedTask;
+    }
+}
+
+[HttpGet]
+public IActionResult GetProducts([ModelBinder(typeof(CommaSeparatedIntsBinder))] List<int> ids) { ... }
+```
+This binder intercepts the raw query string value, splits and parses it manually, and hands MVC the resulting `List<int>` — something the default convention-based binder has no built-in rule for.
+
+**Other genuine use cases:** binding a custom value object from multiple related query parameters (e.g., combining separate `lat`/`lng` query params into one `Coordinates` object), or binding from a non-standard request format a third-party client sends that doesn't match .NET's naming/structure conventions.
+
+**Common Pitfall:** reaching for a custom model binder to solve something better handled by a simple DTO plus a mapping step in the action method itself — custom binders add real complexity (registration, testing the binder in isolation) and are best reserved for genuinely repeated, cross-cutting binding logic, not one-off parameter shaping that a few lines in the action method would handle just as well.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is Response Compression in ASP.NET Core MVC, and what are the security considerations around enabling it for HTTPS responses?**
+
+Response Compression reduces the size of the HTTP response body (typically via gzip or Brotli) before sending it, cutting bandwidth and improving load time for text-heavy responses like HTML, JSON, and CSS — but compressing content served over HTTPS has a specific, well-known security trade-off worth understanding before enabling it broadly.
+
+**Enabling it:**
+```csharp
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true; // opt-in explicitly -- NOT the default, for reasons below
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+});
+
+var app = builder.Build();
+app.UseResponseCompression(); // must be registered early in the pipeline, before UseStaticFiles/MVC
+```
+
+**The security consideration — CRIME/BREACH-style attacks:** compressing a response whose body mixes **attacker-influenced content** with **secret data** (e.g., a reflected query parameter alongside a CSRF token or session identifier in the same compressed response) can let an attacker who can also observe the compressed response *size* deduce the secret byte-by-byte, because compression algorithms produce a smaller output when input contains repeated substrings — an attacker can guess characters of a secret, observe whether the compressed size shrinks (confirming a match with data elsewhere in the response), and iteratively extract the secret. This is exactly why `EnableForHttps` defaults to `false` rather than `true`.
+
+**When it's safe to enable:** responses that don't mix attacker-controlled reflected input with secrets in the same response body — a JSON API returning purely server-controlled data, or a public content page with no secret tokens embedded, are safe to compress. A page that reflects a search query back into HTML *and* also embeds a CSRF token in that same response is the risky combination.
+
+**Common Pitfall:** enabling `EnableForHttps = true` globally across an entire application "for performance" without auditing which responses actually mix reflected/attacker-influenced content with secrets — the safer default is enabling compression selectively for endpoints confirmed not to have this mixing, rather than a blanket application-wide toggle.
+
+---

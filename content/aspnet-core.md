@@ -398,3 +398,126 @@ app.Run();
 **Common Pitfall:** assuming the old `Startup.cs` model is deprecated/broken — it's still fully supported (`.UseStartup<Startup>()` still works in .NET 6+) for large existing codebases that don't want a risky rewrite; it's just no longer the default template for new projects.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is the difference between `app.Run()`, `app.Use()`, and `app.Map()` when building the middleware pipeline?**
+
+All three add something to the request pipeline, but they differ in whether they can call the next component and whether they branch based on the request path.
+
+**`app.Run()` — a terminal middleware, never calls anything after it:**
+```csharp
+app.Run(async context =>
+{
+    await context.Response.WriteAsync("Hello, World!");
+    // there is no "next" -- this is always the END of the pipeline for any request that reaches it
+});
+```
+
+**`app.Use()` — can inspect/modify the request, then optionally continue the pipeline:**
+```csharp
+app.Use(async (context, next) =>
+{
+    Console.WriteLine("Before");
+    await next(context); // continues to the next middleware
+    Console.WriteLine("After");
+});
+```
+
+**`app.Map()` — branches the pipeline entirely based on a path prefix:**
+```csharp
+app.Map("/admin", adminApp =>
+{
+    adminApp.Run(async context => await context.Response.WriteAsync("Admin area"));
+});
+// Requests to "/admin/*" go down this separate branch; everything else continues in the main pipeline
+```
+`Map` creates a genuinely separate sub-pipeline for matching requests — middleware registered inside the `Map` branch only runs for requests under that path, letting you compose entirely different middleware stacks for different sections of an application (e.g., a lightweight branch for health checks versus the full authentication/authorization stack for the rest of the app).
+
+**Common Pitfall:** placing `app.Run()` before other middleware that was meant to run for all requests — since `Run()` never calls `next()`, any middleware registered *after* it in the pipeline is simply unreachable dead code for every request, a subtle bug that's easy to introduce when reordering a `Program.cs` file.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is the `IStartupFilter` interface, and when do you need it instead of just adding middleware directly in `Program.cs`?**
+
+`IStartupFilter` lets a library or a modular piece of infrastructure inject middleware into the pipeline **without the application's `Program.cs` needing to explicitly call it** — useful when you're building a reusable component (a NuGet package, a shared internal library) that needs to guarantee its middleware runs at a specific point in the pipeline, regardless of what the consuming application's `Program.cs` does or doesn't do.
+
+**The Mechanism:**
+```csharp
+public class RequestLoggingStartupFilter : IStartupFilter
+{
+    public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
+    {
+        return app =>
+        {
+            app.UseMiddleware<RequestLoggingMiddleware>(); // inject BEFORE the app's own pipeline
+            next(app); // then let the application's own Program.cs pipeline run
+        };
+    }
+}
+
+// Registered by a library, typically inside its own AddXyz() extension method:
+public static IServiceCollection AddRequestLogging(this IServiceCollection services)
+{
+    services.AddTransient<IStartupFilter, RequestLoggingStartupFilter>();
+    return services;
+}
+```
+When an application calls `builder.Services.AddRequestLogging()`, the logging middleware gets wired into the pipeline automatically — the application's own `Program.cs` never has to remember to call `app.UseMiddleware<RequestLoggingMiddleware>()` itself, and multiple registered `IStartupFilter`s compose together correctly regardless of registration order nuances that manual `app.Use()` calls would require getting right by hand.
+
+**When you actually need this versus just adding middleware directly:** if you're building the application itself, just call `app.UseMiddleware<T>()` directly in `Program.cs` — it's simpler and more explicit. `IStartupFilter` earns its complexity specifically when you're authoring a **reusable library** that needs to guarantee its middleware is present in the pipeline of *any* application that references it, without depending on that application's author remembering to wire it up manually.
+
+**Common Pitfall:** reaching for `IStartupFilter` inside application code (not a shared library) to "make pipeline setup more modular" — for a single application, this indirection makes the actual middleware order harder to see at a glance in `Program.cs`, trading clarity for a flexibility benefit that only really pays off when multiple independent consumers need the same guarantee.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is the ASP.NET Core `IHttpClientFactory`'s "typed client" pattern, and how does it differ from a "named client"?**
+
+Both are ways of configuring `HttpClient` instances through `IHttpClientFactory` (avoiding the socket-exhaustion problem of manually `new HttpClient()`-ing), but they differ in how strongly the configuration is tied to a specific consumer.
+
+**Named client — configuration keyed by a string:**
+```csharp
+builder.Services.AddHttpClient("GitHubApi", client =>
+{
+    client.BaseAddress = new Uri("https://api.github.com");
+    client.DefaultRequestHeaders.Add("Accept", "application/vnd.github.v3+json");
+});
+
+// Consumed via IHttpClientFactory directly, by matching the string name
+public class GitHubService
+{
+    private readonly HttpClient _client;
+    public GitHubService(IHttpClientFactory factory) => _client = factory.CreateClient("GitHubApi");
+}
+```
+The string `"GitHubApi"` is the only link between the configuration and where it's used — a typo in the string at the call site compiles fine and fails only at runtime.
+
+**Typed client — configuration bound directly to a specific class:**
+```csharp
+public class GitHubApiClient
+{
+    private readonly HttpClient _client;
+    public GitHubApiClient(HttpClient client) => _client = client; // HttpClient injected directly
+
+    public Task<Repo> GetRepoAsync(string name) => _client.GetFromJsonAsync<Repo>($"/repos/{name}");
+}
+
+builder.Services.AddHttpClient<GitHubApiClient>(client =>
+{
+    client.BaseAddress = new Uri("https://api.github.com");
+});
+
+// Consumed via ordinary constructor injection -- no string lookup, no factory call at the call site
+public class SomeController(GitHubApiClient gitHub) { ... }
+```
+The configuration is directly associated with the `GitHubApiClient` type itself — there's no string to typo, and the compiler enforces that anyone wanting this specific configured client requests the `GitHubApiClient` type via DI, exactly like any other injected dependency.
+
+**Why typed clients are generally preferred:** they read like ordinary dependency injection (no magic strings), the HTTP-specific logic (building request URLs, parsing responses) is naturally encapsulated inside the typed client class rather than scattered at every call site that resolves a named `HttpClient`, and refactoring/renaming is compiler-checked instead of relying on string matches.
+
+**Common Pitfall:** using named clients purely out of habit from older tutorials when there's a clear 1:1 owning class for that HTTP configuration — typed clients cost nothing extra to set up and remove an entire class of stringly-typed runtime bugs that named clients are exposed to.
+
+---
