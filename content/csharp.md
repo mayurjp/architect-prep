@@ -649,3 +649,108 @@ At compile time, a Roslyn source generator (the same underlying mechanism covere
 **Common Pitfall:** assuming `[GeneratedRegex]` is purely a Native AOT compatibility shim with no benefit otherwise — even in a normal (non-AOT) application, it also eliminates the first-use JIT-compilation delay `RegexOptions.Compiled` incurs, and produces a debuggable, steppable, ordinary C# method (visible in a debugger call stack) rather than an opaque runtime-generated one, both of which are genuine benefits independent of AOT considerations at all.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is the difference between an Implicitly Typed variable (`var`) and Dynamic Typing (`dynamic`), and why does `var` provide zero runtime flexibility despite looking similar to `dynamic` at a glance?**
+
+Both let you write a declaration without spelling out the type explicitly, which makes them easy to confuse — but `var` is resolved to a concrete, fixed type entirely at **compile time**, while `dynamic` genuinely defers type resolution to **runtime**, with fundamentally different capabilities and risks.
+
+**`var` — the compiler infers ONE specific, fixed type at compile time, then treats it exactly like that type forever:**
+```csharp
+var name = "Alice"; // the COMPILER infers this is 'string' -- permanently, from this point on
+name = 42; // COMPILE ERROR -- 'name' is fixed as 'string' by the compiler, just like `string name = "Alice";`
+```
+`var` is purely a compile-time convenience — `var name = "Alice";` is 100% equivalent to `string name = "Alice";` after compilation; there is no runtime flexibility gained at all, and the compiler catches exactly the same type errors it would for an explicitly-typed variable.
+
+**`dynamic` — genuinely defers ALL type checking to runtime, allowing the SAME variable to hold different types over time:**
+```csharp
+dynamic value = "Alice";
+value = 42; // COMPILES FINE -- dynamic genuinely allows reassigning to a completely different type
+value.SomeMethodThatDoesntExist(); // COMPILES FINE TOO -- fails only at RUNTIME with a RuntimeBinderException
+```
+The compiler performs essentially no type checking on `dynamic` operations at all — even calling a method that doesn't exist on the current value compiles successfully, only failing when that line actually executes; this is fundamentally different from `var`'s "still fully type-checked, just with inferred syntax" behavior.
+
+**Why conflating the two is a common, meaningful misunderstanding:** a developer might assume `var` provides some of the same flexibility `dynamic` does (since neither explicitly names a type in the declaration) — in reality, `var` provides zero additional runtime flexibility and zero additional risk compared to explicit typing; it's purely a syntactic convenience for the compiler to infer an otherwise ordinary, fully-checked static type.
+
+**Common Pitfall:** assuming `var` is somehow "less type-safe" than explicit typing, avoiding it out of caution — since `var` is resolved to the exact same concrete type the compiler would have inferred from context regardless, it provides identical compile-time safety to writing the type explicitly; the actual type-safety trade-off only applies to genuinely dynamic typing (`dynamic`, or object-based reflection), not to `var`'s purely syntactic type inference.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is the difference between Explicit and Implicit user-defined Conversion Operators in C#, and why does the language allow the compiler to insert implicit conversions automatically only when they're guaranteed never to lose data or throw?**
+
+C# lets a class/struct define its own custom conversions to/from other types — but the language draws a hard line on which conversions the compiler is allowed to insert *automatically* (implicit) versus which ones require the developer to explicitly request them (explicit) via a cast.
+
+**An implicit conversion — the compiler inserts it automatically, without any cast syntax, because it's guaranteed safe:**
+```csharp
+public struct Meters
+{
+    public double Value { get; }
+    public Meters(double value) => Value = value;
+
+    public static implicit operator Meters(double value) => new Meters(value); // double -> Meters, no data loss possible
+}
+
+Meters distance = 5.0; // the compiler AUTOMATICALLY converts the double 5.0 into a Meters, no cast needed
+```
+Implicit conversions should only ever be defined when the conversion can **never** fail or lose meaningful information — converting a plain `double` into a `Meters` wrapper loses nothing and can't throw, making it safe for the compiler to insert silently, anywhere a `Meters` is expected but a `double` was provided.
+
+**An explicit conversion — REQUIRES an explicit cast, because the conversion could lose data or fail:**
+```csharp
+public struct Meters
+{
+    public double Value { get; }
+    public static explicit operator double(Meters m) => m.Value; // Meters -> double
+
+    public static explicit operator Feet(Meters m) => new Feet(m.Value * 3.281); // a UNIT conversion --
+                                                                                    // arguably "lossy" in
+                                                                                    // the sense of changing
+                                                                                    // meaning/precision
+}
+
+double raw = (double)distance; // requires an EXPLICIT cast -- the developer must deliberately opt in
+```
+Marking a conversion `explicit` forces the developer to write a visible cast at every use site — a deliberate signal that "something potentially meaningful is happening here" (a unit conversion, a possible precision loss, a semantic change), rather than letting it happen silently and invisibly wherever the compiler finds it convenient.
+
+**Why this distinction matters for API design, not just a technical rule:** defining a conversion as `implicit` when it actually risks data loss or throws under some inputs would let the compiler silently insert a potentially-dangerous conversion anywhere in calling code, without the developer ever writing anything indicating a conversion is even happening — exactly the kind of invisible, surprising behavior the Principle of Least Astonishment (covered earlier) warns against.
+
+**Common Pitfall:** defining a custom conversion as `implicit` for developer convenience ("I don't want to force everyone to write a cast") without verifying the conversion is genuinely lossless and can never throw for any valid input — an implicit conversion that occasionally throws or silently loses precision creates exactly the invisible-surprise problem explicit conversions are specifically designed to prevent, since callers have no visual cue in their own code that a conversion (and its associated risk) is even occurring.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is a C# `partial` class/method, and how does it let source generators (covered earlier for `[GeneratedRegex]` and general source generation) add generated code to a type WITHOUT the developer's own hand-written file needing to reference the generated code directly?**
+
+`partial` lets a single class (or a specific method's implementation) be split across multiple files — the compiler merges all `partial` pieces together into one type at compile time, as if they'd been written in a single file all along. This is precisely the mechanism that lets source generators (covered earlier) contribute generated code to a type the developer also hand-writes code for, without either side needing to explicitly reference the other's file.
+
+**The developer's own hand-written file — declares the type as `partial`, and a method SIGNATURE without a body:**
+```csharp
+// Validator.cs (hand-written by the developer)
+public partial class Validator
+{
+    [GeneratedRegex(@"^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$")]
+    private static partial Regex EmailRegex(); // NO BODY here -- just the signature, marked 'partial'
+}
+```
+
+**The source generator's OWN, separately-generated file — provides the ACTUAL implementation, in a completely different file the developer never wrote or even sees directly:**
+```csharp
+// Validator.g.cs (GENERATED automatically by the Roslyn source generator, at build time)
+partial class Validator
+{
+    private static partial Regex EmailRegex() // the SAME partial method, now given its actual body
+    {
+        return GeneratedRegexImplementation.Instance; // the generated, efficient matching logic
+    }
+}
+```
+Because both pieces declare the *same* `partial class Validator` (and the *same* `partial` method signature), the compiler merges them into one single, complete type at compile time — the developer's file and the generator's file never need to reference each other's contents directly; they simply need to agree on the same type name and the same partial method signature, and the compiler does the actual stitching-together.
+
+**Why this specific mechanism (rather than, say, the generator producing a completely separate helper class) matters:** it lets generated code feel like a completely natural, first-class part of the developer's own type — calling `EmailRegex()` from within `Validator`'s own hand-written methods looks and behaves exactly like calling any other method on the same class, with no visible seam indicating part of the class's implementation actually lives in a separate, generated file; this is what makes source-generator-based features (`[GeneratedRegex]`, source-generated JSON serialization, and similar) feel like natural language/framework features rather than an obviously bolted-on code-generation step.
+
+**Common Pitfall:** forgetting to mark the CONTAINING class itself as `partial` (only marking the specific method as `partial`) — the compiler requires every piece of a type that's being split across files to consistently declare the class itself as `partial` too; a class not marked `partial` cannot have a source generator (or any other file) contribute additional members to it at all, resulting in a compile error the first time a source generator attempts to add its own generated partial method implementation.
+
+---

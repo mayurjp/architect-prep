@@ -807,3 +807,123 @@ public class UndoHistory
 **Common Pitfall:** implementing a "Memento" that's really just a public DTO exposing every field of the originator's state openly — this technically achieves undo functionality, but abandons the pattern's actual defining benefit (preserving encapsulation) by making the snapshot's internals just as exposed as if there were no Memento pattern involved at all; a Memento's contents should be opaque to everything except the Originator that created it.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: Explain the Builder pattern's "Fluent Interface" style, and how method chaining (each method returning `this`) is what makes a Builder's call syntax read naturally, almost like a sentence.**
+
+Covered earlier at a conceptual level (the Builder pattern solving the "telescoping constructor" problem) — the specific mechanism making a Builder's usage read fluently is each configuration method returning the builder instance itself (`this`), letting calls chain directly onto one another without needing a new local variable or statement for each step.
+
+**Without method chaining — each configuration step is its own separate statement:**
+```csharp
+var builder = new ComputerBuilder();
+builder.SetCPU("Intel Core i9");
+builder.SetRAM(32);
+builder.SetGPU("NVIDIA RTX 4090");
+var myPc = builder.Build();
+```
+This works, but reads as a disconnected sequence of separate instructions, each needing its own line and the repeated `builder.` prefix.
+
+**With method chaining (a Fluent Interface) — each method returns `this`, enabling direct chaining:**
+```csharp
+public class ComputerBuilder
+{
+    private Computer _computer = new();
+    public ComputerBuilder SetCPU(string cpu) { _computer.CPU = cpu; return this; } // returns ITSELF
+    public ComputerBuilder SetRAM(int gb) { _computer.RAM = gb; return this; }       // returns ITSELF
+    public ComputerBuilder SetGPU(string gpu) { _computer.GPU = gpu; return this; }  // returns ITSELF
+    public Computer Build() => _computer;
+}
+
+var myPc = new ComputerBuilder()
+    .SetCPU("Intel Core i9")
+    .SetRAM(32)
+    .SetGPU("NVIDIA RTX 4090")
+    .Build(); // ONE continuous expression, reading almost like a natural-language sentence
+```
+Because `SetCPU` returns the same builder instance it was called on (`this`), the very next method (`SetRAM`) can be called directly on that returned value, chaining indefinitely — this is purely a syntactic/readability technique layered on top of the Builder pattern, not a separate pattern in its own right, but it's specifically what gives Builder-style APIs (and similarly, LINQ's own `.Where().OrderBy().Select()` chains) their characteristic, readable "sentence-like" call syntax.
+
+**Common Pitfall:** forgetting to `return this` from a configuration method meant to participate in a fluent chain — without it, the method returns `void`, immediately breaking the chain at that specific call (the next method call in the chain would fail to compile, since there'd be nothing to call it on), forcing the fluent API's usage back into separate, disconnected statements exactly like the non-chained example above.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: Explain the Decorator pattern's ability to STACK multiple decorators in any order, and how the specific ORDER they're applied in can change the resulting behavior — something a single, monolithic class couldn't express at all.**
+
+Covered earlier for a single decorator (SMS notification wrapping an Email notifier) — the pattern's real flexibility becomes visible once you stack **multiple** decorators together, where the specific order of wrapping directly determines the resulting behavior, something impossible to express with a single, fixed inheritance hierarchy.
+
+**Stacking multiple decorators — order genuinely matters:**
+```csharp
+public interface IDataSource { string Read(); void Write(string data); }
+
+public class FileDataSource : IDataSource { /* reads/writes a raw file */ }
+
+public class CompressionDecorator : IDataSource
+{
+    private readonly IDataSource _wrapped;
+    public CompressionDecorator(IDataSource wrapped) => _wrapped = wrapped;
+    public void Write(string data) => _wrapped.Write(Compress(data));
+    public string Read() => Decompress(_wrapped.Read());
+}
+
+public class EncryptionDecorator : IDataSource
+{
+    private readonly IDataSource _wrapped;
+    public EncryptionDecorator(IDataSource wrapped) => _wrapped = wrapped;
+    public void Write(string data) => _wrapped.Write(Encrypt(data));
+    public string Read() => Decrypt(_wrapped.Read());
+}
+
+// Order A: Compress THEN Encrypt (compress first, encrypt the ALREADY-compressed bytes)
+var sourceA = new EncryptionDecorator(new CompressionDecorator(new FileDataSource()));
+
+// Order B: Encrypt THEN Compress (encrypt first, then attempt to compress the ALREADY-encrypted bytes)
+var sourceB = new CompressionDecorator(new EncryptionDecorator(new FileDataSource()));
+```
+These two produce genuinely **different** results — compressing plaintext first (Order A) typically achieves meaningfully better compression than trying to compress already-encrypted data (Order B), since encryption deliberately produces high-entropy, effectively-random-looking output that compression algorithms can't meaningfully shrink; the exact same two decorators, just stacked in a different order, produce a real, practically-significant behavioral difference.
+
+**Why this specific composability is something a fixed inheritance hierarchy fundamentally cannot express:** with inheritance alone, you'd need separate, hardcoded classes for every combination (`CompressedThenEncryptedFileSource`, `EncryptedThenCompressedFileSource`, and so on) — an inheritance hierarchy has no natural way to express "apply these behaviors in THIS specific runtime-chosen order," whereas decorators, being ordinary objects wrapping other objects at runtime, can be composed and reordered dynamically, with the order itself becoming a meaningful, deliberate design choice rather than something baked permanently into a class name.
+
+**Common Pitfall:** stacking decorators without considering whether their specific order actually matters for the behaviors involved — as the compression/encryption example shows, decorator order isn't always interchangeable; assuming decorators can be freely reordered without behavioral consequence, without actually verifying whether the specific decorators involved are order-sensitive, can introduce a subtle correctness or performance regression that's easy to overlook since both orderings compile and run without error.
+
+---
+
+## Advanced — Question 6
+
+**Q6: Explain the Interpreter pattern, and why it's one of the LEAST commonly hand-implemented GoF patterns in typical application code despite being foundational to how many tools (regex engines, expression evaluators) work internally.**
+
+The Interpreter pattern defines a way to represent a language's grammar as a class hierarchy, where each class knows how to "interpret" (evaluate) its own specific piece of that grammar — genuinely useful for building small, specialized languages or expression evaluators, but rarely something application developers hand-roll themselves, since mature tools (regex engines, expression libraries, scripting engines) already implement this pattern internally.
+
+**A minimal Interpreter for a simple arithmetic expression language:**
+```csharp
+public interface IExpression { int Evaluate(); }
+
+public class NumberExpression : IExpression
+{
+    private readonly int _value;
+    public NumberExpression(int value) => _value = value;
+    public int Evaluate() => _value;
+}
+
+public class AddExpression : IExpression
+{
+    private readonly IExpression _left, _right;
+    public AddExpression(IExpression left, IExpression right) { _left = left; _right = right; }
+    public int Evaluate() => _left.Evaluate() + _right.Evaluate();
+}
+
+// Representing the expression "(2 + 3) + 4" as a TREE of Expression objects
+var expression = new AddExpression(new AddExpression(new NumberExpression(2), new NumberExpression(3)),
+                                     new NumberExpression(4));
+Console.WriteLine(expression.Evaluate()); // 9 -- evaluates the tree RECURSIVELY
+```
+Each class represents one specific grammar rule (`NumberExpression` for a literal number, `AddExpression` for an addition operation) — evaluating the overall expression means recursively calling `Evaluate()` down through the tree, with each node responsible for interpreting only its own specific piece of the grammar.
+
+**Why application developers rarely hand-implement this pattern themselves:** building a genuinely robust expression language (with parsing, operator precedence, error handling) is substantial, specialized work — for the vast majority of real-world "I need to evaluate a dynamic expression" needs, reaching for an existing, mature tool (a regex engine for pattern matching, `System.Linq.Dynamic` or a scripting library like NCalc for expression evaluation, or genuinely embedding a scripting language like Lua) is almost always the more practical choice than hand-rolling a custom Interpreter pattern implementation from scratch.
+
+**Where recognizing this pattern's presence in EXISTING tools still matters, even without hand-implementing it:** understanding that a regex engine, a SQL query parser, or an expression-evaluation library is *internally* built using something structurally similar to the Interpreter pattern helps explain their performance characteristics and extension points (why some regex engines let you compose custom pattern classes, for instance) — the value here is often in recognizing the pattern in tools you already use, rather than in writing a new one yourself.
+
+**Common Pitfall:** hand-implementing a custom Interpreter-pattern-based expression language for a need that an existing, mature library (or even just `System.Linq.Expressions` and the C# language's own operators) would handle more robustly, with far less code and far fewer edge-case bugs — the Interpreter pattern is valuable to *understand*, but reaching for a battle-tested existing tool is almost always the pragmatic choice over hand-rolling a new grammar/evaluator from scratch for anything beyond a genuinely tiny, narrowly-scoped need.
+
+---

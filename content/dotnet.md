@@ -675,3 +675,99 @@ Under memory pressure, the GC can reclaim cached entries this dictionary referen
 **Common Pitfall:** using `WeakReference<T>` for objects that are cheap to recreate, or for correctness-critical data that must never unexpectedly disappear — since the GC can reclaim a weakly-referenced object at essentially any time (including moments after it was created, under sufficient memory pressure), `WeakReference<T>` is only appropriate for genuinely optional, recomputable, cache-like data, never for anything the application actually depends on remaining available.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is the difference between the .NET SDK and the .NET Runtime, and why does a production server typically only need the Runtime installed, never the full SDK?**
+
+The .NET SDK includes everything needed to **build** .NET applications (the compiler, project templates, the `dotnet build`/`dotnet publish` tooling) — the Runtime includes only what's needed to **run** an already-built application. Installing the wrong one (or both, unnecessarily) on a production server is a common source of confusion and unnecessarily bloated deployments.
+
+**The SDK — everything needed to WRITE and BUILD applications:**
+```bash
+dotnet --version        # requires the SDK
+dotnet new webapi        # requires the SDK -- project templates
+dotnet build              # requires the SDK -- the actual C# compiler (Roslyn)
+dotnet publish            # requires the SDK
+```
+A developer's own machine, and a CI build server, both genuinely need the full SDK — they're the ones actually compiling source code into runnable output.
+
+**The Runtime alone — just enough to EXECUTE an already-compiled application:**
+```bash
+dotnet MyAlreadyBuiltApp.dll   # only requires the RUNTIME -- no compiler, no build tooling needed at all
+```
+A production server is typically only ever handed an *already-compiled* application (the output of a CI pipeline's `dotnet publish` step) — it never needs to compile anything itself, meaning installing the full SDK there is pure unnecessary overhead: more disk space, a larger attack surface (an entire compiler toolchain sitting on a production server it will never actually use), and slower container image builds if containerized.
+
+**The practical Docker/deployment implication (echoing the earlier multi-stage build discussion):** this is exactly why multi-stage Dockerfiles (covered earlier) use the heavier `sdk` base image only for the **build stage**, then switch to the much lighter `aspnet` (Runtime-only) base image for the actual **runtime stage** — the final production image never needs or includes the SDK at all, precisely because the compiled output it's running doesn't need a compiler present to execute.
+
+**Common Pitfall:** installing the full .NET SDK on a production server "just to be safe" or out of habit, when only the Runtime is ever actually needed to run an already-built application — this needlessly increases the server's disk footprint and security-relevant attack surface (an unused compiler toolchain is still something that could theoretically be exploited) for zero functional benefit, since production servers running pre-built applications never invoke `dotnet build` at all.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the .NET `PeriodicTimer`, and how does it differ from the older `System.Timers.Timer`/`System.Threading.Timer` in providing a genuinely `async`-friendly way to run recurring work without callback-based, potentially-overlapping executions?**
+
+Older .NET timers (`System.Timers.Timer`, `System.Threading.Timer`) invoke a **callback** on a timer thread at each interval — if the callback's work takes longer than the interval itself, or if the callback is asynchronous, these older APIs have well-known pitfalls around overlapping executions and awkward `async void` callback signatures. `PeriodicTimer` (introduced in .NET 6) provides a clean, modern `await`-based alternative specifically designed to avoid these issues.
+
+**The older, callback-based approach — awkward for async work, risks overlapping executions:**
+```csharp
+var timer = new System.Timers.Timer(1000);
+timer.Elapsed += async (sender, e) =>
+{
+    await ProcessBatchAsync(); // an ASYNC VOID-style callback -- exceptions are hard to observe,
+                                 // and if ProcessBatchAsync() takes LONGER than 1 second,
+                                 // the NEXT Elapsed event can fire while the previous one is STILL RUNNING
+};
+timer.Start();
+```
+Because the timer keeps firing on its own schedule regardless of whether the previous callback finished, a slow callback can end up with **multiple overlapping executions** running concurrently — a subtle, easy-to-miss correctness risk if the callback isn't specifically written to tolerate concurrent execution of itself.
+
+**`PeriodicTimer` — a clean `await`-based loop, naturally sequential, no overlap risk:**
+```csharp
+using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+
+while (await timer.WaitForNextTickAsync(stoppingToken))
+{
+    await ProcessBatchAsync(); // genuinely AWAITED -- the NEXT tick simply doesn't happen
+                                 // until THIS iteration of the loop reaches WaitForNextTickAsync() again
+}
+```
+Because this is an ordinary `while` loop `await`-ing each tick, the next iteration's `WaitForNextTickAsync()` call simply doesn't happen until the current iteration's `ProcessBatchAsync()` has genuinely finished — there's no possibility of overlapping executions at all, since the loop is naturally, structurally sequential, exactly the same way any other `await`-based code is.
+
+**Why this fits naturally inside a `BackgroundService` (covered earlier):** `PeriodicTimer`'s `await`-based API composes cleanly with `BackgroundService.ExecuteAsync`'s own `async` signature and `CancellationToken`-based graceful shutdown (also covered earlier) — `WaitForNextTickAsync(stoppingToken)` naturally stops looping once the token is cancelled, without needing separate timer-disposal logic the older callback-based timers required.
+
+**Common Pitfall:** continuing to use `System.Timers.Timer` with an `async void`-style `Elapsed` handler for genuinely asynchronous recurring work, unaware of the overlapping-execution risk if the async work occasionally takes longer than the timer interval — `PeriodicTimer`'s naturally sequential `await`-loop structure eliminates this entire class of bug simply by how it's shaped, rather than requiring the developer to manually implement re-entrancy guards around a callback-based timer.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is a .NET `FrozenDictionary`/`FrozenSet` (introduced in .NET 8), and how does its higher construction cost but faster lookup performance make it specifically suited for read-only, build-once-use-many-times lookup data?**
+
+`FrozenDictionary<TKey, TValue>` and `FrozenSet<T>` are immutable collection types specifically optimized for the scenario where a lookup structure is built **once** and then read from **many, many times** afterward — trading meaningfully higher one-time construction cost for meaningfully faster per-lookup performance than an ordinary `Dictionary<TKey, TValue>` provides.
+
+**An ordinary `Dictionary<TKey, TValue>` — fast to build, reasonably fast lookups, optimized for a MUTABLE, general-purpose use case:**
+```csharp
+var lookup = new Dictionary<string, int>();
+lookup["apple"] = 1; lookup["banana"] = 2; // cheap to build, cheap to keep MODIFYING over time
+var value = lookup["apple"]; // reasonably fast lookup, but not maximally optimized for READ-ONLY use
+```
+
+**A `FrozenDictionary` — expensive to build ONCE, but noticeably faster lookups thereafter, for data that NEVER changes again:**
+```csharp
+private static readonly FrozenDictionary<string, int> _statusCodes =
+    new Dictionary<string, int> { ["Pending"] = 1, ["Shipped"] = 2, ["Delivered"] = 3 }
+    .ToFrozenDictionary(); // MORE EXPENSIVE to construct than a regular Dictionary --
+                             // analyzes the actual key set to build a specially-optimized lookup structure
+
+var value = _statusCodes["Pending"]; // FASTER lookup than an equivalent regular Dictionary,
+                                       // because the frozen structure was specifically optimized
+                                       // for THIS EXACT, now-immutable set of keys
+```
+The extra construction cost comes from `FrozenDictionary` analyzing the specific set of keys being frozen and building a lookup structure specifically tailored to that exact key set (sometimes including techniques like perfect hashing, when applicable) — an optimization that would be wasted effort (and actively counterproductive) for a `Dictionary` that's expected to have keys added/removed frequently, since any such change to a regular dictionary is cheap, while re-optimizing a `FrozenDictionary` for a changed key set would require rebuilding it entirely from scratch.
+
+**Why this fits a very specific, narrow use case rather than being a general-purpose `Dictionary` replacement:** the trade-off (much higher one-time build cost, in exchange for faster repeated lookups) only pays off when a lookup structure is built **once** — typically at application startup, or as a `static readonly` field, per the example above — and then read from an enormous number of times over the application's lifetime, such that the one-time construction cost is amortized across far more lookups than a regular `Dictionary` would ever perform against the same, unchanging data; for data that's built once and read only a handful of times, or data that genuinely changes frequently, a regular `Dictionary` remains the more appropriate, less wasteful choice.
+
+**Common Pitfall:** using `FrozenDictionary` for data that's actually rebuilt or modified frequently (misunderstanding it as simply "a faster Dictionary" rather than specifically "an immutable, build-once structure optimized for many subsequent reads") — rebuilding a `FrozenDictionary` from scratch every time its underlying data changes pays the (higher) construction cost repeatedly, potentially making it *slower* overall than simply using a regular, mutable `Dictionary` would have been for data that doesn't actually stay static long enough to amortize the frozen structure's upfront cost.
+
+---

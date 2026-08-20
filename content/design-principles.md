@@ -659,3 +659,121 @@ This code is tightly coupled not just to `Customer`, but to the specific fact th
 **Common Pitfall:** treating each named principle (SRP, DIP, ISP, Law of Demeter, ...) as an independent rule to check off a list, without recognizing they're all pointing toward the same underlying "low coupling, high cohesion" goal — understanding the unifying goal makes it easier to judge *novel* situations these specific named principles don't directly address, by asking the more fundamental question directly: "does this design increase or decrease coupling/cohesion?"
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is "Fail Fast" as a design principle, and how does detecting and reporting an error at the EARLIEST possible point differ from — and generally beat — letting a bad value silently propagate deeper into a system before finally causing a visible failure?**
+
+Fail Fast says a system should detect an invalid state and raise an error **immediately**, at the point where the problem first becomes detectable — rather than allowing invalid data to silently continue flowing through the system, only surfacing as a confusing failure much later, often far away from the actual root cause.
+
+**Without Fail Fast — an invalid value silently propagates, failing much later in a confusing, disconnected way:**
+```csharp
+public void ProcessOrder(Order order)
+{
+    var discount = CalculateDiscount(order); // order.CustomerId happens to be 0 (invalid) -- NOT checked here
+    SaveToDatabase(order, discount); // fails HERE instead, with a cryptic foreign-key constraint violation,
+                                       // FAR from where the actually-invalid CustomerId originated
+}
+```
+The actual root cause (an invalid `CustomerId`) might have originated several method calls, files, or even services earlier — but the visible failure occurs deep inside a database call, with an error message (a generic foreign-key violation) that gives no direct indication of where the bad data actually came from, forcing a much harder debugging investigation to trace backward to the real source.
+
+**With Fail Fast — the invalid value is rejected at the EARLIEST point it could be detected:**
+```csharp
+public void ProcessOrder(Order order)
+{
+    if (order.CustomerId <= 0)
+        throw new ArgumentException($"Invalid CustomerId: {order.CustomerId}", nameof(order));
+        // FAILS IMMEDIATELY, at the entry point, with a message pointing DIRECTLY at the actual problem
+
+    var discount = CalculateDiscount(order);
+    SaveToDatabase(order, discount);
+}
+```
+The error now surfaces at the exact point the invalid data was first available to check, with a message that directly names the actual problem — dramatically shortening the distance between "something's wrong" and "here's exactly what and where," compared to letting the same bad value travel deep into the system before finally causing a much more confusing, disconnected failure.
+
+**Why this connects directly to `ArgumentNullException`/parameter-validation conventions covered implicitly throughout .NET's own API design:** .NET's own BCL conventions (validating constructor/method parameters immediately and throwing descriptive exceptions, rather than letting a `null` silently propagate until it causes a `NullReferenceException` several calls later) are a direct, consistent application of Fail Fast — the entire ecosystem's convention of "check your inputs immediately, throw a specific, descriptive exception" exists precisely because of this principle's debugging-cost benefit.
+
+**Common Pitfall:** adding defensive checks deep inside a call chain (validating data right before it's actually used, several layers removed from where it originated) rather than at the system's actual entry points (a controller action, a public API method) — this technically still catches the problem eventually, but sacrifices Fail Fast's core benefit of pointing directly at the *original* source of bad data, rather than wherever in the call chain someone happened to add a check.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is the "Boy Scout Rule" ("leave the code cleaner than you found it"), and how does it provide an incremental alternative to a large, dedicated refactoring effort for improving a codebase's quality over time?**
+
+The Boy Scout Rule says: whenever you touch a piece of code for any reason (adding a feature, fixing a bug), leave it slightly cleaner than you found it — a small, opportunistic improvement made as a natural side effect of work you were already doing, rather than requiring a separate, large, dedicated "refactoring sprint" that's often hard to get prioritized or funded.
+
+**Without the Boy Scout Rule — code quality only improves via large, deliberately-scheduled refactoring efforts:**
+```text
+Team backlog: "Refactor the OrderService class" -- a large, standalone task competing directly
+against new feature work for prioritization, often deprioritized indefinitely since it
+delivers no immediately visible business value on its own
+```
+Large, dedicated refactoring efforts are valuable but notoriously hard to get prioritized against feature work with obvious, immediate business value — a task that's "just cleanup" competes poorly against a task that visibly moves a product forward, and can remain permanently deprioritized.
+
+**With the Boy Scout Rule — small improvements happen continuously, as an incidental part of other work:**
+```csharp
+// A developer is asked to fix a bug in this method. While there, they ALSO notice
+// (and fix) a poorly-named variable and an outdated comment, at essentially zero
+// additional cost since they're already reading and touching this exact code
+public decimal CalcDisc(Order o, decimal r) // <- poorly named, noticed while fixing the actual bug
+{
+    // old comment: "TODO: fix rounding bug" (the bug being fixed RIGHT NOW)
+    ...
+}
+// After: renamed to CalculateDiscount(Order order, decimal rate), stale comment removed --
+// a small, essentially FREE improvement, made as a side effect of work already being done
+```
+Because the developer is already deeply engaged with reading and understanding this specific piece of code (to fix the actual bug), making a small, incidental cleanup alongside it costs almost nothing extra — accumulated consistently across a team over time, this produces meaningful overall quality improvement without ever needing a dedicated "refactoring" line item competing against feature work.
+
+**Why this specifically works as an alternative (not just a supplement) to large refactoring efforts:** it converts code-quality improvement from a discrete, hard-to-prioritize *project* into a continuous, essentially free *habit* woven into all other work — the accumulated effect over months of a whole team consistently practicing this can meaningfully exceed what a single, occasional dedicated "refactoring sprint" achieves, without ever requiring the organizational friction of explicitly prioritizing pure cleanup work over visible feature delivery.
+
+**Common Pitfall:** using the Boy Scout Rule as justification for unrelated, large-scale refactoring bundled into an otherwise small, unrelated bug-fix pull request — the principle specifically means *small*, low-risk, easily-reviewable improvements made incidentally; a PR that was supposed to fix one small bug ballooning into a sprawling, hard-to-review refactor (under the banner of "leaving it cleaner") defeats the rule's actual purpose of keeping each individual improvement small, safe, and easy to review alongside the primary change.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is "Temporal Coupling," and how does it differ from the ordinary structural coupling covered earlier — describing a dependency on the ORDER operations must be called in, rather than a dependency between two classes' data/interfaces?**
+
+Structural coupling (covered earlier, alongside cohesion) describes one class depending on another's interface or internals. Temporal Coupling is a distinct, easy-to-miss kind of coupling: a dependency on the **order** in which a single class's own methods must be called, which the class's own public interface gives callers no explicit signal about.
+
+**A class with hidden Temporal Coupling — the public interface doesn't reveal a REQUIRED call order:**
+```csharp
+public class ReportGenerator
+{
+    private List<DataRow> _data;
+    public void LoadData(string source) => _data = FetchData(source);
+    public void ProcessData() => _data = Transform(_data); // THROWS if _data is null -- i.e., if
+                                                              // LoadData() wasn't called FIRST
+    public byte[] GenerateReport() => Render(_data); // ALSO throws if ProcessData() wasn't called first
+}
+
+// A caller has NO WAY to know, just from the public method signatures, that THIS exact order matters:
+var generator = new ReportGenerator();
+generator.GenerateReport(); // COMPILES fine -- but THROWS at runtime, since LoadData/ProcessData
+                              // were never called first -- nothing in the TYPE SYSTEM prevented this
+```
+Nothing about the class's public interface (three ordinary-looking public methods) signals that they must be called in a specific sequence — a caller has to *already know* (from documentation, from reading the implementation, or from trial and error) that `LoadData` → `ProcessData` → `GenerateReport` is the required order; the type system provides zero protection against calling them in the wrong sequence, or skipping one entirely.
+
+**Reducing Temporal Coupling — making the required sequence structurally impossible to get wrong:**
+```csharp
+public class ReportGenerator
+{
+    public static byte[] Generate(string source) // ONE method, encapsulating the ENTIRE required sequence
+    {
+        var rawData = FetchData(source);
+        var processedData = Transform(rawData);
+        return Render(processedData);
+    }
+}
+
+var report = ReportGenerator.Generate("database"); // there is LITERALLY NO WAY to call this incorrectly
+```
+By collapsing the three separately-callable, order-dependent methods into one method that internally performs the entire required sequence itself, there's no longer any possibility of a caller invoking the steps out of order or skipping one — the temporal dependency still exists (the *internal* steps still must happen in this order), but it's no longer something a caller could possibly get wrong, since it's no longer exposed as separate, independently-callable public operations at all.
+
+**Why this is worth recognizing as its own distinct category, separate from ordinary coupling/cohesion:** a class can have excellent cohesion (every method is clearly related to "generating reports") and reasonable structural coupling (no messy dependencies on other classes' internals) while still harboring this specific, easy-to-overlook risk — Temporal Coupling is invisible to typical cohesion/coupling analysis, since it's about the *sequencing* relationship between a single class's own members, not about relationships between different classes at all.
+
+**Common Pitfall:** exposing multiple public methods on a class that secretly require a specific call order, relying purely on documentation (a code comment, a wiki page) to communicate that requirement to callers — documentation is easy to miss or skip entirely, whereas structurally eliminating the possibility of an incorrect call sequence (collapsing separately-ordered steps into one method, or using the type system to make an invalid sequence simply uncompilable) provides a guarantee that documentation alone never can.
+
+---

@@ -705,3 +705,142 @@ Every caller can now treat the return value uniformly, with zero special-case nu
 **Common Pitfall:** applying the Null Object Pattern to scenarios where "no value" is actually meaningful, important information the calling code needs to react to (not just safely ignore) — silently substituting a no-op object hides that signal entirely, which is appropriate for something like an optional logger (fine to skip logging silently) but actively harmful for something like "no payment method on file" (which the calling code genuinely needs to detect and handle, not silently no-op through).
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is the difference between "Encapsulation" and "Information Hiding" — two terms often used interchangeably but describing subtly different concepts?**
+
+Encapsulation is the bundling of data and the behavior that operates on it into a single unit (a class) — Information Hiding is the specific *design decision* to conceal a unit's internal implementation details from the outside world, exposing only what's necessary through a well-defined public interface. Encapsulation is the mechanism; Information Hiding is a goal that mechanism enables (but doesn't automatically guarantee).
+
+**Encapsulation without genuine Information Hiding — bundled, but everything is still exposed:**
+```csharp
+public class BankAccount
+{
+    public decimal Balance { get; set; } // PUBLIC, freely settable -- bundled with the class, but hides NOTHING
+    public List<Transaction> Transactions { get; set; } // also fully exposed
+}
+// External code can do: account.Balance = -999999; -- bypassing any notion of a valid balance entirely
+```
+This class technically demonstrates encapsulation (data and an implicit notion of "account-related things" are bundled into one type) — but it provides **zero** information hiding, since every internal detail is fully exposed and mutable by any external code, with no protection of the class's own invariants at all.
+
+**Genuine Information Hiding — the internal representation is concealed, only a controlled interface is exposed:**
+```csharp
+public class BankAccount
+{
+    private decimal _balance; // PRIVATE -- genuinely hidden from the outside
+    private readonly List<Transaction> _transactions = new(); // also hidden
+
+    public decimal Balance => _balance; // exposed as READ-ONLY -- callers see the value, can't set it directly
+    public void Withdraw(decimal amount) // the ONLY way to change balance is through this controlled method
+    {
+        if (amount > _balance) throw new InvalidOperationException("Insufficient funds.");
+        _balance -= amount;
+        _transactions.Add(new Transaction(amount));
+    }
+}
+```
+Now external code has no way to directly manipulate `_balance` or `_transactions` at all — it can only interact through the deliberately narrow, invariant-protecting public interface (`Withdraw`), which is genuine Information Hiding, not just incidental bundling.
+
+**Why this distinction matters in practice:** a class can technically be "an encapsulated unit" (data + behavior bundled together) while still leaking every implementation detail through fully public, freely-settable properties — genuine Information Hiding requires the *deliberate* choice to make fields private and expose only a carefully-designed public surface, which is a design decision layered on top of encapsulation, not an automatic consequence of simply using a class at all.
+
+**Common Pitfall:** writing classes with public auto-properties for every field (`public decimal Balance { get; set; }`) and considering this "properly encapsulated" simply because the data lives inside a class — this is encapsulation in the loosest, most technical sense, but provides none of Information Hiding's actual protective benefit, since every internal detail remains just as exposed and unprotected as if it were a set of loose global variables.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is the "Fragile Base Class Problem," and how can a seemingly safe, backward-compatible change to a base class still silently break a derived class that inherits from it?**
+
+The Fragile Base Class Problem describes a specific risk of inheritance: a base class author can make a change that looks completely safe in isolation (still compiles, doesn't remove any existing members) but silently breaks a derived class's behavior, because the derived class was implicitly relying on some detail of the base class's *internal implementation*, not just its public contract.
+
+**A seemingly safe base class change that silently breaks a derived class:**
+```csharp
+// Version 1 of the base class
+public class Collection
+{
+    public virtual void Add(object item) { /* adds the item */ Count++; }
+    public virtual void AddRange(IEnumerable<object> items)
+    {
+        foreach (var item in items) Add(item); // AddRange calls Add() internally
+    }
+}
+
+// A derived class relying on THIS specific internal detail (AddRange calls Add)
+public class LoggingCollection : Collection
+{
+    public override void Add(object item)
+    {
+        Console.WriteLine("Item added"); // logs EVERY addition
+        base.Add(item);
+    }
+    // AddRange is NOT overridden -- the derived class is COUNTING ON the base class's
+    // internal implementation detail that AddRange() calls Add() internally, so logging
+    // still happens correctly even for bulk additions via AddRange
+}
+```
+```csharp
+// Version 2 of the base class -- the AUTHOR "optimizes" AddRange for performance,
+// still fully backward compatible from a PUBLIC CONTRACT perspective (same method signatures,
+// same observable behavior from the BASE class's own point of view)
+public class Collection
+{
+    public virtual void Add(object item) { /* adds the item */ Count++; }
+    public virtual void AddRange(IEnumerable<object> items)
+    {
+        // "optimized" to bulk-insert directly, NO LONGER calling Add() internally at all
+        InternalBulkInsert(items);
+        Count += items.Count();
+    }
+}
+```
+`LoggingCollection` still compiles perfectly against the new base class version — but it's now **silently broken**: bulk additions via `AddRange` no longer log anything at all, because the base class's internal implementation detail it was implicitly relying on (that `AddRange` calls `Add`) quietly changed, even though nothing about the base class's *public* contract technically changed.
+
+**Why this is specifically a risk of INHERITANCE, not composition:** a derived class can implicitly depend on a base class's internal implementation details (which methods call which other methods internally) in ways that are invisible from reading either class's public interface alone — this is exactly the kind of hidden coupling that Composition over Inheritance (covered earlier) avoids, since composed objects only interact through their explicit, publicly-declared interfaces, never through implicit "I happen to know how your internals are wired up" assumptions.
+
+**Common Pitfall:** as a base class author, changing an internal implementation detail (which internal methods call which other internal methods) without realizing derived classes elsewhere in the codebase (or, worse, in a separate consuming application entirely, for a published library) might be implicitly relying on that specific detail — this is precisely why base classes intended for wide inheritance/extension are often deliberately designed and documented very carefully (or `sealed`, covered earlier, when extension isn't genuinely intended), since the "contract" a base class must honor for safe inheritance is subtly broader than just its public method signatures.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is "Behavioral Subtyping" as the formal, precise version of the Liskov Substitution Principle (covered earlier, and its Design-by-Contract framing), and how does it distinguish between SYNTACTIC substitutability (the code compiles) and SEMANTIC substitutability (the code behaves correctly)?**
+
+Covered earlier through the Design-by-Contract lens (pre/postconditions) — Behavioral Subtyping is the formal term for the *complete* requirement LSP actually demands: it's not enough for a subtype to merely satisfy the type system (compile wherever the base type is expected) — it must also preserve every behavioral property client code could reasonably have relied upon, a distinction between "compiles" and "actually behaves correctly."
+
+**Syntactic substitutability — the code compiles fine wherever the base type is used:**
+```csharp
+public class Stack<T>
+{
+    public virtual void Push(T item) { /* adds to top */ }
+    public virtual T Pop() { /* removes and returns from top */ }
+}
+
+public class LoggingStack<T> : Stack<T>
+{
+    public override void Push(T item)
+    {
+        Console.WriteLine("Pushed"); // WRONG order -- logs, but see below
+        // BUG: forgot to actually call base.Push(item) at all!
+    }
+}
+```
+`LoggingStack<T>` compiles perfectly fine anywhere a `Stack<T>` is expected — it's syntactically a valid substitute. But it's **semantically** completely broken: it never actually pushes anything onto the underlying stack at all, silently violating every client's reasonable expectation that calling `Push` followed by `Pop` would retrieve what was just pushed.
+
+**Semantic (Behavioral) substitutability — the subtype must preserve BEHAVIORAL properties, not just compile correctly:**
+```csharp
+public class LoggingStack<T> : Stack<T>
+{
+    public override void Push(T item)
+    {
+        Console.WriteLine("Pushed"); // logs
+        base.Push(item); // AND actually performs the real behavior clients depend on
+    }
+}
+```
+This version is genuinely, behaviorally substitutable — any client code that worked correctly with a plain `Stack<T>` continues to work identically with a `LoggingStack<T>`, since the actual observable behavior (items genuinely get pushed and can be popped back off in the expected order) is fully preserved, with logging added as a pure side effect that doesn't alter the type's core behavioral contract at all.
+
+**Why this distinction matters more than it might first appear:** compilers can only ever check syntactic substitutability (method signatures match, types align) — they have **no way** to verify behavioral substitutability, since that requires understanding the *meaning* and *intent* behind a type's methods, not just their shapes; this is precisely why LSP violations are notoriously hard to catch automatically and typically require careful code review, comprehensive test suites run against every subtype (per the earlier Design-by-Contract discussion), or disciplined API documentation of expected behavioral contracts, rather than relying on the compiler to catch them the way it catches syntactic errors.
+
+**Common Pitfall:** treating "it compiles and passes the existing test suite" as sufficient evidence of correct Behavioral Subtyping — an incomplete test suite (one that happens not to exercise the specific behavioral property a new subtype violates) can pass cleanly even while a genuine LSP/Behavioral Subtyping violation lurks undetected, precisely because the gap between syntactic and semantic substitutability is invisible to any check that doesn't specifically probe the exact behavioral property in question.
+
+---
