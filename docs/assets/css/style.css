@@ -243,7 +243,7 @@ a.card:hover .badge { transform: scale(1.05); }
   font-size: 0.9em;
   color: #ec4899;
 }
-.answer-body pre code { background: none; padding: 0; color: inherit; font-size: 0.95em; }
+.answer-body pre code { background: none; padding: 0; color: #e2e8f0; font-size: 0.95em; }
 .answer-body table { border-collapse: collapse; width: 100%; margin: 1.25rem 0; border-radius: 8px; overflow: hidden; }
 .answer-body th, .answer-body td { border: 1px solid var(--border); padding: 0.75rem 1rem; text-align: left; }
 .answer-body th { background: var(--surface-2); font-weight: 600; }
