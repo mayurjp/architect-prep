@@ -1,3 +1,5 @@
+# Identity & Access — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is the difference between Authentication (AuthN) and Authorization (AuthZ)?**
@@ -146,3 +148,170 @@ You must implement a hybrid approach that balances stateless performance with se
    - The API middleware still validates the JWT signature statelessly (fast).
    - Before granting access, it makes a microsecond check to Redis: "Is this `UserId` blacklisted?" If yes, it rejects the request.
    - This adds a tiny bit of statefulness, but Redis is so fast it barely impacts performance, providing the best of both worlds.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is Multi-Factor Authentication (MFA), and how does the TOTP (Time-based One-Time Password) mechanism behind most authenticator apps actually work?**
+
+MFA requires a user to prove their identity with **two or more independent factors** — something they *know* (a password), something they *have* (a phone/authenticator app), or something they *are* (a fingerprint) — so that a stolen password alone isn't enough to compromise an account.
+
+**TOTP — the algorithm behind Google Authenticator / Microsoft Authenticator:**
+```csharp
+// Simplified TOTP generation (RFC 6238) -- the same math both server and app run independently
+public static string GenerateTotp(byte[] secretKey, DateTime time)
+{
+    long timeStep = (long)(time - DateTime.UnixEpoch).TotalSeconds / 30; // 30-second windows
+    byte[] timeBytes = BitConverter.GetBytes(timeStep).Reverse().ToArray();
+
+    using var hmac = new HMACSHA1(secretKey);
+    byte[] hash = hmac.ComputeHash(timeBytes);
+
+    int offset = hash[^1] & 0x0F;
+    int binaryCode = ((hash[offset] & 0x7F) << 24) | (hash[offset + 1] << 16)
+                    | (hash[offset + 2] << 8) | hash[offset + 3];
+
+    return (binaryCode % 1_000_000).ToString("D6"); // the 6-digit code shown in the app
+}
+```
+
+**Why this works without the phone ever talking to the server:**
+1. During MFA setup, the server generates a random `secretKey` and shows it to the user as a QR code (scanned once into the authenticator app).
+2. From that point on, **both** the server and the phone independently compute the same 6-digit code every 30 seconds, using the shared secret and the current time as the only two inputs — no network call between them is ever needed.
+3. When logging in, the user types the code currently shown on their phone; the server computes what it expects for the current 30-second window (checking one window before/after to tolerate clock drift) and compares.
+
+**Why this defeats a stolen password:** an attacker who phishes or brute-forces the password still doesn't have the `secretKey`, so they cannot compute a valid code — and each code is only valid for ~30-90 seconds, making a captured code useless shortly after.
+
+**Common Pitfall:** relying on SMS-based MFA codes instead of TOTP for anything security-sensitive — SMS is vulnerable to **SIM-swapping attacks**, where an attacker socially engineers the victim's mobile carrier into porting their phone number to a new SIM card the attacker controls, silently intercepting the "MFA code" texts. TOTP's shared-secret approach has no equivalent carrier-level attack surface.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What is the difference between Role-Based Access Control (RBAC) and Attribute-Based Access Control (ABAC)?**
+
+Both answer "is this user allowed to do this?" but RBAC decides based on a fixed **role** assignment, while ABAC decides based on evaluating **attributes** of the user, resource, and context at request time — a more flexible but more complex model.
+
+**RBAC — access tied to a role:**
+```csharp
+[Authorize(Roles = "Manager")]
+[HttpPost("approve")]
+public IActionResult ApproveExpense(int expenseId) { ... }
+```
+Simple and fast to reason about: "Managers can approve expenses." But it breaks down for rules that don't map cleanly onto a fixed role — e.g., "a manager can only approve expenses **from their own department**, and only if the amount is **under their approval limit**." RBAC alone can't express that without creating an unmanageable explosion of roles (`ManagerDeptA_Under1000`, `ManagerDeptA_Under5000`, ...).
+
+**ABAC — access tied to evaluating attributes at request time:**
+```csharp
+public class ExpenseApprovalHandler : AuthorizationHandler<ApprovalRequirement, Expense>
+{
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, ApprovalRequirement requirement, Expense expense)
+    {
+        var userDept = context.User.FindFirst("department")?.Value;
+        var userLimit = decimal.Parse(context.User.FindFirst("approvalLimit")?.Value ?? "0");
+
+        // Attributes of the USER (department, limit) evaluated against attributes of the RESOURCE (expense)
+        if (userDept == expense.Department && expense.Amount <= userLimit)
+            context.Succeed(requirement);
+
+        return Task.CompletedTask;
+    }
+}
+```
+The decision is computed dynamically from **combinations** of attributes — user department, user's approval limit, the resource's own department and amount — rather than a single static role check, letting one policy correctly express a rule that would otherwise require dozens of RBAC roles.
+
+**Decision guide:**
+- **RBAC** for coarse-grained access that maps naturally onto job functions ("Admins can access the admin panel") — simpler to implement, audit, and explain to non-technical stakeholders.
+- **ABAC** when access genuinely depends on relationships between the user, the specific resource, and context (time of day, department match, resource ownership) that a fixed role can't cleanly express.
+
+**Common Pitfall:** starting a system with ABAC "for maximum flexibility" when RBAC would fully cover the actual requirements — ABAC's policy logic is significantly harder to audit ("why was this request allowed?" requires tracing a dynamic evaluation, not just checking a role list) and over-engineering it for simple role-based needs adds real maintenance cost for no corresponding benefit.
+
+---
+
+## Advanced — Question 2
+
+**Q2: What is PKCE (Proof Key for Code Exchange), and why does the OAuth 2.0 Authorization Code flow require it for SPAs and mobile apps?**
+
+The classic OAuth 2.0 Authorization Code flow was originally designed assuming the client exchanging the code for a token is a confidential, server-side application that can safely hold a `client_secret`. SPAs and mobile apps are **public clients** — their code runs entirely on the user's device, so any embedded secret can be extracted by inspecting the app's binary or JavaScript bundle. PKCE closes the specific vulnerability that gap creates.
+
+**The vulnerability PKCE prevents — Authorization Code Interception:**
+```text
+1. SPA redirects user to the Authorization Server to log in
+2. Authorization Server redirects back with a `code` in the URL: https://app.com/callback?code=abc123
+3. WITHOUT PKCE: a malicious app on the same device (or a network intermediary) that
+   intercepts this redirect can steal `code` and exchange it for tokens itself
+```
+Without a `client_secret` (which public clients can't safely hold) and without PKCE, whoever captures that `code` value can redeem it for access tokens — impersonating the legitimate app.
+
+**The PKCE mechanism — a one-time, per-request secret the SPA generates itself:**
+```csharp
+// Step 1: Before redirecting to login, the SPA generates a random secret and its hash
+var codeVerifier = GenerateRandomString(64);              // kept ONLY in the SPA's memory
+var codeChallenge = Base64UrlEncode(Sha256(codeVerifier)); // sent in the initial redirect
+
+// Step 2: Initial redirect includes the CHALLENGE (the hash), not the secret itself
+// GET /authorize?...&code_challenge=xyz789&code_challenge_method=S256
+
+// Step 3: When exchanging the returned `code` for tokens, the SPA sends the ORIGINAL verifier
+var tokenRequest = new Dictionary<string, string>
+{
+    ["grant_type"] = "authorization_code",
+    ["code"] = returnedCode,
+    ["code_verifier"] = codeVerifier   // proves this exchange request came from the SAME app instance
+};
+```
+The Authorization Server hashes the received `code_verifier` and checks it matches the `code_challenge` from step 2. An attacker who intercepted only the `code` (step 2's redirect) never saw the original `code_verifier` — it never left the legitimate app's memory — so they cannot complete the token exchange even with a stolen code.
+
+**Common Pitfall:** treating PKCE as an optional hardening measure only for "extra security" — the current OAuth 2.1 draft specification makes PKCE **mandatory** for all Authorization Code flows, public and confidential clients alike, precisely because this vulnerability class turned out to affect more scenarios than originally assumed (including some confidential-client setups vulnerable to code interception via other means).
+
+---
+
+## Scenario — Question 5
+
+**Q5: Your ASP.NET Core API authenticates users via an external identity provider (e.g., Auth0 or Azure Entra ID) using OIDC. The provider's JWT only contains generic claims (`sub`, `email`, `name`), but your application needs a custom `subscriptionTier` claim (Free/Pro/Enterprise) stored in your own database to drive authorization decisions. How do you get this application-specific data into the user's claims without asking the identity provider to store it?**
+
+The identity provider owns *authentication* (who is this person), but it shouldn't need to know your application's specific business data — the standard pattern is **Claims Transformation**, enriching the incoming token's claims with application-specific data after authentication succeeds, entirely on your side.
+
+**The Mechanism — `IClaimsTransformation`:**
+```csharp
+public class SubscriptionClaimsTransformation : IClaimsTransformation
+{
+    private readonly ISubscriptionRepository _subscriptions;
+
+    public SubscriptionClaimsTransformation(ISubscriptionRepository subscriptions)
+        => _subscriptions = subscriptions;
+
+    public async Task<ClaimsPrincipal> TransformAsync(ClaimsPrincipal principal)
+    {
+        if (principal.HasClaim(c => c.Type == "subscriptionTier"))
+            return principal; // already transformed this request, avoid double-adding
+
+        var userId = principal.FindFirst("sub")?.Value;
+        var tier = await _subscriptions.GetTierForUserAsync(userId!);
+
+        var identity = (ClaimsIdentity)principal.Identity!;
+        identity.AddClaim(new Claim("subscriptionTier", tier));
+        return principal;
+    }
+}
+
+// Program.cs
+builder.Services.AddTransient<IClaimsTransformation, SubscriptionClaimsTransformation>();
+```
+ASP.NET Core calls every registered `IClaimsTransformation` automatically, right after the incoming JWT is validated and its claims are loaded into `ClaimsPrincipal` — by the time your controller/authorization policy runs, `User.FindFirst("subscriptionTier")` is populated, even though that claim never existed in the original token from the identity provider.
+
+**Using the enriched claim in an authorization policy:**
+```csharp
+builder.Services.AddAuthorization(options =>
+    options.AddPolicy("ProFeatureAccess", policy =>
+        policy.RequireClaim("subscriptionTier", "Pro", "Enterprise")));
+
+[Authorize(Policy = "ProFeatureAccess")]
+[HttpGet("advanced-reports")]
+public IActionResult GetAdvancedReports() { ... }
+```
+
+**Common Pitfall:** querying the database for the subscription tier on *every single request* inside `IClaimsTransformation` without caching — since this runs on every authenticated request, an uncached database call here adds a real per-request latency/load cost. A common fix is caching the tier lookup (e.g., in `IMemoryCache` keyed by user ID, with a short TTL) so the database is only hit once per cache window rather than on every API call.
+
+---

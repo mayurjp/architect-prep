@@ -1,3 +1,5 @@
+# Google Cloud Platform — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What are the primary compute options in Google Cloud Platform (GCP)?**
@@ -122,3 +124,152 @@ You must bridge the gap between Google's serverless environment and your private
 2. **Serverless VPC Access Connector:** You provision a Serverless VPC Access Connector in your VPC. This connector provisions a small cluster of internal VMs that act as a bridge.
 3. **Egress Configuration:** You configure your App Engine `app.yaml` (or Cloud Run service) to route its outbound traffic (egress) through this Connector.
 4. **The Flow:** When your App Engine code connects to `10.0.0.5`, the traffic flows from the serverless environment, through the Connector, directly into your VPC, and hits the Cloud SQL instance without ever touching the public internet. This satisfies strict enterprise security and compliance requirements.
+
+---
+
+## Beginner — Question 2
+
+**Q2: How does GCP's IAM resource hierarchy (Organization → Folder → Project → Resource) work, and how does policy inheritance flow through it?**
+
+GCP structures every resource into a strict hierarchy, and IAM policies (who can do what) attach at any level and flow **downward** — a policy granted higher up the tree automatically applies to everything beneath it.
+
+**The hierarchy:**
+```text
+Organization (e.g., "mycompany.com")
+  └─ Folder ("Engineering")
+       └─ Folder ("Production")
+            └─ Project ("payments-prod")
+                 └─ Resource (a specific Cloud SQL instance, GCS bucket, etc.)
+```
+
+**Policy inheritance in action:**
+```bash
+# Grant a role at the Folder level
+gcloud resource-manager folders add-iam-policy-binding FOLDER_ID \
+  --member="group:sre-team@mycompany.com" \
+  --role="roles/compute.admin"
+```
+Every project nested under that Folder — and every resource within those projects — automatically inherits `sre-team`'s `compute.admin` access, without anyone needing to grant it again at the Project level. This is deliberate: broad, org-wide access decisions (e.g., "the security team can read audit logs everywhere") belong at the Organization or Folder level; narrow, specific access ("this one contractor can deploy to this one dev project") belongs at the Project or Resource level.
+
+**Combining policies is always additive, never restrictive:** if a Project grants `roles/viewer` to a user and its parent Folder separately grants `roles/editor` to that same user, the **effective** permission is the union of both (Editor, since it's the broader one) — there is no IAM mechanism to *deny* or narrow a permission granted higher up the hierarchy from a lower level.
+
+**Common Pitfall:** granting broad roles at the Organization level "for convenience" — because inheritance flows downward unconditionally, an overly broad Organization-level grant (e.g., `roles/owner` to an entire team) silently gives that access to every current *and future* project in the entire company, including ones that don't exist yet. The principle of least privilege pushes you toward granting roles as low in the hierarchy as practical, and using Folders to group projects that genuinely should share the same broad access.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What is BigQuery, and how does it differ architecturally from Cloud SQL?**
+
+Both are GCP's managed SQL-query services, but they're built for opposite workload shapes — Cloud SQL for transactional (OLTP) workloads, BigQuery for analytical (OLAP) workloads over massive datasets.
+
+**Cloud SQL — a managed row-oriented relational database (MySQL/PostgreSQL/SQL Server):**
+```sql
+-- Fast for a single-row lookup/update, exactly like on-prem SQL Server
+UPDATE Orders SET Status = 'Shipped' WHERE OrderId = 12345;
+```
+Optimized for many small, fast transactions touching few rows at a time — the same workload shape SQL Server or PostgreSQL handles on any traditional application backend.
+
+**BigQuery — a serverless, columnar data warehouse:**
+```sql
+-- Scans billions of rows across petabytes, aggregating -- BigQuery's actual sweet spot
+SELECT category, SUM(revenue) AS total_revenue
+FROM `my-project.sales.orders`
+WHERE order_date BETWEEN '2025-01-01' AND '2025-12-31'
+GROUP BY category
+ORDER BY total_revenue DESC;
+```
+**Columnar storage** means BigQuery only reads the specific columns referenced in a query (`category`, `revenue`, `order_date`) rather than entire rows — for a wide table with 200 columns, an aggregation query touching 3 columns reads roughly 3/200ths of the data volume a row-oriented engine like Cloud SQL would have to scan.
+
+**Key architectural differences:**
+- **Serverless, no instance to manage:** you don't provision CPU/RAM for BigQuery — you just run queries, and Google's infrastructure allocates massively parallel compute behind the scenes. Cloud SQL requires you to size and manage an actual instance.
+- **Pricing model:** BigQuery bills primarily by *bytes scanned per query* (or a flat-rate slot reservation), not by uptime — running no queries costs nothing beyond storage. Cloud SQL bills for the instance being up, regardless of query volume.
+- **No row-level transactions:** BigQuery has no equivalent of `UPDATE ... WHERE OrderId = 12345` performance — updating a single row means rewriting the entire columnar block it lives in, making BigQuery a poor fit for OLTP-style single-row mutations.
+
+**Common Pitfall:** running a dashboard's live, per-request queries directly against BigQuery instead of Cloud SQL/a cache — even a "fast" BigQuery query has meaningfully higher fixed latency (often hundreds of milliseconds to seconds) than an indexed Cloud SQL lookup, because it's architected for scanning huge volumes efficiently, not for sub-10ms point lookups.
+
+---
+
+## Advanced — Question 2
+
+**Q2: What is the difference between GKE Standard and GKE Autopilot modes?**
+
+Both are Google Kubernetes Engine, but they represent different points on the "how much of the cluster do you want to manage yourself" spectrum.
+
+**GKE Standard — you manage the node pools:**
+```bash
+gcloud container clusters create my-cluster \
+  --num-nodes=3 \
+  --machine-type=e2-standard-4 \
+  --enable-autoscaling --min-nodes=3 --max-nodes=10
+```
+You choose the VM machine types, node pool sizing, and are billed for the underlying Compute Engine VMs whether or not Pods are actually scheduled on them at full capacity — you're responsible for right-sizing nodes to your workloads' actual resource requests.
+
+**GKE Autopilot — Google manages the nodes entirely:**
+```bash
+gcloud container clusters create-auto my-cluster --region=us-central1
+```
+You never see or configure a node pool at all. You just deploy Pods with resource requests, and Google provisions exactly the compute needed underneath, billing you **per Pod resource request** (vCPU/memory/storage actually requested by your workloads) rather than per underlying VM.
+
+**The practical trade-offs:**
+- **Autopilot removes node-level operational burden entirely** — no capacity planning, no worrying about bin-packing efficiency, no manually patching node OS images — at the cost of some configuration flexibility (certain privileged workloads, DaemonSets, and custom node-level configurations aren't available).
+- **Standard mode is required when you need node-level control** — custom node OS configurations, specific GPU/TPU node pools with fine-grained control, DaemonSets needing host-level access, or workloads with unusual resource shapes Autopilot's bin-packing doesn't handle well.
+- **Billing philosophy differs fundamentally:** Standard bills for provisioned VM capacity (which can sit partially idle if you over-provision); Autopilot bills only for what Pods actually request, which can be cheaper for spiky/uneven workloads but potentially pricier for workloads that pack very efficiently onto Standard nodes already.
+
+**Common Pitfall:** choosing Autopilot for a workload that genuinely needs DaemonSets (e.g., a custom node-level logging/monitoring agent) — Autopilot's restricted feature set doesn't support certain DaemonSet patterns the way Standard mode does, requiring a mode switch (which means recreating the cluster) once the limitation is discovered mid-project.
+
+---
+
+## Scenario — Question 5
+
+**Q5: Your team needs to deploy identical infrastructure (a GKE cluster, Cloud SQL instance, and VPC) across three environments — dev, staging, and prod — on GCP. Manually clicking through the Console for each environment has already caused configuration drift between staging and prod, and a bug that only reproduces in prod slipped through staging. How do you fix this?**
+
+This is the classic Infrastructure-as-Code problem, and on GCP the standard solution is **Terraform** with environment-specific variable files sharing one common module.
+
+**The Mechanism — one module, parameterized per environment:**
+```hcl
+# modules/gke-cluster/main.tf -- the shared, reusable definition
+variable "environment" {}
+variable "node_count" {}
+variable "machine_type" {}
+
+resource "google_container_cluster" "primary" {
+  name     = "app-cluster-${var.environment}"
+  location = "us-central1"
+  initial_node_count = var.node_count
+  node_config {
+    machine_type = var.machine_type
+  }
+}
+```
+
+```hcl
+# environments/staging/main.tf
+module "gke" {
+  source       = "../../modules/gke-cluster"
+  environment  = "staging"
+  node_count   = 2
+  machine_type = "e2-standard-2"
+}
+
+# environments/prod/main.tf
+module "gke" {
+  source       = "../../modules/gke-cluster"
+  environment  = "prod"
+  node_count   = 5
+  machine_type = "e2-standard-4"
+}
+```
+Both environments deploy from the **exact same underlying module** — the only differences (replica count, machine size) are explicit, reviewable variables, rather than staging and prod silently diverging because someone clicked a different dropdown in the Console six months ago.
+
+**Detecting drift going forward:**
+```bash
+terraform plan -var-file=environments/prod.tfvars
+# If prod's actual state differs from the Terraform config (someone manually changed
+# something in the Console), `plan` shows exactly what would change to reconcile it
+```
+Running `terraform plan` regularly (or in a scheduled CI job) surfaces drift *before* it causes a staging/prod mismatch — any manual Console change shows up as a pending diff the next time someone runs Terraform.
+
+**The process fix, not just the tooling fix:** pair this with revoking Console write access for engineers in staging/prod projects (leaving only Terraform's service account with deploy permissions) — Terraform alone doesn't prevent drift if people can still bypass it by clicking around in the Console; the tooling has to be the *only* path to making changes for drift-freedom to actually hold.
+
+---

@@ -1,3 +1,5 @@
+# Azure for .NET — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is the difference between IaaS, PaaS, and SaaS in Azure?**
@@ -143,3 +145,153 @@ Auto-Heal is a built-in feature of Azure App Service that automatically takes ac
 
 **Result:**
 When the memory leak causes the application's RAM usage to spike past 800MB, Azure instantly intercepts the metric and automatically recycles the application pool. The process restarts, instantly freeing all leaked memory, before the application ever reaches the point of an `OutOfMemoryException` crash. This ensures minimal disruption to end users while you wait for the permanent code fix.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is Microsoft Entra ID (formerly Azure AD), and how does it differ from on-premises Active Directory?**
+
+Both manage identities and control access to resources, but they're built for fundamentally different network topologies — one for a private corporate network, one for the open internet.
+
+**On-Premises Active Directory:**
+- Uses **LDAP** and **Kerberos** protocols, designed for a trusted internal network.
+- Organizes identities into **Domains**, **Organizational Units (OUs)**, and **Group Policy Objects (GPOs)** that push configuration down to domain-joined Windows machines.
+- Assumes devices and users are physically on (or VPN'd into) the corporate network.
+
+**Microsoft Entra ID:**
+- A cloud-native identity provider using modern, internet-friendly protocols: **OAuth 2.0**, **OpenID Connect (OIDC)**, and **SAML** — no LDAP/Kerberos required, works over plain HTTPS from anywhere.
+- Organizes identities in a flat directory (no OUs/GPOs) with **Groups** and **Conditional Access Policies** instead — e.g., "require MFA if the sign-in is from an unrecognized country."
+- Built specifically to authenticate access to cloud resources (Azure, Microsoft 365, and any third-party app registered against it), not to manage domain-joined desktop machines.
+
+**Where they intersect — Entra Connect (hybrid identity):**
+```text
+On-prem AD (source of truth for existing employees)
+        │  Azure AD Connect (syncs users/password hashes one-way, ~30 min cycle)
+        ▼
+Microsoft Entra ID (cloud identity, used to sign into Azure/M365/SaaS apps)
+```
+Most enterprises run both side by side during a cloud migration: existing on-prem AD accounts sync into Entra ID via **Entra Connect**, so employees use one set of credentials for both their office desktop login and cloud app access.
+
+**Common Pitfall:** assuming Entra ID is simply "AD moved to the cloud" — it doesn't support classic AD concepts like GPOs or NTLM at all. Migrating an application that depends on Kerberos/NTLM authentication or GPO-pushed settings requires re-architecting its auth flow around OIDC/OAuth, not just a lift-and-shift.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What is a Bicep template, and how does it improve on raw ARM (Azure Resource Manager) JSON templates?**
+
+ARM templates are the native, declarative way to define Azure infrastructure as JSON — but hand-writing deeply nested JSON for even simple resources is notoriously verbose and error-prone. Bicep is a domain-specific language that compiles down to that same ARM JSON, giving you a much cleaner authoring experience with zero runtime difference.
+
+**Raw ARM JSON (verbose):**
+```json
+{
+  "type": "Microsoft.Web/sites",
+  "apiVersion": "2022-03-01",
+  "name": "my-app-service",
+  "location": "[parameters('location')]",
+  "properties": {
+    "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', 'my-plan')]"
+  }
+}
+```
+
+**The same resource in Bicep:**
+```bicep
+param location string = resourceGroup().location
+
+resource appServicePlan 'Microsoft.Web/serverfarms@2022-03-01' = {
+  name: 'my-plan'
+  location: location
+  sku: { name: 'B1' }
+}
+
+resource webApp 'Microsoft.Web/sites@2022-03-01' = {
+  name: 'my-app-service'
+  location: location
+  properties: {
+    serverFarmId: appServicePlan.id   // direct reference, no resourceId() string-building
+  }
+}
+```
+
+**What Bicep actually improves:**
+- **Type-checking and IntelliSense at authoring time** — referencing `appServicePlan.id` is validated by the Bicep compiler; a typo in a raw ARM `resourceId(...)` string reference wouldn't be caught until deployment fails.
+- **No more manual `resourceId()` string construction** — Bicep resolves references between resources directly, eliminating an entire class of ARM template bugs.
+- **Modularity via `modules`** — Bicep files can reference other Bicep files as reusable modules, versus ARM's much clunkier nested/linked template mechanism.
+
+**Deploying it:**
+```bash
+az deployment group create --resource-group my-rg --template-file main.bicep --parameters location=eastus
+```
+
+**Common Pitfall:** treating Bicep as a separate deployment technology from ARM — it compiles directly to ARM JSON (`az bicep build`) and deploys through the exact same Azure Resource Manager APIs. There's no separate "Bicep runtime" in Azure; it's purely an authoring-time improvement, which is why adopting it carries essentially zero migration risk for existing ARM-based pipelines.
+
+---
+
+## Advanced — Question 2
+
+**Q2: How does Azure Service Bus's Topic/Subscription model differ from its Queue model, and when do you need Topics?**
+
+Both are part of Azure Service Bus, but a Queue is built for **one-to-one** delivery (one message, one consumer), while a Topic is built for **one-to-many** delivery (one message, many independent consumers) — the same "fan-out" distinction as Pub/Sub broker models generally.
+
+**Queue — competing consumers, each message consumed exactly once:**
+```csharp
+await using var sender = client.CreateSender("order-processing-queue");
+await sender.SendMessageAsync(new ServiceBusMessage(JsonSerializer.Serialize(order)));
+// Whichever consumer instance picks this message up, only ONE of them processes it
+```
+
+**Topic + Subscriptions — every subscription gets its own copy of the message:**
+```csharp
+await using var sender = client.CreateSender("order-events-topic");
+await sender.SendMessageAsync(new ServiceBusMessage(JsonSerializer.Serialize(new OrderPlacedEvent(order.Id))));
+
+// Three independent subscriptions on the SAME topic, each gets its own copy:
+// - "inventory-subscription"   -> InventoryService reserves stock
+// - "notification-subscription" -> NotificationService emails the customer
+// - "analytics-subscription"    -> AnalyticsService logs the event
+```
+Each subscription maintains its **own** independent copy of every message and its own delivery/redelivery state — InventoryService being slow or crashed doesn't affect whether NotificationService receives and processes its copy.
+
+**Subscription Filters — routing a subset of messages to specific subscribers:**
+```csharp
+await adminClient.CreateRuleAsync("order-events-topic", "high-value-subscription",
+    new CreateRuleOptions("HighValueOnly", new SqlRuleFilter("Total > 1000")));
+```
+A subscription can apply a **SQL filter** or **correlation filter** against message properties, so it only receives messages matching specific criteria — e.g., a "high-value-orders" subscription that only gets orders over $1000, without every subscriber needing to filter messages themselves after receiving them.
+
+**When you need a Topic instead of a Queue:** the moment more than one independent service needs to react to the *same* event. A Queue would force you to either duplicate the message manually to multiple queues, or have one consumer's failure block another's processing — Topics decouple those consumers completely at the broker level.
+
+**Common Pitfall:** creating a new Queue per consumer to fake fan-out behavior (`order-for-inventory-queue`, `order-for-notifications-queue`) — this duplicates publish logic across every producer and misses Service Bus's built-in filtering/subscription management entirely. If more than one thing needs to react to an event, that's the signal to reach for a Topic, not more Queues.
+
+---
+
+## Scenario — Question 5
+
+**Q5: Your team stores order data in Azure Cosmos DB for a globally distributed application. Customers in Europe report seeing stale order statuses that were already updated by customers in the US moments earlier. However, switching to Strong consistency causes checkout latency to triple. How do you resolve this without picking an all-or-nothing consistency level?**
+
+Cosmos DB uniquely offers **five consistency levels** on a spectrum between Strong and Eventual, rather than forcing the binary CP/AP choice most distributed databases impose — this scenario is exactly what that spectrum exists to solve.
+
+**The five levels (strongest to weakest):**
+```text
+Strong  >  Bounded Staleness  >  Session  >  Consistent Prefix  >  Eventual
+(slowest, most consistent)              (fastest, most stale-tolerant)
+```
+
+**Why Strong is the wrong default here:** Strong consistency requires synchronous replication confirmation across regions before acknowledging a write — for a globally distributed app, that means every write waits on a round-trip to the farthest replica, which is exactly the tripled checkout latency you're seeing.
+
+**The fix: Session consistency (Cosmos DB's default, and usually the right choice):**
+```csharp
+var client = new CosmosClient(connectionString, new CosmosClientOptions
+{
+    ConsistencyLevel = ConsistencyLevel.Session
+});
+```
+Session consistency guarantees that **within a single client's session**, reads always see that same client's own prior writes (read-your-own-writes) — a customer who just placed an order will always see it reflected immediately, without waiting for global replication. Consistency between *different* customers' sessions is only eventual, which is an acceptable trade-off: a European customer viewing another customer's order isn't a correctness requirement the way seeing their *own* order status is.
+
+**If cross-customer staleness still matters for specific operations (e.g., an inventory count both customers rely on):** use **Bounded Staleness** instead, which caps staleness to a configurable number of versions or a time interval (e.g., "never more than 5 seconds stale") — trading some of Strong's latency cost for a hard upper bound on staleness, rather than Session's "no guarantee at all" between different sessions.
+
+**Common Pitfall:** assuming consistency level is a single global database setting you must pick once — Cosmos DB lets you override the consistency level **per request**, meaning you can use Session consistency as the default for most operations while applying Strong consistency selectively to the specific reads (like a final payment confirmation check) that genuinely can't tolerate any staleness at all.
+
+---

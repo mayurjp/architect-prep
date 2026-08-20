@@ -1,3 +1,5 @@
+# CI/CD & DevOps — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is the difference between Continuous Integration (CI) and Continuous Deployment (CD)?**
@@ -155,3 +157,164 @@ You must entirely ban manual resource creation in production environments.
 1. **Adopt Terraform or Bicep:** Write declarative code that defines the entire infrastructure architecture.
 2. **Automate via CD:** Ensure that the *only* entity with permission to create resources in Azure is the CI/CD Service Principal. Developers should have "Reader" access in production.
 3. **The Result:** If East US fails, the Disaster Recovery process takes minutes. You simply change a single variable in your Terraform script (`region = "westus"`) and run the CI/CD pipeline. The pipeline automatically provisions the identical 150 resources in the new region, flawlessly and consistently.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is a build artifact, and why should CI pipelines version and publish them rather than rebuilding from source at deploy time?**
+
+A build artifact is the actual compiled, deployable output of a build — a Docker image, a NuGet package, a set of published DLLs — produced once by CI and then reused unchanged across every subsequent stage (test, staging, production).
+
+**The anti-pattern — rebuilding from source at each deployment stage:**
+```yaml
+# BAD: each stage independently runs `dotnet build`
+deploy-staging:
+  script: dotnet build && dotnet publish && deploy-to staging
+deploy-prod:
+  script: dotnet build && dotnet publish && deploy-to prod  # rebuilds AGAIN
+```
+If a NuGet package updates between the staging build and the prod build (even by a patch version, if you're not pinning exactly), staging and production are now running **subtly different compiled code** despite both supposedly deploying "the same release" — the exact kind of drift that makes a bug "work in staging" but fail in prod.
+
+**The correct pattern — build once, deploy the same artifact everywhere:**
+```yaml
+build:
+  script:
+    - dotnet publish -c Release -o ./publish
+    - docker build -t myregistry/order-service:1.4.2 .
+    - docker push myregistry/order-service:1.4.2   # <- ONE immutable, versioned artifact
+
+deploy-staging:
+  script: deploy myregistry/order-service:1.4.2 to staging
+deploy-prod:
+  script: deploy myregistry/order-service:1.4.2 to prod   # the EXACT SAME image, byte-for-byte
+```
+Semantic versioning (`1.4.2`) or a content-addressable tag (a Git commit SHA, or an image digest) makes the artifact **immutable and traceable** — "which exact code is running in prod?" always has a precise, verifiable answer, and rolling back means simply re-deploying the previous version tag rather than trying to rebuild an old commit and hoping the toolchain/dependencies haven't shifted since.
+
+**Common Pitfall:** tagging images with a mutable tag like `latest` or `staging` instead of a specific version — `docker pull myregistry/order-service:latest` might silently pull a *different* image today than it did yesterday, defeating the entire point of an immutable, versioned artifact and making incident rollbacks a guessing game.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What is GitOps, and how does it differ from a traditional push-based CD pipeline?**
+
+Both aim to automate deployment, but they invert *who initiates* the deployment and *where the desired state lives*.
+
+**Traditional push-based CD — the pipeline pushes changes out:**
+```text
+CI pipeline finishes build → CD pipeline runs `kubectl apply` / `helm upgrade`
+directly against the cluster, using credentials the pipeline holds
+```
+The CI/CD system itself needs standing write credentials to production infrastructure, and the "current desired state" only exists implicitly, as whatever the last pipeline run happened to apply.
+
+**GitOps — a controller inside the cluster pulls changes from Git:**
+```yaml
+# An ArgoCD Application resource -- lives IN the cluster, watches a Git repo
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-service
+spec:
+  source:
+    repoURL: https://github.com/myorg/k8s-manifests
+    path: order-service
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      selfHeal: true   # if someone manually kubectl-edits the cluster, revert it back to match Git
+```
+A controller (ArgoCD, Flux) running **inside** the cluster continuously compares the cluster's actual state against what's declared in a Git repository, and reconciles any difference — deploying a new version means merging a PR that changes the manifest in Git; the in-cluster controller notices and pulls the change itself.
+
+**Why this is a meaningful shift, not just a rebrand of CD:**
+- **Git becomes the single source of truth for desired state** — `git log` on the manifests repo *is* your deployment history and audit trail, rather than scattered across CI pipeline run logs.
+- **No external system holds cluster-admin credentials** — the in-cluster controller has cluster access, but the CI pipeline itself never needs a production kubeconfig; it only needs write access to a Git repo.
+- **Self-healing configuration drift** — if someone manually `kubectl edit`s a Deployment directly (bypassing the process), the GitOps controller detects the mismatch against Git and can automatically revert it, rather than drift silently accumulating (the same drift problem IaC solves for cloud resources, applied to what's actually running in the cluster right now).
+
+**Common Pitfall:** treating GitOps as strictly superior for every scenario — the reconciliation loop's "pull" model adds latency (the controller polls or waits for a webhook, rather than the pipeline deploying synchronously the moment a build finishes) and genuinely benefits from Kubernetes-native infrastructure specifically; teams deploying to non-Kubernetes targets (a classic VM fleet, an Azure App Service) don't have an equivalent reconciliation primitive available and typically stay with push-based CD.
+
+---
+
+## Advanced — Question 2
+
+**Q2: What is Software Supply Chain Security in a CI/CD context, and what role does an SBOM (Software Bill of Materials) play?**
+
+Modern applications pull in dozens to hundreds of third-party dependencies (NuGet packages, base Docker images, transitive dependencies of dependencies) — supply chain security is about ensuring none of that dependency graph has been compromised, and having a way to *know* what's actually in a deployed artifact when a new vulnerability is disclosed.
+
+**The problem it addresses:** when a critical CVE is announced in a widely-used library, the first question every security team asks is "are we affected, and where?" Without a systematic answer, teams manually grep through `.csproj` files and Dockerfiles across dozens of repositories — slow, error-prone, and easy to miss a transitive dependency three levels deep.
+
+**An SBOM — a machine-readable manifest of everything in a build:**
+```yaml
+# GitHub Actions step generating an SBOM for a container image
+- name: Generate SBOM
+  uses: anchore/sbom-action@v0
+  with:
+    image: myregistry/order-service:1.4.2
+    format: spdx-json
+    output-file: sbom.spdx.json
+```
+This produces a structured document listing every package, library, and OS-level component in the final image — direct dependencies *and* transitive ones — with exact versions, so "do we use log4j 2.14.1 anywhere" becomes a searchable query against generated SBOMs instead of a company-wide manual audit.
+
+**Combining it with vulnerability scanning in the pipeline:**
+```yaml
+- name: Scan image for known vulnerabilities
+  uses: aquasecurity/trivy-action@master
+  with:
+    image-ref: myregistry/order-service:1.4.2
+    severity: CRITICAL,HIGH
+    exit-code: 1   # fail the build if a critical/high vuln is found
+```
+Failing the build on a critical vulnerability turns "is this dependency safe" from a periodic manual audit into an automatic gate on every single build — a compromised or vulnerable dependency can't reach production without the pipeline actively blocking it.
+
+**Common Pitfall:** generating an SBOM once at release time and treating it as static — a dependency with no known vulnerabilities today can have one disclosed next month. The SBOM's value compounds when paired with continuous re-scanning of *already-deployed* artifacts against newly-published CVE databases, not just at build time.
+
+---
+
+## Scenario — Question 5
+
+**Q5: Your integration test suite spins up a shared SQL Server test database that all CI pipeline runs connect to. As your team grew, parallel PR builds started failing intermittently because two builds' tests collide on the same rows, or one build's schema migration runs while another build's tests are mid-query. How do you fix this without slowing down CI by running builds serially?**
+
+Sharing one persistent test database across concurrent CI runs is the root problem — the fix is giving every pipeline run its own fully isolated, ephemeral database instance rather than trying to make a shared one safe for concurrency.
+
+**The Solution: Testcontainers spinning up a fresh database per test run:**
+```csharp
+public class DatabaseFixture : IAsyncLifetime
+{
+    private readonly MsSqlContainer _container = new MsSqlBuilder().Build();
+    public string ConnectionString => _container.GetConnectionString();
+
+    public async Task InitializeAsync()
+    {
+        await _container.StartAsync();          // spins up a real, isolated SQL Server in Docker
+        // Run EF Core migrations against this fresh instance
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlServer(ConnectionString).Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.MigrateAsync();
+    }
+
+    public async Task DisposeAsync() => await _container.DisposeAsync();  // destroyed after this run
+}
+```
+
+**Why this eliminates the collision problem entirely, rather than just reducing its likelihood:**
+- Each CI pipeline run gets a **brand-new container**, with its own isolated database — Build #401 and Build #402 running in parallel each get a completely separate SQL Server instance; there is no shared state to collide on, by construction rather than by careful test-writing discipline.
+- Schema migrations run fresh against each container, so there's no risk of one build's in-progress migration being visible to another build's queries — a problem that's structurally impossible to fully solve with locking on a single shared database without serializing all builds.
+
+**The CI pipeline configuration (GitHub Actions example):**
+```yaml
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests (Testcontainers spins up its own SQL Server per run)
+        run: dotnet test --filter Category=Integration
+        # No `services:` block needed -- Testcontainers manages the container lifecycle itself
+```
+
+**Common Pitfall:** solving this by adding retry logic or locks around the shared test database instead of eliminating the sharing itself — that only reduces collision *frequency*, still leaves builds competing for one resource (capping how much parallelism is actually achievable), and doesn't fix the migration-timing race at all. Full isolation per run, not smarter sharing, is what actually removes the flakiness.
+
+---

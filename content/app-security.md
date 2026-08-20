@@ -1,3 +1,5 @@
+# App Security — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is the difference between Hashing and Encryption?**
@@ -232,3 +234,95 @@ Password hashing requires algorithms that are deliberately **slow and computatio
 1. **Use BCrypt, Argon2, or PBKDF2:** These algorithms are specifically designed for passwords.
 2. **Work Factor:** They include a configurable "cost" parameter. You configure the algorithm so that hashing a single password takes exactly 250 milliseconds on your server.
 3. **The Result:** 250ms is unnoticeable to a user logging in. However, if a hacker steals the database, it now takes them 250ms to test a single guess. Testing a dictionary of 10 billion passwords would now take hundreds of years instead of 10 minutes, rendering the stolen database useless.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is Command Injection, and how do you prevent it in a .NET application that shells out to external processes?**
+
+Command Injection occurs when untrusted user input is concatenated into a string that's passed to the operating system's shell for execution, letting an attacker append their own commands to whatever the application intended to run.
+
+**The vulnerable pattern:**
+```csharp
+// A "convert this file" feature that shells out to ffmpeg
+string fileName = Request.Query["file"]; // attacker-controlled
+Process.Start("cmd.exe", $"/c ffmpeg -i {fileName} output.mp4");
+```
+An attacker supplies `file = "video.mp4 & del /Q /S C:\\* &"` — the shell happily executes the `ffmpeg` command *and* the attacker's appended `del` command, because the shell doesn't distinguish "the intended argument" from "extra shell syntax" once they're concatenated into one string.
+
+**Prevention — never build a shell command string from untrusted input; pass arguments as a discrete array instead:**
+```csharp
+var psi = new ProcessStartInfo
+{
+    FileName = "ffmpeg",
+    ArgumentList = { "-i", fileName, "output.mp4" }, // each element passed as a SEPARATE argument
+    UseShellExecute = false, // critical: bypasses the shell entirely, no shell metacharacter parsing
+};
+Process.Start(psi);
+```
+Using `ArgumentList` (rather than a single concatenated `Arguments` string) passes each value directly to the process as a discrete argument, without ever invoking a shell to *parse* the string — so shell metacharacters like `&`, `|`, or `;` in `fileName` are treated as a literal, inert part of the filename argument, not as command separators.
+
+**Additional layer — validate the input itself:** even with `ArgumentList`, still validate that `fileName` matches an expected pattern (e.g., a GUID plus a known extension) rather than trusting arbitrary user-supplied strings as file paths, since a validated allowlist is more robust than relying solely on correct argument-passing mechanics.
+
+**Common Pitfall:** assuming `UseShellExecute = false` alone is sufficient while still building a single concatenated `Arguments` string — some process invocations still perform limited interpretation of that string depending on the target executable; using the `ArgumentList` collection is the more robust fix than trying to manually escape shell metacharacters yourself.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is Insecure Deserialization, and how can it lead to Remote Code Execution (RCE) in a .NET application?**
+
+Insecure Deserialization occurs when an application deserializes untrusted data using a format/library capable of reconstructing *arbitrary types* — including types with constructors, property setters, or `Dispose()` methods that execute attacker-chosen code as a side effect of the deserialization process itself, before the application even uses the resulting object.
+
+**The vulnerable pattern — `BinaryFormatter` (deserializing arbitrary types by design):**
+```csharp
+// NEVER do this with untrusted input
+var formatter = new BinaryFormatter();
+using var stream = new MemoryStream(untrustedBytes); // e.g., from a cookie or uploaded file
+var obj = formatter.Deserialize(stream); // can instantiate ANY type present in loaded assemblies
+```
+`BinaryFormatter` (and similarly, insecure configurations of `Newtonsoft.Json` with `TypeNameHandling.All`) embeds the *type name* to construct directly inside the serialized payload — an attacker crafts a payload naming a type already loaded in your application's dependencies (a "gadget chain") whose constructor or property setters have a side effect like writing a file, starting a process, or worse, chained together into full code execution. This is why `BinaryFormatter` is now officially obsolete and blocked by default in modern .NET.
+
+**Prevention — deserialize into a specific, known type; never let the payload dictate what type gets constructed:**
+```csharp
+// Safe: System.Text.Json requires you to specify the target type up front
+var order = JsonSerializer.Deserialize<OrderDto>(untrustedJson);
+// The deserializer only ever populates properties of the KNOWN OrderDto type --
+// it cannot be tricked into instantiating an arbitrary attacker-chosen type
+```
+`System.Text.Json`'s default behavior (and `Newtonsoft.Json` with default settings, `TypeNameHandling.None`) only populates properties of the type *you* specify at the call site — the payload has no ability to dictate what class gets constructed, eliminating the gadget-chain attack surface entirely.
+
+**Common Pitfall:** enabling `TypeNameHandling.Auto` or `TypeNameHandling.All` in Newtonsoft.Json "to support polymorphic deserialization" without restricting it to a strict, known allowlist of safe types via a custom `SerializationBinder` — this setting is specifically what re-introduces the arbitrary-type-instantiation vulnerability that `System.Text.Json`'s stricter default design avoids by not supporting it at all.
+
+---
+
+## Advanced — Question 2
+
+**Q2: What are the key HTTP security headers (HSTS, X-Content-Type-Options, X-Frame-Options, CSP), and how do you configure them in ASP.NET Core?**
+
+These headers instruct the *browser* to enforce additional restrictions on how it handles your site's content — a defense-in-depth layer that mitigates entire attack classes even if some other part of the application has a bug.
+
+**Configuring them together via middleware:**
+```csharp
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.Append("X-Frame-Options", "DENY");
+    context.Response.Headers.Append("Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; frame-ancestors 'none'");
+    await next();
+});
+
+app.UseHsts(); // adds Strict-Transport-Security automatically (ASP.NET Core built-in middleware)
+```
+
+**What each header actually prevents:**
+- **`Strict-Transport-Security` (HSTS)** — tells the browser "always use HTTPS for this domain, even if the user types `http://` or clicks an `http://` link, for the next N seconds." This closes the window for an SSL-stripping man-in-the-middle attack on a public Wi-Fi network, where an attacker would otherwise silently downgrade the user's first request to plain HTTP before they ever reach your server.
+- **`X-Content-Type-Options: nosniff`** — stops the browser from "MIME-sniffing" a response's content type based on its bytes rather than trusting the declared `Content-Type` header. Without it, a file uploaded as an "image" that actually contains HTML/JavaScript could get interpreted and executed as a script by the browser in certain contexts, bypassing content-type-based upload restrictions.
+- **`X-Frame-Options: DENY`** — prevents your pages from being embedded inside an `<iframe>` on another site, which is the core defense against **Clickjacking** (a malicious site overlaying invisible buttons on top of your legitimately-rendered page, tricking users into clicking things they didn't intend to).
+- **`Content-Security-Policy` (CSP)** — the broadest of the four; explicitly whitelists which sources scripts, styles, and other resources are allowed to load from, providing a second layer of XSS defense even if an injection point somehow bypasses output encoding — an injected `<script src="https://evil.com/steal.js">` simply won't execute if CSP's `script-src` doesn't permit `evil.com`.
+
+**Common Pitfall:** enabling `UseHsts()` in a project still served over plain HTTP during local development or in an environment without a valid TLS certificate — once a browser receives an HSTS header, it refuses to connect over plain HTTP for that domain for the specified duration, which can lock developers out of a local `http://` dev server unless HSTS is conditionally applied only in genuinely HTTPS-served environments.
+
+---
