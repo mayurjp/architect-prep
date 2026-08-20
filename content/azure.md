@@ -381,3 +381,96 @@ This reads like an ordinary sequential method, but critically, `WaitForExternalE
 **Common Pitfall:** writing non-deterministic code directly inside an Orchestrator Function (calling `DateTime.Now`, `Guid.NewGuid()`, or making a direct HTTP call inline) — because the orchestrator function is **replayed** from the start every time it resumes, any such non-deterministic operation would produce a *different* result on replay than it did originally, corrupting the orchestration's consistency; all actual work (including getting the current time or a random value) must go through the provided deterministic APIs (`context.CurrentUtcDateTime`, activity functions) specifically designed to behave consistently across replays.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is Azure Key Vault, and how does its "Get Secret" access model differ from just storing the same values as encrypted App Service configuration settings?**
+
+Both keep sensitive values out of source code, but Key Vault is a dedicated, centralized secrets-management service with its own fine-grained access control and audit trail — distinct from an individual App Service's own (encrypted-at-rest, but less centrally governed) application settings.
+
+**Storing a secret directly as an App Service setting:**
+```csharp
+var connectionString = builder.Configuration["DbConnectionString"]; // encrypted at rest by Azure,
+                                                                      // but scoped to THIS one App Service
+```
+This is reasonably secure (Azure encrypts App Service configuration at rest), but the secret is duplicated separately into every single App Service's own configuration that needs it, with no centralized audit log of who read it, and no easy way to rotate the value across every consumer at once.
+
+**Storing the same secret in Key Vault instead:**
+```csharp
+var keyVaultUri = new Uri("https://my-vault.vault.azure.net/");
+builder.Configuration.AddAzureKeyVault(keyVaultUri, new DefaultAzureCredential());
+// Application code reads it the SAME way -- builder.Configuration["DbConnectionString"] --
+// but the actual value lives in ONE centralized, access-controlled vault
+```
+
+**Why centralizing in Key Vault matters beyond just "one more place to store secrets":**
+- **Centralized audit logging** — every single access to a secret is logged (which identity, when), giving security teams a complete access trail that per-App-Service configuration simply doesn't provide.
+- **Fine-grained access policies per secret** — different applications/identities can be granted access to only the *specific* secrets they need, rather than each App Service's configuration being an all-or-nothing blob.
+- **Centralized rotation** — updating a secret's value in Key Vault propagates to every application referencing it, rather than needing the same value manually updated across every App Service's individual configuration.
+
+**Common Pitfall:** treating Key Vault purely as "a place to store connection strings" without granting access via Managed Identities (covered earlier) — if applications instead authenticate to Key Vault using their *own* stored client secret, you've just moved the "how do we securely store a secret" problem one level up without actually solving it; Managed Identity-based access is what completes the "no secrets stored anywhere at all" chain end-to-end.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is Azure API Management (APIM), and how does it let you apply cross-cutting API policies (rate limiting, transformation, caching) without modifying the backend services themselves?**
+
+APIM sits in front of one or more backend APIs (which could be App Services, Functions, or even on-premises services via a hybrid connection) as a managed gateway layer — applying policies expressed in XML-based configuration to requests/responses, entirely independent of the backend service's own code.
+
+**A policy applied at the gateway, with zero backend code changes:**
+```xml
+<policies>
+  <inbound>
+    <rate-limit calls="100" renewal-period="60" /> <!-- 100 calls/minute per subscription key -->
+    <set-header name="X-Forwarded-By" exists-action="override">
+      <value>APIM-Gateway</value>
+    </set-header>
+  </inbound>
+  <outbound>
+    <cache-store duration="300" /> <!-- cache responses for 5 minutes -->
+  </outbound>
+</policies>
+```
+Rate limiting, response caching, header manipulation, and even request/response transformation (converting a legacy backend's XML response into JSON for modern clients) all happen at the APIM layer — the actual backend service behind it never needs to implement any of this itself, and multiple different backend services fronted by the same APIM instance can share consistently-applied policies.
+
+**Why this matters for organizations exposing many APIs across different teams:** instead of every team's backend service independently implementing its own rate limiting, API key validation, and response caching (with predictably inconsistent quality and coverage across teams), APIM centralizes these cross-cutting concerns at the gateway layer — a change to the organization's rate-limiting policy is a configuration change in APIM, not a code change (and redeploy) across dozens of independently-owned backend services.
+
+**The developer-facing side — a self-service portal:** APIM also provides a Developer Portal where external or internal API consumers can discover available APIs, read auto-generated documentation, and self-service provision their own subscription keys — turning API access management from a manual, ticket-based process into something consumers can largely handle themselves.
+
+**Common Pitfall:** routing genuinely high-throughput, latency-sensitive internal service-to-service traffic through APIM "for consistency," when APIM's policy-evaluation overhead (however small per-request) adds up meaningfully at very high request volumes — APIM is most valuable for external-facing or cross-team API exposure where governance and self-service matter; extremely latency-sensitive internal traffic between tightly-coupled services often bypasses a full API gateway layer entirely for that specific reason.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is Azure's Managed Identity "Federated Credential" flow for workloads running OUTSIDE Azure (e.g., GitHub Actions or a Kubernetes cluster on another cloud), and how does it avoid needing a stored Azure client secret at all?**
+
+Managed Identity (covered earlier) works cleanly for workloads running *on* Azure compute — but a CI/CD pipeline running on GitHub Actions (not Azure infrastructure at all) has no Azure-native Managed Identity to lean on. Workload Identity Federation extends the same "no stored secret" principle to workloads running entirely outside Azure, by trusting an external identity provider's tokens directly.
+
+**The traditional (weaker) alternative — a stored Azure AD application client secret in GitHub:**
+```yaml
+# GitHub Actions secret: AZURE_CLIENT_SECRET (a long-lived, stored credential)
+- uses: azure/login@v1
+  with:
+    client-id: ${{ secrets.AZURE_CLIENT_ID }}
+    client-secret: ${{ secrets.AZURE_CLIENT_SECRET }} # a real, storable, potentially-leakable secret
+    tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+```
+This works, but it's exactly the "a long-lived secret sitting in a secret store, waiting to be leaked" pattern the entire Managed Identity approach exists to avoid.
+
+**Federated Credentials — GitHub's own short-lived OIDC token is trusted directly, no Azure secret stored anywhere:**
+```yaml
+- uses: azure/login@v1
+  with:
+    client-id: ${{ secrets.AZURE_CLIENT_ID }} # an identifier, NOT a secret
+    tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+    # NO client-secret at all -- GitHub Actions' own built-in OIDC token IS the credential
+```
+Configured ahead of time, Azure AD is told "trust OIDC tokens issued by GitHub Actions, specifically for this repository/branch/workflow" — at runtime, GitHub Actions' runner requests a short-lived, cryptographically-signed OIDC token from GitHub itself (no secret involved on GitHub's side either), presents it to Azure AD, and Azure AD — having been told in advance to trust tokens matching this exact GitHub repository/workflow — exchanges it for a genuine, short-lived Azure access token.
+
+**Why this closes the same gap Workload Identity (covered for GKE/GCP) closes for Kubernetes:** both mechanisms solve the identical underlying problem — a workload running on infrastructure *outside* the cloud provider's own compute, needing to authenticate *to* that cloud provider, without a long-lived, storable secret ever existing on either side of the exchange; only short-lived tokens, issued and validated based on a pre-configured trust relationship between the two identity systems.
+
+**Common Pitfall:** configuring the trust relationship too broadly (trusting OIDC tokens from *any* workflow in an organization's entire GitHub account, rather than a specific repository and branch) — this defeats much of the security benefit, since a compromised or malicious workflow anywhere in the broader trusted scope could then obtain Azure credentials intended for a completely different, specific pipeline.
+
+---

@@ -421,3 +421,103 @@ public bool ValidateApiKey(string providedKey, string actualKey)
 **Common Pitfall:** applying constant-time comparison to the *hashed* representation of a password (already using BCrypt/Argon2, as covered earlier) while missing that a *raw* secret comparison elsewhere in the same system (an API key check, a webhook signature validation using plain `==`) still uses naive comparison — timing-attack mitigation needs to be applied to every point where a secret value is directly compared, not just the primary password-login path.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is Clickjacking, and how does it trick a user into clicking something entirely different from what they visually believe they're clicking?**
+
+Clickjacking loads a legitimate target page inside an invisible (or nearly-invisible) `<iframe>` on an attacker's own site, then overlays deceptive visible content on top — the victim believes they're clicking the attacker's visible button, but the click actually lands on the invisible legitimate page's button underneath.
+
+**The attack's structure:**
+```html
+<!-- On evil.com -->
+<style>
+  iframe { opacity: 0.01; position: absolute; top: 0; left: 0; width: 500px; height: 200px; z-index: 2; }
+  .decoy-button { position: absolute; top: 50px; left: 100px; z-index: 1; }
+</style>
+
+<button class="decoy-button">Click here to win a free prize!</button>
+<iframe src="https://bank.com/transfer?to=attacker&amount=5000"></iframe>
+<!-- The IFRAME sits invisibly, precisely positioned so the bank's ACTUAL "Confirm Transfer"
+     button lines up exactly where the visible decoy "prize" button appears -->
+```
+The victim, logged into `bank.com` in another tab (carrying a valid session cookie), sees only the "win a free prize" button — clicking it visually appears to interact with the decoy, but the click event actually lands on the invisible bank transfer confirmation button positioned exactly underneath, submitting a request the browser dutifully attaches the victim's real session cookie to.
+
+**The defense — `X-Frame-Options` and `Content-Security-Policy: frame-ancestors` (covered earlier as security headers):**
+```csharp
+context.Response.Headers.Append("X-Frame-Options", "DENY");
+// OR, the more flexible modern equivalent:
+context.Response.Headers.Append("Content-Security-Policy", "frame-ancestors 'none'");
+```
+Either header tells the browser "never allow this page to be embedded inside an `<iframe>` on any other site at all" — if `bank.com` sends this header, the browser refuses to render it inside `evil.com`'s iframe in the first place, and the entire attack setup collapses since there's no invisible frame to hide a legitimate button inside.
+
+**Common Pitfall:** relying purely on "frame-busting" JavaScript (`if (window !== window.top) window.top.location = window.location;`) instead of the proper HTTP header — frame-busting scripts can often be defeated by an attacker's own page (using the HTML5 `sandbox` iframe attribute to specifically block the frame-busting script's own navigation attempt), whereas the browser-enforced `X-Frame-Options`/CSP header cannot be bypassed by anything the embedding page's JavaScript does, since the browser itself refuses the frame before any of the embedded page's own script ever runs.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is a Path Traversal (Directory Traversal) vulnerability, and how does a filename like `../../etc/passwd` let an attacker escape an intended directory to read arbitrary files on the server?**
+
+Path Traversal occurs when an application accepts user-supplied input as part of a file path without properly validating it, letting an attacker use `../` sequences to navigate outside the directory the application intended to restrict access to, potentially reading (or writing) arbitrary files elsewhere on the server's filesystem.
+
+**The vulnerable pattern — a "download your uploaded file" feature:**
+```csharp
+[HttpGet("download")]
+public IActionResult Download(string fileName)
+{
+    var path = Path.Combine("C:\\app\\uploads\\", fileName); // naive concatenation
+    return File(System.IO.File.ReadAllBytes(path), "application/octet-stream");
+}
+```
+An attacker requests `?fileName=..\..\..\Windows\System32\drivers\etc\hosts` (or the Linux equivalent, `../../../../etc/passwd`) — `Path.Combine` doesn't sanitize `../` sequences, so the resulting path escapes the intended `C:\app\uploads\` directory entirely, potentially reading sensitive system files, application configuration files (with connection strings or secrets), or source code never meant to be exposed via this endpoint.
+
+**The fix — validate the resolved path stays within the intended directory, don't just trust the input:**
+```csharp
+[HttpGet("download")]
+public IActionResult Download(string fileName)
+{
+    var basePath = Path.GetFullPath("C:\\app\\uploads\\");
+    var requestedPath = Path.GetFullPath(Path.Combine(basePath, fileName));
+
+    if (!requestedPath.StartsWith(basePath, StringComparison.OrdinalIgnoreCase))
+        return BadRequest("Invalid file path."); // the resolved path escaped the intended directory
+
+    return File(System.IO.File.ReadAllBytes(requestedPath), "application/octet-stream");
+}
+```
+`Path.GetFullPath()` resolves any `../` sequences into their actual final destination — comparing that *resolved* path against the expected base directory (rather than just checking whether the raw input string "looks suspicious") catches the traversal attempt regardless of how many creative `../` or encoded-character variations an attacker tries.
+
+**Common Pitfall:** attempting to block path traversal by simply checking if the input string *contains* `".."` — attackers have many encoding tricks to bypass a naive substring check (URL-encoded `%2e%2e%2f`, double-encoding, or platform-specific path separator variations) that a resolved-full-path comparison (as shown above) inherently handles correctly, since it operates on the *actual, final* filesystem path rather than pattern-matching against the raw, potentially-obfuscated input string.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is a Supply Chain Attack via a compromised or "typosquatted" NuGet package, and how does it exploit the trust developers place in third-party dependencies without ever touching the application's own source code?**
+
+A typosquatting attack publishes a malicious package under a name deliberately similar to a popular, legitimate one (`Newtonsoft.Jsonn` instead of `Newtonsoft.Json`, or `Microsoft.AspNetCore.Authentications` instead of the real package) — hoping a developer's typo, or a copy-pasted `dotnet add package` command with a subtle error, installs the malicious impostor instead of the intended legitimate dependency.
+
+**The attack surface — a single typo installing malicious code with the same privileges as the application itself:**
+```bash
+dotnet add package Newtonsoft.Jsonn  # ONE extra letter -- a malicious package, not the real Newtonsoft.Json
+```
+```csharp
+// Somewhere inside the malicious package's innocuous-looking "JsonConvert.SerializeObject" replacement:
+public static string SerializeObject(object obj)
+{
+    ExfiltrateEnvironmentVariablesToAttackerServer(); // silently runs, hidden inside a familiar-looking API
+    return RealSerialize(obj); // still WORKS correctly, so the compromise goes unnoticed
+}
+```
+Because the malicious package still provides working functionality (so nothing appears broken), and because NuGet packages run with the exact same trust and filesystem/network access as the application itself, a single typo'd dependency can silently exfiltrate secrets, environment variables, or connection strings — with the application's own source code never touched or modified at all.
+
+**Mitigations:**
+- **Verify package names carefully, especially when copy-pasting install commands** from unofficial sources (a Stack Overflow answer, a tutorial blog) rather than the package's own official documentation.
+- **Lock file / package pinning with hash verification** — `packages.lock.json` records exact resolved versions and content hashes, so a subsequent restore fails loudly if a package's content has changed unexpectedly (a compromised update to an existing, previously-legitimate package) rather than silently pulling in different code.
+- **Dependency scanning tools** (covered under DevOps supply-chain security) that specifically check for known-malicious or newly-published, suspiciously-similar-named packages, not just known CVEs in legitimate ones.
+- **Organizational package allowlists** — some enterprises restrict which NuGet sources/packages are installable at all via a private feed acting as a curated proxy, preventing typosquatted packages from ever being installable in the first place, regardless of what a developer types.
+
+**Common Pitfall:** assuming supply-chain risk is limited to "known vulnerabilities in legitimate packages" (the CVE-scanning mental model) — a typosquatted or genuinely malicious package has no CVE to detect in the first place, since it's not a flawed *legitimate* package; it's an entirely different threat category requiring name-verification and provenance-checking practices that vulnerability scanning alone doesn't address.
+
+---

@@ -372,3 +372,88 @@ Every event Eventarc routes — whether it originated from a Storage upload, a P
 **Common Pitfall:** assuming Eventarc changes the *delivery guarantees* of the underlying event source — it's a routing/standardization layer, not a new guarantee; a Pub/Sub-sourced event routed via Eventarc still carries Pub/Sub's own at-least-once delivery semantics, meaning consuming services still need to be idempotent, exactly as they would need to be consuming Pub/Sub directly without Eventarc in between.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is Google Secret Manager, and how does it differ from simply storing a secret as an environment variable in a Cloud Run service's configuration?**
+
+Both approaches keep a secret out of source code, but Secret Manager is a dedicated, centrally-governed secrets store with versioning and access-audit capabilities — a plain environment variable on a Cloud Run service is scoped to that one service's configuration, with no equivalent centralized management.
+
+**A secret as a plain Cloud Run environment variable:**
+```bash
+gcloud run deploy my-api --set-env-vars="DB_PASSWORD=hunter2"
+# The value is visible in the Cloud Run service's configuration to anyone
+# with read access to that service's settings -- no separate access control layer
+```
+
+**The same secret managed via Secret Manager instead:**
+```bash
+gcloud secrets create db-password --data-file=password.txt
+gcloud secrets add-iam-policy-binding db-password \
+  --member="serviceAccount:my-api@my-project.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud run deploy my-api --set-secrets="DB_PASSWORD=db-password:latest"
+```
+The actual secret value lives in Secret Manager, with its own IAM policy controlling exactly which service accounts can read it — Cloud Run mounts it as an environment variable at runtime, but the secret's lifecycle (versioning, rotation, access audit) is managed centrally, independent of any one service's own configuration.
+
+**Why versioning matters specifically:** Secret Manager keeps every previous version of a secret (`db-password:1`, `db-password:2`, ...), letting you roll back to a prior value instantly if a rotation goes wrong, and letting different services reference different specific versions during a gradual rotation — a plain environment variable has no such history; updating it simply overwrites the only value that existed.
+
+**Common Pitfall:** referencing `:latest` for a secret version in a production service's configuration — while convenient, this means rotating the secret's value takes effect for that service on its *next* deployment/restart automatically, which can be surprising if a rotation was intended to be more carefully staged; pinning to a specific version number and deliberately updating the reference is often the safer choice for production services where an unplanned secret change could cause an outage if the new value isn't actually ready yet.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is GCP's Cloud CDN, and how does its cache-key configuration let you control caching behavior for dynamic query-string-driven content without caching every unique URL combination separately?**
+
+Cloud CDN caches responses at Google's edge locations, keyed by default on the full request URL — but for endpoints with many query-string variations that don't actually change the response content, this default behavior can lead to a poor cache-hit ratio unless the cache key is deliberately configured.
+
+**The default behavior — caching keyed on the full URL, including every query parameter:**
+```text
+/api/products?category=electronics&utm_source=twitter   -> cached as ONE distinct entry
+/api/products?category=electronics&utm_source=facebook   -> cached as a DIFFERENT entry (same actual content!)
+/api/products?category=electronics&utm_source=email       -> yet ANOTHER distinct cache entry
+```
+If `utm_source` is purely a marketing-tracking parameter that doesn't affect the actual response content at all, Cloud CDN's default full-URL cache key treats each of these as a completely separate cache entry — fragmenting what should be one highly-reused cache entry into many rarely-reused ones, tanking the effective cache-hit ratio.
+
+**Configuring the cache key to ignore irrelevant query parameters:**
+```bash
+gcloud compute backend-services update my-backend-service \
+  --cache-key-include-query-string \
+  --cache-key-query-string-whitelist=category,sortBy
+  # ONLY "category" and "sortBy" affect the cache key -- "utm_source" and any other
+  # parameter are IGNORED for caching purposes, even though the full URL still hits the backend once
+```
+Now all three of the `utm_source`-varying requests above are treated as the **same** cache entry (since `category=electronics` is the only relevant parameter), dramatically improving cache-hit ratio for content whose actual substance doesn't depend on tracking/analytics query parameters.
+
+**Why getting this right matters beyond just hit-ratio metrics:** a poor cache-hit ratio doesn't just mean "slightly slower" — it means far more requests reach the origin server than necessary, since each differently-parameterized-but-identical-content URL triggers its own origin fetch, undermining much of the point of fronting the service with a CDN at all.
+
+**Common Pitfall:** whitelisting too few query parameters and accidentally caching genuinely different content under the same cache key — if `sortBy` actually does change the response (a differently-ordered product list) but is left off the whitelist, users could receive a cached response reflecting a completely different sort order than what they actually requested; the whitelist must include every parameter that genuinely affects response content, and exclude only ones that are provably irrelevant to it.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is GCP's Binary Authorization, and how does it enforce that only cryptographically-verified, approved container images can be deployed to GKE — closing a supply-chain gap that image-scanning alone doesn't?**
+
+Vulnerability scanning (covered under DevOps supply-chain security) tells you *whether* a container image has known vulnerabilities — Binary Authorization goes further, cryptographically enforcing that only images which passed specific, defined attestation requirements (built by a trusted CI pipeline, scanned and approved, signed by an authorized process) can be deployed to a GKE cluster **at all**, regardless of whether someone with `kubectl` access tries to deploy something else.
+
+**The mechanism — a policy requiring cryptographic attestations before deployment is permitted:**
+```yaml
+# Binary Authorization policy (conceptual)
+defaultAdmissionRule:
+  requireAttestationsBy:
+    - projects/my-project/attestors/qa-passed
+    - projects/my-project/attestors/vulnerability-scan-passed
+  evaluationMode: REQUIRE_ATTESTATION
+```
+When someone (or some CI pipeline) attempts to deploy an image to this GKE cluster, the cluster's admission controller checks whether that specific image has been cryptographically signed by *both* required attestors — an image built by an unauthorized process, or one that was never actually scanned/approved through the proper pipeline, is **rejected outright at deployment time**, regardless of who's attempting the deployment or what access they otherwise have.
+
+**How this differs from "just running a vulnerability scanner in CI":** a vulnerability scan in CI is a *check* — if someone bypasses the normal pipeline entirely (a compromised CI credential, an insider directly pushing to the cluster, a supply-chain attack injecting a malicious image), a CI-only scan provides no protection at all, since it was never actually consulted for that deployment. Binary Authorization enforces the requirement at the **cluster's own admission control layer** — there's no way to deploy an unattested image to this cluster at all, regardless of how someone attempted to bypass the normal CI process.
+
+**Why this matters specifically as supply-chain security, not just "another vulnerability scan":** it directly addresses the "what if an attacker compromises the CI pipeline itself, or a credential with deploy access, and tries to push an unapproved image directly" scenario — a threat model that a CI-stage-only scan structurally cannot defend against, since Binary Authorization's enforcement point is the cluster itself, independent of whatever process (legitimate or compromised) is attempting the deployment.
+
+**Common Pitfall:** configuring Binary Authorization policies but leaving a broad exemption for "break-glass" emergency deployments that's rarely audited afterward — an emergency-access mechanism is often genuinely necessary operationally, but if it's not tightly scoped and actively monitored, it becomes the obvious path an attacker (or an overly casual internal process) uses to bypass the entire attestation requirement the policy was meant to enforce.
+
+---

@@ -402,3 +402,115 @@ Your application never handles, stores, or verifies the user's actual Google pas
 **Common Pitfall:** federating identity but still maintaining a *separate*, locally-stored password as a "backup login method" for the same account — this reintroduces exactly the credential-security burden (password hashing, breach monitoring, reset flows) federation was meant to eliminate, and creates a second, often less-scrutinized attack surface an attacker could target instead of the properly-secured federated IdP.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the difference between "Authentication Scheme" and "Authentication Handler" in ASP.NET Core, and why can an application support more than one at the same time?**
+
+An Authentication Scheme is a named configuration (e.g., `"Cookies"`, `"Bearer"`, `"Google"`) — the Authentication Handler is the actual code that knows how to validate credentials for that specific scheme. ASP.NET Core supports registering **multiple** schemes simultaneously, letting a single application authenticate different kinds of clients through entirely different mechanisms.
+
+**Registering multiple schemes side by side:**
+```csharp
+builder.Services.AddAuthentication()
+    .AddCookie("Cookies", options => { /* for browser-based, server-rendered pages */ })
+    .AddJwtBearer("Bearer", options => { /* for API clients sending a JWT */ })
+    .AddOpenIdConnect("Google", options => { /* for "Sign in with Google" */ });
+```
+Each named scheme has its own dedicated handler validating credentials in a completely different way — a cookie handler checks an encrypted cookie value; a JWT bearer handler validates a token's signature and claims; an OIDC handler redirects to Google and processes the callback.
+
+**Why an application needs more than one scheme:** a typical application serving both a traditional server-rendered admin panel (using cookies) *and* a public JSON API (using JWT bearer tokens) needs both mechanisms available simultaneously — a request to an API endpoint should be authenticated via the `Bearer` scheme, while a request to a browser-facing admin page should be authenticated via `Cookies`, and the application needs to apply the *right* scheme to the *right* kind of request.
+
+**Selecting which scheme applies to which endpoint:**
+```csharp
+[Authorize(AuthenticationSchemes = "Bearer")] // THIS endpoint only accepts JWT bearer tokens
+[HttpGet("api/orders")]
+public IActionResult GetOrders() { ... }
+
+[Authorize(AuthenticationSchemes = "Cookies")] // THIS endpoint only accepts the cookie-based scheme
+[HttpGet("admin/dashboard")]
+public IActionResult AdminDashboard() { ... }
+```
+
+**Common Pitfall:** registering multiple schemes without specifying which one a given endpoint should use, relying only on the application's single `DefaultAuthenticateScheme` — if an API endpoint meant for JWT bearer tokens accidentally falls back to attempting cookie-based authentication (because no explicit scheme was specified and the default happens to be `Cookies`), a JWT-bearing API client can receive confusing authentication failures unrelated to anything wrong with their actual token.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is Step-Up Authentication, and how does it let a system require stronger proof of identity for specific, higher-risk operations without forcing every user interaction through the same strict requirement?**
+
+Step-Up Authentication means a user who's already authenticated (perhaps with just a password) can be prompted for an *additional* verification step specifically when attempting a higher-risk action — rather than requiring that stronger verification (like MFA) for every single interaction regardless of sensitivity, which would add friction to routine, low-risk actions unnecessarily.
+
+**Without step-up — every action requires the same authentication level:**
+```text
+Viewing account balance: requires password + MFA (same as everything else)
+Changing account password: requires password + MFA (same strength, even though FAR more sensitive)
+Wiring $50,000 to a new recipient: requires password + MFA (STILL the same strength!)
+```
+Applying the same authentication strength uniformly either annoys users with excessive friction for routine actions, or under-protects genuinely high-risk ones if the baseline is kept low for convenience.
+
+**With step-up — the authentication requirement scales with the action's risk:**
+```csharp
+[Authorize] // baseline: just needs to be logged in at all, for routine actions
+[HttpGet("balance")]
+public IActionResult GetBalance() { ... }
+
+[Authorize(Policy = "RecentMfa")] // requires MFA to have been completed RECENTLY, not just at initial login
+[HttpPost("wire-transfer")]
+public IActionResult WireTransfer(WireTransferRequest request) { ... }
+```
+```csharp
+builder.Services.AddAuthorization(options =>
+    options.AddPolicy("RecentMfa", policy =>
+        policy.RequireAssertion(context =>
+        {
+            var mfaTime = context.User.FindFirst("mfa_completed_at")?.Value;
+            return mfaTime != null && DateTime.Parse(mfaTime) > DateTime.UtcNow.AddMinutes(-15);
+            // MFA must have happened within the last 15 minutes specifically for THIS action
+        })));
+```
+A user browsing their balance doesn't need to have completed MFA recently at all — but attempting a wire transfer specifically triggers a check for *recent* MFA completion, and if it hasn't happened recently enough, the application prompts for it right then, at the moment the higher-risk action is attempted, rather than upfront for every login.
+
+**Why this matters as a genuinely different model from just "always require MFA":** it concentrates the friction of strong authentication specifically at the moments it provides the most security value (genuinely sensitive, high-risk actions) while keeping routine, low-risk interactions frictionless — a deliberate risk-proportionate design rather than a uniform one.
+
+**Common Pitfall:** implementing step-up authentication but forgetting to set a reasonable expiry on "recent MFA completion" — without a time window (the 15-minute check above), a user who completed MFA once at login would satisfy "recent MFA" checks indefinitely for the rest of their session, defeating the purpose of requiring MFA specifically *close in time* to the sensitive action itself.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is Token Introspection (RFC 7662), and why does an Opaque (non-JWT) access token require a fundamentally different validation approach than a self-contained JWT?**
+
+A JWT is self-contained — a resource server can validate it entirely on its own (checking the signature, expiry, claims) without any network call back to the identity provider, as covered throughout earlier questions. An **Opaque token** (just a random, meaningless string from the resource server's perspective) contains no information at all by itself — validating one requires calling back to the Authorization Server via Token Introspection to ask "is this token currently valid, and if so, what does it represent?"
+
+**A JWT — self-contained, validated locally, no network call needed:**
+```csharp
+// The resource server can check signature/expiry/claims ENTIRELY on its own
+var principal = jwtHandler.ValidateToken(jwt, validationParameters, out _);
+```
+
+**An Opaque token — meaningless on its own, requires an introspection call to the Authorization Server:**
+```http
+POST /introspect HTTP/1.1
+Host: identity-provider.com
+Content-Type: application/x-www-form-urlencoded
+
+token=2YotnFZFEjr1zCsicMWpAA&token_type_hint=access_token
+```
+```json
+{
+  "active": true,
+  "scope": "orders.read orders.write",
+  "client_id": "mobile-app",
+  "exp": 1735689600
+}
+```
+The resource server has to make this network round-trip to the Authorization Server for every single request bearing an opaque token, since the token itself carries no verifiable information — the Authorization Server is the only party that actually knows what that specific opaque string represents and whether it's still valid.
+
+**Why anyone would choose Opaque tokens over the seemingly more convenient JWT:** **instant revocation.** A JWT is only genuinely revocable by waiting for it to naturally expire (or maintaining a deny-list, as covered in the earlier JWT revocation scenario) — an Opaque token can be revoked *immediately* at the Authorization Server, and the very next introspection call for that token simply returns `"active": false`, with no propagation delay or deny-list infrastructure needed at all, since the resource server never cached any independent judgment about the token's validity to begin with.
+
+**The trade-off:** every single request now requires an extra network round-trip (to the introspection endpoint) that a self-contained JWT completely avoids — a real latency and Authorization-Server-load cost, which is exactly the trade-off JWTs were designed to eliminate in the first place; some systems mitigate this by caching introspection results briefly (accepting a small window of revocation delay in exchange for reduced introspection call volume).
+
+**Common Pitfall:** choosing JWTs by default without considering that the specific use case might genuinely need instant revocation (a scenario like the "employee fired, must lose access immediately" case covered earlier) — Opaque tokens with introspection, despite the added latency cost, directly solve that specific requirement in a way a plain JWT structurally cannot without additional deny-list infrastructure layered on top.
+
+---

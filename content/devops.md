@@ -410,3 +410,98 @@ The pipeline automatically queries a metrics system (Prometheus, Datadog) for th
 **Common Pitfall:** configuring a Canary Analysis with too short an evaluation window or too small a canary traffic percentage — a canary receiving only 1% of traffic for 2 minutes may not accumulate statistically meaningful data to detect a real but infrequent problem (an error that only manifests for a specific rare input combination), giving false confidence that the automated gate genuinely validated the release when it actually didn't have enough signal to do so reliably.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is a "Build Matrix" in a CI pipeline, and what problem does it solve for testing an application across multiple configurations without writing a separate pipeline definition per combination?**
+
+A Build Matrix lets a single pipeline definition automatically run the same job across every combination of specified variables (OS, language version, database provider) — instead of hand-writing a nearly-identical, duplicated pipeline job for every combination you want to test.
+
+**Without a matrix — duplicated, near-identical job definitions:**
+```yaml
+jobs:
+  test-net8-ubuntu: { runs-on: ubuntu-latest, steps: [...same steps, .NET 8...] }
+  test-net8-windows: { runs-on: windows-latest, steps: [...same steps, .NET 8...] }
+  test-net9-ubuntu: { runs-on: ubuntu-latest, steps: [...same steps, .NET 9...] }
+  test-net9-windows: { runs-on: windows-latest, steps: [...same steps, .NET 9...] }
+  # 4 nearly-identical job blocks, differing only in OS and .NET version
+```
+
+**With a matrix — one job definition, automatically expanded across every combination:**
+```yaml
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        dotnet-version: ['8.0.x', '9.0.x']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: ${{ matrix.dotnet-version }} }
+      - run: dotnet test
+```
+This single job definition automatically runs **4 times** (2 OS values × 2 .NET versions), once per combination — adding a third .NET version to test means adding one line to the matrix, not writing an entirely new duplicated job block.
+
+**Why this matters beyond just reducing YAML duplication:** it makes it trivial to genuinely verify an application works correctly across every officially-supported combination of environment/runtime versions, catching platform-specific or version-specific bugs (a library behaving differently on Windows vs Linux, a behavior change between .NET versions) that testing on only one combination would never surface.
+
+**Common Pitfall:** letting a build matrix grow unboundedly (testing every combination of 5 different variables) without considering the actual value each additional dimension provides — a matrix with many dimensions multiplies job count combinatorially, and CI minutes/cost scale directly with that multiplication; it's worth pruning combinations that don't provide meaningfully different test coverage (testing every OS × every minor patch version, when patch versions rarely introduce OS-specific behavior differences, for instance).
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is "Shift Left" testing/security, and how does moving a check earlier in the pipeline change both its cost and its effectiveness, not just its timing?**
+
+"Shift Left" refers to moving a quality or security check to an earlier stage in the development/deployment pipeline — the underlying insight isn't just "do it sooner," but that the **cost of fixing** an issue (and the blast radius if it's missed) grows substantially the later it's caught.
+
+**The traditional, "shifted right" order — security/quality checks near the very end:**
+```text
+Code written -> Code merged -> Deployed to staging -> Deployed to production
+                                                              ↑
+                                                   Security scan happens HERE
+                                                   (a vulnerability found now means
+                                                    it's ALREADY in production)
+```
+
+**Shifted left — the same checks happen far earlier, ideally before code is even merged:**
+```yaml
+# A pipeline running static analysis and dependency scanning on EVERY pull request,
+# before merge, rather than only scanning the already-deployed production artifact
+on: pull_request
+jobs:
+  security-scan:
+    steps:
+      - run: dotnet list package --vulnerable # dependency vulnerability check, on the PR itself
+      - uses: github/codeql-action/analyze@v3  # static analysis, on the PR itself
+```
+A vulnerability caught here blocks the PR from merging at all — the "fix" is simply not merging vulnerable code in the first place, versus discovering the same vulnerability after it's already live in production and now requires an emergency patch, a security incident review, and potentially customer notification.
+
+**Why this changes effectiveness, not just timing:** a developer actively working on a specific piece of code (during PR review) has full context and can fix an issue in minutes — the same issue discovered weeks later, after the original developer has moved on to other work, requires re-establishing that context from scratch, in addition to whatever operational cost the issue caused while live in production. The check didn't just move earlier in time — it moved to the point where fixing it is cheapest and least disruptive.
+
+**Common Pitfall:** claiming to "shift left" by adding an earlier pipeline stage that still only produces a report/warning rather than actually **blocking** the problematic change — a shift-left check that developers can freely ignore (a warning buried in CI logs, not a required, blocking status check) provides the earlier *visibility* without the earlier *enforcement*, missing much of the actual benefit of catching the issue before it merges rather than after.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is a "Deployment Ring" strategy, and how does it differ from a simple Canary release in terms of what determines which users see a new version first?**
+
+A Canary release (covered earlier) splits traffic by *percentage*, largely at random. A Ring deployment strategy instead splits users into deliberately-defined groups ("rings") based on **who they are** — internal employees, then beta customers, then general availability — progressing a release through each ring in sequence, with each ring representing a deliberate trust/risk tier rather than an arbitrary traffic percentage.
+
+**The typical ring structure:**
+```text
+Ring 0 (Canary/Dogfood): the engineering team itself, running the new version internally first
+Ring 1 (Early Adopters):  opted-in beta customers who explicitly want early access, tolerate some risk
+Ring 2 (Broad Rollout):   a larger, representative slice of general production users
+Ring 3 (Full Production): everyone else, only reached after prior rings show no issues
+```
+Unlike a Canary's essentially random 5%/10%/50%/100% traffic split, each ring here is a **deliberately chosen population** — Ring 0 is specifically the people who built the feature and have the most context to quickly notice something's wrong; Ring 1 is specifically people who've opted into early access and expect occasional rough edges.
+
+**Why the "who" (not just "how many") matters:** an internal engineering team (Ring 0) using the new version themselves, in their own daily workflows, is likely to notice a subtle behavioral regression far faster and more precisely than a random 5% slice of anonymous production traffic would (a Canary's typical population) — the deliberate ordering front-loads the population most likely to notice problems quickly and most tolerant of the disruption if something does go wrong.
+
+**How rings and canary analysis can combine:** a Ring deployment strategy doesn't replace automated canary analysis (covered earlier) — it's common to apply automated health-metric analysis *within* each ring's rollout (does Ring 1's error rate look healthy before progressing to Ring 2?), combining the "who sees it first" benefit of rings with the "automatically detect a problem" benefit of canary analysis, rather than treating them as competing approaches.
+
+**Common Pitfall:** defining rings but progressing through them on a fixed calendar schedule regardless of whether the current ring is actually showing healthy metrics — the entire value of a ring strategy depends on genuinely verifying each ring is healthy before advancing to the next, larger one; advancing on a fixed timer without that verification reduces the ring structure to just a fancier-sounding, still-blind rollout schedule.
+
+---
