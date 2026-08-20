@@ -1,4 +1,4 @@
-# Architect Prep — Learning Site: Design Spec
+# Learning Site: Design Spec
 
 Handoff document for Claude Code. Goal: a GitHub Pages static site that serves a growing bank of
 interview/learning Q&A across a full .NET-centric backend curriculum, at Beginner / Intermediate /
