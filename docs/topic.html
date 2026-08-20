@@ -11,6 +11,17 @@
 <link rel="stylesheet" href="assets/css/style.css" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/dockerfile.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/http.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/protobuf.min.js"></script>
+<script>
+  // highlight.js's default bundle has no grammar at all for these -- alias them to the
+  // closest supported grammar so they still render with some syntax coloring instead of
+  // sitting flat/unstyled next to properly-highlighted blocks.
+  hljs.registerAliases(["cshtml", "razor"], { languageName: "xml" });
+  hljs.registerAliases(["bicep"], { languageName: "json" });
+  hljs.registerAliases(["hcl"], { languageName: "ini" });
+</script>
 <script src="assets/js/theme.js"></script>
 </head>
 <body>
