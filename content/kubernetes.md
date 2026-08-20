@@ -1,3 +1,5 @@
+# Kubernetes — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What are the core components of Kubernetes (Pods, Deployments, Services)?**
@@ -119,3 +121,154 @@ Kubernetes is a highly dynamic environment; Pods can be terminated at any moment
 
 **The Fix for Long Jobs:**
 If your jobs take 5 minutes, you must increase the `terminationGracePeriodSeconds` in your Deployment YAML to something like `360` (6 minutes). This guarantees the application has enough time to gracefully finish its current work after receiving the `SIGTERM` before Kubernetes brings down the hammer.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is a Kubernetes namespace, and what are the built-in resource limit mechanisms tied to it?**
+
+A Namespace is a virtual partition within a single physical cluster, letting you organize and isolate groups of resources (Pods, Services, ConfigMaps) — most commonly one per team, environment, or application.
+
+**Creating and using a namespace:**
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payments-team
+```
+```bash
+kubectl apply -f namespace.yaml
+kubectl get pods --namespace=payments-team
+```
+Resources in different namespaces are isolated by *name* (two namespaces can each have their own `Deployment` named `order-service` without colliding) but **not** isolated at the network level by default — a Pod in `payments-team` can still reach a Service in `search-team` by its fully-qualified DNS name (`service-name.search-team.svc.cluster.local`) unless a `NetworkPolicy` explicitly restricts it.
+
+**Resource limits tied to a namespace — `ResourceQuota`:**
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-quota
+  namespace: payments-team
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: 20Gi
+    pods: "50"
+```
+This caps the *total* CPU/memory/Pod count the entire namespace can consume across all its workloads combined — preventing one team's runaway deployment from starving the whole cluster.
+
+**Per-Pod defaults — `LimitRange`:**
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: payments-team
+spec:
+  limits:
+    - default: { cpu: "500m", memory: "256Mi" }        # applied if a Pod spec omits limits
+      defaultRequest: { cpu: "250m", memory: "128Mi" }  # applied if a Pod spec omits requests
+      type: Container
+```
+This ensures every container gets *some* resource request/limit even if a developer forgets to specify one in their Deployment manifest, preventing an unbounded container from silently consuming an entire node's resources.
+
+**Common Pitfall:** assuming namespaces provide security isolation by default — without an explicit `NetworkPolicy`, any Pod in the cluster can reach any Service in any other namespace. Namespaces are an *organizational* boundary out of the box, not a *security* boundary, until you deliberately lock down traffic.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What is a Kubernetes `Job` and `CronJob`, and how do they differ from a `Deployment`?**
+
+A `Deployment` is built for **long-running** processes that should always be up (a web API). `Job` and `CronJob` are built for **run-to-completion** workloads — work that finishes and should not be restarted just because it exited.
+
+**`Job` — run something to completion, exactly (or at-least) once:**
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migration
+spec:
+  backoffLimit: 3            # retry up to 3 times on failure, then give up
+  template:
+    spec:
+      restartPolicy: Never   # Jobs cannot use "Always" -- that's what Deployments are for
+      containers:
+        - name: migrator
+          image: myregistry/order-service-migrator:1.4.2
+          command: ["dotnet", "ef", "database", "update"]
+```
+Unlike a `Deployment`, Kubernetes considers this workload "done" once the container exits with code `0` — it does **not** restart a successfully-completed Pod, only a *failed* one (up to `backoffLimit` times).
+
+**`CronJob` — run a `Job` on a recurring schedule:**
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly-billing
+spec:
+  schedule: "0 0 * * *"              # standard cron syntax -- midnight every day
+  concurrencyPolicy: Forbid          # don't start a new run if the previous one is still going
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: billing-job
+              image: myregistry/billing-batch:2.1.0
+```
+`concurrencyPolicy: Forbid` is the key safety net for a job like nightly billing — if last night's run is somehow still executing when the next scheduled time arrives, Kubernetes skips starting a new one instead of running two billing jobs concurrently (the same distributed-double-execution problem a Redis-based distributed lock solves for a `Deployment`-based scheduled task, but built directly into the primitive here).
+
+**Common Pitfall:** using a `Deployment` with `replicas: 1` for a batch job "because it only needs to run once" — a `Deployment`'s entire purpose is to keep its Pod *continuously running*; if the batch job's process exits successfully (code 0), the Deployment considers that a crash and immediately restarts it, causing the job to run in an infinite loop. `Job`/`CronJob` exist specifically to express "this should run to completion and then genuinely stop."
+
+---
+
+## Advanced — Question 2
+
+**Q2: How does the Horizontal Pod Autoscaler (HPA) work, and what's the difference between scaling on CPU vs. custom metrics?**
+
+The HPA automatically adjusts the number of replicas in a `Deployment` based on observed load, so you don't manually run `kubectl scale` during a traffic spike.
+
+**Scaling on built-in CPU metrics:**
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-service
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70   # scale up if average CPU across pods exceeds 70% of its request
+```
+**The Mechanism:** the HPA controller polls the Metrics Server every ~15 seconds, computes `desiredReplicas = ceil(currentReplicas × currentMetric / targetMetric)`, and adjusts the Deployment's replica count accordingly — gradually, with built-in cooldown windows to prevent rapid flapping up and down.
+
+**Why CPU alone is often the wrong signal:** a .NET API doing mostly I/O-bound work (waiting on a database or downstream HTTP call) can have a growing request queue and rising latency while CPU usage stays comfortably low — CPU-based scaling would never trigger, even though the service is genuinely falling behind.
+
+**Scaling on custom/external metrics instead:**
+```yaml
+metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_in_flight   # exposed via Prometheus Adapter from your app's own metrics
+      target:
+        type: AverageValue
+        averageValue: "50"              # scale up if avg in-flight requests per pod exceeds 50
+```
+This requires a **metrics adapter** (like the Prometheus Adapter) translating your application's own exported metrics (queue depth, in-flight requests, custom business metrics) into a form the HPA controller can consume — letting you scale on the signal that actually reflects load for *your* workload, not a generic proxy for it.
+
+**Common Pitfall:** setting `minReplicas` too low for a service with a slow cold start (JIT warm-up, EF Core model building) — if traffic spikes faster than new Pods can become "Ready" (pass their readiness probe), the existing Pods get overwhelmed before the HPA's scale-up has actually finished taking effect, since new replicas take real wall-clock time to start and warm up, not just to be scheduled.
+
+---

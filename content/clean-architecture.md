@@ -1,3 +1,5 @@
+# Clean Architecture & DDD — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is Clean Architecture and what problem does it solve?**
@@ -178,3 +180,115 @@ You should decouple the side effect from the primary action using Domain Events.
 
 **Benefits:**
 The `CreateOrderCommandHandler` only cares about saving the order. The `OrderCreatedEventHandler` only cares about sending the email. You can easily add more side effects (e.g., `UpdateInventoryEventHandler`) without ever modifying the original command handler. (For absolute reliability, you would combine this with the Outbox Pattern).
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is the "Dependency Rule" in Clean Architecture, and how does it relate to the Dependency Inversion Principle?**
+
+The Dependency Rule states that **source code dependencies can only point inward** — an outer layer (Infrastructure, Presentation) can reference an inner layer (Application, Domain), but an inner layer must never reference anything from an outer layer.
+
+**Visualizing the layers (concentric circles, dependencies point inward):**
+```text
+┌─────────────────────────────────────┐
+│  Presentation (Web API, Controllers) │
+│  ┌─────────────────────────────────┐ │
+│  │  Infrastructure (EF Core, etc.) │ │
+│  │  ┌───────────────────────────┐  │ │
+│  │  │  Application (Use Cases)  │  │ │
+│  │  │  ┌─────────────────────┐  │  │ │
+│  │  │  │  Domain (Entities)  │  │  │ │
+│  │  │  └─────────────────────┘  │  │ │
+│  │  └───────────────────────────┘  │ │
+│  └─────────────────────────────────┘ │
+└─────────────────────────────────────┘
+All arrows point INWARD, toward Domain
+```
+
+**How this relates to DIP:** the Dependency Rule is essentially the Dependency Inversion Principle applied at the *architectural* level rather than just the class level. DIP says "depend on abstractions, not concretions" — Clean Architecture's Domain and Application layers define the *interfaces* (`IUserRepository`, `IEmailService`), while the Infrastructure layer (outer) provides the *implementations*. The dependency on the interface still points inward (Infrastructure → Application's interface), even though the actual *runtime* data flow and control often moves outward (Application calls into Infrastructure's implementation via that interface) — this inversion of the compile-time dependency direction relative to the runtime call direction is the entire point.
+
+**Common Pitfall:** allowing a "just this once" shortcut — e.g., the Domain layer directly referencing a NuGet package from Infrastructure "because it's a small utility." Once one inward-pointing rule is broken, the boundary stops being enforceable by convention alone, and teams typically need architecture tests (e.g., using `NetArchTest` to assert "Domain project has zero references to Infrastructure project" in CI) to keep the rule honest as the codebase grows.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What is the Repository pattern, and why is a generic `IRepository<T>` often considered an anti-pattern in Clean Architecture / DDD?**
+
+The Repository pattern abstracts data access behind an interface that looks like an in-memory collection, letting the Application layer work with `IUserRepository.GetById()` instead of raw `DbContext` queries — the classic building block for keeping Infrastructure details out of business logic.
+
+**A well-scoped, specific repository:**
+```csharp
+public interface IUserRepository
+{
+    Task<User?> GetByIdAsync(int id);
+    Task<User?> GetByEmailAsync(string email);   // specific to how Users are actually queried
+    Task AddAsync(User user);
+}
+```
+
+**The generic `IRepository<T>` anti-pattern:**
+```csharp
+public interface IRepository<T> where T : class
+{
+    Task<T?> GetByIdAsync(int id);
+    Task<IEnumerable<T>> GetAllAsync();
+    Task AddAsync(T entity);
+    Task UpdateAsync(T entity);
+    Task DeleteAsync(T entity);
+}
+// Usage: IRepository<User>, IRepository<Order>, IRepository<AuditLog>, all forced into the same shape
+```
+
+**Why this is problematic in a DDD/Clean Architecture context:**
+- **It's really just `DbSet<T>` with extra steps** — EF Core's `DbSet<T>` already *is* a generic repository/unit-of-work abstraction. Wrapping it in another generic interface adds a layer of indirection that provides no additional abstraction value, since both are equally generic.
+- **It hides genuinely different querying needs behind one shape:** `AuditLog` might legitimately need `GetAllAsync()` for a report; `Order` almost never should support fetching "all orders" unbounded — a generic interface can't express "this method doesn't make sense for this aggregate" the way a purpose-built `IOrderRepository` with only the methods that actually make domain sense can.
+- **It encourages leaking query logic out of the repository** — since `IRepository<T>` can't anticipate every specific query (`GetOrdersByCustomerAndDateRange`), callers end up calling `GetAllAsync().Where(...)` in the Application layer, silently pulling entire tables into memory and defeating the purpose of a data-access abstraction in the first place.
+
+**The DDD-aligned alternative:** one repository interface **per Aggregate Root** (not per entity, and never generic), with methods named for the actual business operations the Application layer needs — `IOrderRepository.GetPendingOrdersOlderThan(TimeSpan age)` rather than a generic `GetAllAsync()` a caller must filter themselves.
+
+---
+
+## Advanced — Question 2
+
+**Q2: What is a Domain Service, and how do you decide whether a piece of business logic belongs on an Entity or in a Domain Service?**
+
+A Domain Service holds business logic that doesn't naturally belong to any single Entity or Value Object — typically because it operates *across* multiple aggregates, or requires a stateless calculation with no clear "owner" object.
+
+**Logic that belongs on the Entity (the common, default case):**
+```csharp
+public class Order : AggregateRoot
+{
+    public void AddLineItem(Product product, int quantity)
+    {
+        if (Status != OrderStatus.Draft)
+            throw new DomainException("Cannot modify a submitted order.");
+        _lines.Add(new OrderLine(product.Id, quantity, product.Price));
+    }
+}
+```
+This rule ("can't modify a submitted order") is entirely about `Order`'s own state — it belongs on `Order` itself, enforced by the Aggregate Root, per DDD's core guidance of keeping invariants close to the data they protect.
+
+**Logic that belongs in a Domain Service (spans multiple aggregates, no natural owner):**
+```csharp
+public class FundsTransferDomainService
+{
+    // Doesn't naturally belong to EITHER Account -- it's about the relationship between two
+    public void Transfer(Account from, Account to, decimal amount)
+    {
+        if (from.Balance < amount) throw new DomainException("Insufficient funds.");
+        from.Withdraw(amount);
+        to.Deposit(amount);
+    }
+}
+```
+"Transferring funds between two accounts" isn't naturally owned by either individual `Account` — putting it on one `Account` (e.g., `fromAccount.TransferTo(toAccount, amount)`) would force one aggregate to reach into and directly mutate another aggregate's internals, breaking the rule that aggregates should only be modified through their own root.
+
+**The decision heuristic:**
+- **Single aggregate, clear owner → method on the Entity/Aggregate Root.** This should be the default; most business logic genuinely does belong to one specific object.
+- **Spans multiple aggregates, or is a stateless calculation with no natural "owner" → Domain Service.** Domain Services still live in the pure Domain layer (no infrastructure dependencies) — they're a Domain concept, not an Application-layer or Infrastructure concept, distinguishing them from an "Application Service" (a use-case handler like `TransferFundsCommandHandler` that *orchestrates* calling the Domain Service plus persistence).
+
+**Common Pitfall:** overusing Domain Services as a dumping ground for logic that's actually too lazy to model properly on an Entity — if a "Domain Service" ends up holding most of the business rules while your Entities become anemic property bags, that's a sign the modeling work of identifying true aggregate boundaries and invariants was skipped, not a sign Domain Services were the right tool.
+
+---

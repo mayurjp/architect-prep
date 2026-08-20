@@ -568,6 +568,35 @@ public void Apply(IDomainEvent e) => _ = e switch
 
 ---
 
+## Intermediate — Question 5
+
+**Q5: What is Consumer-Driven Contract Testing (e.g., Pact), and why does it matter more in microservices than in a monolith?**
+
+In a monolith, the compiler catches most breaking changes between modules instantly — rename a method, and every caller fails to build. Across independently-deployed microservices, there's no compiler spanning service boundaries, so a provider service can silently break every one of its consumers by changing its API shape, and nobody finds out until it's already in production.
+
+**The Mechanism (Pact):**
+1. **The consumer writes a test** describing exactly what it expects from the provider — not a full integration test, just the specific interactions it relies on.
+```csharp
+// Consumer-side Pact test (OrderService, consuming InventoryService)
+pact.UponReceiving("a request for stock level")
+    .Given("product 5 has 10 units in stock")
+    .WithRequest(HttpMethod.Get, "/api/inventory/5")
+    .WillRespond()
+    .WithStatus(200)
+    .WithJsonBody(new { productId = 5, available = 10 });
+```
+2. Running this test generates a **contract file** (a JSON document describing the expected request/response shape) — but crucially, this test runs against a mock, not the real InventoryService.
+3. **The contract is published** to a shared Pact Broker.
+4. **The provider's CI pipeline verifies the contract** — InventoryService's own build pulls every contract published by its consumers and replays those exact requests against its *real* code, asserting the actual responses still match what consumers expect.
+
+**Why this matters specifically for microservices:**
+- It catches breaking changes at the **provider's build time**, before a bad deploy ever reaches production — InventoryService's CI fails loudly if a change breaks OrderService's contract, rather than OrderService discovering it via a 500 error hours after InventoryService shipped.
+- It avoids the alternative of slow, flaky, full end-to-end integration tests spanning every service just to catch interface mismatches — contract tests are fast (they don't need every service actually running) and pinpoint exactly which consumer/interaction broke.
+
+**Common Pitfall:** writing contracts that assert on the *entire* response body rigidly (including fields the consumer doesn't actually use) — this makes contracts overly brittle, failing on harmless additive changes (a new optional field) that shouldn't be considered "breaking" at all. Contracts should describe only what the consumer actually depends on.
+
+---
+
 ## Advanced — Question 1
 
 **Q1: Security in Microservices**
@@ -802,3 +831,60 @@ You must implement the **Circuit Breaker** and **Bulkhead** patterns.
 1.  **Circuit Breaker (Polly):** The `CartService` must monitor its calls to the `OrderService`. If it detects continuous failures or timeouts (e.g., 50% failure rate over 10 seconds), the circuit "trips" (opens). Once open, the `CartService` *immediately* stops making network calls to the `OrderService` and instantly returns a failure (or a fallback response) to its callers. This prevents the `CartService`'s threads from hanging and gives the `OrderService` time to recover.
 2.  **Timeouts:** Never use default timeouts. Network calls must fail fast (e.g., 2-3 seconds max) to free up threads.
 3.  **Bulkhead Pattern:** Isolate resources. Limit the number of concurrent outbound requests to the `OrderService` to a small pool (e.g., 50 threads). Even if the `OrderService` hangs, only those 50 threads in the `CartService` are blocked. The remaining threads can continue serving requests for completely unrelated operations, keeping the application partially functional rather than entirely dead.
+
+---
+
+## Advanced — Question 2
+
+**Q2: What is the Strangler Fig pattern, and how do you use it to migrate a legacy monolith to microservices without a risky "big bang" rewrite?**
+
+The Strangler Fig pattern (named after the vine that gradually grows around a host tree, eventually replacing it entirely) migrates a monolith incrementally by routing specific pieces of functionality to new microservices one at a time, while the monolith keeps running unchanged for everything not yet migrated.
+
+**The Mechanism:**
+```text
+Before:  Client → Monolith (handles everything)
+
+During:  Client → API Gateway/Proxy ─┬─→ Monolith (still handles most routes)
+                                     └─→ New OrderService (handles /api/orders/*)
+
+After:   Client → API Gateway ─→ OrderService, PaymentService, InventoryService...
+                                  (Monolith fully decommissioned)
+```
+1. Place a routing layer (an API Gateway, or even just reverse-proxy rules) in front of the monolith.
+2. Pick one bounded, well-understood capability (e.g., Order management) and rebuild it as a standalone microservice with its own database.
+3. Update the routing layer so requests for `/api/orders/*` go to the new service; everything else still goes to the monolith.
+4. Repeat for the next capability. The monolith shrinks with each iteration until — like the strangled tree — nothing of the original remains.
+
+**Why this beats a rewrite:**
+- **Continuous delivery of value:** the business keeps shipping features throughout the migration; a full rewrite typically freezes feature work for months or years while chasing feature parity with the old system.
+- **Bounded risk per step:** if the new `OrderService` has a critical bug, only orders are affected — you can roll the routing rule back to the monolith instantly rather than rolling back an entire system rewrite.
+- **Real production validation:** each extracted service is battle-tested with real traffic before the next piece is touched, rather than discovering systemic issues only after the "big bang" cutover.
+
+**Common Pitfall:** extracting services in an order driven by "what's easiest" rather than "what's most valuable to decouple" — teams often strangle low-risk, low-value modules first (because it's comfortable) and never get to the tightly-coupled, high-value core that was the actual reason for migrating away from the monolith in the first place.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is a Service Mesh, and what problems does it solve that application-level libraries (like Polly) don't?**
+
+A Service Mesh is an infrastructure layer — typically implemented as a sidecar proxy (Envoy is the most common) injected next to every service instance — that handles service-to-service communication concerns (retries, timeouts, mTLS, observability) *outside* the application's own code.
+
+**The Mechanism:**
+```text
+Without a mesh:
+  OrderService code ──(HttpClient + Polly policies baked into C#)──► PaymentService
+
+With a mesh:
+  OrderService ──► [Envoy sidecar] ──(mTLS, retry, timeout, tracing)──► [Envoy sidecar] ──► PaymentService
+```
+Every Pod gets a sidecar container (in Kubernetes, injected automatically via a mutating admission webhook) that intercepts *all* inbound and outbound traffic for that Pod. Retry policies, circuit breakers, timeouts, and mutual TLS are configured centrally (via the mesh's control plane — Istio, Linkerd) and applied uniformly, without a single line of Polly or `HttpClient` configuration in any service's C# code.
+
+**What this solves that Polly-in-code doesn't:**
+- **Consistency across languages/teams:** Polly is a .NET library — a Python or Go service in the same system can't share those exact retry/circuit-breaker policies. A mesh applies the same policies regardless of what language a service is written in, since it operates at the network layer, not the application layer.
+- **Centralized policy changes without redeploying services:** tightening a timeout from 3s to 1s across 40 services normally means editing and redeploying 40 codebases. With a mesh, it's a configuration change to the control plane that takes effect without touching any service's code.
+- **Uniform mTLS and observability:** every hop gets encrypted transport and a trace span automatically, rather than depending on every team remembering to wire up OpenTelemetry instrumentation and certificate handling correctly in their own service.
+
+**Common Pitfall:** adopting a service mesh as the *first* resilience investment for a small number of services (say, under 10) — the operational overhead of running and understanding a mesh's control plane is substantial, and for a small system, in-process libraries like Polly deliver most of the same resilience benefits with far less infrastructure complexity. Meshes earn their cost at genuine multi-team, multi-language, dozens-of-services scale.
+
+---

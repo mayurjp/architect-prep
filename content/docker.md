@@ -1,3 +1,5 @@
+# Docker — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is the difference between a Docker Image and a Docker Container?**
@@ -170,3 +172,102 @@ ENTRYPOINT ["dotnet", "MyApp.dll"]
 
 **Result:**
 The container process now runs with restricted permissions. If the application is compromised, the attacker only has standard user privileges within the container namespace, drastically reducing the blast radius.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is the difference between `CMD` and `ENTRYPOINT` in a Dockerfile?**
+
+Both define what runs when a container starts, but they interact very differently with arguments passed on the `docker run` command line.
+
+**`CMD` — a default, fully overridable:**
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+ENTRYPOINT ["dotnet", "MyApp.dll"]
+CMD ["--environment=Production"]
+```
+```bash
+docker run my-image                        # runs: dotnet MyApp.dll --environment=Production
+docker run my-image --environment=Staging  # CMD is completely replaced: dotnet MyApp.dll --environment=Staging
+```
+
+**`ENTRYPOINT` — the fixed executable, arguments are appended to it (not replacing it):**
+```bash
+docker run my-image --urls=http://+:8080   # runs: dotnet MyApp.dll --urls=http://+:8080
+```
+Whatever you pass on the command line gets appended *after* the `ENTRYPOINT`'s command, rather than replacing it entirely (unless you override `ENTRYPOINT` itself with `--entrypoint`).
+
+**The common pattern:** use `ENTRYPOINT` for the fixed, non-negotiable part of the command (the executable itself — `dotnet MyApp.dll`), and `CMD` for default arguments a caller might reasonably want to override (like a default environment or config flag). This is why most real Dockerfiles combine both rather than using either alone.
+
+**Common Pitfall:** using the *shell form* (`CMD dotnet MyApp.dll` without brackets) instead of the *exec form* (`CMD ["dotnet", "MyApp.dll"]`). The shell form runs your command as a child process of `/bin/sh -c`, meaning `SIGTERM` signals sent by Docker/Kubernetes go to the shell, not your actual application — your app never gets a chance to shut down gracefully, and Docker eventually escalates to `SIGKILL` after the grace period, unnecessarily. Always use the exec (array) form for `CMD`/`ENTRYPOINT`.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is Docker Compose, and how does a minimal `docker-compose.yml` for a .NET API + SQL Server look?**
+
+Docker Compose lets you define and run a multi-container application (an API, its database, a cache) as a single unit, described declaratively in one YAML file, instead of manually running several `docker run` commands with matching network/volume flags.
+
+```yaml
+version: "3.9"
+services:
+  api:
+    build: .                          # builds from the Dockerfile in this directory
+    ports:
+      - "8080:8080"
+    environment:
+      - ConnectionStrings__Default=Server=db;Database=AppDb;User=sa;Password=${DB_PASSWORD}
+    depends_on:
+      - db
+
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=${DB_PASSWORD}
+    ports:
+      - "1433:1433"
+    volumes:
+      - sql-data:/var/opt/mssql        # named volume — survives container recreation
+
+volumes:
+  sql-data:
+```
+
+Running `docker compose up` builds the `api` image, pulls the `db` image, creates a shared user-defined network (so `api` can reach `db` by that hostname automatically), and starts both containers together.
+
+**Key details:**
+- **`depends_on`** controls *start order* only — it does **not** wait for SQL Server to actually finish initializing and accept connections, just for its container process to start. A common follow-up fix is a retry/backoff policy in the API's own DB connection logic (e.g., EF Core's `EnableRetryOnFailure()`) to ride out that gap.
+- **Named volumes** (`sql-data`) persist database files across `docker compose down`/`up` cycles — without one, a `docker compose down` (which removes containers) would silently wipe the database.
+- **Environment variable substitution** (`${DB_PASSWORD}`) lets you keep secrets out of the committed YAML file, typically supplied via a `.env` file (gitignored) sitting next to `docker-compose.yml`.
+
+**Common Pitfall:** relying purely on `depends_on` as a substitute for a proper health-check-based startup order — for anything beyond local dev convenience, pair it with `condition: service_healthy` and a `healthcheck:` block on the `db` service so `api` genuinely waits for SQL Server to be ready, not just "started."
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is the difference between a Docker image's `COPY` and `ADD` instructions, and why is `COPY` usually preferred?**
+
+Both instructions copy files from the build context into the image, but `ADD` has extra "magic" behaviors that are easy to trigger by accident.
+
+```dockerfile
+COPY appsettings.json /app/appsettings.json    # copies exactly this file, nothing more
+ADD source.tar.gz /app/                        # ADD automatically extracts recognized archives!
+ADD https://example.com/file.txt /app/         # ADD can also fetch remote URLs
+```
+
+**What `ADD` does beyond `COPY`:**
+- If the source is a **recognized compressed archive** (`.tar`, `.tar.gz`, `.tgz`, etc.), `ADD` automatically extracts it into the destination — `COPY` never does this; it copies the archive file as-is.
+- `ADD` can fetch a **remote URL** directly into the image — `COPY` only works with local build-context files.
+
+**Why `COPY` is the recommended default:**
+- **Predictability:** `COPY` does exactly one thing — copy files/directories verbatim. There's no implicit archive-extraction behavior to be surprised by if a filename happens to end in `.tar.gz` for unrelated reasons.
+- **Layer caching implications:** `ADD`'s URL-fetching behavior means the fetched content isn't tracked for cache-invalidation the way a local file's checksum is — a remote file changing wouldn't necessarily invalidate the build cache, silently baking a stale file into your image.
+- **Security:** `ADD`'s URL-fetch feature pulls arbitrary remote content into your build with no built-in integrity verification (no checksum pinning) — a compromised or MITM'd URL could inject malicious files into your image during the build.
+
+**When `ADD` is still the right tool:** the auto-extraction behavior is occasionally genuinely useful (unpacking a downloaded SDK tarball as part of a build stage) — but even Docker's own official documentation recommends `COPY` plus an explicit `RUN tar -xzf ...` for anything beyond that narrow case, specifically so the extraction step is visible and intentional in the Dockerfile rather than an implicit side effect of the instruction you chose.
+
+---

@@ -604,10 +604,6 @@ Out-of-order: Kafka orders *within a partition key*; don't assume "OrderCreated 
 
 ---
 
-*End of guide — Q1–Q17. Study track: Beginner (1–5) → Mid (6–9) → Advanced (10–12) → System Design (13) → Troubleshooting Scenarios (14–17).*
-
----
-
 ## Scenario — Question 4
 
 **Q4: Design a Rate Limiter for a public API.**
@@ -708,3 +704,97 @@ The Circuit Breaker acts like an electrical switch wrapped around your HTTP call
    - If the test request fails, the circuit immediately opens again for another 30 seconds.
 
 By combining Circuit Breakers with **Exponential Backoff and Jitter** (adding randomness to retry delays), you ensure your application remains responsive during third-party outages and avoids contributing to the third-party's overload (the "thundering herd" problem).
+
+---
+
+## Intermediate — Question 1
+
+**Q1: What is the CAP Theorem, and how does it force a concrete trade-off when designing a distributed system?**
+
+CAP states a distributed data store can only guarantee two of three properties at once: **C**onsistency (every read sees the latest write), **A**vailability (every request gets a non-error response), and **P**artition Tolerance (the system keeps working despite network failures between nodes).
+
+**Why this isn't really a 3-way choice in practice:**
+Network partitions *will* happen eventually in any real distributed system — so Partition Tolerance isn't optional, it's a given. That collapses the real-world decision down to: when a partition occurs, do you choose **Consistency** or **Availability**?
+
+```text
+Network partition between Region A and Region B:
+
+CP choice: Region B refuses writes/reads until it can confirm
+           it has the latest data from Region A (sacrifices Availability)
+
+AP choice: Region B keeps serving reads/writes using its local data
+           (sacrifices Consistency — may be stale until partition heals)
+```
+
+**Applying it to a real design (e-commerce checkout):**
+- **Payment & Inventory (CP):** you cannot let two regions independently decide "yes, we have stock" during a partition and both sell the last unit — refusing to serve (or routing to a single authoritative region) until consistency is restored is the safer failure mode.
+- **Product Catalog & Reviews (AP):** if a partition happens, showing a slightly stale product description or review count is a far better user experience than showing an error page — staleness here is an acceptable, recoverable cost.
+
+**Common Pitfall:** treating CAP as an all-or-nothing property of "the database" rather than a per-operation, per-service decision — modern systems (and even single databases like Cosmos DB) let you tune consistency level per query, meaning the *same* physical system can behave CP for checkout and AP for browsing simultaneously, as this platform's design does across its Payment vs. Catalog services.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: How do you decide between a SQL read replica, a cache (Redis), and a fully separate read-optimized store (CQRS) for scaling reads?**
+
+All three attack the same problem — reads vastly outnumber writes — but at increasing levels of architectural commitment, and picking the wrong one either under-solves the problem or adds unjustified complexity.
+
+**Read Replicas — the lightest-weight option:**
+```text
+Primary (handles writes) ──replicates──► Replica 1, Replica 2, ...
+Application routes SELECT queries to replicas, INSERT/UPDATE/DELETE to primary
+```
+- Same schema, same query language as the primary — no application rewrite needed, just a connection-routing change.
+- Replication lag (typically milliseconds to low seconds) means replicas can serve *slightly* stale data — acceptable for a product listing page, not for "did my payment just succeed."
+- Scales read *throughput* but every replica still runs the same relatively expensive relational queries — doesn't help if the problem is query *shape*, not just volume.
+
+**A Cache (Redis) — trades a network hop for near-zero backend load:**
+```text
+Request → Check Redis (cache hit? return in ~1ms) 
+            └─ miss → query DB → populate Redis → return
+```
+- Dramatically reduces load on the primary datastore for hot, frequently-repeated reads (product detail pages).
+- Introduces **cache invalidation** as a genuinely hard problem — stale cached data after an update is now a class of bug you didn't have before.
+- Best when the *same* data is read far more often than it changes (read:write ratio like the 100:1 seen on this platform's catalog).
+
+**CQRS with a separate read model — the heaviest but most powerful option:**
+```text
+Write side: normalized SQL Server (Order, OrderLine tables, enforces invariants)
+Read side:  denormalized document in MongoDB/Elasticsearch
+            { orderId, customerName, items: [...], totalWithTax, status }
+            -- pre-joined and pre-computed, updated asynchronously via events
+```
+- Solves problems replicas and caches can't: when the *query shape* itself is fundamentally different from the write model (e.g., a dashboard needing data joined across five normalized tables), no amount of replication or caching of the *same* normalized schema fixes that — you need a genuinely different, purpose-built representation.
+- Highest complexity: a whole separate datastore, an event pipeline keeping it in sync, and genuine eventual consistency to reason about.
+
+**Decision guide:** start with read replicas (cheapest, least architectural change) → add caching for specific hot, repeatedly-read keys → reach for full CQRS only when the read *shape* itself diverges so much from the write model that neither of the first two options can close the gap, regardless of how much hardware you throw at them.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is Database Sharding, and how do you choose a shard key?**
+
+Sharding splits one logical database's data horizontally across multiple physical database instances, each holding a distinct subset of rows — used when a single database server's storage or throughput ceiling is the actual bottleneck, not just read load (which replicas/caching already solve more cheaply).
+
+**The Mechanism:**
+```text
+Shard Key: CustomerId
+
+Shard 1 (CustomerId 1-1,000,000):   physical SQL Server instance A
+Shard 2 (CustomerId 1,000,001-2M):  physical SQL Server instance B
+Shard 3 (CustomerId 2,000,001-3M):  physical SQL Server instance C
+
+Application/routing layer inspects CustomerId and sends the query to the correct shard
+```
+Unlike a read replica (every replica has a *full copy* of the same data), each shard holds a genuinely *different, non-overlapping* subset — this is how sharding scales storage capacity and write throughput, not just read throughput.
+
+**Choosing a shard key — the single hardest decision in this design:**
+- **Even distribution:** sharding by `SignupDate` sounds reasonable but concentrates all of today's active, high-traffic customers on the newest (and likely least-provisioned) shard — a hot-shard problem identical in spirit to a bad NoSQL partition key.
+- **Query alignment:** if the vast majority of queries are "get everything for CustomerId X," sharding by `CustomerId` keeps those queries single-shard and fast. Sharding by `OrderId` instead would scatter one customer's order history across every shard, turning a common query into an expensive fan-out across all of them.
+- **Cross-shard queries are expensive or impossible:** "find all orders over $10,000 across all customers" (a query that doesn't align with the shard key) must fan out to every shard and merge results in the application — exactly the same fan-out penalty as a badly-chosen NoSQL partition key, and `JOIN`s across shards aren't possible at the database level at all.
+
+**Common Pitfall:** sharding prematurely, before actually hitting a genuine storage/throughput ceiling that read replicas and caching can't solve — sharding is difficult to reverse (re-sharding a live system to change the key or add shards is one of the hardest operational migrations in distributed systems), so it should be the last lever pulled, not the first.
+
+---
