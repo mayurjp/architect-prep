@@ -4,15 +4,16 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Architect Prep — Search</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/css/style.css" />
 <script src="assets/js/theme.js"></script>
 </head>
 <body>
 <header class="site">
-  <div class="brand">Architect Prep</div>
+  <div class="brand"><a href="index.html" style="color:inherit;text-decoration:none">Architect Prep</a></div>
   <nav>
-    <a href="index.html">Today</a>
-    <a href="topics.html">Topics</a>
     <a href="search.html">Search</a>
     <button id="theme-toggle" type="button" aria-label="Toggle theme"></button>
   </nav>
@@ -28,9 +29,10 @@ let questions = [];
 let topicsById = {};
 
 async function init() {
+  const cb = Date.now();
   const [q, topics] = await Promise.all([
-    fetch("data/questions.json").then((r) => r.json()),
-    fetch("data/topics.json").then((r) => r.json()),
+    fetch(`data/questions.json?v=${cb}`).then((r) => r.json()),
+    fetch(`data/topics.json?v=${cb}`).then((r) => r.json()),
   ]);
   questions = q;
   topicsById = Object.fromEntries(topics.map((t) => [t.id, t]));
@@ -52,9 +54,10 @@ function render(query) {
     return;
   }
   results.innerHTML = matches
-    .map((q) => {
+    .map((q, i) => {
       const topic = topicsById[q.topic];
-      return `<a class="card" style="display:block" href="topic.html?t=${q.topic}">
+      const delayClass = `delay-${(i % 10) + 1}`;
+      return `<a class="card ${delayClass}" style="display:block" href="topic.html?t=${q.topic}#${q.topic}">
         <span class="badge ${q.status === "planned" ? "planned" : q.level}">${q.status === "planned" ? "planned" : q.level}</span>
         <span class="muted" style="margin-left:0.5rem">${topic ? topic.title : q.topic}</span>
         <p class="question-text">${escapeHtml(q.question)}</p>

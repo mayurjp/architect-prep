@@ -1,51 +1,34 @@
-// Deterministic daily rotation engine. No AI, no network, no storage.
-// Same UTC calendar day -> same "today" question for every visitor.
-// See SPEC.md §7.
-
-// mulberry32 seeded by summing char codes of a string — small, dependency-free PRNG.
-function seededShuffle(items, seedStr) {
-  let seed = 0;
-  for (const ch of seedStr) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
-  const rand = () => {
-    seed |= 0;
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-  const arr = items.slice();
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
+// Deterministic PRNG using Mulberry32
+function mulberry32(a) {
+  return function() {
+    var t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
   }
-  return arr;
 }
 
-const ROTATION_EPOCH_UTC = Date.UTC(2026, 0, 1);
-
-function utcDayIndex(todayUtcString) {
-  return Math.floor((Date.parse(todayUtcString + "T00:00:00Z") - ROTATION_EPOCH_UTC) / 86400000);
+// Generate a daily seed based on UTC date string and topic ID
+function generateSeed(topicId, dateString) {
+  let hash = 0;
+  const str = topicId + "|" + dateString;
+  for (let i = 0; i < str.length; i++) {
+    hash = Math.imul(31, hash) + str.charCodeAt(i) | 0;
+  }
+  return hash;
 }
 
-// pool: array of question objects (already filtered to status === "answered")
-// Returns the id of today's featured question for this pool, or null if empty.
-function todaysQuestionId(pool, topic, todayUtcString) {
-  if (!pool.length) return null;
-  const cycleSeed = `${topic}`;
-  const order = seededShuffle(
-    pool.map((q) => q.id),
-    cycleSeed
-  );
-  const dayIndex = utcDayIndex(todayUtcString);
-  const position = ((dayIndex % order.length) + order.length) % order.length;
-  return order[position];
+// Get today's UTC date string (YYYY-MM-DD)
+function todayUtcDateString() {
+  const d = new Date();
+  return d.toISOString().split("T")[0];
 }
 
-function todayUtcDateString(date) {
-  const d = date || new Date();
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD
-}
-
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = { seededShuffle, todaysQuestionId, todayUtcDateString };
+// Pick the deterministically random question ID for a given topic
+function todaysQuestionId(pool, topicId, dateString) {
+  if (!pool || pool.length === 0) return null;
+  const seed = generateSeed(topicId, dateString);
+  const prng = mulberry32(seed);
+  const index = Math.floor(prng() * pool.length);
+  return pool[index].id;
 }

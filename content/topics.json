@@ -1,79 +1,198 @@
 [
   {
-    "id": "csharp-dotnet-fundamentals",
-    "title": "C# & .NET Fundamentals",
-    "description": "Value/reference types, memory & GC, async/await, LINQ, delegates & events, and core CLR mechanics.",
+    "id": "csharp",
+    "title": "C# Language Features",
+    "description": "Value/reference types, strings, async/await, delegates, LINQ, generics, and pattern matching.",
     "order": 1,
     "color": "#8B5CF6"
   },
   {
-    "id": "oop-design-principles",
-    "title": "OOP & Design Principles",
-    "description": "Encapsulation, inheritance, polymorphism, abstraction, SOLID, and other foundational design principles.",
+    "id": "dotnet",
+    "title": ".NET CLR Internals",
+    "description": "Memory management, Garbage Collection, Task vs Thread, AppDomains, and runtime mechanics.",
     "order": 2,
+    "color": "#6D28D9"
+  },
+  {
+    "id": "oop",
+    "title": "Object-Oriented Programming",
+    "description": "Encapsulation, inheritance, polymorphism, abstraction, and interfaces vs abstract classes.",
+    "order": 3,
     "color": "#6366F1"
+  },
+  {
+    "id": "design-principles",
+    "title": "Design Principles",
+    "description": "SOLID, DRY, YAGNI, KISS, and Composition over Inheritance.",
+    "order": 4,
+    "color": "#4338CA"
   },
   {
     "id": "design-patterns",
     "title": "Design Patterns",
     "description": "Creational, structural, and behavioral patterns (Gang of Four) with C# examples.",
-    "order": 3,
+    "order": 5,
     "color": "#3B82F6"
   },
   {
-    "id": "aspnet-mvc",
-    "title": "ASP.NET & ASP.NET MVC",
-    "description": "MVC lifecycle, routing, view engines, model binding/validation, filters, and DI in MVC.",
-    "order": 4,
+    "id": "aspnet-core",
+    "title": "ASP.NET Core",
+    "description": "Dependency Injection, Middleware, Hosting, Kestrel, Configuration, and IHostedService.",
+    "order": 6,
     "color": "#0EA5E9"
   },
   {
-    "id": "aspnet-webapi-rest-http",
-    "title": "ASP.NET Web API, REST & HTTP/HTTPS",
-    "description": "HTTP fundamentals, REST constraints, Web API controllers, middleware, filters, auth, versioning, async.",
-    "order": 5,
+    "id": "mvc",
+    "title": "ASP.NET Core MVC",
+    "description": "Routing, Controllers, Views, ViewModels, Action Results, and Model Binding.",
+    "order": 7,
+    "color": "#0284C7"
+  },
+  {
+    "id": "webapi",
+    "title": "ASP.NET Web API",
+    "description": "API Controllers, Filters, Content Negotiation, Versioning, and Swagger.",
+    "order": 8,
     "color": "#14B8A6"
   },
   {
-    "id": "entity-framework-sql-server",
-    "title": "Entity Framework & SQL Server",
-    "description": "EF Core DbContext/DbSet, migrations, querying, and SQL Server fundamentals through advanced tuning.",
-    "order": 6,
+    "id": "rest",
+    "title": "RESTful Architecture",
+    "description": "REST constraints, HATEOAS, Idempotency, and Resource modeling.",
+    "order": 9,
+    "color": "#0D9488"
+  },
+  {
+    "id": "http",
+    "title": "HTTP & Protocols",
+    "description": "HTTP Verbs, Status Codes, Headers, TLS/SSL, CORS, and TCP/IP basics.",
+    "order": 10,
+    "color": "#0F766E"
+  },
+  {
+    "id": "ef-core",
+    "title": "Entity Framework Core",
+    "description": "DbContext, Migrations, Lazy/Eager Loading, Change Tracking, and Performance.",
+    "order": 11,
     "color": "#10B981"
+  },
+  {
+    "id": "sql-server",
+    "title": "SQL Server",
+    "description": "T-SQL, Indexes, Execution Plans, ACID properties, Isolation Levels, and Locks.",
+    "order": 12,
+    "color": "#047857"
   },
   {
     "id": "nosql",
     "title": "NoSQL",
     "description": "Document, key-value, and wide-column stores; when to reach for NoSQL over relational.",
-    "order": 7,
+    "order": 13,
     "color": "#84CC16"
+  },
+  {
+    "id": "microservices",
+    "title": "Microservices Architecture",
+    "description": "Service boundaries, API Gateways, Service Mesh, and asynchronous communication.",
+    "order": 14,
+    "color": "#EC4899"
+  },
+  {
+    "id": "system-design",
+    "title": "System Design",
+    "description": "Caching, Load Balancing, CAP Theorem, Sharding, Scalability, and Observability.",
+    "order": 15,
+    "color": "#BE185D"
+  },
+  {
+    "id": "azure",
+    "title": "Azure for .NET",
+    "description": "App Services, Azure Functions, CosmosDB, Azure Service Bus, Key Vault, and Azure AD.",
+    "order": 16,
+    "color": "#0078D4"
+  },
+  {
+    "id": "gcp",
+    "title": "Google Cloud Platform",
+    "description": "Core GCP services relevant to .NET workloads: Cloud Run, GKE, Cloud SQL, IAM, networking.",
+    "order": 17,
+    "color": "#EF4444"
   },
   {
     "id": "docker",
     "title": "Docker",
     "description": "Images, containers, layers, multi-stage builds, networking, volumes, and Docker Compose.",
-    "order": 8,
+    "order": 18,
     "color": "#F59E0B"
   },
   {
     "id": "kubernetes",
     "title": "Kubernetes",
     "description": "Pods, Deployments, Services, probes, autoscaling, deployment strategies, and troubleshooting.",
-    "order": 9,
+    "order": 19,
     "color": "#F97316"
   },
   {
-    "id": "gcp",
-    "title": "Google Cloud Platform",
-    "description": "Core GCP services relevant to .NET workloads: Cloud Run, GKE, Cloud SQL, IAM, networking.",
-    "order": 10,
-    "color": "#EF4444"
+    "id": "app-security",
+    "title": "App Security",
+    "description": "CORS, CSRF, XSS, SQL Injection, Cryptography, and Hashing.",
+    "order": 20,
+    "color": "#9333EA"
   },
   {
-    "id": "microservices-system-design",
-    "title": "Microservices & System Design",
-    "description": "Service boundaries, resilience, sagas, events/outbox, CQRS, observability, security, and end-to-end system design.",
-    "order": 11,
-    "color": "#EC4899"
+    "id": "identity",
+    "title": "Identity & Access",
+    "description": "OAuth2, OpenID Connect, JWTs, ASP.NET Core Identity, and RBAC vs ABAC.",
+    "order": 21,
+    "color": "#7E22CE"
+  },
+  {
+    "id": "messaging",
+    "title": "Messaging & Events",
+    "description": "RabbitMQ, Kafka, Azure Service Bus, pub/sub patterns, and event-driven architectures.",
+    "order": 22,
+    "color": "#059669"
+  },
+  {
+    "id": "testing",
+    "title": "Testing Strategy",
+    "description": "Unit Testing (xUnit), Moq, Integration Testing, TDD, and mocking databases.",
+    "order": 23,
+    "color": "#D97706"
+  },
+  {
+    "id": "performance",
+    "title": "Performance & Diagnostics",
+    "description": "Memory leaks, profiling tools, benchmarking (BenchmarkDotNet), and high-performance C#.",
+    "order": 24,
+    "color": "#DC2626"
+  },
+  {
+    "id": "devops",
+    "title": "CI/CD & DevOps",
+    "description": "GitHub Actions, Azure DevOps, CI/CD pipelines, and IaC with Terraform or Bicep.",
+    "order": 25,
+    "color": "#4B5563"
+  },
+  {
+    "id": "clean-architecture",
+    "title": "Clean Architecture & DDD",
+    "description": "Domain-Driven Design, MediatR, CQRS, and Clean Architecture layers.",
+    "order": 26,
+    "color": "#1E3A8A"
+  },
+  {
+    "id": "graphql",
+    "title": "GraphQL",
+    "description": "Schema, Resolvers, Mutations, and the N+1 problem on the server.",
+    "order": 27,
+    "color": "#E11D48"
+  },
+  {
+    "id": "grpc",
+    "title": "gRPC & Protobuf",
+    "description": "Protocol Buffers, HTTP/2, Bi-directional streaming, vs REST.",
+    "order": 28,
+    "color": "#14B8A6"
   }
 ]

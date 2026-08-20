@@ -1,0 +1,248 @@
+## Beginner — Question 1
+
+**Q1: What are the SOLID design principles?**
+
+SOLID is an acronym for five design principles intended to make software designs more understandable, flexible, and maintainable. They are fundamental to object-oriented design:
+
+1. **S**ingle Responsibility Principle (SRP): A class should have one, and only one, reason to change. It should only have one job or responsibility.
+2. **O**pen/Closed Principle (OCP): Software entities (classes, modules, functions, etc.) should be open for extension, but closed for modification.
+3. **L**iskov Substitution Principle (LSP): Subtypes must be substitutable for their base types without altering the correctness of the program.
+4. **I**nterface Segregation Principle (ISP): Clients should not be forced to depend upon interfaces that they do not use. Many client-specific interfaces are better than one general-purpose interface.
+5. **D**ependency Inversion Principle (DIP): High-level modules should not depend on low-level modules. Both should depend on abstractions. Abstractions should not depend on details. Details should depend on abstractions.
+
+#### Follow-up: Can you give a simple example of violating the Single Responsibility Principle?
+If you have a `UserService` class that handles both saving a user to the database *and* sending a welcome email, it violates SRP. It has two reasons to change: if the database schema changes, or if the email provider changes. These responsibilities should be split into `UserRepository` and `EmailService`.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What do the acronyms DRY, YAGNI, and KISS stand for?**
+
+These are pragmatic development principles:
+
+- **DRY (Don't Repeat Yourself):** Every piece of knowledge must have a single, unambiguous, authoritative representation within a system. If you find yourself copying and pasting code, you are violating DRY. It should be extracted into a shared method or class.
+- **YAGNI (You Aren't Gonna Need It):** A principle from Extreme Programming (XP) stating that a programmer should not add functionality until deemed necessary. Don't build abstract, flexible architectures for future requirements that might never happen.
+- **KISS (Keep It Simple, Stupid):** Systems work best if they are kept simple rather than made complicated. Simplicity should be a key goal in design, and unnecessary complexity should be avoided.
+
+**Trade-offs:** Applying DRY too early can sometimes violate KISS, leading to overly abstracted and hard-to-read code. It's often better to write code twice (WET - Write Everything Twice) and only extract it when you need to write it a third time (the "Rule of Three").
+
+---
+
+## Intermediate — Question 1
+
+**Q1: Explain the Open/Closed Principle (OCP) with a C# example.**
+
+The Open/Closed Principle states that a class should be open for extension (we can add new features) but closed for modification (we shouldn't have to rewrite existing code to add those features).
+
+**The Mechanism:**
+This is almost exclusively achieved using **Polymorphism** and **Dependency Injection**. Instead of using `switch` statements or `if-else` chains that must be modified every time a new type is added, you depend on abstractions.
+
+**Violating OCP:**
+```csharp
+public class DiscountCalculator {
+    public decimal Calculate(decimal price, string customerType) {
+        if (customerType == "Regular") return price;
+        if (customerType == "Premium") return price * 0.9m;
+        // If we add "VIP", we MUST modify this class.
+        return price;
+    }
+}
+```
+
+**Following OCP:**
+```csharp
+public interface IDiscountStrategy {
+    decimal ApplyDiscount(decimal price);
+}
+
+public class PremiumDiscount : IDiscountStrategy {
+    public decimal ApplyDiscount(decimal price) => price * 0.9m;
+}
+
+public class DiscountCalculator {
+    public decimal Calculate(decimal price, IDiscountStrategy strategy) {
+        return strategy.ApplyDiscount(price);
+    }
+}
+```
+Now, if we need a VIP discount, we create a new class `VipDiscount : IDiscountStrategy`. We *extended* the functionality without *modifying* the `DiscountCalculator`.
+
+#### Follow-up: What are the practical limits of OCP?
+It is impossible to make a class closed to *every* kind of change. You have to anticipate what kind of changes are likely and abstract those. Over-engineering OCP for changes that never happen violates YAGNI.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: Explain "Composition over Inheritance". Why is it preferred in modern design?**
+
+"Composition over Inheritance" dictates that classes should achieve polymorphic behavior and code reuse by containing instances of other classes (composition) rather than inheriting from a base class.
+
+**Why Inheritance is problematic (The Fragile Base Class Problem):**
+- Inheritance creates a tight coupling. The derived class is intimately tied to the base class's implementation.
+- You can only inherit from one class in C#.
+- Modifying a base class can inadvertently break derived classes.
+- It often leads to deep, rigid inheritance hierarchies (e.g., `Bird` inherits from `Animal`, `Penguin` inherits from `Bird`, but `Penguin` can't fly, so it throws `NotSupportedException` on `Fly()`, violating LSP).
+
+**The Composition Approach:**
+Instead of saying a `Car` *is a* `Vehicle`, you define what a car *has*.
+```csharp
+// Inheritance (Rigid)
+public class DataStore {
+    public virtual void Save() { /* DB logic */ }
+}
+public class CloudDataStore : DataStore {
+    public override void Save() { /* Cloud logic */ }
+}
+
+// Composition (Flexible)
+public interface ISaveBehavior {
+    void Save();
+}
+public class DataStore {
+    private readonly ISaveBehavior _saveBehavior;
+    public DataStore(ISaveBehavior saveBehavior) {
+        _saveBehavior = saveBehavior;
+    }
+    public void Save() => _saveBehavior.Save();
+}
+```
+With composition, behaviors can be swapped at runtime, it's easier to mock in unit tests, and classes stay focused on a single responsibility.
+
+---
+
+## Advanced — Question 1
+
+**Q1: How does the Dependency Inversion Principle (DIP) relate to Dependency Injection (DI) and Inversion of Control (IoC)?**
+
+While they sound similar and are often used together, they represent different levels of architecture:
+
+1. **Dependency Inversion Principle (DIP):** The 'D' in SOLID. It is a **design principle** stating that high-level policies should not depend on low-level implementation details; both should depend on abstractions (interfaces).
+2. **Inversion of Control (IoC):** A **software architecture pattern** where the flow of control is inverted. Instead of your custom code calling a library, a framework calls your custom code. 
+3. **Dependency Injection (DI):** A **technique** (or design pattern) used to implement IoC and DIP. Instead of a class creating its own dependencies using `new`, the dependencies are passed in (injected) from the outside, usually via the constructor.
+
+**The Mechanism:**
+If `OrderService` (high-level) creates a `SqlDatabase` (low-level) using `new SqlDatabase()`, it violates DIP because it depends on a concrete detail.
+By creating an `IDatabase` interface, both `OrderService` and `SqlDatabase` now depend on the abstraction (DIP).
+By passing `IDatabase` into the `OrderService` constructor, we use DI.
+When ASP.NET Core's runtime automatically provides the right `SqlDatabase` to the `OrderService` constructor at runtime, it is utilizing an IoC Container.
+
+**Common Pitfalls:**
+- **Service Locator Anti-Pattern:** Passing the entire IoC container `IServiceProvider` into a class and asking it to resolve dependencies. This hides the class's real dependencies and makes unit testing difficult, violating the explicit dependency principle.
+
+#### Follow-up: Does using an IoC Container guarantee you are following DIP?
+No. You can inject a concrete `SqlDatabase` class directly into your `OrderService` using DI. You are using DI and IoC, but you are *violating* DIP because the high-level module still depends directly on a low-level concrete class, not an abstraction.
+
+---
+
+## Scenario — Question 1
+
+**Q1: You inherit a massive `OrderProcessor` class (2,000 lines) that validates orders, calculates taxes, applies discounts, connects to a payment gateway, and saves to the database. How do you refactor it using SOLID?**
+
+This is a classic "God Object" that brutally violates the **Single Responsibility Principle (SRP)**. It is impossible to unit test and a nightmare to maintain.
+
+**Step 1: Identify the Responsibilities**
+We need to extract the distinct responsibilities into their own abstractions (Interfaces).
+- `IOrderValidator`
+- `ITaxCalculator`
+- `IDiscountStrategy` (Applying the Strategy Pattern for OCP)
+- `IPaymentGateway`
+- `IOrderRepository`
+
+**Step 2: Dependency Injection (DIP)**
+We rewrite the `OrderProcessor` so it has zero concrete implementations. It will take the interfaces via its constructor.
+```csharp
+public class OrderProcessor {
+    private readonly IOrderValidator _validator;
+    private readonly ITaxCalculator _taxCalc;
+    // ...
+    
+    public OrderProcessor(IOrderValidator validator, ITaxCalculator taxCalc /* ... */) {
+        _validator = validator;
+        _taxCalc = taxCalc;
+    }
+}
+```
+
+**Step 3: The Facade Pattern**
+The `OrderProcessor` is no longer doing the heavy lifting. It acts as an orchestrator (or Facade), passing data between the specialized services.
+```csharp
+public async Task ProcessAsync(Order order) {
+    if (!_validator.IsValid(order)) throw new Exception();
+    order.Tax = _taxCalc.Calculate(order);
+    await _paymentGateway.ChargeAsync(order);
+    await _repository.SaveAsync(order);
+}
+```
+
+**Result:**
+The 2,000-line God Object becomes a 50-line orchestrator. We can easily unit test the tax calculator in isolation. If we need a new payment gateway (Stripe instead of PayPal), we create a new class implementing `IPaymentGateway` without touching the `OrderProcessor` (honoring OCP).
+
+---
+
+## Scenario — Question 2
+
+**Q2: You notice a colleague has created a master `IRepository<T>` interface that forces every class implementing it to define `GetAll()`, `GetById()`, `Save()`, `Delete()`, and `BulkInsert()`. The `AuditLogRepository` implements this interface, but because you can never delete or bulk insert audit logs, those methods just throw `NotImplementedException`. What principle is violated, and how do you fix it?**
+
+This is a classic violation of the **Interface Segregation Principle (ISP)**. 
+
+**The Flaw:**
+ISP states that no client should be forced to depend on methods it does not use. By creating a massive, "fat" interface, you force implementing classes to carry around dead code or throw exceptions, which can lead to runtime crashes if other parts of the system assume the interface methods actually work (which also violates the Liskov Substitution Principle).
+
+**The Fix:**
+Break the fat interface down into highly cohesive, role-specific interfaces.
+
+1. **Segregate the Interfaces:**
+   - `IReadOnlyRepository<T>` containing `GetAll()` and `GetById()`.
+   - `IWriteRepository<T>` containing `Save()` and `Delete()`.
+   - `IBulkOperations<T>` containing `BulkInsert()`.
+
+2. **Implement Selectively:**
+   - Your `UserRepository` can implement all three interfaces.
+   - Your `AuditLogRepository` will *only* implement `IReadOnlyRepository` and perhaps a separate `IAppendOnlyRepository`. It never implements the delete or bulk interfaces, so it never has to throw a `NotImplementedException`.
+
+By segregating the interfaces, you ensure that the contract perfectly matches the capabilities of the class, resulting in safer, more self-documenting code.
+
+---
+
+## Scenario — Question 3
+
+**Q3: A developer writes a `ReportGenerator` class that connects directly to SQL Server using `SqlConnection`, executes a query, and then uses the `iTextSharp` library to output a PDF to disk. Which SOLID principles are violated, and how do you redesign this class?**
+
+This class is a classic example of tight coupling and violates two major SOLID principles: the **Single Responsibility Principle (SRP)** and the **Dependency Inversion Principle (DIP)**.
+
+**The Flaws:**
+1. **SRP Violation:** The class has three distinct responsibilities (and three reasons to change):
+   - Data access (connecting to SQL).
+   - Business logic (generating the report data).
+   - Output formatting (creating a PDF).
+2. **DIP Violation:** The class depends directly on low-level concrete implementations (`SqlConnection`, `iTextSharp`), making it impossible to unit test the business logic in isolation.
+
+**The Redesign:**
+We must separate these concerns and use Dependency Injection.
+
+1. **Extract Data Access:** Create an `IReportDataRepository` interface. Implement it in a `SqlReportDataRepository` class.
+2. **Extract Formatting:** Create an `IReportFormatter` interface with a `Format(ReportData data)` method. Implement it in a `PdfReportFormatter` class.
+3. **Refactor `ReportGenerator` (The Coordinator):**
+```csharp
+public class ReportGenerator {
+    private readonly IReportDataRepository _repository;
+    private readonly IReportFormatter _formatter;
+
+    // Depend on abstractions, injected via constructor (DIP)
+    public ReportGenerator(IReportDataRepository repository, IReportFormatter formatter) {
+        _repository = repository;
+        _formatter = formatter;
+    }
+
+    public void Generate() {
+        var data = _repository.GetData();
+        var document = _formatter.Format(data);
+        // Save document...
+    }
+}
+```
+
+**The Result:**
+The `ReportGenerator` now only has one responsibility: orchestrating the generation process. If you decide to switch from SQL to MongoDB, or from PDF to Excel, you simply create new classes implementing the interfaces and inject them. The core `ReportGenerator` logic remains completely untouched.

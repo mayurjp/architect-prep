@@ -3,74 +3,71 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Architect Prep — Today</title>
+<title>Architect Prep</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/css/style.css" />
 <script src="assets/js/theme.js"></script>
 </head>
 <body>
 <header class="site">
-  <div class="brand">Architect Prep</div>
+  <div class="brand"><a href="index.html" style="color:inherit;text-decoration:none">Architect Prep</a></div>
   <nav>
-    <a href="index.html">Today</a>
-    <a href="topics.html">Topics</a>
     <a href="search.html">Search</a>
     <button id="theme-toggle" type="button" aria-label="Toggle theme"></button>
   </nav>
 </header>
 <main>
-  <h1>Today's Questions</h1>
-  <p class="muted">One rotating question per topic. Same set for everyone, all day, every UTC day — cycles through the full bank before repeating.</p>
-  <div id="today-list" class="grid"></div>
+  <h1>Topics</h1>
+  <div id="topic-grid" class="grid"></div>
 </main>
-<script src="assets/js/rotation.js"></script>
 <script>
 async function init() {
-  const [questions, topics] = await Promise.all([
-    fetch("data/questions.json").then((r) => r.json()),
-    fetch("data/topics.json").then((r) => r.json()),
+  const cb = Date.now();
+  const [topics, questions] = await Promise.all([
+    fetch(`data/topics.json?v=${cb}`).then((r) => r.json()),
+    fetch(`data/questions.json?v=${cb}`).then((r) => r.json())
   ]);
-
-  const today = todayUtcDateString();
-  const container = document.getElementById("today-list");
-  const byTopic = {};
-  for (const q of questions) {
-    if (q.status !== "answered") continue;
-    (byTopic[q.topic] = byTopic[q.topic] || []).push(q);
-  }
-
+  const mastered = JSON.parse(localStorage.getItem("architect_mastered") || "[]");
+  const masteredSet = new Set(mastered);
+  
   topics.sort((a, b) => a.order - b.order);
-  for (const topic of topics) {
-    const pool = byTopic[topic.id] || [];
-    const card = document.createElement("div");
-    card.className = "card";
-    if (pool.length === 0) {
-      card.innerHTML = `
-        <div class="topic-title" style="color:${topic.color}">${topic.title}</div>
-        <p class="muted">No answered questions yet.</p>
-        <a href="topic.html?t=${topic.id}">View topic →</a>`;
-      container.appendChild(card);
-      continue;
-    }
-    const id = todaysQuestionId(pool, topic.id, today);
-    const q = pool.find((x) => x.id === id);
+  const grid = document.getElementById("topic-grid");
+  
+  topics.forEach((topic, i) => {
+    const topicQuestions = questions.filter(q => q.topic === topic.id);
+    const masteredCount = topicQuestions.filter(q => masteredSet.has(q.id)).length;
+    
+    const total = topic.counts.total || 0;
+    const answered = topic.counts.answered || 0;
+    const pct = total ? Math.round((answered / total) * 100) : 0;
+    
+    const levelBadges = Object.entries(topic.counts.byLevel || {})
+      .map(([lvl, n]) => `<span class="badge ${lvl}">${lvl} · ${n}</span>`)
+      .join(" ");
+      
+    const delayClass = `delay-${(i % 10) + 1}`;
+    
+    const card = document.createElement("a");
+    card.href = `topic.html?t=${topic.id}#${topic.id}`;
+    card.className = `card ${delayClass}`;
+    card.style.display = "block";
     card.innerHTML = `
-      <span class="badge ${q.level}">${q.level}</span>
       <div class="topic-title" style="color:${topic.color}">${topic.title}</div>
-      <details>
-        <summary class="question-text" style="cursor:pointer;display:inline">${escapeHtml(q.question)}</summary>
-        <div class="answer-body">${q.answerHtml}</div>
-      </details>
-      <div style="margin-top:0.75rem"><a href="topic.html?t=${topic.id}">View all in this topic →</a></div>`;
-    container.appendChild(card);
-  }
+      <div style="margin-top:0.75rem">${levelBadges}</div>
+      <div style="margin-top:1.25rem;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:0.4rem; font-size:0.85rem;" class="muted">
+          <span>Mastery</span>
+          <span>${pct}%</span>
+        </div>
+        <div class="progress-bar">
+          <span style="width: ${pct}%"></span>
+        </div>
+      </div>`;
+    grid.appendChild(card);
+  });
 }
-
-function escapeHtml(s) {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
-}
-
 init();
 </script>
 </body>

@@ -23,10 +23,19 @@
 </main>
 <script>
 async function init() {
-  const topics = await fetch("data/topics.json").then((r) => r.json());
+  const [topics, questions] = await Promise.all([
+    fetch("data/topics.json").then((r) => r.json()),
+    fetch("data/questions.json").then((r) => r.json())
+  ]);
+  const mastered = JSON.parse(localStorage.getItem("architect_mastered") || "[]");
+  const masteredSet = new Set(mastered);
+  
   topics.sort((a, b) => a.order - b.order);
   const grid = document.getElementById("topic-grid");
   for (const topic of topics) {
+    const topicQuestions = questions.filter(q => q.topic === topic.id);
+    const masteredCount = topicQuestions.filter(q => masteredSet.has(q.id)).length;
+    
     const total = topic.counts.total || 0;
     const answered = topic.counts.answered || 0;
     const pct = total ? Math.round((answered / total) * 100) : 0;
@@ -41,7 +50,7 @@ async function init() {
       <div class="topic-title" style="color:${topic.color}">${topic.title}</div>
       <p class="topic-desc">${topic.description}</p>
       <div class="progress-bar"><span style="width:${pct}%;background:${topic.color}"></span></div>
-      <p class="muted" style="margin:0.5rem 0 0.6rem">${answered} answered / ${total} total</p>
+      <p class="muted" style="margin:0.5rem 0 0.6rem">${answered} answered (${masteredCount} mastered) / ${total} total</p>
       <div>${levelBadges || '<span class="muted">No content yet</span>'}</div>`;
     grid.appendChild(card);
   }
