@@ -549,3 +549,137 @@ The client's GraphQL library (Apollo Client, Relay) receives the fast initial pa
 **Common Pitfall:** marking nearly every field as `@defer`'d "just in case," rather than reserving it specifically for genuinely slow, non-critical-path fields — overusing `@defer` adds real complexity to client-side response handling (reconciling multiple incremental payloads) for fields that were already fast enough that deferring them provides no meaningful user-experience benefit.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is a GraphQL "Input Type," and how does it differ from an ordinary Object Type despite looking structurally similar in schema syntax?**
+
+An Input Type defines the shape of data a client can **send** to the server (as arguments to a Query or Mutation) — an ordinary Object Type defines the shape of data the server **returns**. They look syntactically similar, but GraphQL enforces a strict, one-directional separation: you cannot use a regular Object Type as an argument, and you cannot return an Input Type as a result.
+
+**An Object Type — describes data flowing OUT of the server, in a response:**
+```graphql
+type Product {
+  id: ID!
+  name: String!
+  price: Float!
+}
+```
+
+**An Input Type — describes data flowing INTO the server, as a Mutation's argument:**
+```graphql
+input CreateProductInput {
+  name: String!
+  price: Float!
+  # notice: NO "id" field -- the client doesn't supply an ID when CREATING something
+}
+
+type Mutation {
+  createProduct(input: CreateProductInput!): Product! # takes an INPUT type, RETURNS an OBJECT type
+}
+```
+Even though `CreateProductInput` and `Product` share two nearly-identical fields (`name`, `price`), they're deliberately declared as two separate types — `input` for what the client sends, `type` for what the server returns — and GraphQL's type system enforces this: you cannot pass a `Product` as the `input` argument, nor can `createProduct` return a `CreateProductInput` as its result.
+
+**Why this separation exists rather than just reusing one type for both directions:** the *shape* of data going in often genuinely differs from the shape coming out — creating a product doesn't need (or accept) a client-supplied `id` (the server assigns it), but the *returned* `Product` naturally includes one; keeping Input and Object types structurally separate lets each one's shape reflect exactly what's appropriate for its specific direction, rather than forcing one shared type to awkwardly serve both (nullable `id` on the input side just so the same type can also be used for output, for instance).
+
+**Common Pitfall:** trying to reuse an Object Type directly as a Mutation argument to "avoid duplicating similar fields" — GraphQL's schema language doesn't permit this at all (a `type` cannot be used where an `input` is expected), and even if a specific implementation's tooling allowed bending this rule, doing so conflates two things (what's optional/required when creating something vs. what's always present when reading it back) that usually genuinely differ and are clearer kept as separate, purpose-specific types.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is GraphQL's Interface type, and how does it let a single field return one of several possible concrete Object Types, queried via inline fragments to access type-specific fields?**
+
+A GraphQL Interface defines a set of fields every implementing Object Type must include — similar in spirit to a C# interface (covered throughout the OOP topic) — letting a field's type be declared as "any of several possible concrete types that all share this common shape," with clients using inline fragments to query fields specific to whichever concrete type actually comes back.
+
+**Defining an Interface and multiple Object Types implementing it:**
+```graphql
+interface Notification {
+  id: ID!
+  createdAt: String!
+}
+
+type OrderShippedNotification implements Notification {
+  id: ID!
+  createdAt: String!
+  trackingNumber: String!  # SPECIFIC to this notification type
+}
+
+type CommentReplyNotification implements Notification {
+  id: ID!
+  createdAt: String!
+  replyText: String!        # SPECIFIC to THIS notification type
+}
+
+type Query {
+  notifications: [Notification!]!  # returns a MIX of different concrete types
+}
+```
+
+**Querying it — the common fields directly, type-specific fields via inline fragments:**
+```graphql
+query {
+  notifications {
+    id            # common to ALL notification types -- queried directly
+    createdAt     # also common -- queried directly
+    ... on OrderShippedNotification {
+      trackingNumber   # ONLY resolved for entries that are ACTUALLY this specific type
+    }
+    ... on CommentReplyNotification {
+      replyText        # ONLY resolved for entries that are ACTUALLY this specific type
+    }
+  }
+}
+```
+The `notifications` list can contain a mix of `OrderShippedNotification` and `CommentReplyNotification` instances — the client queries the shared `id`/`createdAt` fields normally, and uses `... on SpecificType { }` inline fragments to request fields that only apply to one particular concrete type, with the server including that fragment's fields only for entries that actually match that specific type.
+
+**Why this matters as GraphQL's approach to polymorphism, mirroring the OOP interface concept covered throughout this topic:** it lets a schema express "this field returns one of several related-but-distinct kinds of things" in a strongly-typed way, giving clients compile-time-checkable (via codegen) knowledge of exactly which fields are safe to request for each possible concrete type, rather than falling back to a loosely-typed, generic "notification data" blob that provides no schema-level guidance about what fields might actually be present for any given entry.
+
+**Common Pitfall:** overusing Interfaces for types that don't genuinely share a meaningful common contract, purely to force disparate data into one queryable list — if `OrderShippedNotification` and `CommentReplyNotification` shared nothing meaningful beyond happening to both be "things that occurred," forcing them into one Interface-typed list mainly to enable a single combined query adds real schema complexity for a relationship that might be better modeled as two entirely separate query fields instead.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is GraphQL's Query Complexity Analysis using assigned per-field "cost" weights (touched on earlier for DoS prevention), and how does it differ mathematically from simple Depth Limiting in what kinds of abusive queries each one actually catches?**
+
+Covered earlier as one of several DoS mitigations (alongside Depth Limiting and Persisted Queries) — the specific reason Complexity Analysis exists *in addition to* Depth Limiting, rather than Depth Limiting alone being sufficient, is that a shallow but extremely wide query can be just as expensive as a deep one, and Depth Limiting alone has no way to catch it.
+
+**A query Depth Limiting catches — genuinely deep nesting:**
+```graphql
+query {
+  user(id: 1) { friends { friends { friends { friends { friends { name } } } } } }
+}
+# Depth = 6 -- exceeds a configured max depth of, say, 4 -- REJECTED by depth limiting alone
+```
+
+**A query Depth Limiting completely MISSES — shallow, but catastrophically WIDE:**
+```graphql
+query {
+  users(first: 1000000) {   # a single field, requesting ONE MILLION results -- depth is only 2!
+    name
+  }
+}
+# Depth = 2 -- easily passes a max-depth-of-4 check, but could still return/compute
+# a MILLION rows -- Depth Limiting provides ZERO protection against this specific abuse
+```
+This query is trivially shallow (only 2 levels of nesting) — it sails right past a depth limit check entirely, while still potentially forcing the server to fetch and serialize a million rows in a single request; Depth Limiting fundamentally cannot catch this class of attack, since it only measures nesting depth, never the *volume* of data a single level might request.
+
+**Complexity Analysis — assigns a numeric "cost" per field, factoring in list-size arguments, catching BOTH deep and wide abuse:**
+```csharp
+// HotChocolate-style cost configuration (conceptual)
+descriptor.Field(f => f.Users(default))
+    .Argument("first", a => a.Type<IntType>())
+    .UseCost(baseCost: 1, multiplierArgument: "first"); // cost SCALES with the requested list size
+```
+```text
+Requesting users(first: 1000000) now correctly computes an enormous total cost
+(1,000,000 x baseCost) -- rejected by a max-cost threshold (e.g., 10,000)
+regardless of how SHALLOW the query's nesting happens to be
+```
+By assigning cost weights that scale with list-size arguments (not just counting nesting levels), Complexity Analysis catches both the "deep nesting" abuse pattern Depth Limiting handles *and* the "shallow but requesting an enormous list" pattern Depth Limiting structurally cannot detect at all — a genuinely more complete defense, covering an attack dimension Depth Limiting alone simply has no visibility into.
+
+**Why production GraphQL servers typically layer BOTH defenses rather than choosing one:** each technique catches a different attack shape — Depth Limiting is cheap to evaluate and catches the "deeply recursive" pattern; Complexity Analysis is more nuanced (requiring per-field cost configuration) and catches the "wide, list-size-driven" pattern Depth Limiting misses entirely; using only one leaves the other attack dimension completely unprotected.
+
+**Common Pitfall:** implementing only Depth Limiting (the simpler of the two to configure) and considering DoS protection complete — as the `users(first: 1000000)` example demonstrates, this leaves a wide-open, easily-discoverable attack vector that doesn't require any deep nesting at all, just a single field with a large list-size argument, which many real-world GraphQL DoS incidents have specifically exploited precisely because teams implemented Depth Limiting alone without realizing it doesn't address this entirely separate attack dimension.
+
+---

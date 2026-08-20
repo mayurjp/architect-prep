@@ -484,3 +484,100 @@ The message traveling through the broker itself stays small (just an ID and a UR
 **Common Pitfall:** using Claim Check for payloads that aren't actually oversized, adding an unnecessary blob-storage round-trip (upload then download) for messages that would have fit comfortably within the broker's normal size limits — the pattern specifically earns its extra complexity (and the added latency of two separate network calls, to blob storage and to the broker) only when the payload genuinely exceeds what the broker can handle directly; for ordinarily-sized messages, passing the data directly through the broker remains simpler and faster.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between a Message Broker's "Push" delivery model and a "Pull/Poll" model, and how does each affect a consumer's control over its own processing rate?**
+
+Covered implicitly throughout (RabbitMQ typically pushes to subscribed consumers, Kafka consumers typically pull/poll) — the explicit distinction matters for understanding which side (broker or consumer) controls the pace of message delivery, and why that control matters for preventing an overwhelmed consumer.
+
+**Push model — the broker actively sends messages to the consumer as they arrive:**
+```csharp
+// RabbitMQ-style push consumer
+channel.BasicConsume(queue: "orders", autoAck: false, consumer: eventingConsumer);
+eventingConsumer.Received += (model, ea) => ProcessOrder(ea.Body); // the BROKER decides WHEN to call this
+```
+The broker pushes messages to the consumer proactively — convenient, but without careful configuration (prefetch limits, covered implicitly in the earlier lock-duration scenario), a fast-publishing broker can push messages to a consumer faster than it can actually process them, backing up in-memory buffers on the consumer side.
+
+**Pull/Poll model — the consumer actively requests the next batch, on its OWN schedule:**
+```csharp
+// Kafka-style pull consumer
+while (true)
+{
+    var records = consumer.Consume(TimeSpan.FromMilliseconds(100)); // consumer DECIDES when to ask for more
+    foreach (var record in records) await ProcessOrder(record.Value);
+    // only AFTER finishing this batch does the loop go back and pull the NEXT one
+}
+```
+The consumer explicitly controls its own pace — it only requests the next batch once it's ready, meaning a slow consumer naturally self-throttles simply by not polling again until it's actually available, rather than the broker needing to guess an appropriate delivery rate.
+
+**Why this distinction connects directly to the earlier Backpressure discussion:** a pull-based model provides natural backpressure almost for free — the consumer's own poll rate *is* the rate limiter, since nothing arrives faster than the consumer explicitly asks for it. A push-based model requires the broker/client library to implement explicit flow-control mechanisms (prefetch counts, credit-based flow control) to achieve the same self-limiting effect, since without them, the broker has no inherent signal telling it to slow down.
+
+**Common Pitfall:** using a push-based consumer with no prefetch/flow-control limit configured, assuming the broker will "naturally" pace deliveries to match consumer capacity — without explicit configuration, many push-based clients will happily accept as many in-flight messages as the broker sends, potentially exhausting consumer-side memory buffering far more messages than the consumer can currently process, exactly the scenario a pull-based model's inherent self-pacing avoids by design.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is Kafka's "Log Compaction" retention policy, and how does it differ from the standard time/size-based retention (covered earlier) by keeping only the LATEST value per key forever, rather than deleting old messages after a fixed window?**
+
+Standard Kafka retention (covered earlier) deletes messages after a configured time window or size limit, regardless of content. Log Compaction is an alternative retention policy that instead guarantees at least the **most recent** message for each distinct key is retained indefinitely, while older messages for keys that have since been updated can be removed — designed for scenarios where a topic represents "current state" rather than a pure event history.
+
+**Standard (time/size-based) retention — deletes everything after a window, regardless of key:**
+```text
+Topic "clickstream" with 7-day retention:
+  ALL messages, from ALL keys, are deleted once they're older than 7 days
+-- appropriate for genuine EVENT streams, where old individual events lose relevance over time
+```
+
+**Log Compaction — keeps only the LATEST value per key, discarding only SUPERSEDED older values:**
+```text
+Topic "user-profile-updates" (compacted), keyed by userId:
+  Key "user-42": v1 {name: "Alice"} -> v2 {name: "Alice Smith"} -> v3 {name: "Alice Jones"}
+-- Log Compaction eventually removes v1 and v2 (SUPERSEDED by v3 for the SAME key),
+   but v3 (the latest value for "user-42") is retained INDEFINITELY, never deleted by age
+-- Key "user-99" (never updated again) keeps its single value forever too
+```
+This produces something functionally similar to a simple key-value snapshot of "the current state of every key," reconstructable at any time by replaying the compacted log from the beginning and keeping only each key's last-seen value — useful specifically for topics representing *current state* (a user's profile, a product's current price) rather than an unbounded history of discrete events.
+
+**Why this matters as a genuinely different use case than standard event-stream retention:** a topic like "every click a user ever made" naturally wants time-based deletion (old clicks aren't individually useful forever) — a topic like "the current email address for each user" instead wants the *opposite* guarantee: never lose the latest value for any key, while being fine discarding the intermediate, now-superseded historical values, which is exactly what Log Compaction (rather than time-based deletion) is specifically designed to provide.
+
+**A concrete practical use — rebuilding a service's local cache/state from a compacted topic on startup:** a service can restore its complete current-state view (every user's latest profile data) simply by consuming a compacted topic from the beginning — since compaction guarantees every key's latest value is present, this reconstructs a complete, current snapshot without needing to have retained every historical update ever made.
+
+**Common Pitfall:** applying standard time-based retention to a topic that's actually meant to represent current state (like the user-profile example) — a user who hasn't updated their profile in over 7 days would have their *only* record deleted under time-based retention, even though it's still their genuinely current, valid data; Log Compaction is specifically the retention policy designed to avoid this exact "still-valid-but-old" data-loss problem for current-state-representing topics.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is the "Transactional Outbox" pattern's relationship to Kafka's own native "Exactly-Once Semantics" (EOS) transactions, and why does Kafka's built-in transaction support NOT eliminate the need for the Outbox pattern when writing to a separate database?**
+
+Kafka has its own native transaction support (`Producer.BeginTransaction()`/`CommitTransaction()`), which might seem to make the Outbox pattern (covered extensively earlier) redundant — but Kafka's transactions only guarantee atomicity **among Kafka operations themselves** (producing to multiple topics, committing consumer offsets), not between a Kafka write and a *separate, external* database write, which is exactly the gap the Outbox pattern exists to close.
+
+**What Kafka's native transactions DO guarantee — atomicity ACROSS KAFKA operations:**
+```csharp
+producer.InitTransactions();
+producer.BeginTransaction();
+producer.Produce("orders-topic", orderCreatedMessage);
+producer.Produce("audit-log-topic", auditMessage); // a SECOND Kafka topic, same transaction
+producer.CommitTransaction(); // BOTH Kafka writes commit together, or NEITHER does
+```
+This genuinely solves "write to two different Kafka topics atomically" and "consume-process-produce atomically" (a common stream-processing pattern) — but notice both operations here are **Kafka-native** operations.
+
+**What Kafka's transactions do NOT cover — a Kafka write PLUS a SEPARATE database write:**
+```csharp
+producer.BeginTransaction();
+producer.Produce("orders-topic", orderCreatedMessage); // Kafka write
+await _db.SaveChangesAsync(); // a COMPLETELY SEPARATE system (SQL Server) -- NOT part of Kafka's transaction at all!
+producer.CommitTransaction();
+// If SaveChangesAsync() fails AFTER the Kafka produce already succeeded (or vice versa),
+// you're back to the EXACT dual-write problem the Outbox pattern was invented to solve --
+// Kafka's transaction API has NO visibility into or control over the separate SQL Server transaction
+```
+Kafka's transaction coordinator only knows about Kafka's own internal state — it has no mechanism to participate in an atomic commit alongside an entirely separate system like SQL Server; the two systems' transactions remain fully independent, meaning the classic dual-write race (covered at the very start of this topic) still fully applies whenever the write actually needs to span Kafka *and* an external database together.
+
+**Why this means the Outbox pattern remains necessary even in a Kafka-based architecture:** the Outbox pattern's entire value proposition — write the business data AND the "I need to publish this" record within **one single database transaction**, then a separate process reliably publishes to Kafka afterward — directly solves exactly this cross-system gap that Kafka's own native transactions cannot reach into, regardless of how sophisticated Kafka's own internal transactional guarantees are.
+
+**Common Pitfall:** hearing that "Kafka supports Exactly-Once Semantics" and concluding the Outbox pattern is now obsolete for a Kafka-based system — Kafka's EOS is a genuinely powerful guarantee, but strictly scoped to operations within Kafka's own transactional boundary (multiple topics, consume-then-produce chains); it provides zero atomicity guarantee for the extremely common case of "update my own database AND publish an event," which is precisely the scenario the Outbox pattern remains the correct solution for, Kafka or not.
+
+---
