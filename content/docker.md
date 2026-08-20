@@ -353,3 +353,94 @@ The `/root/.nuget/packages` directory is preserved in a special build cache **ou
 **Common Pitfall:** using cache mounts but forgetting they require BuildKit (`DOCKER_BUILDKIT=1`, the default in modern Docker) and aren't portable to every CI environment without configuration — some CI runners' Docker layer caching setups (e.g., certain remote-cache configurations) need explicit configuration to actually persist cache-mount contents between CI runs, since a fresh CI runner with no persisted build cache gains nothing from a cache mount on its very first build.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the difference between `docker stop` and `docker kill`, and why does the distinction matter for an application expecting a graceful shutdown?**
+
+Both stop a running container, but they send different signals and allow (or don't allow) different amounts of time for the application inside to shut down cleanly — the same `SIGTERM`/`SIGKILL` distinction covered for Kubernetes Pod termination, applied directly at the Docker CLI level.
+
+**`docker stop` — sends `SIGTERM`, waits, then escalates:**
+```bash
+docker stop my-container
+# 1. Sends SIGTERM to the container's main process (PID 1)
+# 2. Waits up to a grace period (default 10 seconds) for the process to exit on its own
+# 3. If it hasn't exited by then, sends SIGKILL to force-terminate it
+```
+This gives a well-behaved application a real opportunity to finish in-flight work, close database connections, and exit cleanly — exactly the graceful-shutdown pattern covered for ASP.NET Core's `IHostApplicationLifetime.ApplicationStopping` handling.
+
+**`docker kill` — sends `SIGKILL` immediately, no grace period at all:**
+```bash
+docker kill my-container
+# Immediately force-terminates the process -- no chance for cleanup, no grace period
+```
+The application has zero opportunity to run any shutdown logic — any in-flight database transaction is abruptly abandoned, any buffered-but-unflushed data is lost, exactly as if the process had crashed.
+
+**Why this matters for an application that hasn't implemented `SIGTERM` handling:** if your application's code never listens for `SIGTERM` at all, `docker stop` effectively degrades into behaving like `docker kill` anyway — just after waiting the full grace period first, since nothing inside the container ever responded to the polite signal. Implementing proper shutdown handling (as covered for the Kubernetes termination scenario) is what actually makes `docker stop`'s grace period meaningful, rather than just a wasted wait before the same forceful kill happens regardless.
+
+**Common Pitfall:** using `docker kill` routinely during local development "because it's faster" and never noticing that the application doesn't actually handle `SIGTERM` gracefully at all — the gap only becomes visible (and costly) once the same container runs in production under `docker stop`/Kubernetes' graceful termination, where abruptly losing in-flight work actually matters.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is a Docker "distroless" or "scratch" base image, and how does it reduce attack surface compared to a full OS-based base image like `ubuntu` or `debian`?**
+
+A typical Linux-based Docker image (`FROM ubuntu:22.04`) includes an entire general-purpose operating system's worth of tools — a shell, package managers, text editors, networking utilities — almost none of which your actual application needs at runtime, but all of which represent additional attack surface if the container is ever compromised.
+
+**A typical base image includes far more than the application needs:**
+```dockerfile
+FROM ubuntu:22.04
+# Includes: bash, apt, curl, wget, vi, a full package management system,
+# and dozens of other utilities completely irrelevant to running a compiled .NET app
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "MyApp.dll"]
+```
+If an attacker manages to execute code inside this container, they have an entire shell environment and toolset available to explore the filesystem, download additional tools, or pivot further — none of which your application itself ever needed.
+
+**A "distroless" image includes only the bare minimum runtime dependencies, no shell, no package manager:**
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-noble-chiseled
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "MyApp.dll"]
+```
+Microsoft's "chiseled" .NET images (a distroless-style variant) strip out the shell, package manager, and most OS utilities entirely — just enough OS-level files to run a .NET application, and nothing more. If an attacker achieves code execution inside a container like this, there's no `bash`, no `apt`, no `curl` available to them at all — significantly limiting what they can actually do next, even after a successful initial compromise.
+
+**Why this matters as defense-in-depth, not a replacement for fixing the original vulnerability:** removing the shell doesn't prevent the *initial* compromise (an application-level vulnerability like SQL injection or a deserialization bug still works the same either way) — but it substantially limits an attacker's ability to *escalate* afterward, since many post-exploitation techniques rely on having a shell and common utilities available inside the compromised environment.
+
+**Common Pitfall:** switching to a distroless/chiseled base image and then being unable to debug a running container the usual way (`docker exec -it my-container bash` fails, since there's no `bash` inside) — teams adopting these hardened images typically rely on Kubernetes' `kubectl debug` (creating a temporary sidecar/ephemeral container with debugging tools attached, without needing a shell inside the hardened container itself) or shipping a `-debug` variant of the image with tooling included specifically for troubleshooting, kept separate from the hardened production image.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is Docker's `--read-only` flag for a container's root filesystem, and how does it work in combination with `tmpfs`/volume mounts for an application that still needs to write somewhere?**
+
+Running a container with a read-only root filesystem prevents any process inside it from writing to (or modifying) the container's own filesystem at all — a significant security hardening measure, since many exploitation techniques rely on writing a malicious file (a webshell, a modified binary) somewhere inside the compromised container.
+
+**Running with a read-only root filesystem:**
+```bash
+docker run --read-only my-api
+# Any attempt to write to the container's filesystem now fails:
+# "Read-only file system" error, even for a compromised process trying to plant a malicious file
+```
+
+**The problem — most applications DO need to write somewhere (temp files, logs):**
+```csharp
+File.WriteAllText("/tmp/processing-cache.json", data); // FAILS under --read-only!
+```
+
+**The solution — explicitly mount writable locations as `tmpfs` or volumes, while everything else stays read-only:**
+```bash
+docker run --read-only \
+  --tmpfs /tmp:rw,size=64m \
+  --mount type=volume,source=app-logs,target=/app/logs \
+  my-api
+```
+This gives the application **exactly** the specific writable locations it legitimately needs (`/tmp` as an in-memory, size-limited tmpfs; `/app/logs` as a persistent volume) — while every other path in the container's filesystem remains genuinely immutable, including the application's own binaries and any configuration files, which can no longer be tampered with even by a compromised process running inside the container.
+
+**Why this is a meaningfully stronger guarantee than just "don't write files in application code":** a read-only root filesystem is enforced by the container runtime/kernel itself, not by application-code discipline — even if an attacker achieves arbitrary code execution inside the container (bypassing whatever the application's *own* code would normally do), the filesystem-level read-only restriction still holds, since it's not something application code can simply choose to ignore.
+
+**Common Pitfall:** enabling `--read-only` without first identifying every path the application actually needs to write to (temp directories, cache folders, log output, sometimes surprising defaults like ASP.NET Core's Data Protection key storage) — the container will fail at startup or crash the first time it attempts an unanticipated write, requiring a methodical audit of every write path the application (and any of its dependencies/libraries) might touch before this hardening can be safely enabled in production.
+
+---

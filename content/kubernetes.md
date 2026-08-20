@@ -382,3 +382,98 @@ This is how tools like Istio's automatic sidecar injection work — a Pod submit
 **Common Pitfall:** deploying a validating/mutating webhook without a correctly configured `failurePolicy` — if the webhook service itself becomes unavailable, `failurePolicy: Fail` (the safer default for security-critical policies) blocks *all* matching object creation cluster-wide until the webhook recovers, which can cause a wider outage than the policy violation it was meant to prevent if the webhook's own reliability isn't held to a very high standard.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is a Kubernetes `Label` versus an `Annotation`, and why does Kubernetes treat them so differently even though both attach arbitrary key-value metadata to an object?**
+
+Both are key-value pairs attached to a Kubernetes object's metadata — the difference is entirely about *purpose*: Labels are meant to be **queried and selected on** by Kubernetes itself and other tooling; Annotations are purely descriptive, non-identifying metadata Kubernetes never uses for selection.
+
+**Labels — used for identification and selection:**
+```yaml
+metadata:
+  labels:
+    app: order-service
+    environment: production
+    team: payments
+```
+```bash
+kubectl get pods -l app=order-service,environment=production # SELECTS objects by label
+```
+Services, Deployments, and NetworkPolicies all use label **selectors** to determine which Pods they apply to — a Service routes traffic to any Pod matching its selector's labels, regardless of that Pod's name; this selection mechanism is *the* fundamental way Kubernetes objects relate to each other dynamically.
+
+**Annotations — purely descriptive, never used for selection:**
+```yaml
+metadata:
+  annotations:
+    description: "Handles order creation and payment orchestration"
+    contact: "payments-team@mycompany.com"
+    build.commit-sha: "a1b2c3d4"
+    kubernetes.io/last-applied-configuration: "{...large JSON blob...}"
+```
+Kubernetes itself never filters or selects objects based on annotation values — they exist purely to attach extra information (build metadata, tooling-specific configuration, human-readable descriptions) that some *other* tool or human might find useful, without that data ever influencing which objects a Service/Deployment/selector actually matches.
+
+**Why the distinction matters for choosing which to use:** if you ever need to query, filter, or route based on a piece of metadata (`kubectl get pods -l ...`, a Service's selector), it **must** be a Label — Annotations are invisible to Kubernetes' own selection mechanisms entirely. Conversely, cramming large or unstructured data into Labels (Kubernetes imposes character-length and format restrictions on label values) is the wrong choice — that data belongs in an Annotation instead.
+
+**Common Pitfall:** putting large, free-form text (a long description, a full JSON configuration blob) into a Label — Kubernetes enforces strict length and character-set validation rules on label keys/values specifically because they're meant to be efficiently indexed and queried; that same data has no such restriction as an Annotation, since annotations aren't used for indexed lookups at all.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is a Kubernetes `Init Container`, and how does it differ from a regular container in the same Pod in both execution order and failure handling?**
+
+An Init Container runs and **completes** before any of a Pod's regular (main) containers start — used for setup tasks that must finish successfully before the actual application should begin running, like waiting for a dependency to become available or running a one-time setup step.
+
+**The Mechanism:**
+```yaml
+spec:
+  initContainers:
+    - name: wait-for-db
+      image: busybox
+      command: ["sh", "-c", "until nc -z postgres-service 5432; do echo waiting; sleep 2; done"]
+  containers:
+    - name: order-service
+      image: myregistry/order-service:1.4.2
+```
+Kubernetes runs `wait-for-db` to completion **first** — the `order-service` main container doesn't even start until the init container exits successfully (exit code 0). Multiple init containers, if defined, run sequentially, each one waiting for the previous to complete before starting.
+
+**How failure handling differs from a regular container:** if an Init Container fails (non-zero exit code), Kubernetes restarts *just that init container* repeatedly (respecting the Pod's `restartPolicy`) — the main containers never start at all until every init container has succeeded, in order. This is meaningfully different from a regular container's `livenessProbe` failing (which restarts an *already-running* main container) — an init container failure prevents the application from ever starting in the first place, rather than restarting something that was already serving traffic.
+
+**Why use a dedicated Init Container instead of just adding the "wait for dependency" logic to the application's own startup code:** it cleanly separates "environment readiness checks" from "application logic" — the main container's image and code stays focused purely on the application itself, while the init container (often a lightweight, generic image like `busybox`) handles environment-specific waiting/setup that has nothing to do with the application's actual business logic, and can be reused across many different services needing the same kind of dependency-wait behavior.
+
+**Common Pitfall:** using an Init Container for a task that needs to run *continuously* alongside the main application (like a sidecar log-shipper) rather than a one-time setup step — Init Containers are specifically for tasks that **complete and exit**; anything needing to run for the Pod's entire lifetime belongs in a regular container (or, in Kubernetes 1.28+, a "sidecar" container, a special regular container marked to start before other main containers but keep running throughout the Pod's life), not an Init Container.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is a Kubernetes `PodDisruptionBudget` (PDB), and how does it protect application availability specifically during *voluntary* disruptions like node maintenance, as opposed to unexpected crashes?**
+
+A PodDisruptionBudget tells Kubernetes "never voluntarily take down more than X (or fewer than Y) replicas of this application at once" — constraining Kubernetes' own deliberate, planned disruption actions (draining a node for maintenance, a cluster autoscaler shrinking node count) so they don't accidentally take an application below its minimum viable capacity.
+
+**The Mechanism:**
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: order-service-pdb }
+spec:
+  minAvailable: 2   # at least 2 replicas must ALWAYS remain available during voluntary disruptions
+  selector:
+    matchLabels: { app: order-service }
+```
+If `order-service` has 3 replicas and a cluster administrator initiates `kubectl drain node-1` (to patch/reboot that node), Kubernetes checks the PDB before evicting any Pod on that node — if evicting a Pod would drop available replicas below `minAvailable: 2`, the drain operation **pauses/blocks** on that specific Pod until it's safe to proceed (e.g., after a replacement Pod has started elsewhere and become ready).
+
+**Why "voluntary" disruptions specifically, not crashes:** a PDB has no effect on unexpected failures — if a node's hardware genuinely fails and all its Pods disappear instantly, there's no PDB check that could have prevented that (there's nothing to "pause" when the outage is already instantaneous and involuntary). A PDB only governs Kubernetes' own *deliberate* actions (a planned node drain, a cluster-autoscaler scale-down) where the system has the opportunity to check a budget *before* acting, precisely because those actions are initiated by Kubernetes itself and can therefore be paused/sequenced.
+
+**The two configuration styles:**
+```yaml
+spec: { minAvailable: 2 }     # at least 2 must remain -- express as an absolute floor
+# OR
+spec: { maxUnavailable: 1 }   # at most 1 may be taken down at a time -- express as a ceiling on disruption
+```
+Both express the same underlying constraint from different directions — `maxUnavailable` is often more convenient for a Deployment where the total replica count might itself change over time (autoscaling), since it scales proportionally rather than needing a fixed absolute number.
+
+**Common Pitfall:** setting `minAvailable` equal to (or higher than) the total replica count — this makes the PDB impossible to satisfy during *any* voluntary disruption, permanently blocking legitimate node drains/maintenance operations indefinitely, since Kubernetes will never evict a Pod if doing so would violate the budget, no matter how long the administrator waits.
+
+---

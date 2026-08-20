@@ -887,3 +887,88 @@ Since a single logical read might otherwise need to check dozens of on-disk file
 **Common Pitfall:** using a Bloom Filter where false positives are unacceptable — e.g., using one alone as a security check ("has this token been revoked?") without a confirming lookup for "maybe" results would incorrectly treat some *not-actually-revoked* items as revoked; a Bloom Filter is only safe to use as a cheap **pre-filter** before an authoritative check, never as the sole source of truth for a decision where false positives cause real harm.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is a Content Delivery Network (CDN), and how does it reduce latency for users far from your primary servers without you having to deploy your own servers everywhere?**
+
+A CDN is a globally distributed network of caching servers (edge nodes) operated by a third party (Cloudflare, Akamai, Azure CDN) — you configure your CDN to cache your static content, and it automatically serves that content to users from whichever edge location is geographically closest to them, without you needing to run any infrastructure in those locations yourself.
+
+**Without a CDN — every user, everywhere, hits your one origin server directly:**
+```text
+User in Sydney -> requests image.jpg -> travels all the way to your origin server in Virginia
+                                       -> full round-trip latency for every single request
+```
+
+**With a CDN — most requests never reach your origin server at all:**
+```text
+User in Sydney -> requests image.jpg -> nearest CDN edge node (Sydney)
+                                       -> cache HIT: served instantly from Sydney, origin never contacted
+                                       -> cache MISS (first request ever): edge fetches from origin ONCE,
+                                          caches it, then serves every SUBSEQUENT Sydney request from cache
+```
+The very first request for a given piece of content from a given region might still need to reach your origin server — but every subsequent request from users near that same edge node is served entirely from the CDN's local cache, without touching your origin server at all.
+
+**Why this matters beyond just "faster for users":** it also protects your origin server from load — instead of every user worldwide hitting your servers directly, the vast majority of traffic for static/cacheable content (images, CSS, JS, even entire cacheable API responses) is absorbed by the CDN's edge layer, meaning your origin infrastructure only needs to handle cache misses and genuinely dynamic, non-cacheable requests.
+
+**Common Pitfall:** assuming a CDN automatically speeds up *everything*, including highly personalized or frequently-changing dynamic content (a user's own shopping cart, a live stock price) — CDNs excel specifically at content that's the same for many users and doesn't change every request; genuinely per-user dynamic data still needs to go to your origin server (or a properly-designed caching strategy with very short TTLs and careful invalidation) since caching it at the edge risks serving one user's private data to another.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is a Message Queue's role in "Backpressure," and how does an unbounded queue actually make a system's failure mode worse rather than better under sustained overload?**
+
+Backpressure is the general principle that a system under more load than it can handle should signal that fact *upstream*, rather than silently absorbing unlimited work until it catastrophically fails — a message queue, when used naively without bounds, can actually mask an overload condition until it becomes far more severe than if the system had simply pushed back earlier.
+
+**The naive assumption — "the queue absorbs the spike, so we're protected":**
+```text
+Producer sends 10,000 messages/second
+Consumer can only process 2,000 messages/second
+-- the queue happily accepts everything, growing by 8,000 messages/second, unbounded
+```
+For a genuinely temporary spike, this is exactly the load-leveling benefit queues provide (covered earlier). But if the producer's rate *permanently* exceeds the consumer's processing capacity (not just a brief spike), an unbounded queue doesn't protect the system — it just delays and obscures the problem, growing indefinitely while consumers fall further and further behind, until the queue itself runs out of memory/disk, or the backlog becomes so large that by the time messages are finally processed, their data is hopelessly stale and no longer useful.
+
+**Backpressure — the system explicitly signals "slow down" back to the producer instead of endlessly absorbing:**
+```csharp
+// A bounded, backpressure-aware channel -- producers BLOCK (or get rejected) once the buffer is full,
+// rather than growing without limit
+var channel = Channel.CreateBounded<Order>(new BoundedChannelOptions(1000)
+{
+    FullMode = BoundedChannelFullMode.Wait // producer's WriteAsync() call itself slows down/waits
+});
+```
+When the bounded buffer fills up, the producer's attempt to add more work explicitly slows down (or is rejected, depending on configuration) — this pushes the signal "we're overloaded" back to whoever is generating the work, potentially all the way back to an upstream system or even the original client, rather than the queue silently absorbing an ever-growing backlog that eventually fails catastrophically instead of failing early and visibly.
+
+**Why "fail fast and visibly" is often better than "absorb everything invisibly":** a producer that gets pushed back on immediately can react (retry later, shed load, alert an operator) — a producer that's told "sure, I'll take it" by an unbounded queue has no signal anything is wrong until the eventual, much larger, harder-to-diagnose failure occurs (an out-of-memory crash, or a consumer processing hours-stale data).
+
+**Common Pitfall:** treating "we have a message queue" as sufficient protection against overload without ever considering the queue's own bounds — an unbounded queue in front of an underpowered consumer doesn't solve a sustained (not just spiky) capacity mismatch, it just delays and amplifies the eventual failure.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is the "Two Generals' Problem," and how does it explain why truly guaranteed, acknowledged agreement between two nodes over an unreliable network is provably impossible?**
+
+The Two Generals' Problem is a classic thought experiment in distributed systems theory demonstrating that two parties communicating **only** over a network that might lose messages can never achieve *perfectly certain, mutually-confirmed* agreement — no amount of additional acknowledgment messages fixes this fundamentally, which is why real distributed systems settle for practical, probabilistic guarantees instead of theoretically perfect ones.
+
+**The thought experiment:**
+```text
+General A and General B must attack a city SIMULTANEOUSLY to win, or both retreat.
+They can only communicate via messengers who might be captured (message lost) crossing enemy territory.
+
+A sends: "Attack at dawn" -> B receives it, but A doesn't know if the message arrived
+B sends back: "Confirmed, attacking at dawn" -> A receives it, but B doesn't know if THIS arrived
+A would need to send: "Got your confirmation" -> but now A doesn't know if THAT arrived either
+... this chain of acknowledgments can continue FOREVER, and neither general can
+ever have PERFECT certainty the other is really going to attack
+```
+No matter how many rounds of acknowledgment are added, the *very last* message in the chain is never itself acknowledged — there's always one final message whose successful delivery is uncertain, meaning perfect, mutually-known-with-certainty agreement is mathematically impossible over a network where messages can be lost.
+
+**Why this isn't just an academic curiosity — it's exactly the TCP handshake / distributed transaction problem in disguise:** TCP's three-way handshake (covered earlier) doesn't actually solve the Two Generals' Problem — it can't, since the problem is provably unsolvable — it just makes message loss *unlikely enough in practice* (via retransmission and timeouts) that applications built on top of TCP can reasonably proceed as if agreement were certain, accepting a small residual risk rather than eliminating it entirely.
+
+**The practical implication for distributed systems design:** this is the deep theoretical reason systems favor **idempotency and at-least-once delivery with retries** (covered extensively for messaging/Sagas) over trying to achieve theoretically perfect exactly-once semantics — since perfect, certain agreement between two nodes over an unreliable network is provably impossible, practical systems instead design for "it's fine if this happens more than once, as long as repeating it is harmless" rather than chasing an unattainable guarantee.
+
+**Common Pitfall:** designing a critical distributed workflow assuming that "enough" retries and acknowledgments will eventually achieve perfectly certain agreement between two services — the Two Generals' Problem shows this is a category error; the correct response is designing the *operations themselves* to be safe under uncertainty (idempotent, tolerant of duplicates or ambiguous outcomes) rather than trying to engineer away the underlying, provably unavoidable uncertainty.
+
+---

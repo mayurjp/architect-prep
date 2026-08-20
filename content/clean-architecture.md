@@ -420,3 +420,138 @@ Interfaces defined in Application layer (IOrderRepository)  <-->  Ports
 **Common Pitfall:** treating "Clean Architecture" and "Hexagonal Architecture" as meaningfully different methodologies requiring a team to pick one "correctly" — in practice, teams and articles often mix the vocabulary freely (calling an interface both a "Port" and simply "an Application layer interface" in the same codebase), and the actual architectural discipline (dependencies point inward, technology detail stays at the edges) matters far more than which naming convention is used to describe it.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is a Use Case (or Interactor) in Clean Architecture's Application layer, and how does it differ from putting the same logic directly inside a Controller action?**
+
+A Use Case is a class dedicated to orchestrating exactly one specific application operation (e.g., "Place an Order") — coordinating calls to the Domain layer and Infrastructure interfaces, without itself containing framework-specific code (no `IActionResult`, no HTTP-specific types) or deep business-rule logic (that stays in the Domain).
+
+**Logic embedded directly in a Controller action:**
+```csharp
+[HttpPost]
+public async Task<IActionResult> PlaceOrder(PlaceOrderRequest request)
+{
+    var product = await _productRepository.GetByIdAsync(request.ProductId);
+    if (product.Stock < request.Quantity) return BadRequest("Insufficient stock");
+    var order = new Order(request.CustomerId, product, request.Quantity);
+    await _orderRepository.SaveAsync(order);
+    await _emailService.SendConfirmationAsync(order);
+    return Ok(order.Id);
+}
+```
+This works, but the orchestration logic (check stock, create the order, save it, send confirmation) is now tangled directly into a class that also has to know about HTTP status codes and `IActionResult` — testing this logic requires spinning up (or mocking) the entire ASP.NET Core request pipeline, even though the actual logic being tested has nothing to do with HTTP at all.
+
+**The same orchestration extracted into a dedicated Use Case:**
+```csharp
+public class PlaceOrderUseCase
+{
+    public async Task<Guid> ExecuteAsync(PlaceOrderCommand command)
+    {
+        var product = await _productRepository.GetByIdAsync(command.ProductId);
+        if (product.Stock < command.Quantity) throw new InsufficientStockException();
+        var order = new Order(command.CustomerId, product, command.Quantity);
+        await _orderRepository.SaveAsync(order);
+        await _emailService.SendConfirmationAsync(order);
+        return order.Id;
+    }
+}
+
+[HttpPost]
+public async Task<IActionResult> PlaceOrder(PlaceOrderRequest request)
+{
+    try { return Ok(await _placeOrderUseCase.ExecuteAsync(request.ToCommand())); }
+    catch (InsufficientStockException) { return BadRequest("Insufficient stock"); }
+}
+```
+The controller's job shrinks to translating between HTTP concerns (parsing the request, mapping exceptions to status codes) and the Use Case — the actual orchestration logic can now be unit tested directly, instantiating `PlaceOrderUseCase` with mocked repositories, with zero dependency on ASP.NET Core's request pipeline at all.
+
+**Common Pitfall:** extracting a Use Case class but still passing framework-specific types (`HttpContext`, `IActionResult`) into or out of it — this defeats the purpose, since the Use Case is then still coupled to the web framework and can't be tested or reused independently of it; a Use Case's inputs/outputs should be plain, framework-agnostic types (commands, DTOs, domain objects), leaving all HTTP-specific translation to the Controller itself.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is a MediatR Pipeline Behavior, and how does it let you apply cross-cutting concerns (logging, validation, transactions) to every Command/Query handler without repeating that code in each one?**
+
+A Pipeline Behavior wraps around **every** request MediatR dispatches, similar in spirit to ASP.NET Core middleware wrapping every HTTP request — letting you implement a cross-cutting concern once, centrally, rather than duplicating it inside every individual Command/Query handler.
+
+**Without a Pipeline Behavior — the same validation/logging code repeated in every handler:**
+```csharp
+public class CreateOrderCommandHandler : IRequestHandler<CreateOrderCommand, Guid>
+{
+    public async Task<Guid> Handle(CreateOrderCommand request, CancellationToken ct)
+    {
+        var validationResult = await _validator.ValidateAsync(request); // repeated in EVERY handler
+        if (!validationResult.IsValid) throw new ValidationException(validationResult.Errors);
+        _logger.LogInformation("Handling CreateOrderCommand"); // also repeated everywhere
+        // ... actual business logic ...
+    }
+}
+```
+
+**A Pipeline Behavior applying validation to every request automatically:**
+```csharp
+public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : IRequest<TResponse>
+{
+    private readonly IValidator<TRequest> _validator;
+
+    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken ct)
+    {
+        var result = await _validator.ValidateAsync(request, ct);
+        if (!result.IsValid) throw new ValidationException(result.Errors);
+        return await next(); // proceeds to the actual handler ONLY if validation passed
+    }
+}
+
+// Registered once, applies to EVERY command/query in the entire application
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+```
+Now every single Command/Query handler in the application gets validated automatically before it ever executes — no handler needs its own validation-calling code, since the behavior wraps around all of them uniformly, the same way `app.UseAuthorization()` middleware wraps every HTTP request without every controller action needing its own explicit auth check.
+
+**Other common cross-cutting behaviors implemented this way:** logging every request/response (timing, success/failure), wrapping every command in a database transaction automatically, and caching query results — all applied uniformly across the entire application's Commands/Queries via one registered behavior each, rather than duplicated per-handler.
+
+**Common Pitfall:** stacking many pipeline behaviors without being deliberate about their execution order — behaviors wrap around each other like nested middleware, so a Transaction behavior registered *after* a Logging behavior will log outside the transaction's boundary, while registering it *before* would log inside — getting this ordering wrong can produce logs that don't accurately reflect what happened within a transaction, or a validation behavior that runs after (rather than before) a transaction has already started unnecessary work.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is the "Onion Architecture," and how does its concentric-layer diagram relate to (and predate) Clean Architecture's near-identical visual structure?**
+
+Onion Architecture, introduced by Jeffrey Palermo in 2008 (predating Robert C. Martin's 2012 "Clean Architecture" article by several years), describes essentially the same core structural idea — a Domain Model at the center, with successive layers wrapping around it, dependencies pointing strictly inward — using its own distinct layer names, which many "Clean Architecture" codebases still borrow from today.
+
+**Onion Architecture's layer names:**
+```text
+┌─────────────────────────────────────┐
+│  Infrastructure / UI (outermost)     │
+│  ┌─────────────────────────────────┐ │
+│  │  Application Services            │ │
+│  │  ┌───────────────────────────┐  │ │
+│  │  │  Domain Services          │  │ │
+│  │  │  ┌─────────────────────┐  │  │ │
+│  │  │  │  Domain Model       │  │  │ │
+│  │  │  │  (Entities)         │  │  │ │
+│  │  │  └─────────────────────┘  │  │ │
+│  │  └───────────────────────────┘  │ │
+│  └─────────────────────────────────┘ │
+└─────────────────────────────────────┘
+Same Dependency Rule: all arrows point INWARD, toward the Domain Model
+```
+
+**How this maps onto Clean Architecture's own terminology:**
+```text
+Onion: Domain Model            <-> Clean Architecture: Domain (Entities)
+Onion: Domain Services          <-> Clean Architecture: (part of Domain/Application)
+Onion: Application Services      <-> Clean Architecture: Application (Use Cases)
+Onion: Infrastructure/UI          <-> Clean Architecture: Infrastructure + Presentation
+```
+
+**Why the near-identical structure across three independently-named approaches (Onion, Hexagonal/Ports-and-Adapters covered earlier, and Clean Architecture) isn't a coincidence:** all three emerged from the same underlying dissatisfaction with traditional N-Tier layered architecture, where the "Business Logic Layer" typically depended directly on the "Data Access Layer" — coupling core business rules to a specific persistence technology. Each author, working somewhat independently, arrived at essentially the same fix: invert that dependency so the *data access layer* depends on interfaces the *business layer* defines, rather than the reverse — the concentric-circle/hexagon diagrams are different visualizations of that identical realization.
+
+**Why knowing this history matters practically:** a codebase or job description mentioning "Onion Architecture" is very likely describing the same architectural discipline as one describing "Clean Architecture" or "Hexagonal Architecture" — recognizing they're the same underlying idea prevents treating them as competing methodologies requiring a team to pick one "correctly," when in practice the actual dependency-direction discipline matters far more than which of the three vocabularies a given team or codebase happens to use.
+
+**Common Pitfall:** encountering "Onion Architecture" in an older codebase or article and assuming it's an outdated or different approach from "Clean Architecture" specifically because of the different name and slightly different layer labels — the underlying Dependency Rule is identical, and code following one faithfully looks structurally almost identical to code following either of the other two.
+
+---

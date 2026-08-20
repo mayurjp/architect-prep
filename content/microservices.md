@@ -1000,3 +1000,93 @@ The mesh's Envoy sidecar is architecturally identical in shape (an auxiliary con
 **Common Pitfall:** conflating "using sidecars" with "running a service mesh" — a team might adopt sidecar containers for logging or secrets injection without any mesh at all, and conversely, adopting a full service mesh is a much larger operational commitment (a control plane, cert rotation, mesh-wide configuration) than simply "adding a sidecar container" for one narrow purpose.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the "Database per Service" pattern's practical consequence for reporting, and why can't you just run a cross-service SQL JOIN the way a monolith could?**
+
+In a monolith, generating a report joining Order data with Customer data is trivial — one SQL query, one database, a `JOIN` across tables. Once Orders and Customers live in genuinely separate microservices (each with its own private database, per the earlier Database-per-Service discussion), that same report can no longer be a single SQL query at all — the two pieces of data simply aren't in the same database anymore.
+
+**What no longer works once services are properly separated:**
+```sql
+-- This is now IMPOSSIBLE -- OrderDb and CustomerDb are separate physical databases,
+-- likely different database ENGINES entirely (SQL Server vs MongoDB), on different servers
+SELECT o.OrderId, o.Total, c.Name
+FROM OrderDb.dbo.Orders o
+JOIN CustomerDb.dbo.Customers c ON c.Id = o.CustomerId;
+```
+
+**The realistic alternatives:**
+1. **API Composition** — a reporting service calls both `OrderService`'s API and `CustomerService`'s API separately, then joins the results *in application code*, not in SQL. Simple to reason about, but means N+1-style network calls for anything beyond a small, simple report.
+2. **A dedicated read model, kept in sync via events** — a reporting service subscribes to `OrderCreated` and `CustomerUpdated` events (per the earlier CQRS/event-driven discussions) and maintains its **own** denormalized copy of exactly the data it needs for reporting, already joined and shaped the way reports need it — trading storage duplication and eventual consistency for genuinely fast, SQL-JOIN-like reporting queries against data that's actually local to the reporting service.
+
+**Why this is a real, often underestimated cost of adopting microservices:** teams migrating from a monolith frequently underestimate how much of their existing reporting/analytics tooling assumed "everything is in one database, one JOIN away" — that assumption breaks completely once services genuinely own separate databases, and building the event-driven read-model alternative (option 2) is real, non-trivial engineering work that has to be planned for, not an incidental side effect of decomposition.
+
+**Common Pitfall:** "solving" this by quietly granting the reporting service direct read access to every other service's database, bypassing their APIs entirely — this recreates the shared-database coupling problem the Database-per-Service pattern exists specifically to avoid (any service's schema change now risks silently breaking the reporting service, since there's no API contract mediating the relationship anymore), even though it superficially "solves" the reporting problem in the short term.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is the Saga pattern's "Pivot Transaction," and why does identifying it matter for deciding which steps need compensation logic and which don't?**
+
+In a multi-step Saga (covered earlier), not every step is equally risky to reverse — the Pivot Transaction is the specific step in the sequence after which the Saga is committed to **succeeding** (no further compensation is possible or necessary), splitting the Saga into a "can still be safely rolled back" phase before it, and a "must be pushed forward to completion, retrying if needed" phase after it.
+
+**A concrete Saga with its pivot identified:**
+```text
+Step 1: OrderService     -> create order (Pending)              [COMPENSATABLE -- can cancel]
+Step 2: InventoryService -> reserve stock                        [COMPENSATABLE -- can release]
+Step 3: PaymentService   -> charge customer's card                [THE PIVOT TRANSACTION]
+Step 4: InventoryService -> confirm stock allocation permanently  [RETRIABLE -- must eventually succeed]
+Step 5: OrderService     -> mark order Confirmed                  [RETRIABLE -- must eventually succeed]
+```
+Steps 1-2, before the pivot, can be cleanly compensated (cancel the order, release the reserved stock) if something later fails — nothing irreversible has happened yet. Step 3 (charging the customer) is the pivot: once the charge succeeds, you generally **do not** want to compensate by refunding just because a later, comparatively minor step (like updating an internal allocation record) happens to fail — instead, steps after the pivot should be designed to **retry until they succeed**, rather than triggering a full rollback/refund for what's often a transient, recoverable failure.
+
+**Why treating every step as equally "compensatable or retriable" is a design mistake:** if Step 4 (updating an internal stock allocation) fails right after the customer was successfully charged in Step 3, compensating by refunding the customer is usually the *wrong* response — the customer already legitimately paid, and the actual problem (an internal record needing an update) is something the system should keep retrying in the background, not something that should trigger undoing a payment that itself succeeded correctly.
+
+**Practical implication for implementation:** steps before the pivot need genuine compensating transactions written and tested (refund logic, stock-release logic); steps after the pivot need robust **retry-with-backoff** logic instead (since they must eventually succeed, and failure there is a transient problem to push through, not a reason to unwind the whole saga) — conflating the two categories, or writing compensation logic uniformly for every step regardless of position relative to the pivot, leads to either overly aggressive rollbacks (refunding customers unnecessarily) or missing retry logic where it's actually needed.
+
+**Common Pitfall:** writing a "one-size-fits-all" compensation strategy that treats every single Saga step identically, without explicitly identifying which specific step is the pivot — this often results in the exact wrong failure response for post-pivot steps (rolling back a payment that already succeeded) when a retry loop was the actually-correct response all along.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is the Strangler Fig pattern's companion technique, "Branch by Abstraction," and how does it let you migrate a piece of internal logic incrementally without a long-lived feature branch?**
+
+Branch by Abstraction addresses a narrower, more tactical version of the Strangler Fig migration problem (covered earlier at the service level): how do you replace a piece of logic **within a single codebase** (not necessarily extracting a whole new microservice) incrementally, while the team keeps merging to the main branch continuously, rather than working on a long-lived feature branch that risks painful merge conflicts later?
+
+**The mechanism — introduce an abstraction layer BEFORE starting the actual replacement:**
+```csharp
+// Step 1: introduce an interface wrapping the EXISTING implementation, no behavior change yet
+public interface IPricingEngine { decimal CalculatePrice(Order order); }
+
+public class LegacyPricingEngine : IPricingEngine
+{
+    public decimal CalculatePrice(Order order) => /* existing, unchanged logic */;
+}
+
+// Application code now depends on IPricingEngine, wired to LegacyPricingEngine -- committed and deployed
+```
+```csharp
+// Step 2: build the NEW implementation alongside the old one, behind the SAME interface
+public class NewPricingEngine : IPricingEngine
+{
+    public decimal CalculatePrice(Order order) => /* new logic, built incrementally, over many small commits */;
+}
+// NewPricingEngine can be merged to main INCOMPLETE and untested in production,
+// as long as it's not yet the one actually wired up via DI
+```
+```csharp
+// Step 3: once NewPricingEngine is complete and verified (perhaps behind a feature flag first),
+// flip the DI registration -- a ONE-LINE change, no merge conflicts, no long-lived branch
+builder.Services.AddScoped<IPricingEngine, NewPricingEngine>(); // was LegacyPricingEngine
+```
+
+**Why this avoids the pain of a long-lived feature branch:** every step above is a small, independently mergeable, independently deployable commit to the main branch — the new implementation can be built incrementally over days or weeks of ordinary commits, without ever diverging from `main` the way a long-lived feature branch would, and without the team needing to eventually reconcile a large, conflict-prone merge once the replacement is "done."
+
+**How this relates to the earlier Strangler Fig pattern:** Strangler Fig operates at the *architectural* level (routing traffic between an old monolith and a new extracted service); Branch by Abstraction operates at the *code* level (swapping one class's implementation for another within the same codebase/service) — both share the same underlying philosophy of incremental, reversible, continuously-integrated replacement rather than a risky all-at-once cutover, just applied at different scales.
+
+**Common Pitfall:** introducing the abstraction interface but then building the *entire* new implementation on a separate long-lived branch anyway "to keep it clean until it's done" — this defeats the whole point of the technique, which is specifically to enable continuous integration of incomplete, in-progress new code by hiding it behind an interface that isn't yet wired up, rather than isolating it on a branch that still needs a large, risky merge eventually.
+
+---
