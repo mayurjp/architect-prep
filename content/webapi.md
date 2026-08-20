@@ -669,3 +669,96 @@ The mobile client now makes **one** request instead of four — the server (sitt
 **Common Pitfall:** adding screen-specific aggregation endpoints directly into a general-purpose, shared API meant to serve many different clients (web, mobile, third-party integrations) — this couples the shared API's shape to one specific client's UI needs; the BFF pattern's actual guidance is to keep such aggregation in a *dedicated* BFF layer serving that specific client, leaving the general-purpose API's resources clean and client-agnostic.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is `[ApiController]`'s automatic model-state validation, and how does it let an action return `400 Bad Request` for invalid input WITHOUT the action method ever checking `ModelState.IsValid` itself?**
+
+Decorating a controller with `[ApiController]` enables several conventions automatically, one of which is automatic HTTP 400 responses: if model binding or Data Annotation validation on an action's parameters fails, ASP.NET Core short-circuits the request and returns `400 Bad Request` with a structured validation-error body **before the action method's body ever executes** — the action method never needs its own `if (!ModelState.IsValid) return BadRequest(ModelState);` check.
+
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+public class ProductsController : ControllerBase
+{
+    [HttpPost]
+    public IActionResult Create(ProductDto dto) // dto has [Required] on its Name property
+    {
+        // NO manual ModelState.IsValid check here -- [ApiController] already handled it
+        _repository.Add(dto);
+        return Created();
+    }
+}
+```
+A `POST` request whose body is missing the required `Name` field never reaches the `Create` method's body at all — `[ApiController]`'s automatic validation filter intercepts it first and returns a `400` with a machine-readable `ValidationProblemDetails` body describing exactly which field failed and why.
+
+**Why this differs from plain MVC controllers (`[Controller]` without `[ApiController]`):** without `[ApiController]`, an action must explicitly check `ModelState.IsValid` itself and construct its own error response — omitting that check (an easy mistake in a large controller) lets an action run its full logic against invalid, unvalidated input. `[ApiController]` makes this check structurally impossible to forget, since the framework enforces it before the action even starts.
+
+**Common Pitfall:** assuming `[ApiController]`'s automatic validation covers *business rule* validation (e.g., "this SKU must not already exist") — it only covers what Data Annotations and model binding can express structurally (required fields, string lengths, ranges); genuine business-rule validation still needs to be checked explicitly inside the action or a service layer, since `[ApiController]`'s automatic check has no way to know about rules that require querying a database or external state.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is `ProblemDetails` (RFC 7807/9457), and why does a Web API returning it for errors matter for clients consuming MULTIPLE different APIs, rather than each API inventing its own error response shape?**
+
+`ProblemDetails` is a standardized JSON structure (`type`, `title`, `status`, `detail`, `instance`, plus extension members) for representing HTTP API error responses — ASP.NET Core's `[ApiController]` convention returns it by default for validation failures and unhandled exceptions, and it can be returned explicitly for custom error scenarios too.
+
+```csharp
+[HttpGet("{id}")]
+public IActionResult GetById(int id)
+{
+    var product = _repository.Find(id);
+    if (product is null)
+    {
+        return Problem(
+            title: "Product not found",
+            detail: $"No product exists with id {id}.",
+            statusCode: StatusCodes.Status404NotFound);
+    }
+    return Ok(product);
+}
+```
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc7807",
+  "title": "Product not found",
+  "status": 404,
+  "detail": "No product exists with id 42."
+}
+```
+Because this shape is a published standard rather than something each team invents independently, a client library or dashboard tool built to parse `ProblemDetails` responses works identically against *any* compliant API — without `ProblemDetails`, every API team tends to invent its own subtly different error shape (`{ "error": "..." }` vs `{ "message": "...", "code": "..." }` vs a dozen other variants), forcing every client to write bespoke error-parsing logic per API it consumes.
+
+**Why this matters more as an organization's API surface grows:** in an environment with many internal APIs built by different teams, a shared, standardized error shape lets client tooling, logging pipelines, and API gateways handle errors generically across all of them — a custom, per-team error shape means every one of those cross-cutting concerns needs bespoke handling for every single API it touches.
+
+**Common Pitfall:** returning `ProblemDetails` for the error path but a completely different, ad-hoc shape for success responses' error-adjacent fields (like validation warnings embedded in a 200 response) — consistency matters specifically for the *error* path since that's what generic client-side error handling relies on; mixing conventions (standardized errors, but non-standard "soft" error fields elsewhere) undermines the exact benefit `ProblemDetails` is meant to provide.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is API request/response compression (`AddResponseCompression`) in ASP.NET Core Web API, and what specific security risk (the BREACH attack) means it should NEVER be blindly enabled for endpoints returning both a secret (like a CSRF token) and attacker-influenced input in the same response?**
+
+Response compression (typically gzip or Brotli) reduces payload size for bandwidth-sensitive APIs — but compressing a response containing both a secret value and any attacker-influenced content in the same compressed stream creates a side-channel: the BREACH attack exploits the fact that compression works better when it finds repeated substrings, letting an attacker who can influence part of the response (a reflected query parameter, for instance) and observe the compressed response's *size* infer a secret byte-by-byte, by checking which guessed characters cause the compressed size to shrink (indicating a match against the secret elsewhere in the response).
+
+```csharp
+// DANGEROUS if response compression is enabled and this reflects attacker input alongside a secret:
+[HttpGet("search")]
+public IActionResult Search(string query)
+{
+    return Ok(new
+    {
+        Query = query,               // attacker-controlled, reflected directly into the response
+        CsrfToken = _antiforgery.GetToken() // a SECRET, in the same compressed response
+    });
+}
+```
+An attacker can repeatedly send requests varying `query` (trying different guessed characters) and measure the compressed response's byte length each time — when a guessed substring happens to match part of the secret token elsewhere in the response, compression shrinks the output slightly, leaking one correct character at a time purely through response size, without ever needing to read the secret's plaintext value directly.
+
+**The mitigation:** never compress responses containing both a secret and reflected/attacker-influenced content in the same response body; disable compression selectively for security-sensitive endpoints (`[DisableResponseCompression]` or excluding specific paths from `AddResponseCompression`'s configuration), and prefer not reflecting attacker-controlled input back into any response that also carries a secret, regardless of compression.
+
+**Why this is a genuinely easy pitfall to overlook:** response compression is typically enabled globally, as a blanket performance optimization applied to an entire API — the BREACH risk only manifests for the specific combination of "secret in the response" + "attacker-influenced content in the same response" + "compression enabled," a combination that's easy to introduce accidentally in a single endpoint months after compression was first enabled application-wide for unrelated reasons.
+
+**Common Pitfall:** enabling response compression globally across an entire API without auditing which specific endpoints return both a secret and any attacker-reflectable content in the same response — the fix isn't "never use compression," it's identifying and selectively excluding the specific narrow set of endpoints where this dangerous combination actually occurs.
+
+---

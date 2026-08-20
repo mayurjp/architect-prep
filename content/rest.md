@@ -1450,3 +1450,100 @@ The server inspects the `fields` parameter and returns only the requested subset
 **Common Pitfall:** implementing `?fields=` support inconsistently across only some endpoints of an API — a client library built generically to request sparse fieldsets from any endpoint breaks unexpectedly on the endpoints that don't support the parameter, silently receiving the full payload instead and not necessarily realizing the optimization simply wasn't honored for that specific endpoint.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is the difference between the HTTP status codes `401 Unauthorized` and `403 Forbidden` in a REST API, and why is this distinction so frequently implemented backwards?**
+
+`401 Unauthorized` actually means "you are not *authenticated*" — the request lacks valid credentials entirely, or the credentials provided are invalid/expired. `403 Forbidden` means "you ARE authenticated, but you're not *allowed* to do this" — the server recognized who you are and refused anyway, based on permissions.
+
+```http
+GET /api/admin/users
+(no Authorization header at all)
+
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+```
+```http
+GET /api/admin/users
+Authorization: Bearer <a valid token, but belonging to a non-admin user>
+
+HTTP/1.1 403 Forbidden
+```
+The first response means "prove who you are" (the client should try to authenticate, e.g., log in or refresh a token) — the second means "we know who you are, and the answer is still no" (retrying with different credentials for the same account won't help; the account itself lacks the required permission).
+
+**Why the name `401 Unauthorized` is famously misleading:** despite its name containing the word "Unauthorized," HTTP 401 is actually about *authentication*, not *authorization* — this naming mismatch (a historical artifact of the original HTTP spec) is the single most common source of APIs returning the wrong status code for the wrong scenario, since developers naturally read "401 Unauthorized" as "this user isn't authorized to do X" and reach for it even when the real issue is a missing/invalid permission check on an already-authenticated user.
+
+**Common Pitfall:** returning `403 Forbidden` for a request with no credentials at all (should be `401`, prompting the client to authenticate), or returning `401 Unauthorized` for an authenticated user who simply lacks a specific permission (should be `403`, since re-authenticating as the same user won't change the outcome) — getting this backwards actively misleads client-side error handling, since a client typically responds very differently to "please log in" (401) versus "you're logged in, but not allowed" (403).
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is Content Negotiation via the `Accept` header, and how does it let a single REST endpoint serve the SAME resource in multiple representations (JSON, XML, CSV) without needing separate URLs for each format?**
+
+Content negotiation lets a client specify, via the `Accept` request header, which media type(s) it can handle for a response — the server inspects this header and returns the SAME underlying resource, just serialized into whichever format the client requested, all from one single URL.
+
+```http
+GET /api/products/5
+Accept: application/json
+```
+```json
+{ "id": 5, "name": "Keyboard", "price": 29.99 }
+```
+```http
+GET /api/products/5
+Accept: text/csv
+```
+```text
+id,name,price
+5,Keyboard,29.99
+```
+Both requests hit the exact same URL (`/api/products/5`) — the *representation* differs based purely on what the client asked for via `Accept`, not the underlying resource, which is exactly REST's distinction between a "resource" (a stable, identified thing) and its "representation" (one particular serialized form of that thing at a point in time) made concrete.
+
+**Server-side implementation (ASP.NET Core supports this via output formatters):**
+```csharp
+builder.Services.AddControllers(options =>
+{
+    options.OutputFormatters.Add(new CsvOutputFormatter()); // a custom IOutputFormatter
+}).AddXmlSerializerFormatters(); // built-in XML support, alongside the default JSON formatter
+```
+The framework inspects the incoming `Accept` header and automatically selects whichever registered formatter matches — the action method itself remains entirely unaware of which format was ultimately chosen, returning a plain C# object (`Ok(product)`) regardless.
+
+**Common Pitfall:** encoding the desired format into the URL itself (`/api/products/5.json`, `/api/products/5.xml`) instead of using the `Accept` header — this creates multiple distinct URLs for what's conceptually the *same* resource, undermining REST's principle that a URL identifies one stable resource; while format-in-URL is sometimes used pragmatically (it's easier to test by pasting into a browser address bar), the `Accept` header is the more RESTful mechanism specifically because it keeps one canonical URL per resource regardless of representation.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is the "Postel's Law" (Robustness Principle — "be conservative in what you send, be liberal in what you accept") tension in REST API design, and why has API design guidance shifted AWAY from strict adherence to it in recent years?**
+
+Postel's Law originally advised: send strictly conforming output, but accept a wide variety of potentially-malformed input liberally. Applied to REST APIs, this historically meant accepting looser, more forgiving input (extra unexpected fields, alternate casing, minor format inconsistencies) to be maximally compatible with imperfect clients — but modern API design guidance has shifted meaningfully away from this, favoring **strict** input validation instead.
+
+**The "liberal" approach (historically common):**
+```csharp
+[HttpPost]
+public IActionResult Create(dynamic body) // accept ANYTHING, try to figure out the intent
+{
+    string name = body.name ?? body.Name ?? body.productName; // guess which field the client meant
+    // ...
+}
+```
+**The modern, strict approach:**
+```csharp
+public class CreateProductRequest
+{
+    [Required] public string Name { get; set; } = "";
+    [Range(0.01, 100000)] public decimal Price { get; set; }
+}
+
+[HttpPost]
+public IActionResult Create(CreateProductRequest request) // rejects ANYTHING not matching exactly
+```
+**Why the shift away from "liberal acceptance":** being overly permissive about malformed or ambiguous input tends to mask genuine client-side bugs rather than helping — a client sending `productName` instead of the documented `name` field, silently "handled" by liberal guessing logic, never discovers its own bug; it works by accident until the liberal-acceptance logic's assumptions eventually diverge from reality, producing much harder-to-diagnose failures than an immediate, clear `400 Bad Request` would have. Postel's original liberal-input advice was formulated for low-level network protocols (TCP/IP interoperability across different vendor implementations), a very different context from a versioned, documented, actively-maintained API contract between a service and its own known clients.
+
+**The modern consensus, more precisely stated:** be strict about *both* what you send and what you accept for a well-documented API contract — reject unexpected fields or malformed input immediately and explicitly (surfacing the client's bug clearly and early) rather than silently guessing at intent, reserving true Postel's-Law-style leniency for genuinely low-level interoperability protocols, not application-level REST API contracts with a known, documented shape.
+
+**Common Pitfall:** building "helpful" liberal-acceptance logic (case-insensitive field matching, silently ignoring unrecognized fields, guessing at intent from multiple possible field names) believing it improves compatibility — in practice, this class of leniency frequently masks real client bugs, delays their discovery, and makes the API's actual contract far less clear than simply rejecting anything not matching the documented shape exactly.
+
+---

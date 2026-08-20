@@ -613,3 +613,104 @@ A request to `/products/ABC-1234` matches this route; a request to `/products/no
 **Common Pitfall:** implementing business validation as a route constraint when the actual goal is simply "reject invalid input with a helpful error message" — a failed route constraint match doesn't produce validation error details, it just makes the route not match at all (typically surfacing as a bare 404) — for validation where the *client needs to understand what was wrong*, a Data Annotation or `IValidatableObject` check (covered earlier) inside the action is more appropriate, since it can return a detailed `400 Bad Request` explaining exactly what failed, rather than routing's binary "did this segment match or not."
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between `ViewData`, `ViewBag`, and a strongly-typed View Model for passing data from a controller action to its Razor view?**
+
+All three mechanisms move data from a controller action into a view, but they differ in type safety and how errors surface. `ViewData` is a dictionary (`ViewDataDictionary`) keyed by string, requiring casting on the view side. `ViewBag` is a dynamic wrapper *around the same underlying `ViewData` dictionary* — it's not a separate storage mechanism, just a more convenient dynamic-typed syntax over the identical data. A strongly-typed View Model is a dedicated C# class passed directly as the view's model.
+
+```csharp
+public IActionResult Details(int id)
+{
+    var product = _repository.GetById(id);
+
+    ViewData["PageTitle"] = product.Name;      // dictionary access, requires casting in the view
+    ViewBag.PageTitle = product.Name;           // same underlying dictionary, dynamic syntax
+    return View(new ProductDetailsViewModel { Product = product }); // strongly-typed model
+}
+```
+```razor
+@* In the view: *@
+<h1>@ViewData["PageTitle"]</h1>   @* no compile-time check that "PageTitle" is even a valid key *@
+<h1>@ViewBag.PageTitle</h1>       @* no compile-time check; typos just silently evaluate to null *@
+@model ProductDetailsViewModel
+<h1>@Model.Product.Name</h1>      @* compiler verifies Product and Name actually exist *@
+```
+Because `ViewData` and `ViewBag` are both resolved at runtime (string keys, dynamic typing), a typo in either (`ViewBag.PageTitel`) produces no compile error — it silently evaluates to `null` at runtime, a bug only discoverable by actually running the view. A strongly-typed model catches the equivalent mistake (`Model.Product.Naem`) at compile time.
+
+**Common Pitfall:** relying on `ViewBag`/`ViewData` for a view's *primary* data rather than small, incidental page metadata (like a page title) — using them for substantial data passing forfeits compile-time safety, IntelliSense, and refactoring support that a dedicated View Model provides essentially for free; the conventional guidance is to reserve `ViewBag`/`ViewData` for minor, view-specific metadata and always use a strongly-typed model for the view's actual primary data.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is a Razor View Component (`ViewComponent`), and how does it differ from a Partial View when a piece of UI needs its own logic, not just its own markup?**
+
+A Partial View reuses markup, rendered with data the *calling* view already provides — a View Component is a self-contained, mini-MVC-like unit combining its own logic (an `InvokeAsync` method that can query a database or a service) *and* its own markup, invoked directly from a view without needing the containing action to prepare that data itself.
+
+```csharp
+public class RecentOrdersViewComponent : ViewComponent
+{
+    private readonly IOrderService _orderService;
+    public RecentOrdersViewComponent(IOrderService orderService) => _orderService = orderService;
+
+    public async Task<IViewComponentResult> InvokeAsync(int customerId)
+    {
+        var orders = await _orderService.GetRecentOrdersAsync(customerId); // fetches its OWN data
+        return View(orders); // renders Views/Shared/Components/RecentOrders/Default.cshtml
+    }
+}
+```
+```razor
+@* Invoked from ANY view, without that view's controller action needing to fetch order data at all: *@
+@await Component.InvokeAsync("RecentOrders", new { customerId = Model.Id })
+```
+Because `InvokeAsync` can inject services and fetch its own data, a `RecentOrders` widget can be dropped into a product page, an order-history page, or a dashboard — each hosting view's controller action never needs to know or care that a "recent orders" widget even exists on the page, let alone fetch data for it; the View Component is fully self-sufficient.
+
+**Why a Partial View can't cleanly do this:** a Partial View only renders markup against whatever model it's handed — if a "recent orders" widget needs its own database query, a Partial-View-based approach would require *every* controller action hosting that widget to remember to fetch and pass in the relevant data, duplicating that fetch logic across every action that wants to display the widget.
+
+**Common Pitfall:** using a Partial View for a piece of reusable UI that actually needs its own data-fetching logic, then scattering the required data-fetching code across every controller action that renders a page containing that partial — the moment a piece of reusable UI needs its own logic (not just its own markup), that's the specific signal to reach for a View Component instead, keeping the data-fetching logic co-located with the widget rather than duplicated across every hosting action.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is `IApplicationModelConvention`/`IActionModelConvention` in ASP.NET Core MVC, and how does it let you apply a cross-cutting convention (like a route prefix or an authorization requirement) to MANY controllers at once, without touching each controller's code?**
+
+These conventions run once during application startup, operating on MVC's internal `ApplicationModel` (a representation of every discovered controller/action before routes are actually built) — they let you programmatically inspect and modify that model in bulk, applying a rule to every controller/action matching some criterion, entirely separately from the controllers' own source code.
+
+```csharp
+public class ApiVersionRoutePrefixConvention : IApplicationModelConvention
+{
+    public void Apply(ApplicationModel application)
+    {
+        foreach (var controller in application.Controllers)
+        {
+            if (controller.ControllerType.Namespace?.Contains("Api.V2") == true)
+            {
+                // prepend "v2/" to every route in every controller under the Api.V2 namespace
+                controller.Selectors.Add(new SelectorModel
+                {
+                    AttributeRouteModel = new AttributeRouteModel(new RouteAttribute("v2/[controller]"))
+                });
+            }
+        }
+    }
+}
+
+// Registered globally, in Program.cs:
+builder.Services.AddControllers(options =>
+{
+    options.Conventions.Add(new ApiVersionRoutePrefixConvention());
+});
+```
+Because this convention inspects `application.Controllers` once at startup, it can apply a rule (a route prefix, in this example) to an entire *category* of controllers identified by a shared trait (their namespace, in this case) — without a single line of code in any individual controller changing, and without every controller author needing to remember to apply the convention manually via an attribute.
+
+**Why this matters at scale:** in a codebase with dozens or hundreds of controllers, a cross-cutting rule enforced via a convention is applied consistently and automatically to every current *and future* controller matching the criterion — an attribute-based approach (decorating each controller individually) is easy to forget on a newly-added controller, whereas a convention enforces the rule structurally, with no per-controller opt-in required at all.
+
+**Common Pitfall:** reaching for a custom `IApplicationModelConvention` for a rule that only applies to one or two controllers — conventions are a bulk, structural tool, and writing one for a narrow, one-off need adds indirection (a reader inspecting the affected controller's code sees no attribute or comment hinting that a global convention is silently modifying its behavior) that a simple, visible attribute on the specific controller would communicate far more directly.
+
+---
+
+---

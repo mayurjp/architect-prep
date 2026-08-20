@@ -653,6 +653,33 @@ A request for `/css/site.css` is matched by the static files middleware against 
 
 ---
 
+## Beginner — Question 6
+
+**Q6: What is the ASP.NET Core `WebApplicationBuilder` (introduced with the "minimal hosting model" in .NET 6), and how does it differ from the older `Startup.cs` / `IWebHostBuilder` pattern?**
+
+`WebApplicationBuilder` is the entry point of the minimal hosting model — a single `Program.cs` file replaces the separate `Program.cs` + `Startup.cs` pair used in earlier ASP.NET Core versions, collapsing configuration, service registration, and the middleware pipeline into one linear, top-to-bottom script.
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);   // sets up config, logging, DI container
+builder.Services.AddControllers();                   // register services (was Startup.ConfigureServices)
+builder.Services.AddScoped<IOrderService, OrderService>();
+
+var app = builder.Build();                            // builds the app/pipeline
+
+app.UseHttpsRedirection();                            // configure middleware (was Startup.Configure)
+app.UseAuthorization();
+app.MapControllers();
+
+app.Run();
+```
+`builder.Services` is the same `IServiceCollection` used for DI registration previously found in `ConfigureServices`; calling `builder.Build()` produces a `WebApplication` object which plays the role the `Startup.Configure` method used to — defining the middleware pipeline via extension methods like `UseXxx`/`MapXxx`. Under the hood, ASP.NET Core still uses the same generic host (`IHost`) and middleware pipeline as before — the minimal hosting model is a simplification of *how you write the setup code*, not a change to the underlying hosting/middleware architecture.
+
+**Why it matters:** for small-to-medium APIs (especially minimal APIs without MVC controllers), collapsing two files and the split ConfigureServices/Configure lifecycle into one linear script meaningfully reduces boilerplate and cognitive overhead, especially for newcomers.
+
+**Common Pitfall:** assuming the old `Startup.cs`-based pattern is deprecated or unsupported — it still works fine in current ASP.NET Core versions (via `IHostBuilder.ConfigureWebHostDefaults(webBuilder => webBuilder.UseStartup<Startup>())`) and remains common in large existing codebases; both patterns are valid, interoperable style choices, not a hard breaking change.
+
+---
+
 ## Intermediate — Question 6
 
 **Q6: What is the ASP.NET Core `IHostedService`/`BackgroundService`'s relationship to graceful application shutdown, and how does `StopAsync`'s own timeout interact with the earlier SIGTERM/Kubernetes grace period discussion?**
@@ -726,5 +753,65 @@ public IActionResult ExportOrders() => new CsvResult(_repository.GetAllOrders())
 **Why you'd reach for this instead of, say, `File()` or `Content()`:** the built-in results generally expect the entire response body already available as bytes/a string before constructing the result — a custom result is warranted specifically when the response needs to be **generated incrementally**, writing directly to the response stream as data becomes available, rather than fully materializing a payload first and handing it to an existing result type.
 
 **Common Pitfall:** writing a custom `IActionResult` for something that a combination of existing results and response header manipulation could already achieve — most "I need custom behavior" scenarios are actually addressable via `ContentResult` with custom headers, or `FileStreamResult`, without needing a fully custom `ExecuteResultAsync` implementation; reaching for a fully custom result is worth reserving for cases with genuinely unique execution requirements, like true incremental/streaming generation, not as a default whenever a built-in result needs slight header customization.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is ASP.NET Core's `IStartupFilter`, and how does it let a library add middleware to the pipeline BEFORE the application's own `Program.cs` code runs, without the application needing to call anything explicitly?**
+
+`IStartupFilter` is an extensibility point that lets a registered service inject middleware into the pipeline automatically, without the application author writing an explicit `app.UseXxx()` call for it — commonly used by libraries and frameworks (health check dashboards, diagnostic tooling) that need to guarantee their middleware runs at a specific point in the pipeline regardless of how the consuming application is configured.
+
+```csharp
+public class RequestLoggingStartupFilter : IStartupFilter
+{
+    public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
+    {
+        return app =>
+        {
+            app.UseMiddleware<RequestLoggingMiddleware>(); // inserted BEFORE the app's own pipeline
+            next(app); // then continue with the application's own Configure/pipeline code
+        };
+    }
+}
+
+// A library registers this in its own DI extension method:
+public static IServiceCollection AddRequestLogging(this IServiceCollection services)
+{
+    services.AddTransient<IStartupFilter, RequestLoggingStartupFilter>();
+    return services;
+}
+```
+When the application calls `builder.Services.AddRequestLogging()`, the logging middleware is automatically woven into the pipeline — the application's own `Program.cs` never needs to call `app.UseMiddleware<RequestLoggingMiddleware>()` itself; the library guarantees its own middleware placement via the `IStartupFilter` mechanism instead.
+
+**Why this matters for library authors specifically:** without `IStartupFilter`, a library's middleware only gets added if every consuming application remembers to call the right `UseXxx()` method in the right order — `IStartupFilter` flips this responsibility, letting the library guarantee its own middleware is present and correctly positioned purely through DI registration, with zero cooperation required from `Program.cs`.
+
+**Common Pitfall:** application developers rarely need to write a custom `IStartupFilter` themselves — it's primarily a library/framework-author tool; reaching for it in application code where a normal, explicit `app.UseMiddleware<T>()` call in `Program.cs` would be clearer and easier to reason about adds indirection (a middleware appearing in the pipeline with no visible `app.Use...()` call anywhere in `Program.cs` can be genuinely confusing to a developer reading the app's startup code later) without a corresponding benefit.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is ASP.NET Core's Output Caching middleware (`AddOutputCache`/`UseOutputCache`, introduced in .NET 7), and how does it differ from the older Response Caching middleware in terms of where the cached response actually lives?**
+
+Both middlewares cache HTTP responses to avoid re-executing the same request logic repeatedly, but they differ fundamentally in *where* the cached content is stored: Response Caching (the older mechanism) works by setting `Cache-Control` HTTP headers that instruct the **client's browser or an intermediate proxy** to cache the response — the server itself doesn't necessarily retain a copy. Output Caching stores the rendered response **server-side**, in memory (or a configurable distributed cache), and serves subsequent matching requests directly from that server-side store without re-executing the endpoint at all.
+
+```csharp
+builder.Services.AddOutputCache(options =>
+{
+    options.AddPolicy("ProductList", policy => policy.Expire(TimeSpan.FromSeconds(30)));
+});
+
+var app = builder.Build();
+app.UseOutputCache();
+
+app.MapGet("/products", async (IProductService svc) => await svc.GetAllAsync())
+   .CacheOutput("ProductList"); // subsequent requests within 30s never re-run this delegate at all
+```
+Because the cached response lives on the server, Output Caching can meaningfully reduce load on the application itself (database calls, business logic) for repeated identical requests — Response Caching, by contrast, only helps if the *client or a proxy* actually honors and stores the caching headers, offering no guarantee the origin server's own load is reduced at all, since a client that ignores `Cache-Control` (or a request that's the first one to reach a given proxy) still hits the full application pipeline.
+
+**Why both still coexist rather than one replacing the other:** Response Caching remains valuable for reducing bandwidth and round-trip latency for the *client*, especially via CDN/proxy layers sitting between the client and the origin server entirely — Output Caching, meanwhile, specifically protects the *origin server's own resources* (database, CPU) regardless of what any downstream client or proxy chooses to do with the response headers; they solve related but distinct problems and are frequently used together.
+
+**Common Pitfall:** enabling Output Caching on an endpoint whose response varies per authenticated user (returning one user's data cached and then served to a *different* user) without correctly configuring cache key variation (`policy.SetVaryByHeader("Authorization")` or similar) — since Output Caching serves the exact same stored response to any request matching the cache key, an endpoint returning per-user data cached under too coarse a key can leak one user's data to another entirely.
 
 ---

@@ -550,3 +550,72 @@ Needed for legitimate cross-site scenarios (a third-party embedded widget, a pay
 **Common Pitfall:** setting `SameSite=None` on a cookie that doesn't actually need cross-site delivery, out of habit or because a `Strict`/`Lax` value happened to break something during testing — this discards the automatic CSRF-mitigation benefit `Lax`/`Strict` provide for no real reason; `None` should be reserved specifically for cookies that have a genuine, deliberate cross-site use case (the embedded third-party widget scenario), not used as a default troubleshooting step when something doesn't work as expected under the stricter settings.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is the `Host` request header, and why has it been REQUIRED on every HTTP/1.1 request since the standard's introduction, even though HTTP/1.0 didn't need it?**
+
+The `Host` header tells the server *which* website a request is intended for, by hostname — this became mandatory specifically because a single server (identified by one IP address) commonly hosts many different websites (virtual hosting), and without `Host`, the server would have no way to know which of its hosted sites a given request is actually meant for.
+
+```http
+GET /index.html HTTP/1.1
+Host: www.example.com
+```
+A single server at IP address `203.0.113.10` might host `www.example.com`, `blog.example.com`, and `shop.example.com` simultaneously — all three sites share the same IP and port, so the only way the server can tell them apart is by reading the `Host` header on each incoming request and routing it to the correct site's content internally.
+
+**Why HTTP/1.0 didn't need this:** in HTTP/1.0's era, it was far more common for a single server to host just one website — as shared/virtual hosting became the norm (many sites cheaply sharing one server, one IP), the `Host` header became essential, and HTTP/1.1 made it a mandatory part of every request specifically to support this.
+
+**Common Pitfall:** in low-level HTTP debugging or manually-constructed raw HTTP requests (via `netcat`/`telnet`, for instance), forgetting to include the `Host` header — many virtual-hosted servers reject or misroute a request missing `Host` entirely, a confusing failure for someone unfamiliar with why an otherwise well-formed raw request doesn't reach the intended site's content.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is HTTP header case-sensitivity for header NAMES versus header VALUES, and why does this distinction sometimes trip up custom middleware/proxy code that inspects headers?**
+
+HTTP header field *names* are explicitly case-insensitive per the HTTP specification (`Content-Type`, `content-type`, and `CONTENT-TYPE` are all the same header) — but header field *values* are generally case-sensitive (or have their own value-specific rules), and this asymmetry is a common source of subtle bugs in code that manually inspects headers.
+
+```http
+GET /api/products HTTP/1.1
+content-type: application/json
+Accept: application/json
+```
+```csharp
+// WRONG -- exact string comparison on the header NAME is fragile since names are case-insensitive
+if (request.Headers.ContainsKey("Content-Type")) { ... } // works, but only by luck of the actual casing sent
+
+// CORRECT -- most HTTP libraries' header collections already handle name case-insensitivity internally
+var contentType = request.Headers["content-type"]; // works regardless of the actual casing sent, in most frameworks
+```
+Most modern HTTP libraries (including ASP.NET Core's `IHeaderDictionary`) implement header name lookups as case-insensitive internally, so this specific pitfall is largely avoided *if* you use the framework's own header collection API rather than manually parsing raw header text — the risk resurfaces specifically in custom, low-level code that parses raw HTTP text directly (a hand-rolled proxy or gateway, for instance) and does naive exact-string matching on header names.
+
+**Why header VALUES don't get the same universal treatment:** unlike names, values have their own per-header rules — a media type like `application/json` is conventionally lowercase, but many header values (a `Bearer` token, a custom API key) are explicitly case-sensitive and must be compared exactly, so no single blanket case-insensitivity rule applies to values the way it does to names.
+
+**Common Pitfall:** writing custom low-level code (a hand-rolled proxy, gateway, or raw socket-based HTTP parser) that does case-sensitive exact-string matching on header *names* — this works by accident as long as every client happens to send the header with the exact casing the code expects, then breaks unpredictably the moment a client (or an intermediate proxy that normalizes casing differently) sends the same header with different capitalization, since that's fully valid per the HTTP spec.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is HTTP `Trailer` headers (trailing headers, sent AFTER the message body in chunked transfer encoding), and what specific problem do they solve that regular headers (sent before the body) cannot?**
+
+Regular HTTP headers must be known and sent *before* the body — but some values (like a checksum of the body's actual content, or the body's true total size when chunked encoding was used because the size wasn't known upfront) can only be computed *after* the body has been fully generated. Trailer headers solve this by allowing a limited set of headers to be sent *after* the final chunk of a chunked-encoded body.
+
+```http
+HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Trailer: Content-MD5
+
+7\r\n
+Mozilla\r\n
+0\r\n
+Content-MD5: 8845b...\r\n
+\r\n
+```
+The `Trailer` header (sent upfront) announces which header(s) will follow *after* the body — `Content-MD5` in this example is computed only once the entire body has actually been streamed out, something impossible to know in advance if the response body itself is being generated incrementally (streamed from a database cursor or a live computation, for instance).
+
+**Why this specifically requires chunked transfer encoding:** a response with a known, fixed `Content-Length` has a server that already knows the full body size before sending anything, so there's no structural need for trailers — trailers exist specifically for the chunked-encoding case, where the body's boundary isn't known upfront and additional metadata about the now-fully-generated body needs to be communicated to the client somehow, but only after streaming has completed.
+
+**Common Pitfall:** assuming trailer header support is universal across all HTTP clients, proxies, and load balancers — many intermediaries strip or simply don't forward trailer headers, historically making them unreliable for anything beyond client/server pairs known to support them explicitly (gRPC, built on HTTP/2, is one of the more common real-world users of trailers, specifically for sending a call's final status code after the response body has streamed); building critical application logic around trailers reaching an arbitrary client through an arbitrary chain of intermediaries is risky without confirming the specific infrastructure involved actually preserves them.
+
+---
