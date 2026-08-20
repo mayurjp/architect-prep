@@ -385,3 +385,102 @@ Because CDC reads the database engine's own internal change log rather than rely
 **Common Pitfall:** adopting CDC as a wholesale replacement for thoughtful event design, publishing raw row-level change events directly to consumers — this leaks database schema details (column names, internal representations) directly into your event contracts, coupling consumers to your database's internal structure in exactly the way a deliberately-designed Outbox event (or a transformation layer on top of CDC's raw output) is meant to avoid.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is Fan-Out messaging, and how does it let one event trigger independent processing in multiple services without the publisher needing to know who's listening?**
+
+Fan-Out is the pattern where a single published message is delivered to **every** interested subscriber simultaneously — the publisher fires one event, and however many services have independently subscribed each receive their own copy, without the publisher needing any awareness of who those subscribers are or how many exist.
+
+**The Mechanism (using the Topic/Subscription model covered earlier):**
+```csharp
+// OrderService publishes ONE event, with ZERO knowledge of who's listening
+await _publisher.PublishAsync(new OrderPlacedEvent(order.Id, order.Total));
+```
+```text
+This single publish fans out to however many subscriptions currently exist:
+  -> InventoryService's subscription (reserves stock)
+  -> NotificationService's subscription (sends confirmation email)
+  -> AnalyticsService's subscription (logs the sale for reporting)
+  -> (six months later) LoyaltyPointsService's subscription (awards points) -- ADDED without
+     touching OrderService's code AT ALL
+```
+`OrderService` never changes when a new subscriber is added — `LoyaltyPointsService` simply creates its own new subscription to the existing `OrderPlaced` topic, and starts receiving events from that point forward, with zero coordination or code change required in the original publisher.
+
+**Why this is architecturally significant, beyond just "many things happen at once":** it's the concrete mechanism that makes the earlier "new capabilities attach by listening, not by editing" principle (from the "adding a new requirement to a running system" scenario) actually work — Fan-Out is *why* an event-driven architecture lets you add entirely new reactive services over time without ever modifying the original publishing service's code, since the publisher's only job is announcing "this happened," with zero awareness of (or dependency on) how many things react to it.
+
+**Common Pitfall:** assuming Fan-Out guarantees all subscribers process the event at the same speed, or that a slow subscriber affects a fast one — Fan-Out only guarantees each subscription independently receives its own copy; each subscriber's processing speed, failure handling, and retry behavior are entirely its own concern, meaning one slow or failing subscriber (say, `AnalyticsService` backing up) has zero impact on `InventoryService`'s ability to process its own copy of the same event promptly.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is Competing Consumers, and how does it let you scale message processing throughput horizontally simply by adding more consumer instances?**
+
+Competing Consumers is the pattern where multiple instances of the *same* consumer service all listen to the *same* queue, with the broker ensuring each individual message is delivered to only **one** of them — adding more consumer instances increases total processing throughput roughly linearly, without any code change to the consumer itself.
+
+**The Mechanism:**
+```text
+Queue "order-processing" with messages: [msg1, msg2, msg3, msg4, msg5, msg6]
+
+3 instances of OrderProcessor, all competing for the SAME queue:
+  Instance A picks up msg1, msg4
+  Instance B picks up msg2, msg5
+  Instance C picks up msg3, msg6
+-- the broker distributes messages across whichever instances are currently available,
+   ensuring no message is processed by more than one instance
+```
+```csharp
+// The consumer code itself doesn't need ANY awareness of how many other instances exist
+public class OrderProcessor
+{
+    public async Task ProcessAsync(OrderMessage message)
+    {
+        await HandleOrder(message); // identical code, regardless of how many instances are running
+    }
+}
+```
+
+**Why this specifically enables horizontal scaling for message processing:** if a queue's backlog is growing because a single consumer instance can't keep up (covered earlier in the queue-backing-up troubleshooting scenario), the fix is often simply **running more instances** of the exact same consumer — Kubernetes' Horizontal Pod Autoscaler (covered earlier) can even scale consumer replica count automatically based on queue depth (via KEDA), with zero code change required to the consumer logic itself, since the broker's Competing Consumers delivery model already handles distributing work across however many instances happen to be running at any given moment.
+
+**The relationship to Kafka Consumer Groups (covered earlier):** Kafka's Consumer Group mechanism is a specific implementation of this same Competing Consumers pattern — multiple consumer instances sharing one Consumer Group ID compete for partitions the same way multiple instances here compete for individual queue messages, just partitioned rather than message-by-message.
+
+**Common Pitfall:** assuming adding more consumer instances always increases throughput proportionally without limit — if the actual bottleneck is a shared downstream resource (a database connection pool, a rate-limited third-party API each instance calls), adding more competing consumer instances just means more instances contending for that same constrained downstream resource, without the overall system throughput actually improving past that shared bottleneck's own capacity ceiling.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is the Claim Check pattern, and how does it solve the problem of a message payload being too large for a message broker's size limits?**
+
+Most message brokers impose a maximum message size (RabbitMQ commonly configured around 128MB, Azure Service Bus at 256KB for the Standard tier, SQS at 256KB) — the Claim Check pattern handles payloads exceeding that limit by storing the actual large data **outside** the broker (in Blob/S3 storage) and passing only a small reference ("claim check") through the message queue itself.
+
+**The problem — a message genuinely too large for the broker:**
+```csharp
+// A message containing an entire generated PDF report, potentially many MB -- exceeds broker limits
+await _publisher.PublishAsync(new ReportGeneratedEvent { PdfBytes = largePdfByteArray }); // FAILS or is truncated
+```
+
+**The Claim Check solution — store the large payload separately, pass only a reference through the queue:**
+```csharp
+// Step 1: upload the large payload to blob storage FIRST
+var blobUrl = await _blobStorage.UploadAsync($"reports/{reportId}.pdf", pdfBytes);
+
+// Step 2: publish a TINY message containing only a REFERENCE to where the real data lives
+await _publisher.PublishAsync(new ReportGeneratedEvent { ReportId = reportId, BlobUrl = blobUrl });
+```
+```csharp
+// The consumer receives the tiny reference message, then fetches the actual large payload separately
+public async Task Handle(ReportGeneratedEvent e)
+{
+    var pdfBytes = await _blobStorage.DownloadAsync(e.BlobUrl); // fetches the ACTUAL data from blob storage
+    await EmailReport(pdfBytes);
+}
+```
+The message traveling through the broker itself stays small (just an ID and a URL) — the broker never has to handle the actual multi-megabyte PDF at all, sidestepping its size limits entirely, while the consumer transparently retrieves the real payload from blob storage using the reference the tiny message carried.
+
+**Why the name "Claim Check" fits:** it's the same mental model as a coat-check ticket at a physical venue — you don't carry your entire coat around with you (the large payload); you carry a small ticket (the reference) that lets you retrieve the actual coat later, from wherever it's actually being stored.
+
+**Common Pitfall:** using Claim Check for payloads that aren't actually oversized, adding an unnecessary blob-storage round-trip (upload then download) for messages that would have fit comfortably within the broker's normal size limits — the pattern specifically earns its extra complexity (and the added latency of two separate network calls, to blob storage and to the broker) only when the payload genuinely exceeds what the broker can handle directly; for ordinarily-sized messages, passing the data directly through the broker remains simpler and faster.
+
+---

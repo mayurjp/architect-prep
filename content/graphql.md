@@ -412,3 +412,140 @@ The very first time any client uses a new query, there's a one-time extra round-
 **Common Pitfall:** relying on APQ's automatic registration as a *security* boundary the way strict Persisted Queries are used (rejecting any query not pre-approved) — APQ's self-registering nature means it doesn't actually restrict *which* queries can be run the way a strictly pre-registered allowlist does; a client can still register and run an arbitrary new query on its first use. APQ is a bandwidth/performance optimization (avoid re-sending full query text on every request), not the same DoS-prevention mechanism strict Persisted Queries provide.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is a GraphQL Scalar Type, and how do Custom Scalars let you extend the built-in set (Int, String, Boolean, Float, ID) for domain-specific values like dates or money?**
+
+Scalars are GraphQL's "leaf" types — the actual primitive values a query ultimately returns, as opposed to Object Types (like `User` or `Order`) which are composed of fields that are themselves either scalars or further nested objects. GraphQL ships with five built-in scalars, and Custom Scalars let a schema define its own, with custom serialization/validation logic.
+
+**The built-in scalars:**
+```graphql
+type Product {
+  id: ID!            # a unique identifier, serialized as a string
+  name: String!
+  price: Float!
+  inStock: Boolean!
+  quantity: Int!
+}
+```
+
+**The gap — no built-in scalar for common domain concepts like dates:**
+```graphql
+type Order {
+  placedAt: String!  # a DateTime, awkwardly represented as a plain String -- no validation,
+                       # client has no guarantee it's actually a valid, parseable date format
+}
+```
+
+**A Custom Scalar filling that gap, with real validation and serialization logic:**
+```graphql
+scalar DateTime
+
+type Order {
+  placedAt: DateTime!  # now genuinely typed -- the server validates/serializes it specifically as a DateTime
+}
+```
+```csharp
+// HotChocolate custom scalar implementation
+public class DateTimeType : ScalarType<DateTime, StringValueNode>
+{
+    protected override DateTime ParseLiteral(StringValueNode literal) => DateTime.Parse(literal.Value);
+    protected override StringValueNode ParseValue(DateTime value) => new(value.ToString("O")); // ISO 8601
+}
+```
+Now the schema itself documents and enforces that `placedAt` is genuinely a `DateTime`, not just "a string that happens to look like a date" — client-side code generation tools can map `DateTime` scalars to a proper native date type, and the server rejects a malformed date string at the schema-validation layer rather than accepting a value that only *looks* correct.
+
+**Common Pitfall:** representing every non-primitive value as `String` (dates, money amounts, JSON blobs) rather than defining appropriate custom scalars — this pushes all format validation and parsing responsibility onto every client independently, exactly the kind of implicit, undocumented contract GraphQL's strong typing is meant to eliminate in the first place.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is Schema Stitching, and how does it differ from Apollo Federation (covered earlier) in how multiple GraphQL services are composed into one unified graph?**
+
+Both approaches let multiple independent GraphQL services combine into a single client-facing schema, but they differ significantly in *where* the composition logic lives and how tightly the underlying services need to cooperate on shared type ownership.
+
+**Schema Stitching — an external gateway process merges pre-existing schemas, largely unaware of each other:**
+```javascript
+const gatewaySchema = stitchSchemas({
+  subschemas: [
+    { schema: userServiceSchema, executor: userServiceExecutor },
+    { schema: orderServiceSchema, executor: orderServiceExecutor }
+  ],
+  typeMergingOptions: {
+    // The GATEWAY defines how types relate, e.g., "User.orders comes from OrderService,
+    // keyed by userId" -- this composition logic lives in the gateway, not in either service
+  }
+});
+```
+Each underlying service's schema was largely designed independently, without built-in awareness of how it'll later be stitched together — the gateway process is responsible for knowing how to merge/relate types across services, meaning that composition logic is centralized in the gateway rather than distributed.
+
+**Apollo Federation — services declare their own composition intent directly in their own schema:**
+```graphql
+# Written directly INSIDE OrderService's own schema definition
+type Order @key(fields: "id") {
+  id: ID!
+  userId: ID!
+}
+
+extend type User @key(fields: "id") {
+  id: ID! @external
+  orders: [Order!]! @requires(fields: "id") # OrderService declares HOW it extends User itself
+}
+```
+Federation pushes composition awareness *into* each individual service's own schema (via directives like `@key`, `@external`, `@requires`) — each service explicitly declares which types it owns, which it extends, and how, rather than a separate gateway process needing external configuration describing how to merge schemas that don't know about each other at all.
+
+**Why this distinction matters for team ownership and maintenance:** Federation's approach keeps composition logic co-located with the service that owns it (a team changing `OrderService` also owns and updates its own federation directives, in its own codebase) — Schema Stitching's gateway-centric approach means composition logic often lives in a separate repository/team's configuration, which can drift out of sync with either underlying service's own evolution if not carefully coordinated.
+
+**Common Pitfall:** choosing Schema Stitching for a large organization with many independently-owned services specifically because it seems simpler to set up initially, without anticipating the ongoing maintenance burden of a centrally-owned gateway configuration that must be updated by a team that doesn't own the underlying services being stitched together — Federation's more upfront-structured approach (each service declaring its own composition intent) tends to scale better organizationally for exactly this reason, even though Schema Stitching can look like less initial setup work.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is GraphQL's `@defer` and `@stream` directives, and how do they let a single query return a "fast" partial response immediately while slower fields continue loading incrementally?**
+
+Ordinarily, a GraphQL response is all-or-nothing — the client waits for **every** requested field to resolve before receiving *any* data back, even if one specific field happens to be a slow, expensive lookup while everything else resolved instantly. `@defer` and `@stream` (an evolving part of the GraphQL specification) let a query mark specific fields as lower-priority, letting the server send back the fast fields immediately and the slower ones as separate, incremental follow-up payloads over the same response.
+
+**Without `@defer` — the entire response waits for the SLOWEST field:**
+```graphql
+query {
+  product(id: 5) {
+    name          # resolves instantly
+    price         # resolves instantly
+    reviews {     # this one is SLOW -- a complex aggregation query
+      rating
+      comment
+    }
+  }
+}
+```
+Even though `name` and `price` are ready in milliseconds, the client receives *nothing* until the slow `reviews` field also finishes resolving — the fast fields are needlessly held hostage by the one slow one.
+
+**With `@defer` — fast fields arrive immediately, slow ones stream in afterward:**
+```graphql
+query {
+  product(id: 5) {
+    name
+    price
+    ... @defer {
+      reviews {   # marked as OK to arrive LATER, in a separate incremental payload
+        rating
+        comment
+      }
+    }
+  }
+}
+```
+```text
+Response 1 (arrives almost instantly): { "product": { "name": "Keyboard", "price": 29.99 } }
+Response 2 (arrives later, once reviews resolve): { "reviews": [ {...}, {...} ] } -- patched into the initial result
+```
+The client's GraphQL library (Apollo Client, Relay) receives the fast initial payload and can render it immediately (showing product name/price right away), then patches in the `reviews` data once it arrives moments later — rather than the entire UI staying blank waiting for the slowest piece of data.
+
+**Why this is a genuinely different capability than simply "make the reviews query faster":** some data is *inherently* slower to compute (a complex aggregation, a call to a third-party service) regardless of optimization effort — `@defer` doesn't make that specific field faster, it changes the *response shape* so the rest of the query's fast fields aren't forced to wait on it, directly improving perceived responsiveness for the parts of the UI that don't actually depend on the slow field.
+
+**Common Pitfall:** marking nearly every field as `@defer`'d "just in case," rather than reserving it specifically for genuinely slow, non-critical-path fields — overusing `@defer` adds real complexity to client-side response handling (reconciling multiple incremental payloads) for fields that were already fast enough that deferring them provides no meaningful user-experience benefit.
+
+---

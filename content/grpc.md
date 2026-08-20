@@ -474,3 +474,87 @@ This is analogous to what Swagger/OpenAPI provides for REST APIs — a way for t
 **Common Pitfall:** leaving gRPC Reflection enabled unconditionally in production "for debugging convenience" — like Swagger UI, it's a genuinely useful development/staging tool that becomes a reconnaissance gift to an attacker if left reachable in a production environment without additional access controls.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What are Protobuf's built-in scalar types, and why does choosing `int32` versus `int64` versus `sint32` matter for both correctness and wire-size efficiency?**
+
+Protobuf defines a specific, fixed set of scalar types — unlike a dynamically-typed format like JSON where "just a number" is a single concept, Protobuf requires picking the *right* integer variant, since the choice affects both the range of values that fit safely and how many bytes the value takes on the wire.
+
+**The common integer variants and what distinguishes them:**
+```protobuf
+message Metrics {
+  int32 request_count = 1;    // efficient for SMALL, typically non-negative numbers
+  int64 total_bytes_sent = 2; // for values that might exceed int32's ~2 billion range
+  sint32 temperature_delta = 3; // efficient specifically for NEGATIVE numbers
+  uint32 user_id = 4;          // unsigned -- only non-negative values, doubles the positive range
+}
+```
+
+**Why `sint32` exists separately from `int32` — the negative-number encoding quirk:** Protobuf's default `int32`/`int64` use a variable-length encoding ("varint") that's compact for small positive numbers, but a negative number in that encoding takes the **full 10 bytes** regardless of its actual magnitude (since negative numbers are represented with all the high bits set, defeating the variable-length compression entirely). `sint32`/`sint64` use "zigzag encoding" instead, specifically designed so that small negative numbers *also* encode compactly — if a field is genuinely expected to hold negative values often, `sint32` is meaningfully more space-efficient on the wire than `int32` would be for the same values.
+
+**Why this actually matters in practice, not just as a technicality:** for a field that's overwhelmingly likely to hold negative values (a temperature delta, a balance adjustment that's often a debit), choosing `int32` instead of `sint32` means every message pays the full 10-byte encoding cost for that field instead of Protobuf's normal compact encoding — at high message volumes (millions of messages/second in a busy microservice), this adds up to genuinely measurable extra bandwidth and serialization/deserialization cost for no benefit.
+
+**Common Pitfall:** defaulting to `int32` for every integer field out of habit, without considering whether the field is likely to hold negative values — for fields that are always non-negative (a count, an ID), `int32`'s default varint encoding is already efficient; the specific case worth knowing about is fields that *do* commonly hold negative values, where `sint32`/`sint64` is the more size-efficient choice Protobuf provides specifically for that scenario.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is gRPC's built-in support for Deadlines Propagation across a chain of service calls, and how does it prevent a downstream service from doing pointless work after the original caller has already given up?**
+
+When Service A calls Service B, which itself calls Service C, gRPC's deadline mechanism (covered earlier for a single hop) automatically **propagates** the *remaining* time budget across the entire call chain — not just the first hop — so that every service in the chain knows how much time is genuinely left before the original caller's deadline expires, rather than each hop independently guessing at its own timeout.
+
+**The Mechanism — the remaining deadline flows through, decreasing at each hop:**
+```text
+Client calls Service A with a 5-second deadline
+    │ (0.5s elapsed in Service A's own processing before calling B)
+    ▼
+Service A calls Service B, propagating a deadline of 4.5s REMAINING (not a fresh 5s!)
+    │ (1s elapsed in Service B's own processing before calling C)
+    ▼
+Service B calls Service C, propagating a deadline of 3.5s REMAINING
+```
+```csharp
+// Service A's code -- the SDK automatically propagates the remaining deadline
+// to the downstream call, without Service A needing to manually calculate and pass it
+public override async Task<Response> Handle(Request req, ServerCallContext context)
+{
+    // context.Deadline reflects the ORIGINAL caller's deadline, already adjusted for elapsed time
+    var downstreamResponse = await _serviceBClient.CallAsync(req, deadline: context.Deadline);
+}
+```
+
+**Why propagating the *remaining* time (not a fresh timeout per hop) matters:** if each hop instead used its own independent, fixed timeout (say, 5 seconds each), a chain of several services could accumulate a much longer *total* wait than the original caller ever intended — the original caller gave up after 5 seconds total, but without propagation, downstream services might still be busy working on a request whose result nobody is waiting for anymore, wasting compute across the entire chain on work whose outcome will simply be discarded.
+
+**Why this specifically prevents wasted work, not just wasted time:** once `context.Deadline` has already passed by the time Service C receives the propagated (now-expired) deadline, Service C can immediately recognize the deadline has already elapsed and skip the work entirely (or abort quickly) — rather than spending its own full local timeout budget processing a request whose result is already guaranteed to be discarded by the original caller who gave up seconds ago.
+
+**Common Pitfall:** manually hardcoding a fixed timeout value at each service in a call chain, rather than propagating and respecting the incoming `ServerCallContext.Deadline` — this reintroduces exactly the "accumulating wasted work across a chain" problem gRPC's automatic deadline propagation exists specifically to prevent, since each hop's independent fixed timeout has no awareness of how much time the *original* caller actually still has left.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is gRPC's Keepalive mechanism, and how does it detect a "half-open" connection — one where the TCP connection appears alive but the remote peer is actually unreachable?**
+
+A TCP connection can enter a state where the local machine believes it's still open (no explicit close/reset was ever received), but the remote peer has actually crashed, lost network connectivity, or sits behind a now-dead NAT/firewall mapping — without an active mechanism to detect this, a gRPC client can keep attempting calls over a connection that will never actually succeed, with no error surfacing until a long OS-level TCP timeout eventually expires.
+
+**The Mechanism — periodic, lightweight application-level pings over the existing connection:**
+```csharp
+var channel = GrpcChannel.ForAddress("https://order-service", new GrpcChannelOptions
+{
+    HttpHandler = new SocketsHttpHandler
+    {
+        KeepAlivePingDelay = TimeSpan.FromSeconds(60),   // send a ping if idle for 60s
+        KeepAlivePingTimeout = TimeSpan.FromSeconds(10),  // if no pong within 10s, consider it dead
+        KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always
+    }
+});
+```
+If the connection has been idle for the configured delay, the client sends an HTTP/2-level ping frame — a genuinely alive remote peer responds immediately with a pong frame; if no response arrives within the configured timeout, the client concludes the connection is actually dead (half-open) and proactively tears it down, forcing a fresh connection (and, if using client-side load balancing, potentially selecting a different, healthy backend instance) on the next call — rather than waiting for the underlying OS's much longer default TCP keepalive/timeout behavior to eventually notice.
+
+**Why this specifically matters for long-lived gRPC connections (versus typical short-lived HTTP/1.1 connections):** because gRPC channels are designed to be long-lived and reused (covered earlier, rather than created per-call), a connection can sit idle for extended periods between bursts of calls — exactly the scenario where a half-open connection (the remote crashed hours ago, but nothing since has tried to use the connection to notice) can go undetected far longer than it would for a connection that's constantly being freshly established and torn down.
+
+**Common Pitfall:** setting `KeepAlivePingDelay` extremely aggressively (every few seconds) assuming "more frequent checks are always better" — unnecessarily frequent keepalive pings add continuous background network traffic and server-side processing across every single idle connection in a system with many clients, a real, if modest, cost that should be weighed against how quickly a half-open connection genuinely needs to be detected for the specific application's actual reliability requirements.
+
+---
