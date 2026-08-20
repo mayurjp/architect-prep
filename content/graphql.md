@@ -311,3 +311,104 @@ When a query requests `salary` and the caller doesn't satisfy `HRPolicyOnly`, Ho
 **Common Pitfall:** relying solely on hiding a field from the schema's introspection for a given caller as a "security" measure, rather than enforcing an actual authorization check on resolution — introspection-based hiding is a discoverability nicety at best; a determined caller who already knows a field's name from documentation or a leaked schema can still query it directly unless the resolver itself enforces the check.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What are GraphQL Variables, and why are they preferred over building query strings via manual concatenation of user input?**
+
+Variables let a GraphQL query declare typed placeholders that are supplied separately from the query string itself — the same fundamental idea as parameterized SQL queries, and for the same underlying reason: keeping user-supplied values out of the query's literal text.
+
+**Without variables — user input concatenated directly into the query string:**
+```javascript
+const userId = getUserInput(); // e.g., could contain unexpected characters
+const query = `query { user(id: "${userId}") { name email } }`; // string concatenation
+```
+Beyond being awkward to build correctly (escaping quotes, handling different types), this pattern invites the same category of injection-adjacent bugs that string-concatenated SQL does — a malformed or unexpected value could break the query's syntax entirely, and it makes the query string itself non-reusable/non-cacheable since it's different every time the value changes.
+
+**With variables — the query structure stays constant, values are passed separately:**
+```graphql
+query GetUser($id: ID!) {
+  user(id: $id) {
+    name
+    email
+  }
+}
+```
+```json
+{ "id": "user-input-value-here" }
+```
+The query document itself never changes regardless of what `$id` value is supplied — the GraphQL server parses the query structure once and binds the variable value separately, the same separation of "code" from "data" that parameterized queries provide in SQL.
+
+**Why this matters for caching and tooling, not just safety:** because the query *text* stays identical across different variable values, tools like Persisted Queries (covered earlier) and query-plan caching can recognize "this is the same query as before, just with different variable values" — string-concatenated queries defeat this recognition entirely, since every differently-valued query looks like a completely different, never-before-seen query string.
+
+**Common Pitfall:** using variables for some inputs but falling back to string concatenation for "just this one dynamic field name" or similar edge cases — GraphQL's type system and variable mechanism are designed to handle values, not structural parts of the query itself (which field to select); if a use case seems to need a dynamically-changing field *name*, that's usually a sign the schema itself needs a different design (e.g., an argument-based filter) rather than string-built queries.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is the "N+1 problem" as it appears specifically in GraphQL versus how it appears in a plain REST/EF Core context, and why does GraphQL make it structurally more likely to occur?**
+
+The N+1 problem itself (one query for a list, then one additional query per item) isn't unique to GraphQL — it's the same performance bug covered for EF Core's lazy loading. What's different is that GraphQL's very design (client-specified nested field selection, arbitrary query shape) makes triggering it dramatically easier and less visible to the server developer, since the *client*, not the server's own code, controls how deeply nested a query gets.
+
+**In a typical REST/EF Core context, the developer controls the query shape:**
+```csharp
+// The DEVELOPER decides whether to eager-load Posts or not, in the server's own code
+var users = await _db.Users.Include(u => u.Posts).ToListAsync(); // developer's explicit choice
+```
+The person writing the server code sees, in their own codebase, exactly which relationships get loaded — the N+1 risk is visible in the code review of that one endpoint.
+
+**In GraphQL, the client decides the query shape, and the server can't predict it in advance:**
+```graphql
+query {
+  users {
+    name
+    posts {          # this client happened to ask for posts
+      title
+      comments {      # AND comments on those posts
+        text
+      }
+    }
+  }
+}
+```
+The exact same `usersResolver`/`postsResolver`/`commentsResolver` code must correctly handle *this* deeply-nested query today, and a completely different, shallower query from a different client tomorrow — the server-side resolver code has no way to know ahead of time how deep a given request will nest, making it much easier for N+1 (or even N×M×K for triple-nested relationships) to occur without a developer specifically noticing during their own testing, since their own manual testing might only ever exercise shallow queries.
+
+**Why DataLoader (covered earlier) is close to mandatory in GraphQL specifically, rather than just "a nice optimization":** because the *client* controls nesting depth in a way a REST developer's own code doesn't have to anticipate, GraphQL servers essentially must batch-and-cache every resolver that could be invoked multiple times per request as a matter of course — treating it as an occasional optimization (the way N+1 fixes are sometimes treated in a REST/EF Core codebase after the fact) leaves a GraphQL server vulnerable to arbitrary, client-controlled amplification of database load.
+
+**Common Pitfall:** testing a GraphQL API only with the specific query shapes your own frontend team currently uses, and concluding N+1 isn't a problem because those particular queries perform fine — a different, deeper query (from a new client, a mobile app team, or simply a future frontend feature) can trigger the exact same underlying resolver code into a very different, much worse performance profile, since the resolvers themselves didn't change, only the query shape invoking them did.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is Persisted Queries' relationship to Automatic Persisted Queries (APQ), and how does APQ solve the "who registers the query hashes" bootstrapping problem?**
+
+Persisted Queries (covered earlier as a DoS defense) require every valid query to be pre-registered on the server, with clients sending only a short hash instead of the full query text — but this raises a practical question: how does a hash get registered on the server in the first place, especially across a large team shipping frequent frontend changes? Automatic Persisted Queries (APQ) solves this bootstrapping problem elegantly.
+
+**Plain Persisted Queries — hashes must be registered ahead of time, via a separate build step:**
+```text
+1. Frontend build process extracts every GraphQL query from the codebase
+2. Each query is hashed and uploaded to the server's registry BEFORE deployment
+3. The running frontend only ever sends hashes, which the server recognizes because
+   they were registered in step 2
+```
+This requires coordinating a registration step between the frontend build pipeline and the GraphQL server — workable, but adds real deployment coupling between the two.
+
+**Automatic Persisted Queries — the client registers a hash the FIRST time it's used, on demand:**
+```text
+1. Client sends: { "extensions": { "persistedQuery": { "sha256Hash": "abc123" } } }
+   (no query text at all -- just the hash)
+2. Server has never seen "abc123" before -> responds with an error: "PersistedQueryNotFound"
+3. Client retries, this time sending BOTH the hash AND the full query text
+4. Server verifies the hash actually matches the provided query text, then STORES that
+   mapping for next time, and executes it
+5. Every SUBSEQUENT request can send just the hash -- the server already has it cached
+```
+The very first time any client uses a new query, there's a one-time extra round-trip (steps 2-3) to register it — every request after that (from any client, not just the one that registered it) can use the lightweight hash-only form.
+
+**Why this removes the separate build-time registration step:** there's no longer a coordinated "upload all query hashes before deploying the frontend" pipeline step at all — the registration happens organically, automatically, the first time each query is actually used in production, self-bootstrapping without any separate coordination between frontend and backend deployment pipelines.
+
+**Common Pitfall:** relying on APQ's automatic registration as a *security* boundary the way strict Persisted Queries are used (rejecting any query not pre-approved) — APQ's self-registering nature means it doesn't actually restrict *which* queries can be run the way a strictly pre-registered allowlist does; a client can still register and run an arbitrary new query on its first use. APQ is a bandwidth/performance optimization (avoid re-sending full query text on every request), not the same DoS-prevention mechanism strict Persisted Queries provide.
+
+---

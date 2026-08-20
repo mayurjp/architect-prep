@@ -354,3 +354,123 @@ The `reserved` keyword makes the Protobuf compiler itself reject any future atte
 **Common Pitfall:** deleting a field and its tag number without marking it `reserved`, assuming "nobody uses that old client version anymore" — in any system with independently-deployed services or long-lived client versions (mobile apps users haven't updated), that assumption is exactly the kind of thing that turns into a very confusing production incident months later when someone innocently reuses the tag number for something new.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is a gRPC channel, and why is reusing a single channel across many calls recommended rather than creating a new one per request?**
+
+A `GrpcChannel` represents the underlying HTTP/2 connection (or set of connections) to a specific gRPC server — it's a relatively expensive object to create (establishing a TCP connection, performing a TLS handshake) and is designed to be created **once** and reused for the lifetime of the application talking to that server, not recreated per call.
+
+**The wasteful pattern — a new channel per call:**
+```csharp
+public async Task<Product> GetProduct(int id)
+{
+    using var channel = GrpcChannel.ForAddress("https://product-service"); // NEW connection every call!
+    var client = new ProductService.ProductServiceClient(channel);
+    return await client.GetProductAsync(new ProductRequest { Id = id });
+}
+```
+Every call pays the full cost of establishing a fresh TCP connection and TLS handshake before a single RPC can even begin — the same connection-setup overhead problem covered for `HttpClient` and socket exhaustion, since gRPC channels are built on the same underlying HTTP/2 connections.
+
+**The correct pattern — one long-lived channel, reused across many calls:**
+```csharp
+// Registered once, typically via DI
+builder.Services.AddGrpcClient<ProductService.ProductServiceClient>(o =>
+{
+    o.Address = new Uri("https://product-service");
+});
+
+// Consumed via constructor injection -- the underlying channel is created once and reused
+public class ProductController(ProductService.ProductServiceClient client)
+{
+    public async Task<Product> GetProduct(int id) =>
+        await client.GetProductAsync(new ProductRequest { Id = id }); // reuses the existing connection
+}
+```
+Because HTTP/2 multiplexes many concurrent RPCs over a **single** connection, reusing one channel doesn't create the head-of-line contention a single HTTP/1.1 connection would — many concurrent calls genuinely share the connection efficiently, which is exactly why gRPC doesn't need a connection-per-call model the way naively-implemented HTTP/1.1 clients sometimes fall into.
+
+**Common Pitfall:** applying the "always create a fresh instance" instinct from other short-lived .NET objects (like `DbContext`, which genuinely *should* be short-lived and scoped per request) to `GrpcChannel` as well — a channel's lifecycle expectations are the opposite: long-lived and reused, closer to how a single `HttpClient` instance should be managed via `IHttpClientFactory` than to a per-request `DbContext`.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is the difference between gRPC's `UNAVAILABLE` and `DEADLINE_EXCEEDED` status codes, and why does distinguishing them matter for building correct retry logic?**
+
+Both indicate a failed call, but they point to fundamentally different failure causes — retrying blindly on every failure code without distinguishing them can make some problems worse rather than better.
+
+**`DEADLINE_EXCEEDED` — the call took longer than the client's specified deadline allowed:**
+```csharp
+var response = await client.ProcessDataAsync(request, deadline: DateTime.UtcNow.AddSeconds(2));
+// If the server is still working on it after 2 seconds, the client gives up with DEADLINE_EXCEEDED --
+// the server might still be processing it, or might have genuinely been slow this one time
+```
+This says nothing about whether the server is broadly healthy — it might have just been one unusually slow request. Retrying immediately (perhaps to a *different* server instance behind a load balancer) is often reasonable here.
+
+**`UNAVAILABLE` — the server (or the network path to it) is not currently reachable at all:**
+```text
+Common causes: server process crashed, network partition, connection actively refused,
+                a Circuit Breaker somewhere in the path is currently open
+```
+This indicates a more systemic problem — retrying the *same* server immediately is far less likely to succeed, and retrying aggressively against a server that's `UNAVAILABLE` (perhaps because it's overloaded) can actively worsen the situation, contributing to the exact overload causing the unavailability in the first place.
+
+**Why this distinction should drive different retry strategies:**
+```csharp
+services.AddGrpcClient<ProductService.ProductServiceClient>()
+    .ConfigureChannel(o => o.ServiceConfig = new ServiceConfig
+    {
+        MethodConfigs = { new MethodConfig
+        {
+            RetryPolicy = new RetryPolicy
+            {
+                MaxAttempts = 3,
+                RetryableStatusCodes = { StatusCode.Unavailable }, // retry THIS
+                // DEADLINE_EXCEEDED is deliberately NOT included -- retrying an already-slow
+                // call with the SAME short deadline is unlikely to succeed differently
+            }
+        }}
+    });
+```
+A well-designed retry policy treats `UNAVAILABLE` (worth retrying, ideally with backoff, possibly against a different backend instance) very differently from `DEADLINE_EXCEEDED` (retrying with the *same* tight deadline against a call that already timed out rarely helps, and might indicate the deadline itself was set unrealistically low for the work being requested).
+
+**Common Pitfall:** configuring blanket retry-on-any-failure logic that treats every non-OK status code identically — this can turn a `DEADLINE_EXCEEDED` (the call was already too slow) into a self-inflicted retry storm that makes an already-struggling server even slower, precisely the failure mode the earlier "gRPC deadlines and cancellation" discussion was trying to prevent in the first place.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is gRPC Reflection, and how does it let generic tools (like a CLI debugging client) discover a service's API without access to its `.proto` file?**
+
+Normally, calling a gRPC service requires the client to have compiled the same `.proto` file the server uses, generating matching strongly-typed client stubs — Reflection is an optional service that lets a gRPC server describe its own available services/methods/message shapes at runtime, letting generic tooling discover and call an API without needing that `.proto` file distributed in advance.
+
+**Enabling Reflection on an ASP.NET Core gRPC server:**
+```csharp
+builder.Services.AddGrpc();
+builder.Services.AddGrpcReflection(); // exposes a special reflection service
+
+var app = builder.Build();
+if (app.Environment.IsDevelopment())
+{
+    app.MapGrpcReflectionService(); // typically only enabled in dev/staging, not production
+}
+app.MapGrpcService<ProductService>();
+```
+
+**Using a generic CLI tool (`grpcurl`) against a server with Reflection enabled — no `.proto` file needed at all:**
+```bash
+grpcurl -plaintext localhost:5000 list
+# ProductService, grpc.reflection.v1alpha.ServerReflection
+
+grpcurl -plaintext localhost:5000 describe ProductService.GetProduct
+# shows the request/response message shapes, discovered entirely at runtime
+
+grpcurl -plaintext -d '{"id": 5}' localhost:5000 ProductService/GetProduct
+# calls the method directly, without ever having compiled a matching .proto client
+```
+This is analogous to what Swagger/OpenAPI provides for REST APIs — a way for tooling and developers to discover and explore an API's shape without needing the API's source-of-truth definition file distributed to them separately ahead of time.
+
+**Why it's typically disabled in production:** Reflection exposes your complete API surface (every service, method, and message shape) to anyone who can reach the endpoint — for an internal microservice, this is a discoverability convenience; for a production-facing or security-sensitive service, it hands a potential attacker a complete map of the API without them needing to find or guess the `.proto` file through other means, mirroring the same production-exposure concern covered for Swagger UI.
+
+**Common Pitfall:** leaving gRPC Reflection enabled unconditionally in production "for debugging convenience" — like Swagger UI, it's a genuinely useful development/staging tool that becomes a reconnaissance gift to an attacker if left reachable in a production environment without additional access controls.
+
+---
