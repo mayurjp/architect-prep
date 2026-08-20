@@ -1049,3 +1049,111 @@ What should the client do? If it blindly retries a non-idempotent `POST` request
 To fix this, modern APIs implement **Idempotency Keys**. The client generates a unique GUID (e.g., `Idempotency-Key: 12345`) and sends it with the `POST` request. The server records this key. If the client retries the exact same request with the same key, the server recognizes it, skips processing the payment again, and just returns the original success response.
 
 ---
+
+## Advanced — Question 4
+
+**Q4: What are ETags and conditional requests, and how do they implement optimistic concurrency over REST?**
+
+An **ETag** (Entity Tag) is an opaque identifier — usually a hash of the resource's content or a version number — that the server returns alongside a resource, letting clients detect whether the resource has changed since they last fetched it, without re-downloading the full body.
+
+**Step 1 — the server returns an ETag on GET:**
+```http
+GET /api/products/5
+```
+```http
+HTTP/1.1 200 OK
+ETag: "a1b2c3d4"
+Content-Type: application/json
+
+{ "id": 5, "name": "Keyboard", "price": 29.99 }
+```
+
+**Step 2 — the client re-checks cheaply with `If-None-Match`:**
+```http
+GET /api/products/5
+If-None-Match: "a1b2c3d4"
+```
+If nothing changed, the server skips re-sending the body entirely:
+```http
+HTTP/1.1 304 Not Modified
+```
+
+**Step 3 — the client updates safely with `If-Match` (optimistic concurrency):**
+```http
+PUT /api/products/5
+If-Match: "a1b2c3d4"
+{ "name": "Keyboard", "price": 24.99 }
+```
+If another client already updated the resource (so its current ETag no longer matches `a1b2c3d4`), the server rejects the write:
+```http
+HTTP/1.1 412 Precondition Failed
+```
+instead of silently overwriting the other client's change — the classic "lost update" problem that plain `PUT` without a version check is vulnerable to.
+
+**Why this matters for REST specifically:** it's a pure HTTP-native mechanism (headers only, no bespoke versioning field in the JSON body) for both **cache validation** (`If-None-Match` → `304`) and **optimistic concurrency control** (`If-Match` → `412`), fitting REST's "self-descriptive messages" and "cacheable" constraints without inventing anything outside the HTTP spec.
+
+**Common Pitfall:** computing the ETag from a poor hash (or, worse, `LastModified` with only second-level precision) that doesn't actually change when the resource does — two rapid updates within the same second could produce identical `Last-Modified` values and let a lost update slip through. A strong hash of the actual serialized content (or a dedicated `RowVersion`/`xmin` column from the database) avoids this.
+
+---
+
+## Scenario — Question 1
+
+**Q1: Your team is designing a REST API for order management. Beyond the standard CRUD verbs, you need an endpoint to "cancel" an order — but cancellation involves side effects (refunding payment, releasing reserved inventory) beyond just changing a status field. A junior developer proposes `PATCH /api/orders/5 { "status": "Cancelled" }`. Why might this be the wrong shape, and what's the RESTful alternative?**
+
+The core tension: pure CRUD verbs model *state changes to data*, but "cancel an order" is a **business action with side effects**, not just a field update — modeling it as a bare `PATCH` hides that complexity behind what looks like an innocuous data edit.
+
+**Why the naive `PATCH` is risky:**
+- It implies any client with write access to the order could flip `status` to `"Cancelled"` directly, bypassing whatever business rules should gate cancellation (e.g., "can't cancel an order that already shipped").
+- It conflates "this is what the data now looks like" with "please perform the cancellation *process*," which a generic partial-update handler has no natural place to hook business logic (refund, inventory release) into cleanly.
+- Multiple different "reasons" to change status (customer cancels vs. fraud team cancels vs. system auto-cancels for non-payment) would all collapse into the same generic `PATCH`, losing intent.
+
+**The RESTful alternative: a sub-resource / action endpoint.**
+```http
+POST /api/orders/5/cancellation
+{ "reason": "customer_requested" }
+```
+Modeling "cancellation" as its own resource being *created* (rather than the order being merely patched) keeps the action's specific validation, side effects, and audit trail (who cancelled it, why, when) explicit and separately testable, while still following REST's resource-oriented style — you're not inventing an RPC-style verb like `/api/orders/5/cancel`, you're creating a `Cancellation` resource, which is more consistent with "everything is a resource."
+
+**Alternative accepted in practice:** many real-world APIs pragmatically use a verb-like sub-path (`POST /api/orders/5/cancel`) instead of a noun sub-resource, trading some REST purity for clarity — Richardson Maturity Level 2 APIs (the vast majority of production REST APIs) often make this trade-off deliberately, reserving strict noun-only resource modeling for the parts of the API where it doesn't hurt developer ergonomics.
+
+---
+
+## Scenario — Question 2
+
+**Q2: Your public REST API is getting hammered by a client that's polling `GET /api/orders?status=pending` every 100ms in a tight loop, degrading performance for everyone else. You can't force them to fix their client. How do you protect the API using standard HTTP mechanisms?**
+
+You need **rate limiting**, communicated through standard HTTP status codes and headers so well-behaved clients (and even this misbehaving one) can self-correct.
+
+**The Mechanism:**
+```csharp
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("PerClient", opt =>
+    {
+        opt.PermitLimit = 60;                     // 60 requests
+        opt.Window = TimeSpan.FromMinutes(1);      // per minute
+        opt.QueueLimit = 0;                        // reject immediately over limit, don't queue
+    });
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+});
+
+app.UseRateLimiter();
+```
+
+When the limit is exceeded, the API responds:
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 45
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1735689660
+```
+
+**Why this is the "REST-native" solution rather than, say, silently dropping connections:**
+- `429 Too Many Requests` is a standard status code specifically for this — any HTTP-aware client or library (including this misbehaving one, if it's using a normal HTTP stack) will surface it distinctly from a generic error.
+- `Retry-After` tells the client exactly how long to back off, turning "aggressive polling" into "well-behaved polling" without any code change on the client's side beyond respecting a standard header.
+- The `X-RateLimit-*` headers (a de facto convention, not a formal RFC standard, but extremely widely adopted) let well-behaved clients throttle themselves *before* hitting the limit at all.
+
+**Common Pitfall:** rate-limiting by IP address alone when clients sit behind a shared corporate NAT or mobile carrier gateway — one bad actor can trigger `429`s for every legitimate user sharing that IP. Production systems typically key the limiter by API key / authenticated client ID instead, falling back to IP only for fully anonymous/unauthenticated endpoints.
+
+---

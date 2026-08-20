@@ -1,3 +1,5 @@
+# ASP.NET Web API — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is the difference between `[ApiController]` and a standard MVC `Controller`?**
@@ -237,3 +239,116 @@ public async Task<IActionResult> UploadBatch()
 }
 ```
 This streaming approach ensures that regardless of whether the payload is 5MB or 500MB, the memory footprint remains virtually zero, as objects are immediately garbage collected after processing.
+
+---
+
+## Beginner — Question 3
+
+**Q3: What is Swagger/OpenAPI, and how do you set it up in an ASP.NET Core Web API?**
+
+OpenAPI is a language-agnostic specification format for describing a REST API's endpoints, request/response shapes, and auth requirements as machine-readable JSON/YAML. **Swagger** is the tooling ecosystem (originally the name of the spec itself, now a separate brand) built around that spec — most notably Swagger UI, an interactive browsable documentation page generated directly from the spec.
+
+**The Mechanism:**
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(); // scans controllers/actions and builds the OpenAPI document
+
+var app = builder.Build();
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();    // serves the raw OpenAPI JSON at /swagger/v1/swagger.json
+    app.UseSwaggerUI();  // serves the interactive browsable page at /swagger
+}
+```
+
+`AddSwaggerGen` reflects over your controllers, actions, `[HttpGet]`/`[HttpPost]` attributes, parameter types, and `ActionResult<T>` return types to infer the shape of each endpoint automatically — no manual spec-writing required for a baseline document.
+
+**Enriching the generated document:**
+```csharp
+/// <summary>Gets a product by its ID.</summary>
+/// <response code="404">Product not found.</response>
+[HttpGet("{id}")]
+[ProducesResponseType(typeof(Product), StatusCodes.Status200OK)]
+[ProducesResponseType(StatusCodes.Status404NotFound)]
+public ActionResult<Product> GetById(int id) { ... }
+```
+XML doc comments (enabled via `<GenerateDocumentationFile>true</GenerateDocumentationFile>` in the `.csproj`) and `[ProducesResponseType]` attributes both feed into a richer, more accurate Swagger UI page — showing possible status codes and their shapes, not just the happy path.
+
+**Common Pitfall:** leaving `app.UseSwaggerUI()` enabled and unauthenticated in a production deployment. It fully documents every endpoint, parameter, and DTO shape — genuinely useful information for an attacker probing your API's surface. Most teams gate it behind `IsDevelopment()` or put it behind additional authentication in staging/production.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: How does model validation work with Data Annotations in a Web API, and where does FluentValidation fit in?**
+
+**Data Annotations** are attributes placed directly on a model's properties that the framework checks automatically during model binding — before your action method body even runs (when combined with `[ApiController]`).
+
+```csharp
+public class CreateProductRequest
+{
+    [Required]
+    [StringLength(100, MinimumLength = 2)]
+    public string Name { get; set; } = string.Empty;
+
+    [Range(0.01, 100000)]
+    public decimal Price { get; set; }
+
+    [RegularExpression(@"^[A-Z]{3}-\d{4}$")]
+    public string Sku { get; set; } = string.Empty;
+}
+```
+
+Because the controller is decorated with `[ApiController]`, an invalid model automatically short-circuits to a `400 Bad Request` with a `ValidationProblemDetails` body listing every failed field — you never have to write `if (!ModelState.IsValid)` yourself.
+
+**Where Data Annotations fall short:** they can't easily express validation that depends on *multiple* properties together (e.g., "EndDate must be after StartDate"), can't easily reuse the same rule set across unrelated models, and mixing business rules into attributes on a DTO blurs the line between "shape validation" and "business logic."
+
+**FluentValidation fills that gap:**
+```csharp
+public class CreateProductValidator : AbstractValidator<CreateProductRequest>
+{
+    public CreateProductValidator()
+    {
+        RuleFor(x => x.Name).NotEmpty().Length(2, 100);
+        RuleFor(x => x.Price).InclusiveBetween(0.01m, 100000);
+        RuleFor(x => x).Must(x => x.DiscountPrice == null || x.DiscountPrice < x.Price)
+            .WithMessage("Discount price must be less than the regular price.");
+    }
+}
+```
+Rules live in a separate, testable class (not attributes scattered across the model), support cross-property rules naturally, and are composable/reusable across different request types.
+
+**Common Pitfall:** stacking both Data Annotations *and* FluentValidation rules on the same model without a clear convention for which owns what — teams that adopt FluentValidation usually strip Data Annotations from their DTOs entirely to avoid two competing, easily-desynced sources of truth for the same field.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is HATEOAS, and why do most real-world Web APIs skip it despite it being part of "true" REST?**
+
+HATEOAS (Hypermedia As The Engine Of Application State) is the REST constraint that says a response shouldn't just return data — it should include **links** describing what actions the client can take next, the way a website's HTML includes `<a>` links to guide navigation without the client needing prior out-of-band knowledge of the URL structure.
+
+**What it looks like in practice:**
+```json
+{
+  "id": 5,
+  "status": "Pending",
+  "total": 99.99,
+  "_links": {
+    "self": { "href": "/api/orders/5" },
+    "cancel": { "href": "/api/orders/5/cancel", "method": "DELETE" },
+    "pay": { "href": "/api/orders/5/pay", "method": "POST" }
+  }
+}
+```
+Instead of the client hardcoding "orders can be canceled via `DELETE /api/orders/{id}/cancel`," the API tells the client which actions are *currently valid* for this specific resource in its current state — notice there's no `"pay"` link if the order were already `Paid`, meaning the client doesn't even need business-rule knowledge baked in client-side.
+
+**Why most APIs skip it anyway:**
+- **Client complexity for uncertain benefit:** parsing and following hypermedia links is meaningfully more work for client developers than "just call the endpoint you already know," and most internal/first-party clients are built and deployed in lockstep with the API anyway — the theoretical decoupling benefit doesn't materialize when the same team owns both sides.
+- **No dominant standard:** unlike JSON itself, there's no single widely-adopted hypermedia format — HAL, JSON:API, and Siren all compete, fragmenting tooling and client library support.
+- **Versioning already solves the "avoid breaking clients" problem** that HATEOAS is partly meant to address, and most teams find explicit versioning easier to reason about than implicit link-following.
+
+**Where it does get used:** large, long-lived public APIs with many independent third-party clients (payment processors like Stripe use hypermedia-*adjacent* patterns), where decoupling client logic from server-side URL structure has real, measurable value over the API's multi-year lifetime.
+
+---

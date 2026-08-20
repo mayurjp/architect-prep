@@ -1,3 +1,5 @@
+# ASP.NET Core MVC — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is the Model-View-Controller (MVC) pattern and how is it implemented in ASP.NET Core?**
@@ -202,3 +204,117 @@ You must implement defenses at the earliest possible point in the request pipeli
 
 3. **Implement CAPTCHA (Application-level defense):**
    - For public registration endpoints, rate limiting by IP isn't always enough (attackers can use botnets with thousands of IPs). Adding a CAPTCHA (like Google reCAPTCHA or Cloudflare Turnstile) ensures that the submitter is a human, definitively stopping automated scripts.
+
+---
+
+## Beginner — Question 2
+
+**Q2: What is Razor syntax, and how does it mix C# with HTML in a `.cshtml` view?**
+
+Razor is a markup syntax that lets you embed C# directly inside HTML using the `@` symbol, compiled into a regular C# class at build time (or on first request) that generates the final HTML string.
+
+**The Mechanism:**
+```cshtml
+@model List<Product>
+
+<h1>Products (@Model.Count)</h1>
+
+<ul>
+@foreach (var product in Model)
+{
+    <li>@product.Name — @product.Price.ToString("C")</li>
+}
+</ul>
+
+@if (Model.Count == 0)
+{
+    <p>No products found.</p>
+}
+```
+
+- **`@model`** declares the strongly-typed model the view expects — gives you compile-time checking and IntelliSense on `Model`.
+- A single `@` followed by an expression (`@product.Name`) injects a C# value inline.
+- A `@{ }` code block, or control-flow keywords (`@if`, `@foreach`, `@for`) let you write full C# statements; Razor's parser is smart enough to detect where HTML resumes inside the braces without extra syntax.
+
+**How it actually runs:** at build (or first request) time, the Razor engine transpiles the `.cshtml` file into a C# class implementing `IView`, with a `ExecuteAsync()` method that calls `WriteLiteral()` for HTML chunks and `Write()` for `@`-expressions. This is why a typo in a Razor `@` expression shows up as a genuine C# compiler error, not a silent runtime string-substitution failure.
+
+**Common Pitfall:** forgetting that Razor **HTML-encodes** `@`-expressions by default (to prevent XSS) — `@userComment` escapes `<script>` tags automatically. If you deliberately need to render raw HTML (e.g., from a trusted CMS field), you must opt in explicitly with `@Html.Raw(userComment)`, and doing so on untrusted input reopens the exact XSS hole Razor was protecting you from.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is the difference between a Partial View and a View Component, and when should you use each?**
+
+Both let you extract reusable chunks of UI out of a full view, but they differ in how much logic they're allowed to carry.
+
+**Partial View (`_ProductCard.cshtml`):**
+- Pure UI/markup reuse — no independent data-fetching logic of its own.
+- Receives its model from the *parent* view that renders it; it cannot go fetch its own data.
+```cshtml
+@* In the parent view *@
+@foreach (var product in Model.Products)
+{
+    <partial name="_ProductCard" model="product" />
+}
+```
+
+**View Component (`WeatherViewComponent`):**
+- A self-contained mini-controller with its own `InvokeAsync` method that can call services, hit a database, or call an external API — genuinely independent of what the parent controller already loaded.
+```csharp
+public class WeatherViewComponent : ViewComponent {
+    private readonly IWeatherService _weather;
+    public WeatherViewComponent(IWeatherService weather) => _weather = weather;
+
+    public async Task<IViewComponentResult> InvokeAsync(string zipCode) {
+        var forecast = await _weather.GetForecastAsync(zipCode);
+        return View(forecast); // renders Default.cshtml in Views/Shared/Components/Weather/
+    }
+}
+```
+```cshtml
+@await Component.InvokeAsync("Weather", new { zipCode = "10001" })
+```
+
+**Decision guide:** if the chunk of UI just needs *data the parent already has*, use a Partial View — it's lighter weight, no DI resolution needed. If the chunk needs to independently fetch its *own* data (a different database call, a different service), use a View Component — trying to force that into a Partial View means polluting the parent controller with data it doesn't otherwise need, just to hand it down.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What are Areas in ASP.NET Core MVC, and when do they earn their complexity?**
+
+An Area is a way to partition a large MVC application into functional groups, each with its own Controllers, Views, and (optionally) Models — effectively a mini-application nested inside the main one.
+
+**The folder structure:**
+```text
+/Areas
+  /Admin
+    /Controllers/DashboardController.cs
+    /Views/Dashboard/Index.cshtml
+  /Blog
+    /Controllers/PostsController.cs
+    /Views/Posts/Index.cshtml
+/Controllers        <- non-area ("default") controllers still live here
+/Views
+```
+
+**Registering areas in routing:**
+```csharp
+app.MapControllerRoute(
+    name: "areas",
+    pattern: "{area:exists}/{controller=Home}/{action=Index}/{id?}");
+```
+The `{area:exists}` constraint means this route only matches if the area segment corresponds to an actual registered area — otherwise requests fall through to the default (non-area) route.
+
+**Marking a controller as belonging to an area:**
+```csharp
+[Area("Admin")]
+public class DashboardController : Controller { }
+```
+
+**When Areas earn their complexity:** a genuinely large application with clearly separable functional zones — e.g., a public storefront, an admin back-office, and a separate blog/CMS section — where each zone has its own set of controllers and views that would otherwise clutter a single flat `/Controllers` and `/Views` folder, and where you want the URL structure itself to reflect that separation (`/Admin/Dashboard`, `/Blog/Posts`).
+
+**Common Pitfall:** introducing Areas prematurely in a small-to-medium application "for organization." Areas add real friction — view lookup rules become more complex (`_ViewStart.cshtml` and `_Layout.cshtml` need per-area copies or explicit shared references), and route ambiguity between areas and default routes is a common source of confusing 404s. Simple folder organization within `/Controllers` and `/Views` (without Areas) is usually enough until an application genuinely has multiple, clearly distinct sub-applications.
+
+---

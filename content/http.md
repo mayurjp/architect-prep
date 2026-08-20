@@ -1,3 +1,5 @@
+# HTTP & Protocols — Q&A
+
 ## Beginner — Question 1
 
 **Q1: Explain HTTP verbs (GET, POST, PUT, PATCH, DELETE) and their idempotency.**
@@ -143,3 +145,132 @@ The decision between `POST` and `PUT` hinges on **Idempotency** and **Resource I
 `PUT` means "Replace the resource at this exact URL with the provided payload." 
 If your endpoint represents the *current* state of the thermometer (e.g., `PUT /api/thermometers/1/currentTemperature`), then applying `{"temp": 72.5}` means "make the current temperature 72.5". 
 If the network drops and the IoT device retries the `PUT` request 3 times, the end result is exactly the same: the current temperature is 72.5. It is inherently **idempotent**, which perfectly aligns with the unreliable network connections typical of IoT devices.
+
+---
+
+## Beginner — Question 3
+
+**Q3: What is the difference between HTTP/1.1, HTTP/2, and HTTP/3?**
+
+Each version solves a specific performance limitation of its predecessor, while keeping the same request/response semantics (methods, status codes, headers) — a `GET` still means `GET` in all three.
+
+**HTTP/1.1 — one request per connection at a time (per "slot"):**
+```http
+GET /style.css HTTP/1.1
+Host: example.com
+```
+Browsers work around this by opening multiple parallel TCP connections (typically 6 per domain) to fetch several resources at once — a heavyweight workaround, not a language feature.
+
+**HTTP/2 — multiplexing over a single TCP connection:**
+Instead of one request per connection, HTTP/2 breaks messages into binary **frames** tagged with a stream ID, letting many requests and responses interleave over one connection simultaneously — no more juggling 6 parallel connections just to load a page fast. It also adds **header compression (HPACK)** and **server push** (mostly deprecated in practice).
+
+**HTTP/3 — HTTP/2's semantics over QUIC instead of TCP:**
+```text
+HTTP/1.1 & HTTP/2:  Application -> TLS -> TCP -> IP
+HTTP/3:             Application -> QUIC (TLS built-in) -> UDP -> IP
+```
+HTTP/2 still suffers from **TCP head-of-line blocking** — if one TCP packet is lost, *all* multiplexed streams on that connection stall waiting for retransmission, because TCP guarantees strict byte-order delivery. HTTP/3 replaces TCP with **QUIC** (built on UDP), where each stream's lost packets only block *that* stream — the others keep flowing.
+
+**Common Pitfall:** assuming a server "supports HTTP/2" automatically means every request benefits — HTTP/2's multiplexing gains are most visible on pages with many small resources loaded concurrently; a single large file download sees little difference between versions.
+
+---
+
+## Intermediate — Question 2
+
+**Q2: What are conditional requests, and how do `ETag` / `If-None-Match` reduce bandwidth?**
+
+A conditional request lets the client tell the server "only send me the full response if the resource has actually changed since I last saw it" — turning a potentially large response into a tiny `304 Not Modified` when nothing changed.
+
+**Step 1 — server returns a validator with the resource:**
+```http
+GET /api/products/5 HTTP/1.1
+Host: example.com
+```
+```http
+HTTP/1.1 200 OK
+ETag: "a1b2c3d4"
+Cache-Control: max-age=0, must-revalidate
+
+{ "id": 5, "name": "Keyboard", "price": 29.99 }
+```
+
+**Step 2 — client re-validates instead of re-downloading:**
+```http
+GET /api/products/5 HTTP/1.1
+Host: example.com
+If-None-Match: "a1b2c3d4"
+```
+```http
+HTTP/1.1 304 Not Modified
+```
+No body is transmitted at all — the client just keeps using its cached copy.
+
+**Two validator styles:**
+- **`ETag` / `If-None-Match`** — an opaque token (hash or version), the strongest and most precise validator; works even if content changes without the timestamp changing.
+- **`Last-Modified` / `If-Modified-Since`** — a timestamp-based validator, simpler but only second-precision, so two changes within the same second can be missed.
+
+**Common Pitfall:** confusing `Cache-Control: max-age` (skip contacting the server entirely, for N seconds) with conditional requests (always contact the server, but skip re-transferring the body if unchanged) — they solve different problems and are often used together: `max-age` avoids the round-trip short-term, `ETag` minimizes payload size for the round-trips that do happen.
+
+---
+
+## Advanced — Question 2
+
+**Q2: What is the TCP three-way handshake, and why does every new HTTP/1.1 or HTTP/2 connection pay this cost upfront?**
+
+Before any HTTP bytes can be exchanged, TCP (the transport HTTP/1.1 and HTTP/2 run on) must establish a reliable, ordered connection between client and server — this setup is the three-way handshake.
+
+**The Mechanism:**
+```text
+Client                                  Server
+  |------------ SYN (seq=x) ------------->|   1. Client requests a connection
+  |<---- SYN-ACK (seq=y, ack=x+1) --------|   2. Server acknowledges + requests its own
+  |------------ ACK (ack=y+1) ------------>|   3. Client acknowledges — connection open
+  |                                        |
+  |------------ HTTP GET request -------->|   (only now can HTTP data flow)
+```
+Each leg of this exchange costs at least one network round-trip (RTT). On a mobile connection with 100ms latency, that's already ~150ms spent before a single byte of the actual HTTP request goes out — and if the connection is HTTPS, the TLS handshake (another 1–2 RTTs) stacks on top of that.
+
+**Why this matters for HTTP performance:**
+- **Connection reuse (`Connection: keep-alive`, HTTP/1.1's default)** avoids paying this cost on every request by reusing one TCP connection for multiple HTTP requests sequentially.
+- **HTTP/2 multiplexing** goes further — one handshake, then *many* concurrent requests share that same already-open connection.
+- **HTTP/3 (QUIC over UDP)** removes the TCP handshake from the picture entirely, and even combines the transport and TLS handshakes into a single round-trip (or zero, for a resumed connection) — this is a major reason HTTP/3 improves page-load latency on high-latency mobile networks specifically.
+
+**Common Pitfall:** benchmarking API latency by hitting an endpoint once and blaming "the API" for a slow first response, when a large chunk of that time was actually connection setup (TCP + TLS handshakes) rather than server processing — subsequent requests on a reused/pooled connection are typically dramatically faster for exactly this reason (this is also why `IHttpClientFactory`'s connection pooling matters so much on the .NET client side).
+
+---
+
+## Scenario — Question 4
+
+**Q4: A mobile client reports that an API call "took 2 seconds," but your server-side logs show the request was processed in 40ms. How do you use HTTP headers to figure out where the other ~1.96 seconds went?**
+
+When server-side processing time and client-observed time diverge this dramatically, the gap is almost always in the network/connection layer or an intermediary — and HTTP gives you headers specifically designed to pinpoint it, rather than guessing.
+
+**Step 1 — check `Server-Timing` for a server-side breakdown:**
+```http
+HTTP/1.1 200 OK
+Server-Timing: db;dur=12, cache;dur=1, app;dur=27
+```
+If your API emits this header (a standard, browser-devtools-visible way to report internal timing phases), you can immediately confirm the *server's own* 40ms breaks down as claimed — ruling out "the server is lying about its own processing time."
+
+**Step 2 — check for a CDN/proxy layer adding latency:**
+```http
+HTTP/1.1 200 OK
+Via: 1.1 varnish, 1.1 some-corporate-proxy
+X-Cache: MISS
+Age: 0
+```
+An `X-Cache: MISS` plus multiple hops in `Via` suggests the request had to travel through several intermediaries (each adding its own connection-setup and processing overhead) before ever reaching your app server — very different from a direct client-to-server path.
+
+**Step 3 — suspect connection setup, not transfer, using client-side timing (e.g., browser DevTools' Network tab / `PerformanceResourceTiming` API):**
+```text
+DNS Lookup:      340ms   <- resolving the domain
+Initial connection: 380ms   <- TCP handshake
+TLS negotiation:  410ms   <- TLS handshake
+Time to First Byte: 60ms    <- roughly matches your 40ms server time + a small hop
+Content Download:  20ms
+```
+In a case like this, the ~1.96 seconds is almost entirely **connection setup** (DNS + TCP + TLS), not server processing or data transfer — a classic mobile-network symptom (poor cell signal, DNS resolver latency, cold connection with no keep-alive reuse), not an application bug.
+
+**The fix, once diagnosed:** for connection-setup-dominated latency specifically, options include enabling **connection reuse/keep-alive** so subsequent requests skip the handshake, moving to **HTTP/2 or HTTP/3** to reduce the number of round-trips needed, or serving from a **CDN edge node** physically closer to the mobile client to cut DNS/TCP/TLS round-trip time. None of these are things you'd discover by only looking at server-side application logs — they require reading the HTTP-level timing signals end-to-end.
+
+---

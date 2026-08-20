@@ -1,3 +1,5 @@
+# ASP.NET Core — Q&A
+
 ## Beginner — Question 1
 
 **Q1: What is the ASP.NET Core Middleware pipeline?**
@@ -281,3 +283,118 @@ You must implement strict Request Size Limits and, for large files, use Streamin
    - You copy the stream asynchronously: `await section.Body.CopyToAsync(fileStream)`. 
    
 This allows the server to process a 5GB file using only a few kilobytes of RAM, completely mitigating the DoS attack.
+
+---
+
+## Beginner — Question 2
+
+**Q2: How does configuration work in ASP.NET Core (`appsettings.json`, environment variables, `IConfiguration`)?**
+
+ASP.NET Core reads configuration from multiple sources and merges them into a single unified `IConfiguration` object, rather than relying on one hardcoded file.
+
+**The Mechanism (layered providers, applied in order — later wins):**
+1. `appsettings.json`
+2. `appsettings.{Environment}.json` (e.g., `appsettings.Development.json`) — overrides the base file for that environment
+3. Environment variables
+4. Command-line arguments
+
+```json
+// appsettings.json
+{
+  "ConnectionStrings": { "Default": "Server=prod-db;..." },
+  "Logging": { "LogLevel": { "Default": "Information" } }
+}
+```
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+string? conn = builder.Configuration.GetConnectionString("Default");
+string? logLevel = builder.Configuration["Logging:LogLevel:Default"]; // colon = nested key
+```
+
+**Common Pitfall:** committing real secrets (connection strings, API keys) into `appsettings.json` and pushing it to source control. The correct pattern is to keep placeholder/non-sensitive defaults in the checked-in file and override the real values via environment variables or a secret store (`dotnet user-secrets` locally, Azure Key Vault / AWS Secrets Manager in production) — environment variables always win over the JSON file, precisely so production secrets never need to touch the repo.
+
+#### Follow-up: How does `appsettings.Development.json` get selected automatically?
+Via the `ASPNETCORE_ENVIRONMENT` environment variable (or `DOTNET_ENVIRONMENT`). `CreateBuilder` reads it at startup and loads `appsettings.{ASPNETCORE_ENVIRONMENT}.json` on top of the base file automatically — no code required.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is the Options pattern (`IOptions<T>`, `IOptionsSnapshot<T>`, `IOptionsMonitor<T>`), and why not just inject `IConfiguration` directly?**
+
+The Options pattern binds a section of configuration into a strongly-typed C# class, instead of scattering `configuration["Some:Nested:Key"]` string lookups (with no compile-time safety) throughout the codebase.
+
+```csharp
+public class SmtpSettings {
+    public string Host { get; set; } = string.Empty;
+    public int Port { get; set; }
+}
+
+// Program.cs
+builder.Services.Configure<SmtpSettings>(builder.Configuration.GetSection("Smtp"));
+
+// Consuming class
+public class EmailService {
+    private readonly SmtpSettings _settings;
+    public EmailService(IOptions<SmtpSettings> options) => _settings = options.Value;
+}
+```
+
+**The three flavors, and when each applies:**
+- **`IOptions<T>`** — resolved once, cached for the app's lifetime (registered as a Singleton internally). Doesn't pick up config changes after startup. Use for settings that genuinely never change while running.
+- **`IOptionsSnapshot<T>`** — recomputed **per Scoped lifetime** (per HTTP request), reflecting the latest values from reloadable config sources (like a `appsettings.json` with `reloadOnChange: true`). Use for settings that might change and you want the current value per-request.
+- **`IOptionsMonitor<T>`** — a Singleton-safe option that gives you the *current* value on demand (`.CurrentValue`) plus a `.OnChange()` callback, usable even from Singleton services (where `IOptionsSnapshot` can't be injected due to lifetime mismatch).
+
+**Common Pitfall:** injecting `IOptionsSnapshot<T>` into a Singleton service — this throws at startup, because a Scoped-lifetime service can't be captured by a Singleton (a captive dependency). Singletons that need live-reloading config must use `IOptionsMonitor<T>` instead.
+
+---
+
+## Advanced — Question 2
+
+**Q2: What is the difference between the old `Startup.cs` hosting model and the modern `WebApplicationBuilder`/minimal hosting model?**
+
+Both ultimately configure the same two things — the DI container (services) and the middleware pipeline — but the modern model (default since .NET 6) collapses what used to be two classes and two methods into one linear `Program.cs` file.
+
+**The old model (`Startup.cs`, .NET Core 3.1 / 5):**
+```csharp
+// Program.cs
+public class Program {
+    public static void Main(string[] args) =>
+        Host.CreateDefaultBuilder(args)
+            .ConfigureWebHostDefaults(webBuilder => webBuilder.UseStartup<Startup>())
+            .Build().Run();
+}
+
+// Startup.cs
+public class Startup {
+    public void ConfigureServices(IServiceCollection services) {
+        services.AddControllers(); // DI registration
+    }
+    public void Configure(IApplicationBuilder app, IWebHostEnvironment env) {
+        app.UseRouting();          // middleware pipeline
+        app.UseEndpoints(endpoints => endpoints.MapControllers());
+    }
+}
+```
+
+**The modern model (`WebApplicationBuilder`, .NET 6+):**
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddControllers();   // same DI registration, no separate class
+
+var app = builder.Build();
+app.UseRouting();                    // same middleware pipeline, same file
+app.MapControllers();
+
+app.Run();
+```
+
+**What actually changed:**
+- `ConfigureServices` and `Configure` are gone as separate lifecycle methods — everything happens linearly, top to bottom, in `Program.cs`. This isn't just cosmetic: it removes the split-brain of "where do I register vs. configure this," which used to trip up newcomers constantly.
+- Top-level statements (C# 9+) let `Program.cs` skip the `class Program { static void Main() }` boilerplate entirely.
+- `WebApplication` implements both `IApplicationBuilder` (pipeline) and `IEndpointRouteBuilder` (routing) — one object does what used to require `IApplicationBuilder` + `IWebHostEnvironment` + `IEndpointRouteBuilder` passed around separately.
+
+**Common Pitfall:** assuming the old `Startup.cs` model is deprecated/broken — it's still fully supported (`.UseStartup<Startup>()` still works in .NET 6+) for large existing codebases that don't want a risky rewrite; it's just no longer the default template for new projects.
+
+---
