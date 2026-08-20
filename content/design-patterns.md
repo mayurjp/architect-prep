@@ -927,3 +927,121 @@ Each class represents one specific grammar rule (`NumberExpression` for a litera
 **Common Pitfall:** hand-implementing a custom Interpreter-pattern-based expression language for a need that an existing, mature library (or even just `System.Linq.Expressions` and the C# language's own operators) would handle more robustly, with far less code and far fewer edge-case bugs — the Interpreter pattern is valuable to *understand*, but reaching for a battle-tested existing tool is almost always the pragmatic choice over hand-rolling a new grammar/evaluator from scratch for anything beyond a genuinely tiny, narrowly-scoped need.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is the Facade pattern, and how does providing ONE simplified interface over a complex subsystem reduce the number of classes client code needs to know about directly?**
+
+The Facade pattern introduces a single, simplified class sitting in front of a complex subsystem made up of many interacting classes — client code interacts only with the Facade, which internally coordinates whatever subsystem classes are actually needed, hiding that internal complexity entirely from the client.
+
+```csharp
+// The COMPLEX subsystem -- many classes, each with their own setup and coordination requirements
+public class VideoConverter { public void Convert(string file) { /* ... */ } }
+public class AudioNormalizer { public void Normalize(string file) { /* ... */ } }
+public class ThumbnailGenerator { public void Generate(string file) { /* ... */ } }
+public class MetadataWriter { public void Write(string file) { /* ... */ } }
+
+// The FACADE -- ONE simple entry point, hiding all the subsystem coordination
+public class VideoProcessingFacade
+{
+    private readonly VideoConverter _converter = new();
+    private readonly AudioNormalizer _normalizer = new();
+    private readonly ThumbnailGenerator _thumbnailGen = new();
+    private readonly MetadataWriter _metadataWriter = new();
+
+    public void ProcessVideo(string file) // ONE method call replaces coordinating FOUR separate classes
+    {
+        _converter.Convert(file);
+        _normalizer.Normalize(file);
+        _thumbnailGen.Generate(file);
+        _metadataWriter.Write(file);
+    }
+}
+
+// Client code -- knows about ONE class, not four
+new VideoProcessingFacade().ProcessVideo("myvideo.mp4");
+```
+Without the Facade, client code would need to know about all four subsystem classes individually, in what order to call them, and how their outputs relate to each other — the Facade absorbs all of that coordination knowledge internally, exposing just one simple method that represents the complete, common operation clients actually need.
+
+**Why a Facade doesn't PREVENT direct access to the underlying subsystem:** unlike some patterns that fully encapsulate and hide their internals, a Facade is explicitly a *convenience* layer — code with genuinely advanced needs (needing fine-grained control over just the `AudioNormalizer` alone, say) can still bypass the Facade and use the underlying subsystem classes directly; the Facade simplifies the *common* case without removing the option of deeper access for less common ones.
+
+**Common Pitfall:** letting a Facade accumulate so much additional logic over time that it becomes a complex subsystem in its own right (a "God Facade") — a Facade is meant to be a thin, simplifying coordination layer over an existing subsystem, not a place to accumulate substantial new business logic; if a Facade grows large and complex enough to need its own internal decomposition, that's a signal it has outgrown its original, simplifying purpose.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is the Proxy pattern's "Virtual Proxy" variant specifically (as distinct from Protection or Remote Proxies), and how does it defer the cost of creating an expensive object until it's ACTUALLY needed?**
+
+A Virtual Proxy stands in for an expensive-to-create object, deferring the actual creation until the moment it's genuinely needed (lazy initialization) — client code interacts with the proxy exactly as if it were the real object, unaware that the real, expensive object might not have been created yet at all.
+
+```csharp
+public interface IImage { void Display(); }
+
+public class HighResolutionImage : IImage // EXPENSIVE to construct -- loads a large file from disk
+{
+    public HighResolutionImage(string path) { /* expensive file load happens HERE */ }
+    public void Display() { /* renders the already-loaded image */ }
+}
+
+public class ImageProxy : IImage // the VIRTUAL PROXY -- looks identical to the real thing from OUTSIDE
+{
+    private readonly string _path;
+    private HighResolutionImage? _realImage; // NOT created yet
+
+    public ImageProxy(string path) => _path = path; // CHEAP -- just stores the path, no expensive load yet
+
+    public void Display()
+    {
+        _realImage ??= new HighResolutionImage(_path); // the EXPENSIVE load happens HERE, on FIRST use only
+        _realImage.Display();
+    }
+}
+```
+Creating an `ImageProxy` is cheap regardless of how expensive `HighResolutionImage`'s actual construction is — the real, expensive object is only constructed the first time `Display()` is actually called, meaning a gallery holding a hundred `ImageProxy` instances (representing a hundred images the user might never actually scroll to) never pays the loading cost for images that are never actually displayed.
+
+**Why this differs from simply calling `new HighResolutionImage(path)` lazily inline, without a formal Proxy class:** the Proxy pattern's specific value is that `ImageProxy` implements the *exact same interface* (`IImage`) as the real object — meaning client code holding an `IImage` reference doesn't need to know or care whether it's holding a proxy or the real thing; ad-hoc lazy-initialization inline code would require every call site to handle the "is it loaded yet?" logic itself, rather than that logic being fully encapsulated and invisible behind a substitutable, interface-compatible proxy.
+
+**Common Pitfall:** using a Virtual Proxy for an object that's actually cheap to construct — the pattern's entire justification is deferring a *genuinely expensive* construction cost; wrapping a cheap-to-create object in a Virtual Proxy adds indirection and complexity for essentially zero benefit, since there's no meaningful cost being deferred in the first place.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is the Chain of Responsibility pattern's relationship to ASP.NET Core's own Middleware Pipeline (covered under the ASP.NET Core topic), and how does recognizing this connection deepen understanding of BOTH?**
+
+The Chain of Responsibility pattern passes a request along a chain of handler objects, each deciding either to process the request itself, pass it to the next handler in the chain, or both — ASP.NET Core's middleware pipeline is a direct, concrete, real-world application of exactly this pattern, just under different terminology and with framework-specific conventions layered on top.
+
+```csharp
+// The GENERAL Chain of Responsibility pattern, expressed abstractly:
+public abstract class Handler
+{
+    protected Handler? _next;
+    public Handler SetNext(Handler next) { _next = next; return next; }
+    public abstract void Handle(Request request);
+}
+
+public class AuthHandler : Handler
+{
+    public override void Handle(Request request)
+    {
+        if (!request.IsAuthenticated) { /* reject, don't call _next */ return; }
+        _next?.Handle(request); // pass along the chain
+    }
+}
+```
+```csharp
+// ASP.NET Core middleware -- the EXACT SAME structural pattern, framework-specific terminology
+app.Use(async (context, next) =>
+{
+    if (!context.User.Identity!.IsAuthenticated) { context.Response.StatusCode = 401; return; }
+    await next(context); // pass along the chain -- IDENTICAL structural role to _next?.Handle() above
+});
+```
+Each middleware component (like each `Handler` in the abstract pattern) decides whether to short-circuit the chain (rejecting the request, as the auth check does above) or pass control to the next component — the `next` delegate in ASP.NET Core plays the exact structural role the abstract pattern's `_next` reference plays, just expressed through the specific idioms (delegates, `async`/`await`) ASP.NET Core's implementation happens to use.
+
+**Why recognizing this connection is valuable beyond mere trivia:** understanding that ASP.NET Core's middleware pipeline IS a Chain of Responsibility implementation means everything already understood about the general pattern (each link can independently decide to short-circuit, order matters, each link is decoupled from knowing about the full chain) transfers directly to reasoning about middleware ordering, short-circuiting behavior, and why a middleware placed early can prevent every later middleware from ever running at all — general design pattern knowledge and framework-specific knowledge reinforce each other rather than being two separate, unrelated things to learn.
+
+**Common Pitfall:** learning ASP.NET Core's middleware pipeline as an isolated, framework-specific mechanism without recognizing its structural identity with the general Chain of Responsibility pattern — this misses an opportunity to transfer general pattern knowledge (much of it covered throughout this very topic) directly onto a very concrete, everyday framework mechanism, understanding both more deeply than treating them as two entirely separate, unrelated things to memorize independently.
+
+---

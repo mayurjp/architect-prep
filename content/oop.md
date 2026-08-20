@@ -844,3 +844,92 @@ This version is genuinely, behaviorally substitutable — any client code that w
 **Common Pitfall:** treating "it compiles and passes the existing test suite" as sufficient evidence of correct Behavioral Subtyping — an incomplete test suite (one that happens not to exercise the specific behavioral property a new subtype violates) can pass cleanly even while a genuine LSP/Behavioral Subtyping violation lurks undetected, precisely because the gap between syntactic and semantic substitutability is invisible to any check that doesn't specifically probe the exact behavioral property in question.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is "Method Overloading," and how does the compiler decide WHICH overload to call based purely on the number and types of arguments provided at the call site?**
+
+Method Overloading lets a class define multiple methods sharing the same name but differing in their parameter list (different number of parameters, or different parameter types) — the compiler examines the arguments at each call site and selects the overload whose parameter list matches, entirely at compile time.
+
+```csharp
+public class Calculator
+{
+    public int Add(int a, int b) => a + b;                    // overload #1
+    public double Add(double a, double b) => a + b;            // overload #2 -- different parameter TYPES
+    public int Add(int a, int b, int c) => a + b + c;           // overload #3 -- different parameter COUNT
+}
+
+var calc = new Calculator();
+calc.Add(2, 3);        // compiler selects overload #1 (int, int)
+calc.Add(2.5, 3.5);     // compiler selects overload #2 (double, double)
+calc.Add(1, 2, 3);      // compiler selects overload #3 (int, int, int)
+```
+The compiler performs "overload resolution" purely from the static, compile-time types of the arguments at each call site — this is resolved entirely at compile time (unlike virtual method dispatch, covered elsewhere, which is resolved at runtime based on the object's actual type), meaning the specific overload called is fixed and known before the program ever runs.
+
+**Common Pitfall:** confusing Method Overloading (same name, different parameter signatures, resolved at compile time) with Method Overriding (same signature, different implementation in a derived class, resolved at runtime via virtual dispatch) — these are two entirely different mechanisms serving different purposes, and mixing up their terminology (or their actual behavior) is a common source of confusion, especially since both involve "a method with the same name behaving differently" on the surface.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is the "Composite Reuse Principle" (favoring object composition over class inheritance), and what specific rigidity does composition avoid that a deep inheritance hierarchy tends to introduce?**
+
+The Composite Reuse Principle states: prefer achieving code reuse by composing objects together (one class holding a reference to another and delegating to it) rather than by inheriting from a base class — composition creates a more flexible, loosely-coupled relationship that can be reconfigured at runtime, whereas inheritance creates a rigid, compile-time-fixed relationship between a class and its ancestors.
+
+```csharp
+// INHERITANCE -- rigid, fixed at compile time, and DEEPLY couples Car to Engine's specific implementation
+public class Car : Engine { } // Car IS-A Engine?? this is already a questionable relationship
+
+// COMPOSITION -- Car HAS-A Engine, can be swapped/reconfigured, far more flexible
+public class Car
+{
+    private IEngine _engine;
+    public Car(IEngine engine) => _engine = engine; // ANY IEngine implementation can be plugged in
+    public void Start() => _engine.Start();
+}
+
+var car = new Car(new ElectricEngine()); // swap engines FREELY, at RUNTIME, no inheritance hierarchy involved
+```
+With composition, `Car` can be given a completely different `IEngine` implementation at runtime (or even have its engine swapped out later) without any change to `Car`'s own class definition — with inheritance, `Car`'s relationship to `Engine` is fixed permanently at compile time, and changing it means changing `Car`'s own class declaration and recompiling.
+
+**Why deep inheritance hierarchies specifically become rigid over time:** each additional level of inheritance tightly couples a subclass to its entire chain of ancestors' implementation details (the Fragile Base Class Problem, covered earlier) — composition avoids this by keeping each component's relationship to others expressed through a narrow, explicit interface, rather than through the broad, often-implicit contract an entire inheritance chain represents.
+
+**Common Pitfall:** reaching for inheritance as the default code-reuse mechanism whenever two classes happen to share some behavior, without first asking whether the relationship is genuinely an "IS-A" relationship (justifying inheritance) or more accurately a "HAS-A"/"USES-A" relationship (better expressed through composition) — inheritance misused purely for code reuse, without a genuine IS-A relationship, tends to produce exactly the rigid, fragile hierarchies the Composite Reuse Principle specifically advises against.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is "Mixin"-style composition (as approximated in C# via default interface methods), and how does it let a type gain a specific, reusable slice of behavior WITHOUT full multiple inheritance?**
+
+A Mixin provides a reusable, self-contained unit of behavior that can be "mixed into" multiple otherwise-unrelated classes — C# doesn't support true multiple inheritance of implementation, but default interface methods (introduced in C# 8) let an interface itself provide a default method body, letting any implementing class gain that behavior automatically without needing to inherit it from a base class.
+
+```csharp
+public interface ILoggable
+{
+    string GetLogIdentifier(); // still abstract -- each implementer must supply this
+
+    void LogAction(string action) // DEFAULT implementation -- a "mixin" of shared behavior
+    {
+        Console.WriteLine($"[{GetLogIdentifier()}] {action}");
+    }
+}
+
+public class Order : ILoggable
+{
+    public string GetLogIdentifier() => $"Order-{Id}";
+    // LogAction() is INHERITED from the interface's default implementation -- NO base class needed!
+}
+
+public class User : ILoggable // an UNRELATED class, ALSO gains the SAME mixin behavior
+{
+    public string GetLogIdentifier() => $"User-{Username}";
+}
+```
+Both `Order` and `User` gain identical `LogAction` behavior despite having no inheritance relationship to each other at all — each simply implements `ILoggable`, and the shared logging logic comes "mixed in" via the interface's default method, rather than requiring both to inherit from some common base class (which would force an artificial, unrelated IS-A relationship purely to share this one behavior).
+
+**Why this is a genuine (if partial) alternative to a base class purely for behavior-sharing:** unlike inheriting from a shared base class (which commits a type to a single, fixed ancestor and everything else that ancestor might bring along), a type can implement *multiple* interfaces, each contributing its own independent mixin-style default behavior — approximating some of what true multiple inheritance would provide, without C#'s single-inheritance-of-classes restriction being violated at all.
+
+**Common Pitfall:** overusing default interface methods to smuggle substantial, stateful business logic into interfaces, rather than reserving them for small, genuinely stateless, cross-cutting behaviors (like the logging example) — interfaces still cannot hold instance fields, so any default method relying on meaningful internal state quickly runs into awkward workarounds; default interface methods work best for small, focused, mixin-style behaviors, not as a wholesale replacement for genuine base-class-based inheritance where substantial shared state is actually needed.
+
+---

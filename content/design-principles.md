@@ -777,3 +777,95 @@ By collapsing the three separately-callable, order-dependent methods into one me
 **Common Pitfall:** exposing multiple public methods on a class that secretly require a specific call order, relying purely on documentation (a code comment, a wiki page) to communicate that requirement to callers — documentation is easy to miss or skip entirely, whereas structurally eliminating the possibility of an incorrect call sequence (collapsing separately-ordered steps into one method, or using the type system to make an invalid sequence simply uncompilable) provides a guarantee that documentation alone never can.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is the "Principle of Least Astonishment," and how does naming a method or class in a way that misleadingly implies different behavior than what it actually does violate it?**
+
+The Principle of Least Astonishment states: a component's behavior should match what its name, signature, and surrounding context lead a reasonable developer to expect — a piece of code that "surprises" someone reading or calling it, even if technically correct, imposes an ongoing cognitive tax on everyone who has to work with it.
+
+```csharp
+// SURPRISING -- the name implies a read-only query, but it SECRETLY has a side effect
+public class OrderRepository
+{
+    public Order GetOrder(int id)
+    {
+        var order = _db.Orders.Find(id);
+        order.LastAccessedAt = DateTime.UtcNow; // SIDE EFFECT -- hidden inside a method named "Get"!
+        _db.SaveChanges();
+        return order;
+    }
+}
+```
+```csharp
+// UNSURPRISING -- the name accurately signals what actually happens
+public Order GetOrder(int id) => _db.Orders.Find(id); // a pure read, exactly as the name suggests
+
+public void RecordOrderAccess(int id) // a SEPARATE, honestly-named method for the side effect
+{
+    var order = _db.Orders.Find(id);
+    order.LastAccessedAt = DateTime.UtcNow;
+    _db.SaveChanges();
+}
+```
+A method named `GetOrder` strongly implies a simple, side-effect-free read — a developer calling it in a hot, frequently-executed read path would have no reason to suspect it's silently writing to the database on every single call, potentially causing an unexpected performance problem or unintended data mutation that's genuinely difficult to trace back to "just calling a getter."
+
+**Common Pitfall:** naming a method after its most prominent *intended* use case rather than its *complete* actual behavior (a method genuinely named `Get...` that also happens to mutate state, log, or trigger a side effect) — even if the side effect seems minor or well-intentioned, a name that doesn't honestly reflect everything the method does sets up every future caller to be "astonished" the moment they encounter the hidden behavior, usually in production, often at the worst possible time.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is "Programming to an Interface, not an Implementation," and how does declaring a variable's TYPE as an interface (rather than a concrete class) preserve the freedom to swap implementations later without changing dependent code?**
+
+This principle states: code that depends on some behavior should reference that behavior through an interface/abstract type, rather than a specific concrete class — doing so means any code depending on that interface never needs to change when the underlying concrete implementation is later swapped for a different one.
+
+```csharp
+// Programming to an IMPLEMENTATION -- tightly coupled to SqlOrderRepository SPECIFICALLY
+public class OrderService
+{
+    private readonly SqlOrderRepository _repository = new(); // hardcoded to ONE specific implementation
+}
+
+// Programming to an INTERFACE -- depends only on the ABSTRACTION, not any specific implementation
+public class OrderService
+{
+    private readonly IOrderRepository _repository; // could be SQL, MongoDB, in-memory, ANYTHING implementing this
+    public OrderService(IOrderRepository repository) => _repository = repository;
+}
+```
+Because `OrderService` only ever references `IOrderRepository`, swapping the actual underlying implementation from `SqlOrderRepository` to, say, `MongoOrderRepository` requires zero changes to `OrderService`'s own code — the swap happens entirely at the composition/DI-registration point (covered under Dependency Injection elsewhere), completely invisible to any code that only ever depended on the interface.
+
+**Why this specifically enables testability, not just swappable production implementations:** because `OrderService` depends on `IOrderRepository` rather than `SqlOrderRepository` directly, a unit test can substitute a lightweight fake/mock implementation of `IOrderRepository` with zero database involved at all — this same "programming to an interface" discipline that enables swapping production implementations is exactly what makes isolated unit testing (without spinning up a real database) possible in the first place.
+
+**Common Pitfall:** declaring a field or parameter's type as the concrete class even when only interface-level behavior is actually needed ("I'll just use the concrete type since that's what I'm actually using right now") — this quietly reintroduces tight coupling to that one specific implementation, foreclosing the ability to swap it later (for a different production implementation, or for a test double) without now needing to change every place that referenced the concrete type directly.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is "Command-Query Separation" (CQS) at the METHOD level (as distinct from the architectural CQRS pattern it inspired), and why does a method that BOTH mutates state and returns a meaningful value violate it?**
+
+Command-Query Separation states: every method should be either a Command (performs an action, changes state, returns `void`) or a Query (returns data, causes no observable side effect) — never both simultaneously. A method violating this (mutating state *and* returning a meaningful value) makes it impossible to safely call the method purely to "just check something" without also risking an unintended side effect.
+
+```csharp
+// VIOLATES CQS -- looks like it might just be checking something, but ALSO mutates state
+public bool TryDeductBalance(decimal amount)
+{
+    if (_balance < amount) return false;
+    _balance -= amount; // MUTATION, hidden inside what looks like it might just be a query
+    return true;
+}
+```
+```csharp
+// FOLLOWS CQS -- the Query and the Command are explicitly SEPARATE methods
+public bool HasSufficientBalance(decimal amount) => _balance >= amount; // QUERY -- no side effect, ever
+public void DeductBalance(decimal amount) => _balance -= amount;         // COMMAND -- mutates, returns void
+```
+With the CQS-compliant version, a caller can call `HasSufficientBalance` purely to check the current state, as many times as needed, with complete confidence that doing so never mutates anything — with the violating version, simply calling `TryDeductBalance` to "see what would happen" isn't safe at all, since the act of checking is inseparably bundled with an actual mutation.
+
+**Why the popular `TryXxx` idiom (`TryParse`, `TryGetValue`) is a widely-accepted, deliberate EXCEPTION to strict CQS, not a counterexample disproving it:** `int.TryParse` both returns a boolean AND produces an output value, technically blending query-like and command-like characteristics — but critically, it has no *externally observable side effect* (no mutation of any shared or external state) — CQS's actual concern is specifically about avoiding HIDDEN, meaningful **mutations** disguised as queries, not about strictly forbidding a method from ever returning a value alongside a boolean status.
+
+**Common Pitfall:** treating CQS as an absolute, universal rule requiring literally every single method to be strictly one or the other, and treating any exception (like the widely-used `TryXxx` idiom) as evidence the principle itself is invalid — CQS is a valuable *default discipline* specifically aimed at avoiding methods that hide a genuine, meaningful state mutation behind what looks like an innocuous query; well-understood, side-effect-free idioms like `TryParse` are a deliberate, narrow, widely-accepted exception, not a refutation of the principle's actual underlying concern.
+
+---

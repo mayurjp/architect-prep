@@ -771,3 +771,90 @@ The extra construction cost comes from `FrozenDictionary` analyzing the specific
 **Common Pitfall:** using `FrozenDictionary` for data that's actually rebuilt or modified frequently (misunderstanding it as simply "a faster Dictionary" rather than specifically "an immutable, build-once structure optimized for many subsequent reads") — rebuilding a `FrozenDictionary` from scratch every time its underlying data changes pays the (higher) construction cost repeatedly, potentially making it *slower* overall than simply using a regular, mutable `Dictionary` would have been for data that doesn't actually stay static long enough to amortize the frozen structure's upfront cost.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is the .NET `IDisposable` interface and the `using` statement, and how does `using` guarantee `Dispose()` is called even if an exception is thrown inside the block?**
+
+`IDisposable` is the standard .NET convention for a type holding an unmanaged or otherwise scarce resource (a file handle, a database connection, a network socket) to expose a `Dispose()` method releasing that resource deterministically. The `using` statement (or `using` declaration) guarantees `Dispose()` runs when the block exits — via normal completion **or** an exception — by compiling down to an implicit `try`/`finally`.
+
+```csharp
+using (var file = new StreamReader("data.txt"))
+{
+    var content = file.ReadToEnd();
+    if (content.Length == 0) throw new InvalidDataException("Empty file");
+    // even though an exception was just thrown, file.Dispose() STILL runs, closing the file handle
+}
+```
+```csharp
+// Compiles down to (conceptually) this:
+var file = new StreamReader("data.txt");
+try
+{
+    var content = file.ReadToEnd();
+    if (content.Length == 0) throw new InvalidDataException("Empty file");
+}
+finally
+{
+    file.Dispose(); // GUARANTEED to run, exception or not
+}
+```
+Without `using` (or its equivalent explicit `try`/`finally`), an exception thrown between acquiring the resource and manually calling `Dispose()` would skip the `Dispose()` call entirely, leaking the underlying file handle/connection/socket — `using`'s compiler-generated `finally` block is what guarantees the resource is always released, regardless of how the block's execution actually ends.
+
+**Common Pitfall:** manually calling `.Dispose()` at the end of a method without wrapping the resource's usage in a `using` block (or an explicit `try`/`finally`) — if any code between acquisition and that manual `Dispose()` call throws, the `Dispose()` call is simply never reached, silently leaking the resource; `using` (or the C# 8+ `using` declaration syntax, which doesn't even require an explicit block) should be the default whenever working with any `IDisposable` resource.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is .NET's `IAsyncDisposable` interface, and why does asynchronous cleanup (`DisposeAsync`) matter for a resource whose cleanup itself involves genuine I/O, as opposed to `IDisposable`'s synchronous `Dispose()`?**
+
+`IAsyncDisposable` provides an asynchronous counterpart to `IDisposable` — `DisposeAsync()` — for resources whose cleanup logic itself performs real I/O (flushing a network stream, closing a database connection that requires a final round-trip) that would otherwise need to block a thread synchronously during an ordinary `Dispose()` call.
+
+```csharp
+public class NetworkResource : IAsyncDisposable
+{
+    public async ValueTask DisposeAsync()
+    {
+        await _stream.FlushAsync();      // genuine I/O -- would BLOCK a thread if done synchronously
+        await _connection.CloseAsync();  // likewise involves a real network round-trip
+    }
+}
+
+await using (var resource = new NetworkResource())
+{
+    // ... use resource ...
+} // DisposeAsync() awaited automatically here, WITHOUT blocking a thread during cleanup
+```
+`await using` compiles to an equivalent `try`/`finally` that `await`s `DisposeAsync()` in the `finally` block, rather than calling a synchronous `Dispose()` — this means the thread pool thread isn't blocked while cleanup's genuine I/O work completes, consistent with the broader async/await philosophy (covered extensively elsewhere) of never blocking a thread on I/O that could instead be awaited.
+
+**Why a type would implement BOTH `IDisposable` and `IAsyncDisposable`:** many real-world types offer both, letting synchronous callers (who can't easily `await`) still call the synchronous `Dispose()` (potentially blocking briefly on the underlying I/O), while asynchronous callers get the fully non-blocking `DisposeAsync()` path — providing both makes the type usable correctly in either a fully-synchronous or fully-asynchronous calling context.
+
+**Common Pitfall:** calling the synchronous `Dispose()` on a resource that implements `IAsyncDisposable` specifically because its cleanup involves meaningful I/O, inside a hot, high-concurrency asynchronous code path — this blocks a thread pool thread for the duration of that I/O-bound cleanup, exactly the kind of synchronous-blocking-on-I/O anti-pattern async/await exists to avoid; `await using`/`DisposeAsync()` should be the default choice whenever a type offers `IAsyncDisposable` and the calling context is already asynchronous.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is .NET's `RuntimeHelpers.IsKnownConstant` / the JIT's constant-folding for `const` values, and how does a `const` field's value being baked directly into CALLING assemblies (rather than referenced at runtime) create a specific versioning hazard across separately-compiled assemblies?**
+
+A C# `const` field's value is embedded directly into the IL of every assembly that references it, at the point that referencing assembly is *compiled* — unlike a `static readonly` field (whose value is read from the defining assembly at runtime, every time), a `const`'s value becomes a literal, baked-in copy inside each consuming assembly's own compiled output.
+
+```csharp
+// LibraryA.dll
+public static class Config
+{
+    public const int MaxRetries = 3;         // baked DIRECTLY into every assembly that references it
+    public static readonly int DefaultTimeout = 30; // read from LibraryA.dll AT RUNTIME, every time
+}
+
+// ConsumingApp.dll (compiled AGAINST LibraryA.dll v1.0, where MaxRetries = 3)
+Console.WriteLine(Config.MaxRetries); // this literally COMPILES TO "Console.WriteLine(3);" -- baked in!
+```
+If `LibraryA.dll` is later updated (`MaxRetries` changed to `5`) and deployed **without recompiling** `ConsumingApp.dll`, `ConsumingApp` continues printing `3` — the literal value baked into its own compiled IL at the time it was originally built — completely oblivious to the new value in the updated library, since it never actually reads `Config.MaxRetries` from `LibraryA.dll` at runtime at all. `DefaultTimeout`, being `static readonly`, would correctly reflect the new library's value without requiring `ConsumingApp` to be recompiled.
+
+**Why this specifically matters for library authors distributing NuGet packages:** a library that exposes a `const` field and later changes its value creates a "binary compatible but silently behaviorally wrong" situation for any consumer that doesn't recompile against the new version — the consumer's binary still loads and runs fine (no compile/link error), but silently uses the *old*, stale value baked in at its own last compile time, a subtle bug that's easy to overlook since nothing throws or fails visibly.
+
+**Common Pitfall:** exposing a `public const` field on a publicly-versioned library, particularly one whose value might reasonably change in a future release — `static readonly` is almost always the safer choice for any publicly-exposed value that isn't truly, permanently fixed forever (like a genuinely immutable mathematical or physical constant), specifically because it avoids this "stale baked-in value surviving a library update without recompilation" hazard entirely.
+
+---
