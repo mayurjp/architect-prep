@@ -625,3 +625,106 @@ public void StartBackgroundWork()
 **Common Pitfall:** injecting `IHttpContextAccessor` into a class with a lifetime longer than a single request (a Singleton, or a background service) and treating its `.HttpContext` property as something safe to read at any arbitrary later point — outside the scope of the original request that set it, `.HttpContext` may return `null` entirely (there's no "current" request in a background thread's `AsyncLocal` flow) or, worse, a recycled context belonging to a different request.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is `app.UseStaticFiles()`, and how does it let ASP.NET Core serve files (CSS, JS, images) directly from the `wwwroot` folder without those requests ever reaching a controller?**
+
+`UseStaticFiles()` middleware checks whether an incoming request's path matches a file physically present in the `wwwroot` folder — if it does, the middleware serves that file's bytes directly and short-circuits the pipeline, meaning the request never proceeds to routing, controllers, or any application code at all.
+
+**The setup:**
+```csharp
+var app = builder.Build();
+app.UseStaticFiles(); // serves anything under wwwroot/ directly
+app.UseRouting();
+app.MapControllers();
+```
+```text
+wwwroot/
+  css/site.css
+  js/app.js
+  images/logo.png
+```
+A request for `/css/site.css` is matched by the static files middleware against `wwwroot/css/site.css` — if found, it's served immediately, with the correct `Content-Type` header inferred from the file extension, and the request pipeline stops there entirely; it never reaches routing or any controller action.
+
+**Why this middleware is placed early in the pipeline:** since static file serving should be fast and bypass unrelated overhead (authentication checks, MVC routing logic) for simple asset requests, `UseStaticFiles()` is conventionally placed near the very start of the pipeline — a request for a CSS file shouldn't need to run through authorization middleware or routing resolution at all if it's just a static asset with no access restrictions.
+
+**Common Pitfall:** placing sensitive files inside `wwwroot` assuming "the application controls what's served" — anything physically present in `wwwroot` (or whichever folder is configured) is served to **any** client who knows or guesses the path, with no authentication or authorization check applied at all by default; genuinely sensitive files (configuration, uploaded user documents that need access control) should never be placed in the static files folder, since `UseStaticFiles()` performs no access-control checks of its own.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is the ASP.NET Core `IHostedService`/`BackgroundService`'s relationship to graceful application shutdown, and how does `StopAsync`'s own timeout interact with the earlier SIGTERM/Kubernetes grace period discussion?**
+
+Covered earlier in the context of Kubernetes sending `SIGTERM` before a Pod is terminated — the actual mechanism that receives and acts on that signal *inside* an ASP.NET Core application is the Generic Host's shutdown sequence, which calls `StopAsync()` on every registered `IHostedService` (including any `BackgroundService`), each with its own configurable timeout.
+
+**The Mechanism — the Host orchestrates an ordered, timeout-bounded shutdown:**
+```csharp
+public class QueueProcessor : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            await ProcessNextMessageAsync(stoppingToken);
+        }
+    }
+}
+```
+When the Host receives the shutdown signal (from `SIGTERM`, or `Ctrl+C` locally), it:
+1. Signals `stoppingToken` as cancelled, requesting every `BackgroundService` to wind down its own loop gracefully.
+2. Waits up to `HostOptions.ShutdownTimeout` (default 30 seconds, configurable) for all hosted services to actually finish.
+3. If a service hasn't stopped within that timeout, the Host proceeds with shutdown anyway, potentially abandoning in-progress work in that service.
+
+**Configuring the shutdown timeout to match actual processing needs:**
+```csharp
+builder.Services.Configure<HostOptions>(options =>
+{
+    options.ShutdownTimeout = TimeSpan.FromSeconds(60); // give background work more time to finish gracefully
+});
+```
+
+**Why this must align with the Kubernetes `terminationGracePeriodSeconds` covered earlier:** if ASP.NET Core's own `ShutdownTimeout` is set *longer* than Kubernetes' grace period, Kubernetes will `SIGKILL` the process before the application's own graceful shutdown logic even finishes — the two settings need to be coordinated (Kubernetes' grace period should be equal to or longer than the application's own configured shutdown timeout, with some margin), or the application-level graceful-shutdown code is silently cut short regardless of how carefully it was written.
+
+**Common Pitfall:** implementing careful graceful-shutdown logic inside a `BackgroundService` (finishing the current message before checking the cancellation token) without also verifying the surrounding Kubernetes/container orchestrator's grace period is long enough to actually let that logic complete — the application-level code can be perfectly correct and still get forcibly killed mid-shutdown if the *infrastructure's* grace period is shorter than what the application actually needs.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is a Custom `ActionResult` (implementing `IActionResult` directly), and when would you write one instead of composing existing results like `Ok()`/`NotFound()`?**
+
+ASP.NET Core's built-in action results (`OkObjectResult`, `NotFoundResult`, etc.) cover the vast majority of response-shaping needs — a custom `IActionResult` implementation is for genuinely novel response behavior that doesn't reduce to a combination of the built-in ones, most commonly custom content-type serialization or specialized streaming behavior.
+
+**A custom result for streaming a CSV export, without buffering the entire file in memory first:**
+```csharp
+public class CsvResult : IActionResult
+{
+    private readonly IEnumerable<object> _data;
+    public CsvResult(IEnumerable<object> data) => _data = data;
+
+    public async Task ExecuteResultAsync(ActionContext context)
+    {
+        var response = context.HttpContext.Response;
+        response.ContentType = "text/csv";
+        response.Headers.Append("Content-Disposition", "attachment; filename=export.csv");
+
+        await using var writer = new StreamWriter(response.Body);
+        foreach (var row in _data)
+        {
+            await writer.WriteLineAsync(SerializeToCsvRow(row)); // streams row-by-row, never buffers it all
+        }
+    }
+}
+
+[HttpGet("export")]
+public IActionResult ExportOrders() => new CsvResult(_repository.GetAllOrders()); // just like Ok()/NotFound()
+```
+`ExecuteResultAsync` gives full, direct control over exactly how the response is written to the underlying stream — something composing built-in results (which are generally designed around a single, already-materialized payload) doesn't cleanly support for genuinely streaming, row-by-row output.
+
+**Why you'd reach for this instead of, say, `File()` or `Content()`:** the built-in results generally expect the entire response body already available as bytes/a string before constructing the result — a custom result is warranted specifically when the response needs to be **generated incrementally**, writing directly to the response stream as data becomes available, rather than fully materializing a payload first and handing it to an existing result type.
+
+**Common Pitfall:** writing a custom `IActionResult` for something that a combination of existing results and response header manipulation could already achieve — most "I need custom behavior" scenarios are actually addressable via `ContentResult` with custom headers, or `FileStreamResult`, without needing a fully custom `ExecuteResultAsync` implementation; reaching for a fully custom result is worth reserving for cases with genuinely unique execution requirements, like true incremental/streaming generation, not as a default whenever a built-in result needs slight header customization.
+
+---

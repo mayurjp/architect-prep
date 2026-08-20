@@ -573,3 +573,99 @@ builder.Services.AddProblemDetails(options =>
 **Common Pitfall:** returning Problem Details' standardized shape for validation/client errors, but falling back to an unhandled exception's default (non-standardized) shape for unexpected server-side exceptions — a global exception-handling middleware (`app.UseExceptionHandler()` combined with `AddProblemDetails()`) is needed to ensure genuinely *every* error path, including unhandled exceptions, produces the same consistent Problem Details shape, not just the specific ones `[ApiController]` handles automatically.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is `IActionResult` streaming via `IAsyncEnumerable<T>` return types (introduced in ASP.NET Core 6+), and how does returning it directly from an action differ from manually building a custom streaming `IActionResult`?**
+
+Covered earlier at a conceptual level (streaming large collections instead of buffering an entire list), ASP.NET Core lets an action method return `IAsyncEnumerable<T>` **directly**, with the framework automatically handling the JSON-array streaming serialization — no custom `IActionResult` implementation (like the CSV streaming example covered earlier) needed for this specific, common case.
+
+**Returning `IAsyncEnumerable<T>` directly — the framework handles the streaming automatically:**
+```csharp
+[HttpGet]
+public async IAsyncEnumerable<Product> GetProducts()
+{
+    await foreach (var product in _db.Products.AsAsyncEnumerable())
+    {
+        yield return product; // the framework serializes and STREAMS the JSON array as items become available
+    }
+}
+```
+The client receives a standard JSON array response (`[{...}, {...}, ...]`), but the server never buffers the entire result set in memory before sending — as each `Product` is yielded, its JSON representation is written directly into the response stream, and the next database row is only fetched once the previous one has been serialized and sent.
+
+**Why this specific case doesn't need a custom `IActionResult` the way the earlier CSV example did:** ASP.NET Core has built-in support for recognizing an `IAsyncEnumerable<T>` return type from an action and automatically wiring up the correct streaming JSON serialization — the custom `IActionResult` approach (covered earlier) remains necessary for genuinely custom formats (CSV, a proprietary binary format) that have no built-in framework support, but plain JSON array streaming from an async-enumerable sequence is handled natively.
+
+**Common Pitfall:** returning `IAsyncEnumerable<T>` from an action but having the underlying data source (a LINQ query, a repository method) actually materialize the entire result set eagerly before the enumeration even starts (e.g., calling `.ToList()` somewhere in the chain before returning it as `IAsyncEnumerable<T>`) — this defeats the entire memory benefit, since the framework's streaming serialization is only useful if the underlying data is genuinely produced incrementally; wrapping an already-fully-materialized list in an `IAsyncEnumerable<T>` type just adds streaming *serialization* overhead without any of the streaming *data-production* benefit.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is Request/Response Compression specifically for Web API JSON payloads, and how do you choose between Brotli and Gzip when both are supported?**
+
+Covered earlier for MVC response compression generally (including its CSRF-adjacent security consideration for reflected content) — for a pure JSON API specifically (rather than HTML pages potentially mixing reflected user input with secrets), compression is usually a much more straightforward, purely beneficial optimization, and the choice between Brotli and Gzip is worth understanding.
+
+**Enabling both, letting content negotiation pick the best one per client:**
+```csharp
+builder.Services.AddResponseCompression(options =>
+{
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(new[] { "application/json" });
+});
+
+builder.Services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+```
+The client's `Accept-Encoding` header determines which compression the server actually uses — a client sending `Accept-Encoding: br, gzip` gets Brotli (if the server prefers it and supports it); a client only supporting `gzip` falls back to that instead, all handled automatically by the compression middleware based on standard HTTP content negotiation.
+
+**Why choose Brotli over Gzip when both are available:** Brotli generally achieves meaningfully better compression ratios than Gzip for text-based content (including JSON) at comparable compression *speed* settings — smaller payloads over the wire for roughly the same CPU cost, which is why modern browsers and HTTP clients widely support it and why it's generally the preferred choice when the client supports it.
+
+**The trade-off to actually measure, not just assume:** compression itself costs CPU time on the server (compressing the response) in exchange for reduced network transfer time — for very small JSON payloads, the compression overhead can sometimes exceed the transfer-time savings, while for larger payloads (or clients on slow/high-latency connections), compression is a clear net win; the compression *level* setting (`Fastest` vs `Optimal`) lets you tune this trade-off between CPU cost and compression ratio based on the actual payload sizes your API typically returns.
+
+**Common Pitfall:** enabling compression with the highest/`SmallestSize` compression level uniformly across a high-throughput API without measuring actual CPU impact — the most aggressive compression settings meaningfully increase CPU cost per request, and for an API already CPU-bound rather than bandwidth-bound, this can shift the bottleneck without providing a proportional benefit; `Fastest` is often the more appropriate default for high-throughput APIs, reserving higher compression levels for genuinely bandwidth-constrained scenarios.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is API Gateway-level request aggregation (the Backend for Frontend pattern applied specifically to Web API response shaping), and how does it reduce the number of round-trips a mobile client needs versus calling several separate endpoints?**
+
+Covered briefly under the BFF pattern in the system-design/microservices material — applied specifically at the Web API level, an aggregating endpoint combines data from multiple internal sources into a single response shaped exactly for one specific client's screen, trading some API purity for meaningfully fewer round-trips on constrained (mobile, high-latency) networks.
+
+**Without aggregation — a mobile client makes several separate round-trips for one screen:**
+```text
+Mobile app rendering an Order Details screen needs:
+  GET /api/orders/5           (order details)
+  GET /api/orders/5/items     (line items)
+  GET /api/customers/42       (customer info)
+  GET /api/shipping/5/status  (shipment tracking)
+-- FOUR separate round-trips, each with its own latency, before the screen can fully render
+```
+On a slow mobile network, four sequential (or even parallel, but still four separate) round-trips each carry their own connection/latency overhead — the screen's total load time is dominated by network round-trip count, not by how much data is actually being transferred.
+
+**An aggregating endpoint combining everything into one response, shaped for this specific screen:**
+```csharp
+[HttpGet("order-details-screen/{orderId}")]
+public async Task<IActionResult> GetOrderDetailsScreen(int orderId)
+{
+    var orderTask = _orderService.GetAsync(orderId);
+    var itemsTask = _orderService.GetItemsAsync(orderId);
+    var shipmentTask = _shippingService.GetStatusAsync(orderId);
+    await Task.WhenAll(orderTask, itemsTask, shipmentTask); // fetched CONCURRENTLY, server-side
+
+    var order = await orderTask;
+    var customer = await _customerService.GetAsync(order.CustomerId); // depends on order's result
+
+    return Ok(new OrderDetailsScreenDto // ONE response, shaped exactly for this ONE screen
+    {
+        Order = order, Items = itemsTask.Result, Customer = customer, Shipment = shipmentTask.Result
+    });
+}
+```
+The mobile client now makes **one** request instead of four — the server (sitting on a fast, low-latency internal network, unlike the mobile client's connection) absorbs the cost of making those several internal calls concurrently, which is a far better trade given the server's network conditions are typically dramatically better than the mobile client's.
+
+**The trade-off against pure, generic REST resource modeling:** this endpoint isn't a clean "resource" in the REST sense (covered under the REST topic) — it's explicitly shaped around one specific client screen's needs, which is exactly the BFF pattern's core idea: sacrificing some API genericity/reusability for a specific client's performance needs, typically maintained as a *separate*, purpose-built API layer rather than polluting the general-purpose API with screen-specific aggregation endpoints.
+
+**Common Pitfall:** adding screen-specific aggregation endpoints directly into a general-purpose, shared API meant to serve many different clients (web, mobile, third-party integrations) — this couples the shared API's shape to one specific client's UI needs; the BFF pattern's actual guidance is to keep such aggregation in a *dedicated* BFF layer serving that specific client, leaving the general-purpose API's resources clean and client-agnostic.
+
+---

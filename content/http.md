@@ -437,3 +437,116 @@ This request maliciously includes **both** headers, which contradict each other 
 **Common Pitfall:** assuming this is purely a "proxy configuration problem" unrelated to application code — while proxy/gateway configuration is the primary mitigation surface, an application server with lenient, non-standard HTTP parsing (accepting malformed requests a stricter parser would reject) can still be the "back-end" side of the disagreement that makes smuggling possible, even behind an otherwise well-configured front-end.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between a `301 Moved Permanently` and a `302 Found` redirect, and why does the distinction matter for search engines and browser caching, not just the immediate redirect behavior?**
+
+Both tell the browser "go to a different URL instead" — the difference is entirely about whether that redirect should be treated as a *permanent* change (safe to remember and reuse indefinitely) or a *temporary* one (check again next time).
+
+**`301 Moved Permanently` — the browser (and search engines) should remember this and stop asking:**
+```http
+HTTP/1.1 301 Moved Permanently
+Location: https://newdomain.com/products
+```
+A browser receiving this can cache the redirect and, on future visits, go directly to the new URL without even asking the old one again — and critically, **search engines transfer the old URL's accumulated SEO ranking/authority to the new URL**, treating this as a genuine, permanent relocation of the content.
+
+**`302 Found` — this is temporary; keep asking the original URL each time:**
+```http
+HTTP/1.1 302 Found
+Location: https://newdomain.com/maintenance-page
+```
+A browser should **not** permanently cache this redirect or stop checking the original URL — appropriate for temporary situations (a maintenance page shown while the real page is briefly unavailable) where the *original* URL remains the "real," canonical one and should keep being checked on future visits, rather than being permanently bypassed.
+
+**Why picking the wrong one causes real, hard-to-diagnose problems:** using `301` for what's actually a temporary situation (a brief maintenance redirect) can cause browsers/search engines to cache that redirect far longer than intended — users (and search engine crawlers) might keep going to the maintenance page long after the real page is back, since the permanent-redirect signal told them to stop checking the original URL at all. Conversely, using `302` for a genuinely permanent URL change means search engines never transfer the old URL's SEO ranking to the new one, and every browser must keep re-checking the old URL indefinitely rather than caching the redirect.
+
+**Common Pitfall:** defaulting to `302` for URL migrations "because it's the more common/default status code in many frameworks" without considering the redirect is actually meant to be permanent — this is a classic, easy-to-miss SEO mistake that silently loses accumulated search ranking on a URL migration, discovered only much later when organic traffic to the new URL mysteriously underperforms expectations.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is the `Accept-Language` header, and how does Content Negotiation extend beyond format (JSON/XML) to also negotiate language/locale for internationalized responses?**
+
+Content negotiation (covered earlier primarily for format — JSON vs XML) applies equally to **language** — `Accept-Language` lets a client specify which human language it prefers for a response's text content, letting one API endpoint serve genuinely internationalized content without a separate URL per language.
+
+**The client signals preferred language(s), with optional quality weighting:**
+```http
+GET /api/products/5
+Accept-Language: fr-CA, fr;q=0.9, en;q=0.5
+```
+This says: "Canadian French is my top preference; any French is my second choice; English is an acceptable fallback" — the `q` values (quality factors, the same mechanism covered for format negotiation) let a client express a ranked preference rather than a single hard requirement.
+
+**The server responds with content in the best-matching available language, declaring which one it chose:**
+```http
+HTTP/1.1 200 OK
+Content-Language: fr-CA
+
+{ "name": "Clavier", "description": "Un clavier mécanique de haute qualité" }
+```
+`Content-Language` in the response tells the client which language was actually selected — important because the server might not have Canadian French specifically available and instead fell back to generic French or English, and the client (or a caching layer) needs to know definitively which one it actually received.
+
+**Why `Vary: Accept-Language` (the same `Vary` mechanism covered earlier for format negotiation) matters here too:** exactly the same caching-correctness concern applies — a CDN or shared cache that doesn't know a response varies by `Accept-Language` could serve a French response to an English-requesting client, unless the response explicitly declares `Vary: Accept-Language` so the cache knows to store separate copies per language rather than one shared copy for the URL alone.
+
+**Common Pitfall:** implementing language selection via a custom, bespoke header (`X-Preferred-Language`) or a URL path segment (`/fr/api/products/5`) instead of the standard `Accept-Language` header — while URL-based localization has its own valid use cases (making the language visible/bookmarkable in the URL itself, useful for web pages), for pure API content negotiation, `Accept-Language` is the standard, widely-tooled mechanism that HTTP clients/libraries already know how to set without bespoke per-API configuration.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is HTTP/2's "Header Compression" via HPACK, and how does it solve a bandwidth problem that becomes significant specifically because of how many requests HTTP/2's multiplexing (covered earlier) enables per connection?**
+
+HTTP headers (`User-Agent`, `Cookie`, `Accept`, `Authorization`) are often nearly **identical** across every request a client makes to the same server — HTTP/1.1 re-transmits these full header strings on every single request regardless, which becomes a proportionally larger waste as HTTP/2 enables far more requests per connection (via multiplexing) than HTTP/1.1 typically saw.
+
+**Without compression — the same headers repeated in full, on every single request:**
+```text
+Request 1: User-Agent: Mozilla/5.0 (Windows NT 10.0...) [200+ bytes]
+           Cookie: session=abc123; theme=dark; ... [could be hundreds of bytes]
+Request 2: User-Agent: Mozilla/5.0 (Windows NT 10.0...) [IDENTICAL 200+ bytes, retransmitted AGAIN]
+           Cookie: session=abc123; theme=dark; ... [IDENTICAL, retransmitted AGAIN]
+```
+For a page loading dozens of resources (each its own HTTP/2 stream, thanks to multiplexing), retransmitting these near-identical headers on every single one adds up to genuinely significant redundant bytes, especially for clients sending large cookies or verbose `User-Agent` strings.
+
+**HPACK — a shared, per-connection compression table lets repeated headers be referenced by a tiny index instead of retransmitted:**
+```text
+Request 1: sends "User-Agent: Mozilla/5.0..." in full, AND registers it in a shared table -> index 62
+Request 2: instead of retransmitting the full string, sends just "index 62" -- a few bytes,
+           referencing the ALREADY-KNOWN value from Request 1
+```
+Both the client and server maintain a synchronized table of previously-seen header name/value pairs specific to that one connection — once a header value has been sent once, every subsequent request on the same connection can reference it by a tiny index number instead of retransmitting the full string, dramatically reducing the cumulative header overhead across many requests on the same connection.
+
+**Why this specifically compounds with HTTP/2's multiplexing benefit rather than being a separate, unrelated optimization:** multiplexing (covered earlier) is what makes it practical to send many more individual requests over one connection in the first place — HPACK's header compression is what keeps that increased request *count* from proportionally increasing total header bytes transmitted, since headers become cheap (a small index reference) after the first occurrence rather than each additional request paying the full header cost again.
+
+**Common Pitfall:** assuming HPACK's benefit is primarily about compressing any *individual* request's headers more efficiently (like gzip compressing a single payload) — its actual value comes specifically from **cross-request** reuse within a connection (referencing previously-sent values), which is a fundamentally different mechanism than compressing one request's headers in isolation, and is why HPACK's benefit scales specifically with how many requests share one connection, not with any single request's header size alone.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is a "Same-Site" cookie's `Lax`, `Strict`, and `None` values, and how does each affect whether a cookie is sent on a cross-site request — the actual mechanism underlying modern CSRF mitigation?**
+
+The `SameSite` cookie attribute (referenced earlier alongside CSRF mitigation) directly controls whether a browser attaches a cookie to a request originating from a *different* site than the one that set it — its three possible values represent meaningfully different points on the security/compatibility trade-off spectrum.
+
+**`SameSite=Strict` — the cookie is NEVER sent on a cross-site request, even a simple top-level navigation:**
+```http
+Set-Cookie: session=abc123; SameSite=Strict; Secure
+```
+Clicking a link from `google.com` directly to `mybank.com` won't include the `mybank.com` session cookie on that very first navigation — the strictest possible protection against CSRF, but at a real UX cost: a user clicking an email link to a specific page on a site they're already logged into might land on that page appearing logged-out, since the cookie wasn't attached even to this legitimate top-level navigation.
+
+**`SameSite=Lax` (the modern browser default when unspecified) — sent on top-level navigation, but NOT on cross-site subresource requests or background AJAX:**
+```http
+Set-Cookie: session=abc123; SameSite=Lax; Secure
+```
+Clicking a link from an email directly to `mybank.com` **does** include the cookie (so the user lands logged-in, avoiding the `Strict` mode's UX problem) — but a hidden `<img>` tag, a background `fetch()`, or a form auto-submitted by JavaScript from a *different* site does **not** include the cookie, blocking exactly the CSRF attack pattern covered earlier while preserving normal link-clicking UX.
+
+**`SameSite=None` — always sent on cross-site requests, REQUIRES `Secure` (HTTPS-only) to be set alongside it:**
+```http
+Set-Cookie: session=abc123; SameSite=None; Secure
+```
+Needed for legitimate cross-site scenarios (a third-party embedded widget, a payment provider's iframe needing its own session cookie while embedded on your site) — browsers now *require* `Secure` alongside `SameSite=None` specifically because sending a cookie on every cross-site request without at least requiring HTTPS would reintroduce serious security exposure.
+
+**Why `Lax` becoming the modern default (rather than `None`) meaningfully reduced CSRF risk industry-wide:** before browsers changed the default to `Lax`, any cookie without an explicit `SameSite` attribute behaved like `None` — attached to every cross-site request automatically, exactly the ambient-credential-attachment behavior that made CSRF attacks straightforward. Modern browsers defaulting to `Lax` means a huge portion of previously-vulnerable applications gained a meaningful degree of automatic CSRF protection without any code change at all, simply from the browser vendors changing what happens when a cookie doesn't explicitly specify a `SameSite` value.
+
+**Common Pitfall:** setting `SameSite=None` on a cookie that doesn't actually need cross-site delivery, out of habit or because a `Strict`/`Lax` value happened to break something during testing — this discards the automatic CSRF-mitigation benefit `Lax`/`Strict` provide for no real reason; `None` should be reserved specifically for cookies that have a genuine, deliberate cross-site use case (the embedded third-party widget scenario), not used as a default troubleshooting step when something doesn't work as expected under the stricter settings.
+
+---

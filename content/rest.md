@@ -1346,3 +1346,107 @@ Both requests hit the **exact same URI** (`/api/products/5`) — the version is 
 **Common Pitfall:** adopting Custom Media Type versioning for its theoretical REST purity without accounting for how much harder it makes onboarding new API consumers — documentation, example code, and tooling all need to explicitly teach developers to set an unusual `Accept` header value, a genuinely higher barrier than a version number visible directly in the URL they're already looking at.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is the difference between a "Collection Resource" returning a bare JSON array versus an "Envelope" wrapping it with metadata, and why do most production APIs prefer the envelope despite the extra nesting?**
+
+A REST endpoint returning a list can shape that response two ways — a bare array (simplest to consume directly) or an object "envelope" wrapping the array alongside metadata (pagination info, total count) — the trade-off is directness versus the ability to attach information *about* the collection itself.
+
+**A bare array — simplest, but has nowhere to attach metadata:**
+```json
+[
+  { "id": 1, "name": "Keyboard" },
+  { "id": 2, "name": "Mouse" }
+]
+```
+This is simple to consume (`response.json()` directly gives you the array), but there's no way to also communicate "there are 500 total products, this is page 2 of 25" alongside the actual items — the response *is* the array, with no room to attach anything else at the same top level.
+
+**An envelope — wraps the array with metadata about the collection itself:**
+```json
+{
+  "data": [
+    { "id": 1, "name": "Keyboard" },
+    { "id": 2, "name": "Mouse" }
+  ],
+  "pagination": { "page": 2, "pageSize": 20, "totalItems": 500, "totalPages": 25 }
+}
+```
+Now the response can communicate both the actual items *and* metadata describing the collection as a whole — pagination details, applied filters, or a request-correlation ID — without needing to smuggle that information into HTTP headers (the `Link` header approach covered earlier) or omit it entirely.
+
+**Why most production APIs prefer the envelope despite the extra nesting:** metadata like pagination info is usually essential for the client to actually build a usable UI (showing "page 2 of 25," enabling/disabling a "next" button) — while the `Link` header approach works, many teams find keeping pagination metadata directly in the JSON body (visible in any HTTP client/browser dev tools without needing to inspect headers separately) more discoverable and easier for API consumers to work with directly.
+
+**Common Pitfall:** inconsistently switching between bare arrays and enveloped responses across different endpoints of the same API — a client library written generically against "the API always returns `{ data: [...] }`" breaks unexpectedly on an endpoint that happens to return a bare array instead; picking one convention and applying it consistently across the entire API matters more than which specific convention is chosen.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is Idempotency Key Design specifically for how long a server should remember a given key, and what happens if a client reuses the same key for a genuinely different request body?**
+
+Idempotency Keys (covered earlier for preventing duplicate payment processing) require the server to make two additional design decisions beyond just "check if we've seen this key before": how long to remember a used key, and what to do if the *same* key arrives with *different* request data than the first time.
+
+**How long to remember a used key — a retention window, not forever:**
+```csharp
+public class IdempotencyRecord
+{
+    public string Key { get; set; }
+    public string RequestHash { get; set; } // a hash of the ORIGINAL request body
+    public string CachedResponse { get; set; }
+    public DateTime ExpiresAt { get; set; } // e.g., 24 hours after the original request
+}
+```
+Retaining every idempotency key forever would grow the tracking table unboundedly — a reasonable, documented retention window (commonly 24 hours, matching how long a client might plausibly still be retrying a failed request) balances genuine duplicate-protection against unbounded storage growth; a client retrying after the window has expired is treated as a brand-new request, which is an accepted, documented trade-off of the chosen window length.
+
+**What happens if the same key arrives with a DIFFERENT request body — a critical edge case:**
+```csharp
+[HttpPost("payments")]
+public async Task<IActionResult> Charge([FromHeader(Name = "Idempotency-Key")] string key, ChargeRequest request)
+{
+    var existing = await _idempotencyStore.GetAsync(key);
+    if (existing != null)
+    {
+        var currentRequestHash = ComputeHash(request);
+        if (existing.RequestHash != currentRequestHash)
+            return Conflict("Idempotency-Key was already used with a different request body."); // REJECT, don't silently process either version
+        return Ok(existing.CachedResponse); // genuinely the same request, return the cached result
+    }
+    // ... process normally, store the result keyed by (key, requestHash) ...
+}
+```
+If a client reuses an idempotency key but with a *different* request body (perhaps a bug reusing a stale key, or a client mistakenly generating fewer unique keys than distinct operations), silently returning the *original* cached response for a *different* request would be actively wrong — the server should detect the mismatch (via a hash of the original request) and explicitly reject it with a `409 Conflict`, rather than either silently processing the new, different request (defeating the idempotency guarantee) or silently returning the old response for what's actually a different operation.
+
+**Common Pitfall:** implementing idempotency key checking purely by key existence, without also validating the request body matches what was originally associated with that key — this creates a scenario where a client bug (accidentally reusing a key across genuinely different requests) could either silently succeed with wrong cached data, or silently double-process, depending on implementation details, rather than surfacing the client's bug clearly via an explicit conflict response.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is "Overfetching Mitigation via Sparse Fieldsets" in REST (an approach GraphQL solves natively, covered in that topic, but that plain REST APIs can approximate), and how does a `?fields=` query parameter work?**
+
+Covered as GraphQL's core motivating problem (over-fetching, under-fetching) — a REST API can partially address the over-fetching half of that problem without adopting GraphQL wholesale, by letting clients specify exactly which fields they want returned via a query parameter, trading some REST simplicity for reduced payload size on bandwidth-constrained clients.
+
+**The default — the full resource representation is always returned, regardless of what the client actually needs:**
+```http
+GET /api/products/5
+```
+```json
+{ "id": 5, "name": "Keyboard", "description": "A very long description...", "price": 29.99,
+  "manufacturer": "...", "warehouseLocation": "...", "supplierId": 42, "internalSku": "..." }
+```
+A mobile client that only needs `name` and `price` for a list view still receives every field, wasting bandwidth on a constrained connection — the exact over-fetching problem GraphQL was designed to solve entirely.
+
+**Sparse Fieldsets — a query parameter lets the client request only specific fields:**
+```http
+GET /api/products/5?fields=name,price
+```
+```json
+{ "name": "Keyboard", "price": 29.99 }
+```
+The server inspects the `fields` parameter and returns only the requested subset — this requires deliberate server-side support (parsing the parameter, selectively projecting the response), it isn't something REST/HTTP provides automatically the way GraphQL's field-selection is built into the query language itself.
+
+**Why this remains an approximation, not a full GraphQL replacement:** Sparse Fieldsets only address a single resource's *own* field selection — it doesn't solve under-fetching (needing related, nested data like the earlier `posts`/`comments` example requiring separate requests), and every endpoint needs its own bespoke implementation of field-filtering logic, whereas GraphQL provides both field selection *and* nested relationship traversal as one unified, built-in mechanism across the entire schema, implemented once at the framework level rather than per-endpoint.
+
+**Common Pitfall:** implementing `?fields=` support inconsistently across only some endpoints of an API — a client library built generically to request sparse fieldsets from any endpoint breaks unexpectedly on the endpoints that don't support the parameter, silently receiving the full payload instead and not necessarily realizing the optimization simply wasn't honored for that specific endpoint.
+
+---

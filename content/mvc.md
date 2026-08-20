@@ -523,3 +523,93 @@ Between `UseRouting()` and the actual endpoint execution, any middleware can cal
 **Common Pitfall:** placing custom middleware that needs to inspect endpoint metadata (like a custom rate-limiting rule based on a `[RateLimit]` attribute) *before* `UseRouting()` — at that point in the pipeline, no endpoint has been matched yet, so `context.GetEndpoint()` returns `null`, and the middleware silently has no metadata to inspect at all.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the `_ViewStart.cshtml` file, and how does it let you set a default `Layout` for every view in a folder without repeating that assignment in each individual view?**
+
+`_ViewStart.cshtml` is a special, conventionally-named file that Razor executes automatically **before** rendering any regular view in the same folder (and its subfolders) — most commonly used to set the default `Layout` once, rather than every single view needing its own `Layout = "..."` line repeated.
+
+**Without `_ViewStart.cshtml` — every view repeats the same layout assignment:**
+```cshtml
+@{ Layout = "_Layout"; } @* repeated at the top of EVERY SINGLE view in the entire application *@
+<h1>Product Details</h1>
+```
+
+**With `_ViewStart.cshtml` — set once, applies automatically to every view in scope:**
+```cshtml
+@* Views/_ViewStart.cshtml -- applies to ALL views under Views/, unless overridden closer to a specific view *@
+@{
+    Layout = "_Layout";
+}
+```
+```cshtml
+@* Views/Products/Details.cshtml -- no Layout assignment needed here at all, inherits from _ViewStart *@
+<h1>Product Details</h1>
+```
+Razor looks for `_ViewStart.cshtml` files starting from the view's own folder and walking up toward `Views/`, executing each one it finds (closer, more specific ones running *after* more general ones) — letting you set an application-wide default at `Views/_ViewStart.cshtml`, while still overriding it for a specific subfolder (e.g., `Views/Admin/_ViewStart.cshtml` using a different admin-specific layout) without needing to touch every individual view file in either case.
+
+**Why this matters for maintainability:** changing the application's overall layout file (a global navigation redesign) becomes a one-line change in `_ViewStart.cshtml`, rather than requiring a find-and-replace across every single view file that previously had its own hardcoded `Layout = "..."` assignment.
+
+**Common Pitfall:** forgetting that a specific view's own `@{ Layout = "..."; }` assignment **overrides** whatever `_ViewStart.cshtml` set, rather than merging with it — if a developer needs a one-off different layout for a single view, setting `Layout` directly in that view is correct and expected; the confusion typically arises when a developer forgets they left a stray override in one view and can't understand why changing `_ViewStart.cshtml` didn't affect that particular page.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is `IUrlHelper`/`Url.Action()`, and why is generating URLs this way preferable to hardcoding route strings directly in a view or controller?**
+
+`Url.Action()` (and its Tag Helper equivalent `asp-action`/`asp-controller`, covered earlier) generates a URL by consulting the application's actual, currently-registered routing configuration — rather than a developer typing out the expected URL string by hand and hoping it matches what the routing table will actually produce.
+
+**Hardcoding the URL directly — fragile, silently breaks if routing changes:**
+```csharp
+return Redirect("/Products/Details/5"); // a literal, hand-typed string
+```
+If a later change to `Program.cs`'s routing configuration alters how `ProductsController` maps to URLs (adding an area, changing the route template, renaming the controller), this hardcoded string silently becomes wrong — nothing catches the mismatch at compile time, since it's just an ordinary string with no connection to the actual routing table at all.
+
+**Using `Url.Action()` instead — generated FROM the actual routing configuration, not hand-typed:**
+```csharp
+var url = Url.Action("Details", "Products", new { id = 5 }); // asks the ROUTING SYSTEM to build this URL
+return Redirect(url);
+```
+If the routing configuration later changes, `Url.Action()` automatically reflects that change the next time it runs — since it consults the live routing table rather than a hardcoded guess, the generated URL is always consistent with whatever routing rules are actually currently configured, with no risk of drift between "what URL we typed" and "what URL routing will actually produce."
+
+**Why this matters especially as an application grows:** a large application might have dozens of places generating links to the same action (navigation menus, redirect-after-save logic, emails containing links back to the site) — hardcoding the URL string in each of those places means a routing change requires hunting down and updating every single hardcoded occurrence; using `Url.Action()`/Tag Helpers everywhere means a routing change automatically propagates correctly to every URL-generation call site with zero additional changes needed.
+
+**Common Pitfall:** hardcoding URLs "just this once, it's a simple case" — even simple cases accumulate over time, and a routing refactor later has no reliable way to find every hardcoded string reference scattered through views/controllers/emails, whereas every `Url.Action()`/Tag-Helper-generated reference is guaranteed to stay correct automatically.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is a Custom Route Constraint in ASP.NET Core MVC, and how does it let you validate route parameter values (beyond the built-in `{id:int}`/`{id:guid}`) using your own business logic?**
+
+Built-in route constraints (`:int`, `:guid`, `:alpha`, covered earlier) handle common, generic type-shape validation — a Custom Route Constraint lets you plug in **arbitrary business logic** to decide whether a route segment matches, useful when the validation rule is domain-specific rather than a generic type check.
+
+**A custom constraint validating a product SKU's specific format (e.g., `ABC-1234`):**
+```csharp
+public class SkuRouteConstraint : IRouteConstraint
+{
+    public bool Match(HttpContext? httpContext, IRouter? route, string routeKey,
+        RouteValueDictionary values, RouteDirection routeDirection)
+    {
+        if (!values.TryGetValue(routeKey, out var value)) return false;
+        return Regex.IsMatch(value?.ToString() ?? "", @"^[A-Z]{3}-\d{4}$");
+    }
+}
+
+// Registered in Program.cs
+builder.Services.Configure<RouteOptions>(options =>
+    options.ConstraintMap.Add("sku", typeof(SkuRouteConstraint)));
+```
+```csharp
+[HttpGet("products/{sku:sku}")] // only matches if 'sku' looks like "ABC-1234"
+public IActionResult GetBySku(string sku) { ... }
+```
+A request to `/products/ABC-1234` matches this route; a request to `/products/not-a-valid-sku` **fails to match this route entirely** (routing falls through to look for another matching route, or ultimately returns 404) rather than reaching the action method and needing an in-body validation check.
+
+**Why validating at the routing layer (rather than inside the action method) matters in specific scenarios:** it lets you register **two different actions** disambiguated purely by whether a route segment matches a specific shape — a `{sku:sku}` route can coexist with a `{id:int}` route on the same base path, with the routing engine itself picking the correct action based on which constraint the actual incoming value satisfies, rather than one action having to inspect the parameter and manually branch internally.
+
+**Common Pitfall:** implementing business validation as a route constraint when the actual goal is simply "reject invalid input with a helpful error message" — a failed route constraint match doesn't produce validation error details, it just makes the route not match at all (typically surfacing as a bare 404) — for validation where the *client needs to understand what was wrong*, a Data Annotation or `IValidatableObject` check (covered earlier) inside the action is more appropriate, since it can return a detailed `400 Bad Request` explaining exactly what failed, rather than routing's binary "did this segment match or not."
+
+---
