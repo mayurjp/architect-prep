@@ -315,3 +315,90 @@ public IActionResult GetAdvancedReports() { ... }
 **Common Pitfall:** querying the database for the subscription tier on *every single request* inside `IClaimsTransformation` without caching — since this runs on every authenticated request, an uncached database call here adds a real per-request latency/load cost. A common fix is caching the tier lookup (e.g., in `IMemoryCache` keyed by user ID, with a short TTL) so the database is only hit once per cache window rather than on every API call.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is Single Sign-On (SSO), and what actually happens behind the scenes when a user logs into one application and is automatically signed into others?**
+
+SSO lets a user authenticate once with a central Identity Provider (IdP) and gain access to multiple, independent applications without logging in separately to each — the "automatic" sign-in a user experiences relies on a shared session with the IdP itself, not on the applications somehow sharing credentials directly with each other.
+
+**The mechanism, step by step:**
+```text
+1. User visits App A (has never logged in yet) -> App A redirects to the IdP for login
+2. User enters credentials at the IdP -> IdP authenticates, establishes its OWN session
+   (typically an IdP session cookie, scoped to the IdP's domain)
+3. IdP redirects back to App A with a token proving successful authentication
+4. App A creates its own local session for the user based on that token
+
+5. Later, user visits App B (different application, same organization) -> App B ALSO redirects to the IdP
+6. The IdP notices the user ALREADY has an active session (from step 2's cookie) --
+   it does NOT ask for credentials again, and immediately redirects back to App B with a fresh token
+7. App B creates its own local session -- the user never saw a login form for App B at all
+```
+The "single" part of Single Sign-On refers to the *IdP's own session* being reused across every application redirecting to it — each application still gets its own token and its own local session, but the credential-entry step only happens once, at the IdP, for as long as that IdP session remains valid.
+
+**Why this requires a shared, trusted Identity Provider rather than "App A telling App B the user is logged in" directly:** apps don't trust each other's assertions about identity directly (that would require pairwise trust relationships between every pair of applications) — instead, every application trusts the *same* IdP, and the IdP is the only party that needs to verify credentials and maintain the actual login session.
+
+**Common Pitfall:** assuming SSO eliminates the need for each application to still validate tokens/sessions properly on every request — SSO simplifies the *login experience*, but each application must still independently validate the token it receives from the IdP (signature, expiry, audience) exactly as it would with any other authentication token; SSO isn't a security shortcut for skipping that validation.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is the Authorization Code flow in OAuth 2.0, and why does it involve a "code" as an intermediate step rather than returning the access token directly?**
+
+The Authorization Code flow is OAuth 2.0's standard flow for server-side (confidential) applications — it deliberately introduces an extra round-trip (exchanging a short-lived code for the actual token) rather than handing back the access token directly in the initial redirect, specifically to keep the access token out of the browser's URL and history.
+
+**The flow:**
+```text
+1. App redirects user to: https://idp.com/authorize?client_id=X&redirect_uri=Y&response_type=code
+2. User logs in and consents at the IdP
+3. IdP redirects back to the app: https://app.com/callback?code=SHORT_LIVED_CODE
+   -- notice: only a CODE appears in the browser's URL, not an actual access token
+4. The app's OWN BACKEND (not the browser/frontend) makes a separate, direct server-to-server
+   request to the IdP, exchanging the code for the actual access token:
+   POST https://idp.com/token  { code: SHORT_LIVED_CODE, client_secret: ... }
+5. IdP responds with the access token -- delivered directly to the app's backend,
+   NEVER appearing in the browser's URL bar, browser history, or server access logs
+```
+
+**Why not just return the access token directly in step 3?** URLs are logged in many places outside the application's control — browser history, proxy server access logs, the `Referer` header sent to any third-party resources the redirect page loads. An access token sitting directly in a URL is exposed to all of those logging surfaces; a short-lived, single-use authorization code exchanged over a direct server-to-server call (never appearing in a URL a browser navigates to) avoids that entire exposure surface.
+
+**Why the code alone isn't enough — it also requires the `client_secret`:** the code-for-token exchange in step 4 requires the app's confidential `client_secret`, which only the legitimate backend possesses — even if an attacker somehow intercepted the authorization code from the redirect URL, they can't complete the exchange without also having the client secret, which never travels through the browser at all.
+
+**Common Pitfall:** using this exact flow (with a `client_secret`) for a public client like a SPA or mobile app — those can't safely store a `client_secret` at all (it would be visible in their distributed JavaScript/binary), which is precisely why SPAs and mobile apps use the Authorization Code flow **with PKCE** instead (covered earlier) rather than this confidential-client variant.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is Federated Identity, and how does it differ from your own application maintaining its own separate user accounts for third-party logins like "Sign in with Google"?**
+
+Federated Identity means your application trusts an *external* Identity Provider's assertion about who a user is, rather than owning and verifying credentials itself — "Sign in with Google" is a concrete example, but the underlying concept extends to enterprise scenarios (trusting a partner company's IdP) far beyond consumer social login buttons.
+
+**Without federation — your application owns the credential:**
+```csharp
+// YOUR database stores the password hash, YOUR code verifies it
+var user = _db.Users.SingleOrDefault(u => u.Email == email);
+if (!BCrypt.Verify(password, user.PasswordHash)) return Unauthorized();
+```
+Your application bears full responsibility for credential security — password hashing, breach response, password reset flows — for every one of these accounts.
+
+**With federation — an external IdP owns the credential, you trust its assertion:**
+```csharp
+// Your app NEVER sees the user's Google password at all
+builder.Services.AddAuthentication()
+    .AddOpenIdConnect("Google", options =>
+    {
+        options.Authority = "https://accounts.google.com";
+        options.ClientId = googleClientId;
+        // Your app trusts Google's signed ID token asserting "this is alice@gmail.com, verified"
+    });
+```
+Your application never handles, stores, or verifies the user's actual Google password — it simply validates a **signed token** from Google asserting the user's verified identity, trusting Google's own authentication process (which might include Google's own MFA, risk-based challenges, etc.) entirely.
+
+**Why enterprises use federation beyond convenience:** a large enterprise integrating dozens of SaaS applications doesn't want each application maintaining its own separate password database for the same employees — federating identity to the company's own IdP (Entra ID, Okta) means employee onboarding/offboarding, password policy, and MFA enforcement are centralized in **one** place, and instantly apply across every federated application, rather than needing to be replicated and kept in sync across dozens of separate per-application user stores.
+
+**Common Pitfall:** federating identity but still maintaining a *separate*, locally-stored password as a "backup login method" for the same account — this reintroduces exactly the credential-security burden (password hashing, breach monitoring, reset flows) federation was meant to eliminate, and creates a second, often less-scrutinized attack surface an attacker could target instead of the properly-secured federated IdP.
+
+---

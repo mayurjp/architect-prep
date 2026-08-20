@@ -273,3 +273,102 @@ Running `terraform plan` regularly (or in a scheduled CI job) surfaces drift *be
 **The process fix, not just the tooling fix:** pair this with revoking Console write access for engineers in staging/prod projects (leaving only Terraform's service account with deploy permissions) — Terraform alone doesn't prevent drift if people can still bypass it by clicking around in the Console; the tooling has to be the *only* path to making changes for drift-freedom to actually hold.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is a GCP Service Account, and how does it differ from a regular Google user account (IAM principal)?**
+
+A Service Account is an identity meant for **workloads/applications** to authenticate as, rather than for a human to log into — used when your code (a Cloud Run service, a GKE pod, a Compute Engine VM) needs to call other GCP APIs on its own behalf, without a human's credentials being involved at all.
+
+**The distinction:**
+```text
+User account: alice@mycompany.com
+  -- represents a HUMAN, authenticates via a login flow (password, MFA, SSO)
+  -- used when a PERSON needs to access GCP resources (Console, gcloud CLI)
+
+Service Account: order-service@my-project.iam.gserviceaccount.com
+  -- represents an APPLICATION/WORKLOAD, not a person
+  -- used when CODE needs to call GCP APIs (e.g., writing to Cloud Storage) on its own
+```
+
+**Granting a Service Account permissions, then having your application use it:**
+```bash
+gcloud iam service-accounts create order-service --display-name="Order Service"
+gcloud projects add-iam-policy-binding my-project \
+  --member="serviceAccount:order-service@my-project.iam.gserviceaccount.com" \
+  --role="roles/storage.objectCreator"
+```
+```csharp
+// Application code running as this Service Account (e.g., on Cloud Run) authenticates
+// automatically via Application Default Credentials -- no key file needed if configured correctly
+var storageClient = await StorageClient.CreateAsync();
+await storageClient.UploadObjectAsync("my-bucket", "invoice.pdf", null, fileStream);
+```
+
+**Why this matters for the "don't embed long-lived keys" security guidance covered elsewhere:** a Service Account **can** have a downloadable JSON key generated for it (the risky pattern the Workload Identity scenario warned against), but it doesn't have to — when running on GCP compute (Cloud Run, GKE, Compute Engine), the platform can bind the Service Account's identity to the workload directly, letting code authenticate without ever downloading or storing a key file at all.
+
+**Common Pitfall:** treating a Service Account as functionally identical to a user account and granting it broad, human-level IAM roles "for convenience" — because Service Account credentials (especially downloaded JSON keys) are far easier to accidentally leak (committed to a repo, embedded in a container image) than a human's interactive login, the principle of least privilege matters even more for Service Accounts than for user accounts.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is Google Cloud's Cloud Load Balancing, and how does its "Anycast" global IP differ from the regional load balancing model common in other clouds?**
+
+Most cloud load balancers are inherently regional — you deploy one in a specific region, and traffic to it enters that region first. GCP's global HTTP(S) Load Balancer is unusual in that it exposes a **single global Anycast IP address** that automatically routes each user to the closest healthy backend, without the user's DNS resolution needing to know anything about regions at all.
+
+**How Anycast makes this possible:**
+```text
+The SAME IP address (e.g., 34.120.XX.XX) is simultaneously announced from
+MULTIPLE physical locations around the world via BGP.
+
+User in Tokyo connects to 34.120.XX.XX -> internet routing naturally sends them
+    to the NEAREST announcing location (a Google edge point in Asia)
+User in London connects to the SAME 34.120.XX.XX -> routed to the nearest
+    European edge point instead
+```
+Unlike DNS-based geographic routing (where a DNS server decides which regional IP to *hand out* based on the resolver's location, with all its caching/propagation quirks), Anycast operates at the network routing layer itself — the same IP is simply closest to different users depending on where they are, resolved by normal internet routing (BGP), not DNS trickery.
+
+**Why this matters for failover speed:** because there's no DNS record to update and wait to propagate (DNS changes can take minutes and are subject to client-side caching/TTLs), if a regional backend becomes unhealthy, GCP's load balancer can redirect traffic to the next-closest healthy region essentially instantly, at the routing layer — without waiting on DNS caches around the world to expire.
+
+**Common Pitfall:** assuming this global load balancing model is free of any regional configuration — you still need healthy backend services deployed in each region you want traffic served from; Anycast solves *how traffic finds the nearest available region*, not *whether you've actually deployed redundant infrastructure in multiple regions* in the first place.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is GCP's Eventarc, and how does it provide a unified way to route events from any GCP source to any target, compared to wiring up point-to-point integrations manually?**
+
+Eventarc is GCP's event-routing service — instead of each event-producing service (Cloud Storage, Pub/Sub, Cloud Audit Logs, Firestore) needing a bespoke, manually-configured integration to each specific consumer (a Cloud Run service, a Cloud Function), Eventarc provides one consistent way to say "route events of this type, from this source, to this target," using the CloudEvents open standard as the common message format.
+
+**Without Eventarc — bespoke integration per event source:**
+```text
+Cloud Storage upload -> needs its own specific trigger mechanism to call Cloud Function A
+Pub/Sub message      -> needs a DIFFERENT trigger mechanism to call Cloud Function B
+Audit Log entry       -> needs YET ANOTHER mechanism to call Cloud Run service C
+```
+Each source historically had its own triggering conventions, formats, and configuration surface — a developer needed to learn several different integration patterns depending on which GCP service was producing the event.
+
+**With Eventarc — one consistent routing model regardless of source:**
+```bash
+gcloud eventarc triggers create storage-trigger \
+  --destination-run-service=image-processor \
+  --event-filters="type=google.cloud.storage.object.v1.finalized" \
+  --event-filters="bucket=my-uploads-bucket"
+```
+```csharp
+// The Cloud Run service receives a STANDARDIZED CloudEvent, regardless of what
+// GCP service originally produced it
+[HttpPost]
+public IActionResult HandleEvent([FromBody] CloudEvent cloudEvent)
+{
+    // cloudEvent.Type, cloudEvent.Source, cloudEvent.Data -- same shape every time
+}
+```
+Every event Eventarc routes — whether it originated from a Storage upload, a Pub/Sub message, or a Firestore document change — arrives at the target in the same standardized CloudEvents envelope format, so the receiving service's event-handling code doesn't need source-specific parsing logic for each different kind of trigger.
+
+**Why the CloudEvents standard specifically matters:** CloudEvents is a CNCF (Cloud Native Computing Foundation) specification, not a GCP-proprietary format — code written to handle a CloudEvents payload is portable across other platforms/clouds that also support the standard, rather than being locked into a GCP-specific event schema.
+
+**Common Pitfall:** assuming Eventarc changes the *delivery guarantees* of the underlying event source — it's a routing/standardization layer, not a new guarantee; a Pub/Sub-sourced event routed via Eventarc still carries Pub/Sub's own at-least-once delivery semantics, meaning consuming services still need to be idempotent, exactly as they would need to be consuming Pub/Sub directly without Eventarc in between.
+
+---

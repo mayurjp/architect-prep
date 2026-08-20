@@ -318,3 +318,95 @@ jobs:
 **Common Pitfall:** solving this by adding retry logic or locks around the shared test database instead of eliminating the sharing itself — that only reduces collision *frequency*, still leaves builds competing for one resource (capping how much parallelism is actually achievable), and doesn't fix the migration-timing race at all. Full isolation per run, not smarter sharing, is what actually removes the flakiness.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is the difference between Continuous Delivery and Continuous Deployment (a distinction often blurred but with a specific, meaningful difference)?**
+
+Both terms describe automating the path from a passing build to a release-ready artifact — the difference is entirely about whether the very last step (actually going live in production) requires a human decision or happens fully automatically.
+
+**Continuous Delivery — automated up to a manual approval gate:**
+```text
+Code merged -> CI builds & tests -> artifact published -> STOPS, waits for a human to click "Deploy"
+```
+Every change is automatically verified and packaged into a deployable, production-ready artifact — but an actual person still decides *when* (or *whether*) that specific artifact goes live, often for business reasons (releasing during a specific maintenance window, coordinating with a marketing launch) rather than technical ones.
+
+**Continuous Deployment — no manual gate at all:**
+```text
+Code merged -> CI builds & tests -> artifact published -> AUTOMATICALLY deployed to production
+```
+Every change that passes the automated pipeline goes live with zero human intervention — this requires significantly higher confidence in the automated test suite, since there's no human safety net catching an issue before it reaches real users.
+
+**Why the distinction matters in practice:** teams sometimes describe their pipeline as "CI/CD" without being precise about which of the two they actually have — a team practicing Continuous *Delivery* still has meaningful release-cadence control (batching changes, releasing on a schedule) that a team practicing true Continuous *Deployment* has deliberately given up in exchange for faster, more frequent releases.
+
+**Common Pitfall:** claiming "Continuous Deployment" when a manual approval step still exists somewhere in the pipeline (even an informal Slack message before someone clicks deploy) — that's Continuous Delivery with an informal process, not genuine Continuous Deployment; the distinction isn't about pipeline automation quality, it's specifically about whether the final go-live decision is human or automatic.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is a "Quality Gate" in a CI/CD pipeline, and how does it differ from simply running tests as one of the pipeline's steps?**
+
+Tests running and passing is necessary but not sufficient for many teams' release standards — a Quality Gate is an explicit, often configurable threshold check (code coverage percentage, static analysis issue count, security vulnerability severity) that the pipeline evaluates as a distinct pass/fail decision point, separate from whether individual tests themselves passed.
+
+**Tests passing alone doesn't guarantee quality standards are met:**
+```yaml
+- run: dotnet test
+# All 200 tests pass -- but this says NOTHING about:
+# - whether NEW code added in this PR has any test coverage at all
+# - whether a static analyzer found new code-smell issues
+# - whether a dependency scan found a newly-introduced critical vulnerability
+```
+
+**A Quality Gate adds an explicit, separate evaluation:**
+```yaml
+- run: dotnet test /p:CollectCoverage=true /p:CoverletOutputFormat=opencover
+- name: SonarQube Quality Gate
+  uses: sonarsource/sonarqube-quality-gate-action@master
+  # Configured gate: "new code coverage must be >= 80%, zero new CRITICAL issues,
+  # zero new security vulnerabilities" -- this step FAILS the build if any threshold is violated,
+  # independent of whether the underlying tests themselves passed
+```
+This is a distinct decision from "did tests pass" — a PR could have 100% passing tests (because the developer wrote zero new tests for their new, uncovered code) and still fail the Quality Gate specifically because new-code coverage dropped below the configured threshold.
+
+**Why this matters architecturally:** it turns a team's quality standards (documented policy, easy to forget or skip under deadline pressure) into an automatically-enforced pipeline check that blocks a merge regardless of good intentions — the gate doesn't rely on a reviewer remembering to check coverage manually on every single PR.
+
+**Common Pitfall:** setting Quality Gate thresholds so strict that they become a constant source of pipeline friction teams route around (disabling the check, or gaming coverage numbers with meaningless tests) — a Quality Gate's thresholds need to be calibrated to genuinely achievable, valuable standards, or teams will find ways to satisfy the letter of the gate without its intended benefit.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is a "Canary Analysis" step in a progressive delivery pipeline, and how does it differ from a plain Canary deployment that just routes a percentage of traffic without automated evaluation?**
+
+A plain Canary deployment (covered earlier) routes a small percentage of traffic to a new version and lets a human watch dashboards to decide whether to proceed — Canary *Analysis* automates that judgment call, using defined metrics and statistical comparison to automatically promote or roll back the canary, without waiting on a person to notice a problem.
+
+**Plain Canary — traffic split exists, but a human must actively watch and decide:**
+```text
+90% traffic -> v1 (stable)
+10% traffic -> v2 (canary)
+-- a human watches a dashboard, manually decides "looks fine, ramp up" or "rollback"
+```
+
+**Canary Analysis — automated statistical comparison drives the decision:**
+```yaml
+# Argo Rollouts canary analysis template (conceptual)
+analysis:
+  templates:
+    - templateName: success-rate-check
+  args:
+    - name: canary-hash
+metrics:
+  - name: error-rate
+    successCondition: result < 0.01  # canary's error rate must stay under 1%
+    provider:
+      prometheus:
+        query: sum(rate(http_requests_total{status=~"5..", version="{{args.canary-hash}}"}[5m]))
+```
+The pipeline automatically queries a metrics system (Prometheus, Datadog) for the canary version's real-time error rate, latency percentiles, or other defined health signals — comparing the canary's numbers against the stable version's baseline or against a fixed threshold, and automatically **promotes** the canary to 100% traffic (or **rolls it back** to 0%) based on that comparison, without a human needing to notice a dashboard anomaly in time.
+
+**Why automation matters here specifically:** a human watching a dashboard is prone to alert fatigue, delayed response (someone needs to be actively watching at the right moment), and inconsistent judgment calls between different people — an automated analysis step applies the exact same objective criteria every single time, and reacts within minutes rather than however long it takes a human to notice and act.
+
+**Common Pitfall:** configuring a Canary Analysis with too short an evaluation window or too small a canary traffic percentage — a canary receiving only 1% of traffic for 2 minutes may not accumulate statistically meaningful data to detect a real but infrequent problem (an error that only manifests for a specific rare input combination), giving false confidence that the automated gate genuinely validated the release when it actually didn't have enough signal to do so reliably.
+
+---

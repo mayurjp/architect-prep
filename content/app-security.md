@@ -326,3 +326,98 @@ app.UseHsts(); // adds Strict-Transport-Security automatically (ASP.NET Core bui
 **Common Pitfall:** enabling `UseHsts()` in a project still served over plain HTTP during local development or in an environment without a valid TLS certificate — once a browser receives an HSTS header, it refuses to connect over plain HTTP for that domain for the specified duration, which can lock developers out of a local `http://` dev server unless HSTS is conditionally applied only in genuinely HTTPS-served environments.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is the difference between Encoding and Encryption (a distinction often confused with Hashing, covered earlier)?**
+
+These three terms get frequently conflated, but only Encryption is actually designed to protect confidentiality — Encoding exists purely for data *representation*, with reversibility that requires no secret at all.
+
+**Encoding — a public, reversible transformation with no secret involved:**
+```csharp
+string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("password123"));
+// "cGFzc3dvcmQxMjM=" -- ANYONE can reverse this instantly, no key/secret needed
+string decoded = Encoding.UTF8.GetString(Convert.FromBase64String(encoded)); // "password123"
+```
+Base64, URL-encoding, and similar schemes exist to represent data safely in a context that can't handle raw binary/special characters (embedding binary data in JSON, putting special characters in a URL) — they provide **zero confidentiality**, since reversing them requires no secret information whatsoever, just knowledge of the (public, standardized) encoding scheme.
+
+**Encryption — a reversible transformation that *requires* a secret key:**
+```csharp
+using var aes = Aes.Create();
+aes.Key = secretKey; // without this specific key, the ciphertext cannot be reversed
+byte[] ciphertext = EncryptWithAes(plaintext, aes.Key, aes.IV);
+```
+Encryption is specifically designed so that reversal (decryption) is only computationally feasible with possession of the correct secret key — this is the actual mechanism providing confidentiality; without the key, recovering the plaintext should be infeasible even knowing the exact algorithm used.
+
+**Why this distinction is a real security bug source, not just terminology pedantry:** a genuinely dangerous mistake is storing "obfuscated" sensitive data using Base64 encoding and treating it as if it were protected — since Base64 requires no secret to reverse, anyone who obtains the encoded value (through a log file, a database backup, a network capture) can trivially recover the original data; only actual encryption (with a properly managed key) provides real confidentiality protection.
+
+**Common Pitfall:** using Base64 encoding on a sensitive value (an API key, a connection string) and describing it in code comments or documentation as "encrypted" — this is a common and dangerous mislabeling that leads developers and security reviewers to believe protection exists where none actually does.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is a Server-Side Request Forgery (SSRF) vulnerability, and how does it let an attacker use your own server to reach internal resources it shouldn't be able to?**
+
+SSRF occurs when an application accepts a user-supplied URL and makes an HTTP request to it *from the server itself* — if that URL isn't properly validated, an attacker can direct the server to make requests to internal, otherwise-unreachable resources (an internal admin panel, a cloud metadata endpoint), using the server's own network position and trust as a proxy for the attack.
+
+**The vulnerable pattern — a "fetch this image URL and resize it" feature:**
+```csharp
+[HttpPost("resize-image")]
+public async Task<IActionResult> ResizeImage(string imageUrl)
+{
+    var response = await _httpClient.GetAsync(imageUrl); // SERVER fetches whatever URL is given
+    var imageBytes = await response.Content.ReadAsByteArrayAsync();
+    return File(ResizeImage(imageBytes), "image/jpeg");
+}
+```
+This looks harmless — until an attacker supplies `imageUrl=http://169.254.169.254/latest/meta-data/iam/security-credentials/` (a cloud provider's internal metadata endpoint, reachable only from within the cloud network) or `imageUrl=http://internal-admin-panel.local:8080/delete-all-users`. The server, sitting inside the trusted internal network, dutifully makes that request on the attacker's behalf — something the attacker could never do directly from the public internet, but can now trigger indirectly through your server acting as an unwitting proxy.
+
+**Mitigations:**
+```csharp
+// Validate against an ALLOWLIST of expected, external domains -- never a denylist
+var allowedHosts = new[] { "images.trusted-cdn.com", "cdn.mycompany.com" };
+var uri = new Uri(imageUrl);
+if (!allowedHosts.Contains(uri.Host)) return BadRequest("URL not allowed.");
+
+// ALSO block requests to private/internal IP ranges even for "allowed" domains that could
+// theoretically resolve to an internal address via DNS rebinding
+if (IsPrivateOrLoopbackAddress(await Dns.GetHostAddressesAsync(uri.Host)))
+    return BadRequest("Cannot fetch internal resources.");
+```
+
+**Common Pitfall:** defending against SSRF with only a denylist of "bad" hostnames (`localhost`, `169.254.169.254`) rather than an allowlist of genuinely expected external hosts — attackers have many tricks to bypass denylists (alternate IP representations like `2130706433` for `127.0.0.1`, DNS rebinding, IPv6 loopback forms, open redirects on trusted domains) that an allowlist-based approach structurally avoids by only ever permitting a small, known-safe set of destinations in the first place.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is a Timing Attack, and how can a naive string-comparison in an authentication check leak information about a secret value one character at a time?**
+
+A Timing Attack exploits the fact that a naive equality check (like the default `==` string comparison in many languages) typically returns `false` as soon as it finds the **first** mismatched character — meaning the comparison takes measurably longer when more leading characters happen to match, leaking information about the secret through response time alone, without ever seeing the secret's actual bytes.
+
+**The vulnerable pattern:**
+```csharp
+public bool ValidateApiKey(string providedKey, string actualKey)
+{
+    return providedKey == actualKey; // short-circuits at the FIRST mismatched character
+}
+```
+If `actualKey` is `"abc123xyz"` and an attacker submits `"zzzzzzzzz"`, the comparison fails at character 1 (near-instantly). If the attacker submits `"azzzzzzzz"` (correctly guessing just the first character), the comparison fails at character 2 instead — taking a *fractionally* longer time, since one more character had to be checked before the mismatch was found. By measuring these tiny timing differences across thousands of requests (statistically averaging out network jitter), an attacker can determine the secret **one character at a time**, trying all possible values for each position and keeping whichever produces a measurably slower response, without ever seeing the key directly.
+
+**The fix — constant-time comparison, checking every byte regardless of where a mismatch occurs:**
+```csharp
+public bool ValidateApiKey(string providedKey, string actualKey)
+{
+    var providedBytes = Encoding.UTF8.GetBytes(providedKey);
+    var actualBytes = Encoding.UTF8.GetBytes(actualKey);
+    return CryptographicOperations.FixedTimeEquals(providedBytes, actualBytes); // ALWAYS checks all bytes
+}
+```
+`FixedTimeEquals` (a .NET built-in specifically for this purpose) always compares every byte regardless of where the first mismatch occurs, taking the same amount of time whether the very first character is wrong or every character except the last one matches — eliminating the timing signal an attacker could otherwise exploit.
+
+**Why this matters specifically for secret comparisons (API keys, tokens, HMAC signatures) and not general string equality:** ordinary application logic comparing two non-secret strings has no timing-attack concern at all — the vulnerability only applies where the comparison result gates access to something and one side of the comparison is meant to be secret; using constant-time comparison everywhere would be needless overhead, but skipping it specifically for secret validation is the actual security gap.
+
+**Common Pitfall:** applying constant-time comparison to the *hashed* representation of a password (already using BCrypt/Argon2, as covered earlier) while missing that a *raw* secret comparison elsewhere in the same system (an API key check, a webhook signature validation using plain `==`) still uses naive comparison — timing-attack mitigation needs to be applied to every point where a secret value is directly compared, not just the primary password-login path.
+
+---

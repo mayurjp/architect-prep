@@ -295,3 +295,89 @@ Session consistency guarantees that **within a single client's session**, reads 
 **Common Pitfall:** assuming consistency level is a single global database setting you must pick once — Cosmos DB lets you override the consistency level **per request**, meaning you can use Session consistency as the default for most operations while applying Strong consistency selectively to the specific reads (like a final payment confirmation check) that genuinely can't tolerate any staleness at all.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is an Azure App Service Deployment Slot, and how does "swap" avoid downtime during a release?**
+
+A Deployment Slot is a separate, fully-functional instance of your App Service (with its own URL) that you can deploy a new version to and test *before* it becomes the live production slot — swapping slots is (nearly) instantaneous, rather than requiring a slow rebuild-and-redeploy of the production environment itself.
+
+**The workflow:**
+```text
+1. Production slot (myapp.azurewebsites.net) is running v1.0, serving live traffic
+2. Deploy v2.0 to a "staging" slot (myapp-staging.azurewebsites.net) -- completely isolated
+3. Test v2.0 thoroughly against the staging slot's own URL, with production traffic unaffected
+4. Swap staging <-> production -- Azure re-points the routing so staging becomes production instantly
+```
+```bash
+az webapp deployment slot swap --resource-group myrg --name myapp --slot staging --target-slot production
+```
+Behind the scenes, the swap doesn't physically move files — it re-routes the virtual IP/hostname bindings between the two slots' existing running instances, which is why it completes in seconds rather than requiring a fresh deployment and container/process warm-up on the production side.
+
+**Why this avoids downtime specifically:** the new version was already fully warmed up and tested in the staging slot *before* the swap — there's no "cold start" moment where production suddenly needs to boot up a brand-new instance from scratch; production traffic simply starts flowing to what was, a moment ago, the staging instance, which is already warm and ready.
+
+**Common Pitfall:** forgetting that slot-specific app settings (like a `staging`-only connection string) can swap along with the code unless explicitly marked "sticky" — an app setting not marked as sticky follows the swap, potentially pointing your new production slot at a staging database if that wasn't the intent; settings that should always stay tied to a specific slot (not follow the swap) need to be explicitly configured as slot-sticky.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is Azure Front Door, and how does it differ from Azure Application Gateway despite both being described as "layer 7 load balancers"?**
+
+Both operate at Layer 7 (HTTP-aware) and both can route traffic intelligently — the key difference is *scope*: Front Door is a **global**, edge-based service routing traffic across regions/continents, while Application Gateway is a **regional** service operating within a single Azure region's virtual network.
+
+**Azure Front Door — global entry point, closest-edge routing:**
+```text
+User in Tokyo -> nearest Front Door edge (Asia) -> routed to the healthiest/closest backend
+                                                     (could be a region in Asia, or failover
+                                                      to Europe/US if Asia's backend is down)
+User in London -> nearest Front Door edge (Europe) -> routed to a European backend
+```
+Front Door terminates the connection at the edge closest to the user globally, then efficiently routes over Microsoft's own backbone network to whichever backend region is healthy and appropriate — built specifically for multi-region, globally-distributed applications needing both low latency worldwide and automatic regional failover.
+
+**Azure Application Gateway — regional, VNet-integrated routing:**
+```text
+All traffic -> Application Gateway (in ONE specific region/VNet) -> routes to backend
+                                                                     pools WITHIN that
+                                                                     same region's VNet
+```
+Application Gateway lives inside a specific Virtual Network and routes traffic to backends within that same region — it also provides a Web Application Firewall (WAF) and path-based routing, but has no concept of "route to whichever region is closest to this specific user" the way Front Door does, since it's inherently a single-region service.
+
+**When you use both together:** a common architecture puts Front Door in front (global entry, cross-region failover, edge caching) with an Application Gateway in each region behind it (region-specific WAF and routing to that region's backend pool) — Front Door handles "which region should this user's traffic go to," Application Gateway handles "which specific backend within this region should handle it."
+
+**Common Pitfall:** choosing Application Gateway alone for a genuinely multi-region, globally-distributed application expecting automatic cross-region failover — Application Gateway has no built-in concept of routing between separate regional deployments; that specific capability is what Front Door (or Traffic Manager, an older/simpler alternative) exists to provide.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is Azure Durable Functions, and how does its "Orchestrator Function" solve the problem of maintaining state across a long-running, multi-step serverless workflow?**
+
+Ordinary Azure Functions are stateless and short-lived — each invocation starts fresh, with no memory of previous invocations. Durable Functions adds an **orchestration** layer on top of that stateless model, letting you write what *looks* like ordinary sequential C# code for a multi-step, potentially long-running workflow, while the underlying framework transparently persists progress and can resume execution across restarts, scale-downs, or even days-long delays.
+
+**The Mechanism — an Orchestrator Function looks deceptively like normal sequential code:**
+```csharp
+[Function(nameof(OrderOrchestrator))]
+public async Task<string> RunOrchestrator([OrchestrationTrigger] TaskOrchestrationContext context)
+{
+    var order = context.GetInput<Order>();
+
+    await context.CallActivityAsync("ReserveInventory", order);
+    await context.CallActivityAsync("ChargePayment", order);
+
+    // Wait for an EXTERNAL event, potentially for hours or days, without holding any compute resources
+    await context.WaitForExternalEvent("ShipmentConfirmed");
+
+    await context.CallActivityAsync("SendConfirmationEmail", order);
+    return "Completed";
+}
+```
+This reads like an ordinary sequential method, but critically, `WaitForExternalEvent` can pause for an arbitrarily long time (hours, days) **without consuming any compute resources while waiting** — no VM, no container, no billed CPU time sits idle during the wait.
+
+**How this actually works under the hood — event sourcing, not literal thread suspension:** the Durable Functions runtime persists every step's result to storage (Azure Table Storage/Azure Storage Queues by default) as an event log. When the orchestrator needs to resume (an external event arrives, or a timer elapses), the framework **replays** the orchestrator function from the beginning, but each previously-completed `CallActivityAsync`/`WaitForExternalEvent` call returns its already-recorded result instantly from the event log rather than re-executing — the function only actually does new work at the point it hadn't reached before.
+
+**Why this matters architecturally:** it lets you express complex, long-running, multi-step workflows (Sagas, human-approval steps, scheduled multi-day processes) as plain, readable, sequential-looking C# code, instead of manually wiring together a state machine, a database table tracking "what step are we on," and a separate resumption mechanism — Durable Functions' orchestration engine provides all of that transparently.
+
+**Common Pitfall:** writing non-deterministic code directly inside an Orchestrator Function (calling `DateTime.Now`, `Guid.NewGuid()`, or making a direct HTTP call inline) — because the orchestrator function is **replayed** from the start every time it resumes, any such non-deterministic operation would produce a *different* result on replay than it did originally, corrupting the orchestration's consistency; all actual work (including getting the current time or a random value) must go through the provided deterministic APIs (`context.CurrentUtcDateTime`, activity functions) specifically designed to behave consistently across replays.
+
+---
