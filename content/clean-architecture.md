@@ -555,3 +555,143 @@ Onion: Infrastructure/UI          <-> Clean Architecture: Infrastructure + Prese
 **Common Pitfall:** encountering "Onion Architecture" in an older codebase or article and assuming it's an outdated or different approach from "Clean Architecture" specifically because of the different name and slightly different layer labels — the underlying Dependency Rule is identical, and code following one faithfully looks structurally almost identical to code following either of the other two.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is a Value Object's "self-validating constructor" convention in DDD, and how does it prevent an entity from ever holding an invalid value in the first place, rather than validating it after the fact?**
+
+Covered earlier at a conceptual level (Value Objects are immutable, defined by their attributes) — the practical implementation technique worth knowing is validating **inside the constructor itself**, making it structurally impossible to ever construct an invalid instance, rather than constructing a potentially-invalid object and validating it as a separate, later step.
+
+**Without self-validation — an invalid instance CAN exist, temporarily or permanently:**
+```csharp
+public class EmailAddress
+{
+    public string Value { get; set; } // just a plain string, no validation at all
+
+    public static bool IsValid(string email) => Regex.IsMatch(email, @"^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$");
+}
+
+var email = new EmailAddress { Value = "not-an-email" }; // constructs FINE -- invalid data now exists!
+if (EmailAddress.IsValid(email.Value)) { /* ... */ } // validation is a SEPARATE step someone must remember to call
+```
+Nothing stops an invalid `EmailAddress` from being constructed and passed around the codebase — validation is available, but it's an opt-in step a caller must remember to invoke separately, exactly the same "forgettable" pattern that plagued the earlier Anemic Domain Model discussion.
+
+**Self-validating in the constructor — an invalid instance literally cannot exist:**
+```csharp
+public class EmailAddress
+{
+    public string Value { get; }
+
+    public EmailAddress(string value)
+    {
+        if (!Regex.IsMatch(value, @"^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$"))
+            throw new ArgumentException($"'{value}' is not a valid email address.");
+        Value = value;
+    }
+}
+
+var email = new EmailAddress("not-an-email"); // THROWS IMMEDIATELY -- invalid EmailAddress can NEVER exist
+```
+Because the validation happens inside the constructor itself, the moment construction succeeds, every piece of code holding a reference to an `EmailAddress` instance can trust — without any further checking — that it's genuinely valid; there is no code path anywhere that could produce an invalid one, since construction *is* validation.
+
+**Why this specific technique matters more than it might first appear:** it converts "remember to validate this before using it" (a discipline problem, easy to forget in one of many call sites) into "this type's own type system guarantees validity" (a structural guarantee, impossible to bypass accidentally) — the same fundamental shift from convention-based safety to structurally-enforced safety that runs through much of DDD's actual value, not just a stylistic preference for where validation code happens to live.
+
+**Common Pitfall:** creating a Value Object type but still allowing a parameterless constructor or public setters alongside the validating constructor (often for ORM/serialization compatibility) — any code path that can construct the object *without* going through the validating constructor reopens the exact hole self-validation was meant to close; frameworks needing parameterless construction (some serializers, older EF Core versions) require careful handling (private parameterless constructors, EF Core's modern support for constructor binding) to preserve the guarantee rather than quietly undermining it.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is a Domain Event's "raised but not yet dispatched" lifecycle, and how does deferring actual event publication until after `SaveChanges()` succeeds prevent a side effect from firing based on a change that never actually got persisted?**
+
+Covered earlier at a high level (an `Order` aggregate raises an `OrderCreatedEvent`, later published via an interceptor) — the specific reason for this two-phase "raise now, dispatch later" design (rather than publishing immediately when the domain method runs) is avoiding a serious correctness bug: firing a side effect for a change that the database transaction might still roll back.
+
+**The bug this design avoids — publishing immediately, before the transaction actually commits:**
+```csharp
+public class Order : AggregateRoot
+{
+    public void Confirm()
+    {
+        Status = OrderStatus.Confirmed;
+        _eventPublisher.Publish(new OrderConfirmedEvent(Id)); // PUBLISHED IMMEDIATELY, INSIDE the domain method
+    }
+}
+
+// Application layer
+order.Confirm();               // the event ALREADY fired here -- an email may have already been sent!
+await _db.SaveChangesAsync();  // if THIS throws (a DB constraint violation, a concurrency conflict),
+                                 // the Order.Confirmed status change is ROLLED BACK --
+                                 // but the "OrderConfirmedEvent" was ALREADY published and can't be un-sent!
+```
+If `SaveChangesAsync()` fails *after* the event was already published, you're left with a permanently-inconsistent world: the database correctly rolled back the `Order`'s status change, but a confirmation email (or whatever the event triggered) already went out for an order that, as far as the database is concerned, was never actually confirmed at all.
+
+**The two-phase design — raise (record) the event now, but only DISPATCH it after the transaction genuinely commits:**
+```csharp
+public class Order : AggregateRoot
+{
+    private readonly List<IDomainEvent> _domainEvents = new();
+    public IReadOnlyList<IDomainEvent> DomainEvents => _domainEvents;
+
+    public void Confirm()
+    {
+        Status = OrderStatus.Confirmed;
+        _domainEvents.Add(new OrderConfirmedEvent(Id)); // just RECORDED in a list, NOT published yet
+    }
+}
+
+// In a SaveChanges interceptor (covered earlier) or the DbContext's own overridden SaveChangesAsync:
+public override async Task<int> SaveChangesAsync(CancellationToken ct)
+{
+    var result = await base.SaveChangesAsync(ct); // the ACTUAL commit happens HERE
+    // ONLY AFTER a successful commit, dispatch every entity's recorded (but not-yet-published) events
+    foreach (var entity in ChangeTracker.Entries<AggregateRoot>().Select(e => e.Entity))
+    {
+        foreach (var domainEvent in entity.DomainEvents) await _mediator.Publish(domainEvent);
+        entity.ClearDomainEvents();
+    }
+    return result;
+}
+```
+Now, if `SaveChangesAsync()` throws, execution never reaches the event-dispatching loop at all — the recorded-but-undispatched events simply never fire, exactly matching reality: the change was rolled back, so nothing that depended on that change having happened should fire either.
+
+**Common Pitfall:** publishing domain events synchronously and immediately inside the domain method itself (the "bug" pattern shown first) purely because it's simpler to write and reason about locally — this pattern works fine in every test and every happy-path manual check, and only reveals its flaw specifically when a `SaveChanges()` call genuinely fails *after* the event was already fired, which is exactly the kind of intermittent, hard-to-reproduce, only-shows-up-under-real-failure-conditions bug that's easy to ship without ever noticing during normal development.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is an "Aggregate Boundary" decision's connection to Transactional Consistency, and how does DDD's guidance "one transaction should touch at most one Aggregate" directly shape which Sagas (covered extensively earlier) become necessary at all?**
+
+DDD's Aggregate pattern (covered earlier — a cluster of entities/value objects with one Aggregate Root enforcing invariants) comes with a specific, often-overlooked corollary: a single database transaction should modify **at most one** Aggregate instance — and this single modeling rule is directly what determines whether an operation can be a simple, single-transaction save, or whether it necessarily requires a full multi-step Saga.
+
+**Why this rule exists — Aggregates are the transactional consistency boundary, by design:**
+```csharp
+public class Order : AggregateRoot // the Order AND its OrderLines are ONE Aggregate
+{
+    private readonly List<OrderLine> _lines = new();
+    public void AddLine(Product product, int quantity)
+    {
+        if (Status != OrderStatus.Draft) throw new DomainException("Cannot modify a submitted order.");
+        _lines.Add(new OrderLine(product.Id, quantity, product.Price));
+        // Invariant enforced: total line count can't exceed some business rule, checked HERE, atomically
+    }
+}
+```
+Modifying `Order` and its `OrderLines` together, within one transaction, is exactly what Aggregates are designed for — the Aggregate Root (`Order`) enforces its own invariants atomically, and one database transaction naturally covers the Aggregate's own internal consistency needs.
+
+**Where this rule directly FORCES a Saga rather than a simple transaction — an operation spanning TWO separate Aggregates:**
+```text
+"When an order is confirmed, decrement the Product's available inventory count"
+-- Order and Product are TWO SEPARATE Aggregates (each with its OWN invariants,
+   its OWN Aggregate Root, potentially even living in entirely separate microservices)
+-- DDD's rule says: do NOT wrap both in one transaction just because it's convenient --
+   this is EXACTLY the scenario requiring a Saga (Order confirms locally, THEN publishes
+   an event, Inventory reacts and decrements its OWN count in ITS OWN separate transaction)
+```
+This is the precise modeling-level reason the Saga pattern (covered so extensively earlier) becomes *necessary* at all, rather than an arbitrary architectural preference — once you've correctly identified `Order` and `Product`/`Inventory` as separate Aggregates (each independently responsible for its own invariants), DDD's "one transaction, one Aggregate" discipline directly implies you cannot simply wrap both updates in one local database transaction, *forcing* the eventual-consistency-via-events approach a Saga provides.
+
+**Why getting Aggregate boundaries right is the single hardest, most consequential DDD modeling decision (as noted in passing during the earlier system-design trade-offs discussion):** drawing an Aggregate boundary too large (cramming `Order`, `Product`, and `Customer` all into one giant Aggregate "for convenience") makes simple operations artificially require locking/loading far more data than necessary; drawing boundaries too small/fragmented forces excessive Saga usage for operations that would have been simpler as one atomic transaction — correctly identifying "what genuinely needs to be atomically consistent together" versus "what can tolerate eventual consistency via events" is the actual crux of good DDD modeling, directly determining how much Saga-based coordination a system ends up needing.
+
+**Common Pitfall:** treating Aggregate boundaries as a purely technical/performance decision (how big can one object graph reasonably be) rather than recognizing they directly determine transactional consistency requirements — a boundary drawn without considering "what actually needs atomic consistency together, versus what can tolerate eventual consistency" tends to produce either overly-large Aggregates causing contention, or overly-fragmented ones requiring Sagas for operations that didn't actually need cross-Aggregate coordination in the first place.
+
+---

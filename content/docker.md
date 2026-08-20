@@ -444,3 +444,117 @@ This gives the application **exactly** the specific writable locations it legiti
 **Common Pitfall:** enabling `--read-only` without first identifying every path the application actually needs to write to (temp directories, cache folders, log output, sometimes surprising defaults like ASP.NET Core's Data Protection key storage) — the container will fail at startup or crash the first time it attempts an unanticipated write, requiring a methodical audit of every write path the application (and any of its dependencies/libraries) might touch before this hardening can be safely enabled in production.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between `docker-compose.yml`'s `depends_on` and a proper health-check-based startup order, and why does `depends_on` alone not guarantee a dependency is actually ready?**
+
+Covered briefly earlier — `depends_on` only controls the **order containers start in**, not whether the depended-upon service has finished its own initialization and is actually ready to accept connections; this gap is a very common source of "works when I restart it, fails on first `docker compose up`" bugs.
+
+**`depends_on` alone — only guarantees start ORDER, not readiness:**
+```yaml
+services:
+  api:
+    build: .
+    depends_on:
+      - db   # only ensures db's CONTAINER PROCESS starts before api's container process starts
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+```
+Docker Compose starts the `db` container first, then immediately starts `api` — but SQL Server's actual startup (initializing system databases, becoming ready to accept connections) can take many seconds *after* its container process has technically started; `api` might attempt its first database connection before `db` is genuinely ready, and fail.
+
+**Adding an actual health check, with `depends_on` waiting on that health status specifically:**
+```yaml
+services:
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy   # wait for db to be HEALTHY, not just STARTED
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "$SA_PASSWORD", "-Q", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+```
+Now `api` genuinely waits until `db`'s own health check (an actual `SELECT 1` query succeeding) confirms it's ready to accept real connections — not just that its container process has technically launched.
+
+**Why this specific gap causes intermittent, hard-to-reproduce failures:** on a fast machine (or if `db`'s image happened to already be cached/warm), the race between `api` starting and `db` becoming ready might resolve favorably often enough that the bug goes unnoticed in casual local testing — only surfacing reliably in CI pipelines, fresh machine setups, or under different load conditions where the timing race consistently loses.
+
+**Common Pitfall:** relying on `depends_on` alone and then "fixing" the resulting intermittent connection failures with an arbitrary `sleep 10` in the application's startup script — this is fragile (the actual required wait time varies by machine/load) compared to a genuine health-check-based wait, which waits exactly as long as necessary and no longer, regardless of how long the dependency actually takes to become ready on any given run.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is a Docker Multi-Platform (multi-architecture) image, and how does `docker buildx` let one image tag transparently serve both `linux/amd64` and `linux/arm64` machines?**
+
+A single image tag (`myapp:1.0`) can actually reference **multiple** underlying images, each built for a different CPU architecture — Docker automatically pulls the correct one for whatever machine is running `docker pull`/`docker run`, without the user needing to specify architecture manually at all.
+
+**The problem — an image built on/for one architecture doesn't run on another:**
+```bash
+# An image built on a typical amd64 (Intel/AMD) development machine or CI runner
+docker build -t myapp:1.0 .
+# Attempting to run this SAME image tag on an Apple Silicon Mac (arm64) or an AWS Graviton
+# (arm64) instance either fails outright or runs (slowly) under binary emulation
+```
+
+**Building a genuine multi-platform image with `buildx`:**
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t myregistry/myapp:1.0 --push .
+```
+This builds the image **twice** — once genuinely compiled/assembled for `amd64`, once for `arm64` — and pushes both to the registry under **one shared tag**, along with a "manifest list" (an index) recording which underlying image corresponds to which architecture.
+
+**What happens at pull time — Docker automatically selects the RIGHT one:**
+```bash
+docker pull myregistry/myapp:1.0
+# On an Intel/AMD machine: automatically pulls the amd64 variant
+# On an Apple Silicon Mac or ARM-based cloud instance: automatically pulls the arm64 variant
+# The USER never has to specify architecture manually -- the manifest list handles it transparently
+```
+
+**Why this matters increasingly, not just for a niche use case:** ARM-based infrastructure (Apple Silicon developer machines, AWS Graviton instances known for meaningfully better price/performance) has become common enough that shipping only an `amd64` image creates real friction — either forcing ARM users into slow emulation, or requiring them to maintain a separate, differently-tagged image themselves; multi-platform images solve this once, centrally, at build/publish time.
+
+**Common Pitfall:** assuming a Dockerfile that builds successfully on one architecture will automatically also work correctly on another without testing — some base images or native dependencies (particularly ones with architecture-specific compiled binaries baked in) aren't actually available or behave differently across architectures, meaning a multi-platform build can sometimes fail or subtly misbehave for one specific architecture even though the same Dockerfile builds cleanly for another; testing the actual arm64 build (not just assuming buildx's success on amd64 implies success everywhere) remains necessary.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is Docker's OverlayFS (the default storage driver), and how does its layered, copy-on-write filesystem let dozens of running containers share a base image's files without duplicating them on disk?**
+
+Covered at a conceptual level earlier (image layers, layer caching) — OverlayFS is the actual filesystem mechanism making layer-sharing work at runtime: when a container starts, it doesn't copy the entire image's files onto disk again; it stacks a thin, writable layer on top of the image's existing, shared, read-only layers.
+
+**The layered structure at runtime:**
+```text
+Container A's filesystem view:
+  [Writable layer -- Container A's own changes] <- unique to THIS container
+  [Image layer 3 -- app code]                    <- SHARED, read-only
+  [Image layer 2 -- runtime dependencies]         <- SHARED, read-only
+  [Image layer 1 -- base OS]                       <- SHARED, read-only
+
+Container B's filesystem view (SAME image, different running instance):
+  [Writable layer -- Container B's own DIFFERENT changes] <- unique to Container B
+  [Image layer 3 -- app code]                    <- the EXACT SAME shared layer as Container A
+  [Image layer 2 -- runtime dependencies]         <- the EXACT SAME shared layer as Container A
+  [Image layer 1 -- base OS]                       <- the EXACT SAME shared layer as Container A
+```
+Ten containers all started from the same image share the exact same underlying read-only layers on disk (loaded into the page cache once, not duplicated ten times) — only each container's own thin writable layer (typically containing very little data — logs, temp files, minor runtime state) is actually unique per-container.
+
+**Copy-on-Write — modifying a "shared" file doesn't affect other containers:**
+```text
+Container A modifies /etc/config.json (which exists in a shared read-only image layer)
+    -> OverlayFS copies THAT SPECIFIC FILE into Container A's own writable layer FIRST,
+       then applies the modification there
+    -> Container B's view of /etc/config.json is COMPLETELY UNCHANGED --
+       it still reads the original file from the shared read-only layer
+```
+The underlying shared layer is never actually modified — a copy-on-write operation transparently copies just the specific file being changed into the writable layer the moment a write is attempted, leaving the original shared layer (and every other container still referencing it) completely unaffected.
+
+**Why this matters for understanding container resource efficiency:** this is the concrete mechanism explaining why running 50 containers from the same base image doesn't consume anywhere near 50× the base image's disk/memory footprint — the shared, unchanging majority of each container's filesystem is genuinely shared at the OS level, not duplicated, with only the comparatively tiny per-container deltas actually taking unique space.
+
+**Common Pitfall:** writing large amounts of data to a container's writable layer during normal operation (treating it as general-purpose persistent storage) rather than using a proper volume mount (covered earlier) — the writable layer is deliberately optimized for small, container-lifecycle-scoped changes; using it for substantial data volumes both performs worse than a dedicated volume and, critically, is lost entirely when the container is removed, unlike data in a properly-mounted volume.
+
+---

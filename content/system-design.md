@@ -972,3 +972,99 @@ No matter how many rounds of acknowledgment are added, the *very last* message i
 **Common Pitfall:** designing a critical distributed workflow assuming that "enough" retries and acknowledgments will eventually achieve perfectly certain agreement between two services — the Two Generals' Problem shows this is a category error; the correct response is designing the *operations themselves* to be safe under uncertainty (idempotent, tolerant of duplicates or ambiguous outcomes) rather than trying to engineer away the underlying, provably unavoidable uncertainty.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between Vertical Partitioning and Horizontal Partitioning (Sharding, covered earlier) of a database, and why does splitting by COLUMN solve a different problem than splitting by ROW?**
+
+Sharding (covered earlier) splits a table's **rows** across multiple physical databases — Vertical Partitioning instead splits a table's **columns**, moving different groups of columns to separate tables or even separate databases, addressing a fundamentally different bottleneck.
+
+**Horizontal Partitioning (Sharding, covered earlier) — splits by ROW, addresses storage/throughput volume:**
+```text
+Shard 1: Customers 1-1,000,000 (ALL their columns)
+Shard 2: Customers 1,000,001-2,000,000 (ALL their columns)
+-- solves: "this table has too many ROWS for one server"
+```
+
+**Vertical Partitioning — splits by COLUMN, addresses access-pattern mismatch within ONE row:**
+```text
+Original table: Customers(Id, Name, Email, ProfilePictureBlob, LastLoginAt, PreferencesJson)
+
+Vertically partitioned:
+  CustomerCore(Id, Name, Email, LastLoginAt)        -- accessed on EVERY request, small/fast
+  CustomerProfileData(Id, ProfilePictureBlob, PreferencesJson) -- rarely accessed, but LARGE
+```
+Here, the *row count* might be perfectly manageable on a single server — the actual problem is that some columns (a large binary blob) are rarely needed but bloat every single row's physical size, slowing down the common case (fetching just `Name`/`Email` for an auth check) because the database still has to work with rows that are much larger than necessary due to the rarely-used blob column living alongside them.
+
+**Why this is a genuinely different fix than Sharding:** Sharding solves "too many rows for one machine" — Vertical Partitioning solves "each row is bloated by columns most queries don't actually need," a problem that exists regardless of total row count. A table with only 10,000 rows could still benefit from vertical partitioning if each row carries a large, rarely-accessed blob column that's slowing down the much more frequent "just read the core fields" queries by forcing the database to work with unnecessarily large row sizes.
+
+**Common Pitfall:** reaching for Sharding (a much larger architectural commitment, per the earlier sharding discussion) when the actual problem is really about column access patterns within otherwise reasonably-sized rows — Vertical Partitioning is a comparatively lightweight schema change (splitting one table into two, joined by a shared key) that can solve a "queries are slow because of bloated rows" problem without the operational complexity of a full horizontal sharding migration.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is a Circuit Breaker's "Half-Open" state's specific test-request mechanics (going beyond the earlier conceptual coverage), and how does it avoid immediately re-tripping into Open on the very first test request if the downstream service is only *partially* recovered?**
+
+Covered earlier at a conceptual level (Closed -> Open -> Half-Open -> Closed/Open) — the specific mechanics of *how many* test requests Half-Open allows through, and how the transition back to Closed is decided, matter for avoiding a circuit breaker that flaps rapidly between states when a downstream service is recovering gradually rather than instantly.
+
+**A naive Half-Open implementation — one single test request decides everything:**
+```text
+Half-Open: let exactly ONE request through
+    -> succeeds -> immediately go fully Closed (100% of traffic resumes)
+    -> fails -> immediately go back to fully Open
+```
+The problem: a downstream service recovering from an outage might handle its *first* request successfully (it just restarted, has spare capacity for one request) but immediately buckle again once **all** traffic floods back at once — a single successful test request is a weak signal that the service can handle the *full* traffic volume, not just one lucky request.
+
+**A more robust Half-Open implementation — a small, gradually-increasing sample of test traffic:**
+```csharp
+.AddCircuitBreaker(new CircuitBreakerStrategyOptions
+{
+    FailureRatio = 0.5,
+    MinimumThroughput = 10,       // require at least 10 sample requests before making a decision
+    SamplingDuration = TimeSpan.FromSeconds(30),
+    BreakDuration = TimeSpan.FromSeconds(30)
+});
+```
+Rather than "exactly one test request," many production circuit breaker implementations let through a **small percentage** of traffic during Half-Open (not literally 100%, not literally one single request), monitoring the *aggregate* success rate of that sample before deciding to fully close — this avoids both extremes: not flooding a possibly-still-fragile service with 100% of traffic immediately, and not making a full-open/full-closed decision based on the noise of just one single request's outcome.
+
+**Why this specifically matters for services recovering gradually (auto-scaling up, warming caches) rather than instantly:** a downstream service auto-scaling back up from an outage might genuinely handle 10% of normal traffic fine, 50% with some struggle, and 100% not yet — a circuit breaker that goes straight from "let one request through" to "resume 100% of traffic" on that single success completely skips over detecting this gradual-recovery curve, potentially re-triggering the exact overload condition that tripped the breaker in the first place, moments after declaring the service "recovered."
+
+**Common Pitfall:** configuring Half-Open with too small a sample size (or too short a sampling duration) relative to how variably a downstream dependency actually behaves under partial load — a sample that's too small provides a statistically unreliable signal about whether the dependency is genuinely ready for full traffic, risking exactly the "immediately re-trip after declaring recovery" flapping behavior a more gradual, larger-sample Half-Open evaluation is specifically designed to avoid.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is Consistent Hashing, and how does it let a distributed cache/database add or remove a node while only requiring a small fraction of keys to be remapped, instead of nearly all of them?**
+
+A naive hash-based sharding scheme (`node = hash(key) % totalNodes`) has a serious hidden cost: changing the *number* of nodes (adding or removing even one) changes the modulo divisor, which changes the result of `hash(key) % totalNodes` for **almost every single key** — meaning nearly the entire dataset needs to be reshuffled across nodes just because the cluster size changed by one. Consistent Hashing solves this specific problem.
+
+**Naive modulo-based hashing — adding ONE node reshuffles almost EVERYTHING:**
+```text
+With 4 nodes: key "order-123" -> hash("order-123") % 4 = 2 -> Node 2
+Add a 5th node: key "order-123" -> hash("order-123") % 5 = 4 -> Node 4 (COMPLETELY different node!)
+-- This happens for the VAST MAJORITY of keys, not just a few -- adding one node
+   to a cluster of 4 can require reshuffling roughly 80% of ALL data
+```
+
+**Consistent Hashing — nodes and keys are placed on the SAME conceptual "ring," minimizing remapping:**
+```text
+Imagine a circular hash space (0 to 2^32-1). Both NODES and KEYS are hashed onto this same ring.
+A key belongs to the NEXT node clockwise from its own position on the ring.
+
+Node A at position 1000, Node B at position 5000, Node C at position 9000 (on the ring)
+Key "order-123" hashes to position 1500 -> belongs to Node B (the next node clockwise)
+
+Adding Node D at position 3000:
+-- ONLY keys between position 1000 (Node A) and 3000 (new Node D) are affected --
+   they now belong to Node D instead of Node B
+-- Keys anywhere ELSE on the ring are COMPLETELY UNAFFECTED -- still map to the same node as before
+```
+Adding or removing a node only affects the small arc of the ring immediately adjacent to that node's position — every other key, anywhere else on the ring, keeps mapping to exactly the same node it always did, since the ring positions of the *other* existing nodes and keys never changed at all.
+
+**Why this specifically matters for elastic, auto-scaling distributed caches:** a distributed cache (Redis Cluster, Memcached with consistent hashing client libraries) that needs to scale nodes up and down dynamically based on load would face a devastating "cache stampede" (covered earlier, but at cluster-topology scale) every time the node count changed, if it used naive modulo hashing — nearly the entire cache would suddenly miss and need to be recomputed/refetched from the origin simultaneously; Consistent Hashing keeps that disruption limited to only the small fraction of keys actually near the changed node's ring position.
+
+**Common Pitfall:** implementing a "simple" `hash(key) % nodeCount` sharding scheme for a system expected to scale its node count dynamically over time, without realizing the node-count-change remapping cost until the first time a scaling event actually happens in production — the naive approach works identically to consistent hashing as long as the node count *never* changes, making the flaw easy to miss during initial development and testing against a fixed-size cluster, only surfacing once real elastic scaling is attempted.
+
+---

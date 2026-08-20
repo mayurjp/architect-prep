@@ -1090,3 +1090,95 @@ builder.Services.AddScoped<IPricingEngine, NewPricingEngine>(); // was LegacyPri
 **Common Pitfall:** introducing the abstraction interface but then building the *entire* new implementation on a separate long-lived branch anyway "to keep it clean until it's done" — this defeats the whole point of the technique, which is specifically to enable continuous integration of incomplete, in-progress new code by hiding it behind an interface that isn't yet wired up, rather than isolating it on a branch that still needs a large, risky merge eventually.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between "Orchestration" and "Choreography" at the organizational/team-ownership level (beyond the technical Saga-pattern distinction covered earlier), and why does a choice that seems purely technical actually reflect a team-structure decision?**
+
+Covered earlier purely as a technical Saga implementation choice (a central coordinator vs. independent event reactions) — the same choice has a less obvious but equally important organizational dimension: it determines which team is responsible for understanding and maintaining the *overall* business process end-to-end.
+
+**Orchestration — ONE team/service owns the entire workflow's logic, in one place:**
+```csharp
+public class OrderSagaOrchestrator // ONE team (say, the Orders team) owns this ENTIRE class
+{
+    public async Task Execute(OrderSaga saga)
+    {
+        await _payment.Charge(saga.CustomerId, saga.Total);   // Orders team's code CALLS Payment's API
+        await _inventory.Reserve(saga.ProductId, saga.Qty);    // and Inventory's API
+        await _order.Confirm(saga.OrderId);
+    }
+}
+```
+The Orders team can read this ONE file and understand the *entire* checkout process end-to-end — but they've also taken on the responsibility of knowing about, and coordinating calls to, other teams' services directly, meaning changes to the overall *process* require the Orders team specifically, even if the change is really about how Payment and Inventory should interact.
+
+**Choreography — EACH team owns only ITS OWN piece, with no one team seeing the whole picture in one place:**
+```csharp
+// In InventoryService's OWN codebase, owned by the Inventory team
+public async Task Handle(OrderCreatedEvent e) { await _payments.Charge(...); await _bus.Publish(new PaymentSucceededEvent()); }
+
+// In PaymentService's OWN codebase, owned by the Payments team, REACTING independently
+public async Task Handle(PaymentSucceededEvent e) { /* ... */ }
+```
+No single file or team owns the "whole" checkout process — understanding the complete flow requires reading code spread across multiple teams' independently-owned repositories, but each team has full autonomy over their own specific piece without needing another team's central orchestrator to change.
+
+**Why this is genuinely a team-structure decision, not purely a technical one:** Orchestration concentrates cross-service process knowledge (and the coordination burden) in one team; Choreography distributes it, trading "any one person can read one file to understand the whole flow" for "each team is fully autonomous over their own piece, with no central coordinator to become a bottleneck for cross-team changes" — this is a direct instance of Conway's Law (system architecture tends to mirror the communication structure of the organization building it) playing out in a very concrete, practical way.
+
+**Common Pitfall:** choosing Choreography purely for its technical decoupling benefits without considering that "who do I even ask to understand this end-to-end business process" becomes a genuinely harder organizational question once no single team/codebase owns the full picture — for a process with real business-criticality and complexity (the earlier checkout Saga example), some teams deliberately choose Orchestration specifically to preserve a single, readable source of truth for the overall process, accepting the coordination cost as worthwhile for that specific process's complexity.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is the "Saga Choreography Event Chain Depth" problem, and how does a seemingly simple choreographed Saga become nearly impossible to reason about once event chains grow beyond 3-4 hops?**
+
+Building directly on the Choreography vs. Orchestration trade-off (covered in the previous question and earlier under the Saga pattern) — Choreography's "no central coordinator" benefit has a specific, well-known failure mode as the *number of steps* in a business process grows: the event chain becomes long enough that literally no single person can hold the entire flow in their head, and debugging a stuck process requires manually tracing through many independently-owned services' event handlers.
+
+**A SHORT choreographed chain — manageable, easy to reason about:**
+```text
+OrderCreated -> (Inventory reacts) -> StockReserved -> (Payment reacts) -> PaymentCompleted
+-- 3 services, 2 event hops -- a developer can trace this by reading 3 codebases
+```
+
+**A LONGER choreographed chain — the same pattern, but now genuinely hard to reason about:**
+```text
+OrderCreated -> StockReserved -> PaymentCompleted -> ShippingLabelGenerated ->
+WarehouseNotified -> CarrierPickupScheduled -> CustomerNotified -> LoyaltyPointsAwarded ->
+InvoiceGenerated -> AccountingRecordCreated
+-- 10 services, 9 event hops -- understanding "what happens when an order is placed"
+   now requires reading code across TEN independently-owned, independently-deployed codebases
+```
+At this depth, there's no single place to look to answer "what's the complete sequence of things that happen when a customer places an order" — the actual business process only exists implicitly, scattered as a chain of independent event-reaction pairs across ten different teams' codebases, discoverable only by manually tracing published/subscribed event types through each one.
+
+**Why this specifically makes debugging a stuck process painful:** if an order gets "stuck" somewhere in this ten-hop chain, diagnosing *where* requires checking each service in the chain individually (does `WarehouseNotified` show up in the logs? did `CarrierPickupScheduled` ever fire?) — there's no single orchestrator's state machine you could inspect to immediately see "we're stuck at step 6 of 10"; distributed tracing (covered earlier, correlation IDs across the whole chain) becomes not just helpful but close to mandatory once chains grow this long, since it's the only practical way to reconstruct the actual sequence of what happened for one specific order.
+
+**The practical mitigation — reaching for Orchestration once chain depth crosses a complexity threshold:** teams that start with Choreography for a simple, short process often deliberately migrate to an Orchestrator once the process has organically grown to this kind of depth over time — not because Choreography is "wrong," but because the trade-off that favored it (simplicity, autonomy) at 3 hops inverts once the same process has organically grown to 10 hops, and centralizing the coordination logic (even at the cost of the earlier-covered team-ownership trade-off) becomes the more maintainable choice.
+
+**Common Pitfall:** letting a choreographed process's event chain grow organically, one new event-reaction pair at a time, without ever stepping back to assess the *overall* chain's depth and complexity — since each individual addition (one more service reacting to one more event) looks like a small, contained change from the perspective of the team making it, the *cumulative* complexity of the entire chain can silently cross the point where Choreography's benefits still outweigh its debugging/comprehension costs, without any single change feeling like the "problem."
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is the "Distributed Monolith" anti-pattern, and how can a system that's technically split into many separate services still fail to deliver microservices' actual promised benefits?**
+
+A Distributed Monolith has all the *operational* complexity of microservices (many separately-deployed services, network calls between them, distributed tracing needed to debug) while retaining the *coupling* of a monolith (services can't actually be deployed independently, because they're too tightly coupled to each other's internal details) — arguably the worst of both worlds, rather than a genuine microservices architecture.
+
+**The telltale sign — deploying ONE service requires ALSO deploying others, in lockstep:**
+```text
+"We need to deploy OrderService v2.3, but it requires InventoryService v1.8 to already be
+deployed first, and PaymentService needs a coordinated schema migration at the SAME TIME,
+so we always deploy all three together as one coordinated release"
+```
+If services can't genuinely be deployed independently — if deploying one *requires* coordinating deployment of others in a specific order or at the same time — the fundamental promise of microservices (independent deployability, covered as the very first principle in this topic) has already been lost, regardless of how many separate services/repositories/deployment pipelines technically exist.
+
+**Common root causes producing this anti-pattern:**
+- **Shared database** (the earlier Database-per-Service violation) — services aren't genuinely independent if they share tables, since a schema change to one can silently break another.
+- **Synchronous call chains with no resilience** (the earlier cascading-failure scenario) — if Service A always calls B, which always calls C, synchronously, with no timeouts/circuit breakers, the services are operationally coupled even if their code lives in separate repositories.
+- **Shared domain-model libraries** (covered earlier as the "shared library trap") — compile-time coupling through a shared NuGet package recreates deployment coordination requirements even across "separate" services.
+- **Overly chatty, tightly-sequenced APIs** — if completing one business operation requires Service A to call B, which must complete before calling C, which must complete before calling D, all synchronously and in a rigid sequence, the services are behaviorally coupled into what's functionally a distributed function call chain, not autonomous services.
+
+**Why this matters as a diagnosis, not just a definition:** a team that has "done microservices" (split a monolith into 15 separate deployable services) but still can't deploy any single one independently without coordinating with several others hasn't actually achieved the architectural benefits microservices are meant to provide — they've paid the full *operational* cost (network calls, distributed debugging, more infrastructure to manage) without receiving the actual payoff (independent, autonomous team ownership and deployment), which is a worse outcome than either a well-structured monolith or genuine microservices.
+
+**Common Pitfall:** measuring "microservices success" purely by counting the number of separately-deployable-looking services that exist, without actually verifying whether any of them can be deployed genuinely independently in practice — the actual test of whether a system has achieved microservices' core benefit isn't "how many services do we have," it's "can Team X deploy their service on Tuesday afternoon without needing Team Y or Team Z to coordinate anything at all."
+
+---

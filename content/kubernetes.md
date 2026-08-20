@@ -477,3 +477,111 @@ Both express the same underlying constraint from different directions — `maxUn
 **Common Pitfall:** setting `minAvailable` equal to (or higher than) the total replica count — this makes the PDB impossible to satisfy during *any* voluntary disruption, permanently blocking legitimate node drains/maintenance operations indefinitely, since Kubernetes will never evict a Pod if doing so would violate the budget, no matter how long the administrator waits.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is a Kubernetes `ConfigMap`'s "mounted as a volume" mode versus "injected as environment variables" mode, and what practical difference does it make when the ConfigMap's data changes while Pods are already running?**
+
+Both modes get the same ConfigMap data into a running Pod, but they behave meaningfully differently when the ConfigMap is later updated — one picks up changes automatically without a Pod restart, the other doesn't.
+
+**Environment variables — set ONCE at container startup, frozen from that point on:**
+```yaml
+containers:
+  - name: api
+    envFrom:
+      - configMapRef: { name: app-config }
+```
+Environment variables are injected into the container process exactly once, at startup — if the underlying `ConfigMap` is updated afterward (`kubectl edit configmap app-config`), already-running Pods have **no way to see the change** at all; the environment variables were copied in at process launch and are now simply a fixed, frozen snapshot, requiring a Pod restart (or a rolling redeploy) to pick up the new values.
+
+**Mounted as a volume — files that CAN update live, without a restart:**
+```yaml
+containers:
+  - name: api
+    volumeMounts:
+      - { name: config-volume, mountPath: /app/config }
+volumes:
+  - name: config-volume
+    configMap: { name: app-config }
+```
+```csharp
+// Application code that RE-READS the file periodically (rather than caching it once at startup)
+// can pick up updates without any restart at all
+var config = File.ReadAllText("/app/config/settings.json"); // re-read this periodically
+```
+Kubernetes' kubelet periodically syncs a mounted ConfigMap volume's files to reflect the ConfigMap's *current* state (typically within about a minute of the update) — but critically, this only actually helps if the *application itself* is written to re-read the file periodically (or watch it for changes) rather than reading it once at startup and caching the value in memory forever, the same way `IOptionsMonitor<T>`'s `OnChange()` callback (covered earlier for `appsettings.json`) requires application-level cooperation to actually take advantage of a reloadable configuration source.
+
+**Why this distinction trips people up:** a developer expecting a ConfigMap change to "just work" without any Pod restart needs **both** the volume-mount delivery mechanism **and** application code that actually watches/re-reads the file — using environment variables at all, or using a volume mount but caching the value once at application startup, both result in the update requiring a Pod restart regardless of which ConfigMap delivery mode was chosen.
+
+**Common Pitfall:** switching from environment variables to a volume-mounted ConfigMap expecting configuration changes to "just take effect live," without also updating the application code to actually re-read the mounted file periodically — the volume mount alone only makes live updates *possible*, it doesn't automatically make the running application *notice and use* those updates without corresponding application-level file-watching logic.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is a Kubernetes `Job`'s `completions` and `parallelism` fields, and how do they let you run a batch workload as many coordinated, parallel worker tasks processing a shared work queue?**
+
+Covered earlier for a single-run `Job` (a database migration) — `completions` and `parallelism` extend the same primitive to express "run this task N times total, with up to M running concurrently," useful for batch-processing a large, divisible workload across multiple parallel workers.
+
+**A Job configured for parallel batch processing:**
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata: { name: image-resize-batch }
+spec:
+  completions: 100    # the task must succeed a TOTAL of 100 times to be considered done
+  parallelism: 10      # but only 10 Pods run CONCURRENTLY at any given moment
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: resizer
+          image: myregistry/image-resizer:1.0
+          command: ["./process-next-image-from-queue.sh"]
+```
+Kubernetes keeps launching new Pods (up to 10 running at once) until a **total** of 100 Pods have completed successfully — if a Pod fails, Kubernetes launches a replacement to keep working toward the total completion count, and if a Pod succeeds, another new one launches to replace it (keeping parallelism at 10) until the overall target of 100 total completions is reached.
+
+**Why `parallelism` is capped below the total `completions` count, rather than just running all 100 at once:** capping concurrent execution protects downstream resources (a database connection pool, a rate-limited third-party API, or simply the cluster's own available compute capacity) from being overwhelmed by 100 simultaneous Pods — `parallelism` lets you tune how aggressively the batch work is parallelized independent of how many total units of work exist.
+
+**How individual Pods typically coordinate to avoid processing the same work twice:** the Job controller itself doesn't assign specific work items to specific Pods — each Pod's own script/application logic typically pulls the "next" item from a shared work queue (a message queue, covered extensively earlier, or a shared database table with row-level locking) itself, meaning the Competing Consumers pattern (covered earlier for message queues) is directly what makes many-Pods-safely-sharing-one-work-queue actually correct, applied here at the Kubernetes Job level rather than a long-running service level.
+
+**Common Pitfall:** setting `parallelism` higher than the actual downstream system (a database, a third-party API with its own rate limits) can safely handle — Kubernetes will happily launch that many concurrent Pods, but if the actual bottleneck lives downstream of the Job itself, high Kubernetes-level parallelism just means more Pods contending for (and potentially overwhelming) that same constrained downstream resource, without genuinely increasing overall throughput past that shared bottleneck's own capacity ceiling — the same fundamental limit covered earlier for Competing Consumers scaling.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is a Kubernetes `NetworkPolicy`, and how does it let you enforce that a Pod can only communicate with specific other Pods — closing the "any Pod can reach any Service" gap covered earlier for namespaces?**
+
+Covered earlier as a gap — namespaces provide organizational, not security, isolation by default; a `NetworkPolicy` is the actual mechanism that restricts which Pods can send/receive traffic to/from which other Pods, since Kubernetes' default networking model otherwise allows any Pod to reach any other Pod across the entire cluster, including across namespace boundaries.
+
+**Without a NetworkPolicy — the default: every Pod can reach every other Pod:**
+```text
+ANY pod in ANY namespace can send traffic to the "payments-db" Pod by default,
+including a pod in a completely unrelated "marketing-website" namespace --
+Kubernetes' default networking model has NO built-in traffic restriction at all
+```
+
+**A NetworkPolicy restricting which Pods can reach a sensitive database Pod:**
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: payments-db-policy, namespace: payments }
+spec:
+  podSelector:
+    matchLabels: { app: payments-db }   # this policy applies TO Pods with this label
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: payments-api }   # ONLY allow traffic FROM pods labeled "payments-api"
+      ports:
+        - protocol: TCP
+          port: 5432
+```
+Once this policy is applied, the `payments-db` Pod only accepts incoming connections from Pods specifically labeled `app: payments-api` — a Pod from an unrelated namespace (or even a different, non-`payments-api` Pod within the same namespace) attempting to connect is now blocked at the network level, regardless of what application-level authentication the database might also have.
+
+**Why this needs to be enforced at the network layer, not just relying on the database's own authentication:** defense in depth — even if the database itself requires a password, a NetworkPolicy prevents an attacker who's already compromised some *other*, unrelated Pod in the cluster from even attempting a connection to the database in the first place, rather than relying solely on the database's own credential check as the only line of defense; this mirrors the same "defense in depth" philosophy covered under the microservices security material (mTLS, per-service AuthN/AuthZ, and now network-level segmentation, all as complementary layers).
+
+**Common Pitfall:** assuming a `NetworkPolicy` is enforced automatically by "Kubernetes itself" — the actual enforcement depends on the cluster's CNI (Container Network Interface) plugin supporting NetworkPolicy at all (not every CNI plugin does), meaning a `NetworkPolicy` object can be created and appear to exist correctly in the cluster's API, while providing **zero** actual traffic restriction if the underlying CNI plugin doesn't implement policy enforcement — always verifying the cluster's specific CNI plugin actually supports and is configured to enforce NetworkPolicies is a prerequisite, not an assumption to skip.
+
+---
