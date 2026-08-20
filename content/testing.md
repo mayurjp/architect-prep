@@ -533,3 +533,128 @@ Instead of asserting specific input/output pairs, this defines the *general prop
 **Common Pitfall:** trying to express every test as a property-based test — some behaviors (a specific business rule like "orders over $1000 get free shipping") are inherently about specific, concrete values rather than a general mathematical property, and are more naturally and clearly expressed as example-based tests; property-based testing shines specifically for algorithmic code with genuine mathematical invariants (sorting, serialization round-trips, mathematical operations), not as a wholesale replacement for example-based testing everywhere.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between a "Stub" method that returns a fixed value and a "Fake" implementation with actual in-memory logic (a distinction touched on earlier, worth expanding), and when does a Stub stop being sufficient?**
+
+A Stub (covered earlier) returns a hardcoded, fixed value regardless of input — it works for tests that don't care about varying behavior based on different inputs. Once a test needs the double to behave *consistently* across multiple calls with different inputs (remembering state between calls), a Stub's fixed-response model breaks down, and a Fake's actual working logic becomes necessary instead.
+
+**A Stub — fine for a single, simple, input-independent expectation:**
+```csharp
+var stubRepo = new Mock<IUserRepository>();
+stubRepo.Setup(r => r.GetById(It.IsAny<int>())).Returns(new User { Id = 1, Name = "Alice" });
+// Calling GetById(1) OR GetById(999) returns the SAME hardcoded "Alice" -- doesn't matter for THIS test
+```
+
+**Where a Stub becomes insufficient — a test needs realistic, input-dependent, STATEFUL behavior:**
+```csharp
+// Testing: "after adding a user, GetById for THAT user's specific ID returns THEM, not someone else"
+var stubRepo = new Mock<IUserRepository>();
+stubRepo.Setup(r => r.GetById(1)).Returns(new User { Id = 1, Name = "Alice" });
+stubRepo.Setup(r => r.GetById(2)).Returns(new User { Id = 2, Name = "Bob" });
+// This WORKS, but becomes unwieldy fast if the test needs many IDs, or needs Add() to actually
+// affect what a LATER GetById() call returns
+```
+
+**A Fake — genuine, simplified working logic that behaves consistently across a whole test:**
+```csharp
+public class FakeUserRepository : IUserRepository
+{
+    private readonly Dictionary<int, User> _users = new();
+    public void Add(User user) => _users[user.Id] = user;
+    public User? GetById(int id) => _users.GetValueOrDefault(id); // GENUINELY reflects whatever was Added
+}
+
+var fakeRepo = new FakeUserRepository();
+fakeRepo.Add(new User { Id = 1, Name = "Alice" });
+var service = new UserService(fakeRepo);
+service.UpdateName(1, "Alice Updated");
+Assert.Equal("Alice Updated", fakeRepo.GetById(1)?.Name); // reflects the ACTUAL Add+Update sequence
+```
+A Fake behaves like a genuinely simplified real implementation — adding a user actually makes it retrievable afterward, updating it actually changes what a later `GetById` returns — rather than needing every possible input/output pair pre-configured via `Setup()` calls ahead of time.
+
+**When to reach for each:** a Stub is simpler and sufficient when a test only needs "this dependency returns X, regardless of details" for one or two fixed scenarios; a Fake earns its extra setup cost specifically when a test needs to verify a *sequence* of operations behaving consistently together (add, then update, then verify), which would require an unwieldy number of individually pre-configured Stub responses to express otherwise.
+
+**Common Pitfall:** building an elaborate Stub with many individually-configured `Setup()` calls trying to simulate stateful behavior a Fake would express far more naturally and readably — if a test's Stub configuration is starting to look like it's manually re-implementing basic CRUD logic through a chain of `Setup()` calls, that's usually the signal a proper Fake would be simpler and clearer.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is Contract Testing's relationship to Consumer-Driven Contracts (covered earlier for microservices), and how does "Provider-Driven" contract testing differ in which side of the relationship writes the contract?**
+
+Covered earlier specifically as Consumer-Driven (the consumer defines what it expects, and the provider's CI verifies it still honors that) — Provider-Driven contract testing inverts who authors the contract, useful in scenarios where the provider is a large platform serving many consumers who can't practically each author their own contract.
+
+**Consumer-Driven (covered earlier) — each consumer defines its OWN specific expectations:**
+```csharp
+// OrderService (a CONSUMER of InventoryService) writes what IT specifically needs
+pact.UponReceiving("a request for stock level")
+    .WithRequest(HttpMethod.Get, "/api/inventory/5")
+    .WillRespond().WithJsonBody(new { productId = 5, available = 10 });
+```
+This scales well when there are a manageable number of known, cooperating consumer teams who can each maintain their own contract.
+
+**Provider-Driven — the PROVIDER defines and publishes a contract describing its own guaranteed behavior:**
+```yaml
+# InventoryService publishes an OpenAPI spec or a formal schema describing its OWN commitment
+openapi: 3.0.0
+paths:
+  /api/inventory/{id}:
+    get:
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { productId: { type: integer }, available: { type: integer } }
+```
+Any consumer (including ones the provider team has never even met — a public API with unknown, unregistered third-party consumers) can validate their own expectations against this provider-published contract, without the provider needing an individual, hand-maintained Pact-style contract per consumer at all.
+
+**Why Provider-Driven fits large-scale/public APIs better:** a platform team serving hundreds of internal teams (or a genuinely public API with anonymous external consumers) can't practically maintain individual Consumer-Driven contracts with every single one — publishing one authoritative provider-driven contract (an OpenAPI spec functioning as a testable contract) that any consumer can validate against scales far better than requiring pairwise consumer-provider contract relationships for every single API consumer.
+
+**The trade-off versus Consumer-Driven:** Provider-Driven contracts describe what the provider *offers*, but don't guarantee any specific consumer's *actual* usage pattern is still satisfied after a change — a provider could make a technically-contract-compliant change that still breaks a specific consumer relying on some behavioral nuance the contract doesn't fully capture; Consumer-Driven contracts, by directly encoding what a *specific* consumer actually depends on, catch a narrower but more precisely-targeted category of breaking changes.
+
+**Common Pitfall:** treating an OpenAPI/Swagger specification alone as equivalent to genuine contract testing — a spec describes the *intended* shape, but without an automated verification step actually running the provider's real code against that spec (or against real consumer expectations) as part of CI, it's just documentation that can drift from actual behavior, not an enforced, CI-verified contract the way Consumer-Driven or actively-tested Provider-Driven contracts are.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is Chaos Engineering, and how does deliberately injecting failure into a production (or production-like) system differ fundamentally from traditional testing's goal of proving correctness?**
+
+Traditional testing (unit, integration, even load testing) aims to verify a system behaves correctly under *anticipated* conditions — Chaos Engineering instead deliberately introduces *unanticipated*, realistic failures into a running system specifically to discover weaknesses that no one thought to write a test for in the first place, because no one anticipated that particular failure mode existed.
+
+**Traditional testing — verifies known, anticipated scenarios:**
+```csharp
+[Fact]
+public async Task PaymentService_WhenGatewayTimesOut_ReturnsGracefulError()
+{
+    // Tests a SPECIFIC, ANTICIPATED failure the developer already thought to write a test for
+    _mockGateway.Setup(g => g.ChargeAsync(It.IsAny<Payment>())).ThrowsAsync(new TimeoutException());
+    var result = await _paymentService.ProcessAsync(payment);
+    Assert.Equal(PaymentStatus.Failed, result.Status);
+}
+```
+This is valuable, but it only ever tests failure modes someone already anticipated well enough to write a specific test case for — it says nothing about failure modes nobody thought of.
+
+**Chaos Engineering — deliberately injects REAL failures into a running system to discover UNANTICIPATED weaknesses:**
+```yaml
+# A Chaos Mesh / Gremlin-style experiment definition (conceptual)
+experiment:
+  target: payment-service-pods
+  action: network-latency
+  parameters: { latency: 3000ms, percentage: 50 } # inject 3-second latency into 50% of traffic
+  duration: 10m
+  # Runs against a REAL (often production, or a faithful staging replica) environment,
+  # observing whether the system's ACTUAL resilience mechanisms (circuit breakers, timeouts,
+  # retries -- covered extensively earlier) behave as intended under a REAL, injected failure
+```
+Rather than mocking a timeout in a unit test, this genuinely introduces network latency into a fraction of real traffic in a real (or production-faithful) environment — surfacing whether the *actual* deployed system's resilience mechanisms genuinely work as designed, including interactions between multiple resilience mechanisms and real infrastructure that no unit test's mocked dependencies could ever fully capture.
+
+**Why this specifically catches what unit/integration tests structurally cannot:** unit tests verify code behaves correctly against failures the *test author* specifically anticipated and coded a mock for — Chaos Engineering instead asks "what actually happens when THIS REAL infrastructure component genuinely fails," surfacing emergent behavior from real system interactions (does the circuit breaker's threshold actually trip correctly under genuine, sustained latency? does a retry storm actually overwhelm a downstream service the way theory predicted?) that a mocked unit test, by definition, can't observe since it never involves the real infrastructure at all.
+
+**Common Pitfall:** running chaos experiments without first having the basic resilience mechanisms (timeouts, circuit breakers, retries — all covered earlier) in place at all — Chaos Engineering is meant to *validate and stress-test* resilience mechanisms that are believed to already exist, not to be the *first* place a team discovers "we have no timeout configured at all"; running chaos experiments against a system with no baseline resilience design is more likely to just cause an unplanned outage than to produce a useful, actionable finding.
+
+---

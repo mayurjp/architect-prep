@@ -405,3 +405,96 @@ db.users.find({ email: "alice@example.com" }); // now uses the index -- O(log n)
 **Common Pitfall:** adding secondary indexes liberally in a distributed NoSQL database the same way one might in a single-node relational database — each additional secondary index in a partitioned NoSQL system can meaningfully increase write latency/cost (updating a separate, potentially cross-node index structure on every write) in a way that's less pronounced in a single-node relational database, making index proliferation a more consequential decision in a distributed NoSQL context.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between a Wide-Column Store's "column family" and a relational table's "columns," and why can different rows in the same Cassandra table have entirely different sets of columns?**
+
+A relational table has a fixed, schema-enforced set of columns — every row has exactly the same columns, even if some are `NULL`. A wide-column store's "column family" is more like a container for rows that *can* each have a completely different set of actual columns, only sharing the same row-key structure conceptually.
+
+**A relational table — every row has the SAME fixed columns:**
+```sql
+CREATE TABLE Sensors (SensorId INT, Temperature FLOAT, Humidity FLOAT, Pressure FLOAT);
+-- EVERY row has all four columns, even if some values are NULL for a given sensor type
+```
+
+**A Cassandra column family — different rows can have entirely different columns:**
+```text
+Row "sensor-1": { temperature: 72.5, humidity: 45 }
+Row "sensor-2": { temperature: 68.0, pressure: 1013, wind_speed: 12 }  <- DIFFERENT columns entirely!
+Row "sensor-3": { humidity: 60, uv_index: 7, battery_level: 85 }       <- yet ANOTHER different set
+```
+Each row in the same column family can genuinely have its own distinct set of columns — a temperature sensor's row naturally has different fields than a weather-station row, without either needing to declare unused, always-`NULL` columns for fields that don't apply to it; this is fundamentally different from a relational table, where every row is structurally forced into the exact same column set regardless of whether a given row logically needs all of them.
+
+**Why this fits certain use cases (like IoT sensor data, covered earlier) especially well:** different device types naturally produce different sets of readings — modeling this in a strict relational schema either requires a sparse table with dozens of mostly-`NULL` columns (one per possible sensor type's fields), or a more normalized but join-heavy schema; a wide-column store's per-row flexible column set matches this naturally-heterogeneous data shape directly, without either downside.
+
+**Common Pitfall:** assuming a wide-column store's flexibility means "no schema design consideration needed at all" — while individual rows can have different columns, the actual query patterns still fundamentally depend on how data is partitioned and clustered (the same partition-key design considerations covered earlier apply just as strongly here); column-level flexibility doesn't eliminate the need for careful row-key/partition-key design.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is "Eventual Consistency with Read-Your-Own-Writes" as a specific, named consistency guarantee weaker than Strong Consistency but stronger than plain Eventual Consistency, and how does it map onto Session Consistency (covered earlier for Cosmos DB)?**
+
+Plain Eventual Consistency (covered earlier) only guarantees that *given enough time with no further updates*, all replicas eventually converge — it says nothing about whether the client that just *wrote* a value can immediately read that same value back. "Read-Your-Own-Writes" is a specific, commonly-needed intermediate guarantee: a client is guaranteed to see its *own* prior writes immediately, even while the system is only eventually consistent for *other* clients' writes.
+
+**Plain Eventual Consistency — even the writer might not immediately see their own write:**
+```text
+Client writes: user.name = "Alice Updated" to Replica A
+Client IMMEDIATELY reads from Replica B (perhaps due to load-balanced routing)
+    -> Replica B hasn't received the update yet -> reads STALE "Alice" instead of "Alice Updated"
+    -> even though it was the SAME client that just made the write!
+```
+For many user-facing scenarios (a user updates their own profile, then immediately views it), this is a jarring, confusing experience — the user just typed a change and instantly sees the *old* value, appearing as if their edit was silently lost.
+
+**Read-Your-Own-Writes — the SAME client is guaranteed to see their own prior write immediately:**
+```text
+Client writes: user.name = "Alice Updated"
+Client reads back -> GUARANTEED to see "Alice Updated", regardless of which replica
+    actually serves the read, as long as it's genuinely the SAME client/session
+Different client (never wrote anything) reads -> might STILL see stale "Alice" for a
+    brief window, until eventual consistency catches up for THEM specifically
+```
+This is a genuinely useful middle ground: the writer never experiences the confusing "my own edit disappeared" symptom, while the system still only needs to guarantee full consistency for *that specific client's own operations*, not a global strong-consistency guarantee across every client simultaneously.
+
+**How this maps directly onto Cosmos DB's Session Consistency (covered earlier):** Session Consistency is precisely this guarantee, implemented via a "session token" the client carries with its requests — the database uses that token to ensure *this specific client's* subsequent reads reflect at least its own prior writes, while other clients' visibility of that same write remains only eventually consistent until full replication catches up.
+
+**Common Pitfall:** assuming "eventual consistency" as a blanket term always means the writer might see their own stale data — many production NoSQL systems default to (or offer) a Read-Your-Own-Writes/Session-level guarantee specifically because pure eventual consistency's UX problems for the writer are usually unacceptable; understanding this middle tier exists (rather than treating "consistency" as a binary strong-vs-eventual choice) is what lets you pick the right, minimally-costly guarantee for a specific requirement.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is Vector Clock-based conflict detection (as an alternative to the Last-Write-Wins approach covered earlier for Cassandra), and how does it let a system detect *genuinely concurrent* conflicting writes rather than just picking a winner by timestamp?**
+
+Last-Write-Wins (covered earlier) resolves conflicts by comparing timestamps and picking the more recent write — simple, but it silently discards the "loser" write entirely, and is vulnerable to clock-drift issues (covered earlier). A Vector Clock is a different mechanism that lets a system detect *whether* two writes were genuinely concurrent (neither one "happened after" the other) versus one being a legitimate causal update to the other — enabling the system to flag genuine conflicts explicitly rather than silently picking a winner and discarding data.
+
+**The core idea — each replica tracks its OWN logical counter, combined into a vector:**
+```text
+A Vector Clock for a value looks like: [NodeA: 3, NodeB: 1, NodeC: 0]
+-- meaning: this version reflects 3 updates NodeA has seen, 1 NodeB has seen, 0 from NodeC
+```
+
+**Detecting a genuine conflict — neither vector clock is a strict superset of the other:**
+```text
+Write 1 (at Node A): vector clock [A:2, B:1]  -- happened after seeing A's 2nd update and B's 1st
+Write 2 (at Node B): vector clock [A:1, B:2]  -- happened after seeing A's 1st update and B's 2nd
+-- NEITHER clock is fully "ahead of" the other (A:2 > A:1, but B:1 < B:2) --
+-- this is a GENUINE, detected conflict: two writes that happened concurrently,
+-- neither one aware of the other, unlike Last-Write-Wins which would just pick
+-- whichever has the later WALL-CLOCK timestamp and silently discard the other
+```
+Unlike comparing simple timestamps (vulnerable to clock drift, and which always produces *a* winner even when the writes were genuinely concurrent and equally valid), comparing vector clocks can mathematically detect the specific case where two writes are truly concurrent — neither one derived from or aware of the other — versus one write being a legitimate, causally-later update building on the other.
+
+**What happens once a genuine conflict is detected — often surfaced to the APPLICATION rather than silently resolved:**
+```text
+Amazon's original Dynamo paper (which popularized this technique) returns BOTH conflicting
+versions to the application/client, which then applies domain-specific logic to reconcile
+them (e.g., for a shopping cart: merge both versions' items together, rather than
+silently discarding one cart's contents the way Last-Write-Wins would)
+```
+This is the key philosophical difference from Last-Write-Wins: rather than the *database* silently picking a winner (potentially discarding legitimate data), Vector Clocks let the database detect and surface genuine conflicts, deferring the actual resolution decision to application-specific logic that understands the domain well enough to merge conflicting versions sensibly (like combining two concurrently-modified shopping carts' items, rather than one shopper's additions vanishing entirely).
+
+**Common Pitfall:** assuming Vector Clocks eliminate the *need* for conflict resolution entirely — they only provide better *detection* of genuine concurrency; the application still needs domain-specific merge logic to actually reconcile detected conflicts, which is real, non-trivial engineering work that Last-Write-Wins avoids entirely (at the cost of sometimes silently discarding legitimate concurrent writes) — Vector Clocks trade "simple but sometimes silently loses data" for "correctly detects conflicts, but requires you to write the merge logic yourself."
+
+---

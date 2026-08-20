@@ -490,3 +490,101 @@ Columnstore indexes are optimized for bulk analytical reads, not frequent small 
 **Common Pitfall:** applying a Columnstore index to a heavily-updated OLTP table expecting a pure performance win — columnstore specifically trades write performance for read/aggregate performance, making it the right tool for data warehouses and reporting tables, and the wrong tool for a table serving as an application's primary transactional read/write workload.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between a Clustered Index Scan and a Clustered Index Seek in an execution plan, and why is "Scan" not automatically a bad sign the way a Table Scan often is?**
+
+Both operators appear in execution plans (covered earlier at a high level) — but unlike a plain "Table Scan" (which only happens on a table with no clustered index at all, a "heap"), a Clustered Index *Scan* is a normal, sometimes entirely appropriate operation, not automatically a performance red flag the way it's sometimes assumed to be.
+
+**Clustered Index Seek — navigates directly to matching rows via the B-Tree, ideal for selective queries:**
+```sql
+SELECT * FROM Orders WHERE Id = 12345; -- Id is the clustered index key
+-- Execution plan: Clustered Index Seek -- navigates DIRECTLY to the one matching row
+```
+
+**Clustered Index Scan — reads every row in order, appropriate when most/all rows are needed anyway:**
+```sql
+SELECT * FROM Orders WHERE OrderDate > '2020-01-01'; -- if this matches 95% of all rows
+-- Execution plan: Clustered Index Scan -- reads through the table sequentially
+```
+If a query's `WHERE` clause matches the vast majority of a table's rows, a Seek (navigating to each individual matching row one at a time via the B-Tree) is actually **less** efficient than simply scanning sequentially through the clustered index in physical order — the optimizer correctly chooses Scan here specifically *because* it's the faster option for this particular selectivity, not because indexing failed.
+
+**Why "Scan" isn't automatically the same red flag as a heap Table Scan:** a Table Scan (on a heap, with no clustered index at all) means there's no ordered structure to navigate at all — every single row must be read regardless of how selective the query is, even for a query matching just one row. A Clustered Index Scan, by contrast, is a *deliberate optimizer choice* made specifically when scanning is genuinely more efficient than seeking for that query's actual selectivity — the same operator name ("Scan") describes two very different situations depending on whether an index exists to seek through at all.
+
+**How to actually judge whether a Scan indicates a problem:** compare the **estimated number of rows** the scan will touch against what the query's `WHERE` clause *should* logically match — a Clustered Index Scan touching nearly the entire table for a query that should only match a handful of rows (given proper indexing) suggests a missing or unused index; a Scan touching a large percentage of rows for a query that's *supposed* to match a large percentage is simply the optimizer making the correct choice.
+
+**Common Pitfall:** reflexively adding a new index whenever "Scan" appears in an execution plan, without checking the query's actual selectivity first — for a query genuinely needing most of a table's rows, no additional index changes the fact that a Scan is the fastest available approach; the "fix" in that case, if performance is still inadequate, lies elsewhere (reducing the actual data volume needed, caching, or reconsidering whether the query needs to run this way at all).
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is a SQL Server Filtered Index, and how does it let you build a smaller, more efficient index over just the subset of rows a query actually cares about?**
+
+A Filtered Index adds a `WHERE` clause to the index definition itself — indexing only the rows matching that condition, rather than every row in the table. For a query that only ever filters on a specific, narrow subset of data, this produces a dramatically smaller, more efficient index than indexing the entire table.
+
+**The scenario — most queries only care about a small, specific subset of a large table:**
+```sql
+-- Orders table has 50 million rows, but the application ALWAYS filters "WHERE Status = 'Pending'"
+-- for the specific dashboard query that runs constantly, and Pending orders are only ~0.1% of the table
+```
+
+**A regular (non-filtered) index covers every row, most of which are irrelevant to this specific query pattern:**
+```sql
+CREATE NONCLUSTERED INDEX IX_Orders_Status ON Orders(Status);
+-- Indexes ALL 50 million rows, even though 99.9% of them will NEVER match "WHERE Status = 'Pending'"
+```
+
+**A Filtered Index indexes only the relevant subset:**
+```sql
+CREATE NONCLUSTERED INDEX IX_Orders_Pending ON Orders(CreatedDate)
+WHERE Status = 'Pending'; -- indexes ONLY the ~50,000 Pending rows, not all 50 million
+```
+This produces a dramatically smaller index (covering roughly 0.1% of the table's rows) that's faster to scan, cheaper to maintain on writes (only `INSERT`/`UPDATE` operations affecting `Pending` rows need to update this index at all), and takes meaningfully less disk space — while still being fully useful for exactly the query pattern (`WHERE Status = 'Pending'`) it was designed around.
+
+**Why this matters specifically for the common "mostly one status value matters" pattern:** many real-world tables have exactly this shape — a `Status`/`IsActive`/`IsDeleted` column where the overwhelming majority of rows share one value, but the application's actual hot-path queries almost always filter for the *rare* value (active support tickets, pending orders, unprocessed queue items) — a Filtered Index tailored to that specific rare-but-important subset can be both smaller *and* faster than a full index covering the entire table.
+
+**Common Pitfall:** creating a Filtered Index for a condition that changes frequently per-row (today's `Status = 'Pending'` row might become `Status = 'Shipped'` tomorrow) without accounting for the write overhead this creates — every time a row's `Status` changes into or out of the filtered condition, SQL Server must add or remove that row from the filtered index accordingly, which is a real, ongoing maintenance cost worth weighing against the read-side benefit for columns with high churn between the filtered and non-filtered states.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is SQL Server's `OPTION (RECOMPILE)` versus Plan Guides versus Query Store's "Force Plan" feature, and how do they represent three different levels of intervention against the Parameter Sniffing problem covered earlier?**
+
+Parameter Sniffing (covered earlier) causes a cached execution plan optimized for one parameter value to be reused — sometimes badly — for a very different parameter value. Beyond the basic fixes covered there, SQL Server offers a spectrum of increasingly forceful interventions for controlling exactly which plan gets used.
+
+**Level 1 — `OPTION (RECOMPILE)`, covered earlier: discard the cache, recompile fresh every single execution:**
+```sql
+SELECT * FROM Orders WHERE CustomerId = @CustomerId OPTION (RECOMPILE);
+-- Guarantees an OPTIMAL plan for THIS SPECIFIC parameter value, every time, at the cost of
+-- compilation overhead on EVERY execution -- appropriate when parameter value distribution is
+-- highly variable and compilation cost is small relative to query execution cost
+```
+
+**Level 2 — a Plan Guide: force a SPECIFIC plan for a query, without modifying the query's own source code:**
+```sql
+EXEC sp_create_plan_guide
+    @name = N'PG_ForceIndexSeek',
+    @stmt = N'SELECT * FROM Orders WHERE CustomerId = @CustomerId',
+    @type = N'OBJECT',
+    @module_or_batch = N'GetCustomerOrders',
+    @hints = N'OPTION (TABLE HINT(Orders, INDEX(IX_Orders_CustomerId)))';
+```
+Useful specifically when you **can't modify the application's actual query text** (a third-party application, a stored procedure you can't safely edit) but still need to influence which plan SQL Server chooses — the Plan Guide intercepts a specific, exactly-matching query pattern and applies hints to it externally, without touching the original source.
+
+**Level 3 — Query Store's "Force Plan": pin one SPECIFIC, already-observed-good execution plan permanently:**
+```sql
+-- Using SSMS's Query Store UI (or sp_query_store_force_plan), you identify a specific
+-- plan_id that performed well historically, and FORCE the optimizer to always reuse
+-- exactly that plan for this query going forward, regardless of future parameter values
+EXEC sp_query_store_force_plan @query_id = 42, @plan_id = 17;
+```
+This is the most forceful intervention — rather than letting the optimizer make a fresh decision (even a hinted one), it pins one exact, specific plan permanently, useful when you've identified through Query Store's historical data that one particular plan reliably performs well across the actual range of parameter values your application sends, and want to eliminate any risk of the optimizer choosing a worse plan in the future (from a statistics update, a SQL Server upgrade changing optimizer behavior, etc.).
+
+**Why understanding the spectrum matters, not just knowing `RECOMPILE` exists:** `RECOMPILE` trades away *all* plan caching benefit for guaranteed per-execution optimality; Plan Guides and Forced Plans instead let you keep the performance benefit of plan caching/reuse while still exerting deliberate control over *which* plan gets reused, appropriate for genuinely high-frequency queries where paying `RECOMPILE`'s per-execution compilation cost would itself become a meaningful performance problem.
+
+**Common Pitfall:** reaching for `OPTION (RECOMPILE)` as the default fix for every parameter-sniffing symptom without considering its own cost — for a query executed thousands of times per second, the *compilation* overhead `RECOMPILE` reintroduces on every single execution can itself become the new bottleneck; Query Store's Forced Plan approach (pin a known-good plan, keep the caching benefit) is often the better trade-off for genuinely high-frequency queries, reserving `RECOMPILE` for lower-frequency queries where compilation cost is comparatively negligible.
+
+---

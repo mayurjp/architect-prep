@@ -546,3 +546,101 @@ public class SqlLoggingInterceptor : DbCommandInterceptor
 **Common Pitfall:** implementing the exact same cross-cutting logic (soft-delete filtering, auditing timestamps) independently in multiple `DbContext` subclasses' `SaveChanges()` overrides across a growing solution — once that logic needs to apply consistently across more than one context, an Interceptor registered against all of them (rather than duplicated per-context overrides slowly drifting out of sync) is the more maintainable choice.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is EF Core's Change Tracking "snapshot" mechanism, and how does `DetectChanges()` decide which properties were actually modified?**
+
+Covered earlier at a high level (change tracking generates the right SQL) — the actual mechanism relies on EF Core storing a private "original values" snapshot alongside each tracked entity the moment it's loaded, later comparing the entity's *current* values against that snapshot to determine exactly what changed.
+
+**What happens when an entity is loaded:**
+```csharp
+var product = context.Products.First(p => p.Id == 5);
+// EF Core internally stores a SNAPSHOT: { Id: 5, Name: "Keyboard", Price: 29.99 }
+// alongside the actual 'product' object it hands back to your code
+```
+
+**Modifying the entity, then calling `SaveChanges()`:**
+```csharp
+product.Price = 24.99m; // only the in-memory OBJECT changes -- the snapshot is untouched
+
+context.SaveChanges();
+// Internally, DetectChanges() compares product's CURRENT values against the stored snapshot:
+//   Id: 5 == 5 -- unchanged
+//   Name: "Keyboard" == "Keyboard" -- unchanged
+//   Price: 24.99 != 29.99 -- CHANGED
+// Generates: UPDATE Products SET Price = 24.99 WHERE Id = 5  (only the ACTUALLY changed column)
+```
+This snapshot comparison is precisely why `SaveChanges()` can generate a targeted `UPDATE` touching only the columns that actually changed, rather than blindly updating every column every time — and it's also why `AsNoTracking()` (covered earlier) improves performance: without tracking, there's no snapshot to store or later compare against at all, since a no-tracking query has no intention of ever calling `SaveChanges()` for those entities.
+
+**Why `DetectChanges()` can become a genuine performance concern with many tracked entities:** by default, EF Core calls `DetectChanges()` automatically before certain operations (including every `SaveChanges()` call, and some LINQ query executions) — with thousands of tracked entities in a single `DbContext`, this comparison sweep across every tracked entity's every property can itself become measurably slow, which is part of why keeping a `DbContext`'s tracked-entity count small (short-lived contexts, `AsNoTracking()` for reads) matters for more than just memory usage.
+
+**Common Pitfall:** modifying an entity's properties through a code path that bypasses the tracked object entirely (e.g., raw ADO.NET updating the same row directly while EF Core still holds a stale tracked snapshot of it) — EF Core has no way to know the underlying data changed out from under it, and a subsequent `SaveChanges()` from the stale tracked context could silently overwrite the other update, since its snapshot comparison only ever sees what changed through *its own* tracked object, never external changes made through a completely different path.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is EF Core's `ExecuteDeleteAsync()` (EF Core 7+), and how does it complement `ExecuteUpdateAsync()` (covered earlier) for bulk deletes that bypass Change Tracking entirely?**
+
+Just as `ExecuteUpdateAsync()` (covered earlier) translates a LINQ filter directly into a single, efficient bulk `UPDATE` statement without loading entities into memory, `ExecuteDeleteAsync()` does the same for deletions — translating a LINQ query directly into one `DELETE` statement, bypassing the Change Tracker entirely for genuinely bulk delete operations.
+
+**The traditional (slow, memory-heavy) approach to bulk deletion:**
+```csharp
+var staleOrders = await context.Orders.Where(o => o.CreatedAt < cutoffDate).ToListAsync(); // loads ALL matching rows into memory
+context.Orders.RemoveRange(staleOrders); // marks EVERY loaded entity as Deleted in the Change Tracker
+await context.SaveChangesAsync(); // generates ONE DELETE statement PER row (or batched, but still N operations)
+```
+For deleting 100,000 stale orders, this loads 100,000 entities into memory just to mark them for deletion — genuinely wasteful when the actual goal is simply "delete every row matching this condition."
+
+**`ExecuteDeleteAsync()` — translates directly into one bulk SQL `DELETE`, no entities ever loaded:**
+```csharp
+int deletedCount = await context.Orders
+    .Where(o => o.CreatedAt < cutoffDate)
+    .ExecuteDeleteAsync(); // generates: DELETE FROM Orders WHERE CreatedAt < @cutoffDate
+```
+Zero entities are loaded into memory at all — the LINQ filter is translated directly into a single SQL `DELETE` statement's `WHERE` clause, executing entirely on the database server, exactly mirroring the memory/performance benefit `ExecuteUpdateAsync()` provides for bulk updates.
+
+**Why these bulk operations bypass Change Tracking entirely, and why that's the correct trade-off for genuinely bulk operations:** Change Tracking exists to support fine-grained, entity-by-entity mutation with automatic dirty-checking (covered in the previous question) — for a genuinely bulk operation ("delete every row matching this condition"), there's no meaningful per-entity state to track at all; the operation is fundamentally set-based, and EF Core's bulk methods correctly recognize this and skip the entity-tracking machinery entirely, rather than forcing a bulk conceptual operation through a per-entity mechanism ill-suited to it.
+
+**Common Pitfall:** using `ExecuteDeleteAsync()` on entities with configured cascade-delete relationships or domain events that need to fire on deletion (an `OrderDeletedEvent` a normal `SaveChanges()`-based delete might trigger via an interceptor, covered earlier) — because `ExecuteDeleteAsync()` bypasses the Change Tracker and any interceptors tied to `SaveChanges()`, any side effects normally triggered through that pipeline (domain events, audit logging via a `SaveChanges` interceptor) simply won't fire for rows removed this way; bulk operations trade away exactly that per-entity hook-triggering behavior in exchange for their performance benefit.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is EF Core's Second-Level Cache (via a third-party extension like `EFCoreSecondLevelCacheInterceptor`), and how does it differ from simply caching query results yourself in `IMemoryCache`?**
+
+EF Core has no first-party, built-in second-level (cross-`DbContext`-instance) query result cache — unlike some other ORMs (Hibernate's L2 cache, for instance), caching identical query results across different `DbContext` instances/requests requires either a third-party EF Core extension or hand-rolled caching, each with different trade-offs around cache invalidation correctness.
+
+**Hand-rolled caching via `IMemoryCache` — you own the invalidation logic entirely:**
+```csharp
+public async Task<List<Product>> GetActiveProductsAsync()
+{
+    return await _cache.GetOrCreateAsync("active-products", async entry =>
+    {
+        entry.SlidingExpiration = TimeSpan.FromMinutes(5);
+        return await context.Products.Where(p => p.IsActive).ToListAsync();
+    });
+}
+// PROBLEM: if a Product's IsActive flag changes elsewhere, THIS cache entry doesn't know --
+// you must manually remember to _cache.Remove("active-products") anywhere that mutation happens
+```
+This works, but correctness entirely depends on the developer remembering to invalidate the cache at *every* code path that could change the underlying data — miss one, and the cache silently serves stale data with no automatic detection.
+
+**A second-level cache interceptor — automatically invalidates based on which TABLES a query touched:**
+```csharp
+optionsBuilder.AddInterceptors(new SecondLevelCacheInterceptor()); // third-party package
+
+var products = await context.Products.Where(p => p.IsActive).Cacheable().ToListAsync();
+// The interceptor automatically tracks: "this cached result depends on the Products table"
+// Any SaveChanges() that writes to Products AUTOMATICALLY invalidates this cache entry --
+// no manual _cache.Remove() call needed anywhere
+```
+The interceptor hooks into EF Core's own query/save pipeline (using the Interceptor mechanism covered earlier) to automatically track which tables a cached query result depends on, and automatically invalidates matching cache entries whenever `SaveChanges()` writes to those same tables — removing the "developer must remember every invalidation point" risk inherent to hand-rolled caching.
+
+**Why this matters as a meaningfully different reliability guarantee, not just a convenience:** hand-rolled caching's correctness is only as good as the developer's discipline in remembering every invalidation path across a potentially large, evolving codebase — a second-level cache interceptor's automatic, table-dependency-based invalidation removes an entire category of "we forgot to invalidate the cache here" bugs, at the cost of adopting a third-party dependency and its own specific caching semantics/limitations.
+
+**Common Pitfall:** assuming a second-level cache extension provides the exact same invalidation precision as hand-written cache-key-specific invalidation — most implementations invalidate at the *table* level (any write to `Products` invalidates *every* cached query touching `Products`, even ones logically unrelated to the specific row that changed), which is coarser-grained than a hand-rolled cache keyed and invalidated with full knowledge of exactly which specific query results are actually affected by a given write.
+
+---
