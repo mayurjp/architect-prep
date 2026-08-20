@@ -573,3 +573,105 @@ A method called only once or twice during the entire application lifetime never 
 **Common Pitfall:** benchmarking a hot method's performance using only a handful of iterations and concluding the JIT/language is "slow" — a method measured before it's been promoted to Tier 1 is still running the deliberately-unoptimized Tier 0 version; meaningful microbenchmarks (as BenchmarkDotNet's warm-up phase specifically accounts for) need enough iterations for tiering to actually kick in before the measured numbers reflect steady-state performance.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the Global Assembly Cache (GAC), and why has it become largely irrelevant for modern .NET (Core) applications compared to its role in .NET Framework?**
+
+The GAC was .NET Framework's machine-wide, shared repository for assemblies — installing a library into the GAC made it available to *every* .NET Framework application on that machine, without each application needing its own private copy. Modern .NET (Core, 5+) deliberately abandoned this model entirely in favor of self-contained, per-application dependencies.
+
+**The old .NET Framework model — one shared, machine-wide copy:**
+```text
+C:\Windows\Microsoft.NET\assembly\GAC_MSIL\Newtonsoft.Json\...
+-- EVERY .NET Framework app on this machine references THIS ONE shared copy
+```
+This saved disk space (one copy shared by many apps) but created "DLL Hell" — if App A needed `Newtonsoft.Json 10.0` and App B needed `13.0`, both apps sharing one GAC could conflict, and updating the GAC's shared copy for one app's benefit risked silently breaking another app relying on the old version's exact behavior.
+
+**The modern .NET (Core+) model — each application carries its own private dependencies:**
+```text
+MyApp/
+  MyApp.dll
+  Newtonsoft.Json.dll        <- THIS app's own private copy, version 13.0
+OtherApp/
+  OtherApp.dll
+  Newtonsoft.Json.dll        <- a COMPLETELY separate copy, version 10.0, no conflict at all
+```
+Each application deploys with its own copy of every dependency it needs — there's no shared, machine-wide assembly cache for .NET (Core) applications to conflict over at all, deliberately trading the old model's disk-space savings for genuine deployment isolation and reproducibility (an app that works on the developer's machine carries the exact same dependency versions to production, with no machine-specific shared-assembly variance to account for).
+
+**Why this matters for understanding older codebases/documentation:** articles, Stack Overflow answers, and legacy troubleshooting guides referencing "GAC" issues, `gacutil`, or "strong-naming an assembly for the GAC" are specifically describing .NET Framework-era concerns that simply don't apply to modern .NET (Core, 5+) applications, which have no GAC equivalent at all.
+
+**Common Pitfall:** searching for GAC-related solutions to a modern .NET (Core+) dependency conflict — the underlying problem (two different parts of an application needing different versions of the same library) is solved completely differently in modern .NET, primarily through each project's own isolated dependency resolution, not through any shared-cache mechanism analogous to the old GAC.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is the difference between `Task.Run(() => ...)` and `Task.Factory.StartNew(() => ..., TaskCreationOptions.LongRunning)`, and when does the `LongRunning` hint actually change runtime behavior?**
+
+`Task.Run` (covered earlier as generally preferred over `Task.Factory.StartNew`) always schedules work onto the regular Thread Pool. `TaskCreationOptions.LongRunning` is a hint specifically telling the scheduler "this task will run for a long time and shouldn't be treated like typical Thread Pool work" — it changes actual runtime behavior in a way that matters for genuinely long-running operations.
+
+**Ordinary `Task.Run` — uses a regular, pooled Thread Pool thread:**
+```csharp
+await Task.Run(() => ProcessBatch()); // uses a THREAD POOL thread, meant for short-ish bursts of work
+```
+The Thread Pool is sized and managed under the assumption that tasks complete relatively quickly, freeing the thread back to the pool for other work — the pool's thread-injection algorithm (covered earlier under thread pool starvation) only slowly adds new threads if the existing ones stay busy, since it assumes busy-ness is typically transient.
+
+**`LongRunning` — signals the scheduler to use a dedicated thread OUTSIDE the pool instead:**
+```csharp
+Task.Factory.StartNew(() => RunForeverPollingLoop(),
+    TaskCreationOptions.LongRunning); // hints: "don't tie up a pooled thread with this"
+```
+With this hint, the default task scheduler creates a **dedicated, non-pooled thread** specifically for this task, rather than borrowing one from the shared Thread Pool — a genuinely long-running or infinite-loop-style operation (a continuous background polling loop, for instance) doesn't permanently tie up one of the pool's limited threads, which the pool's sizing/injection heuristics assume will periodically become free.
+
+**Why this distinction matters for a genuinely long-running background operation:** if you start several `Task.Run`-based operations that each run for hours (rather than the pool's implicit assumption of quick bursts), you can inadvertently starve the Thread Pool of threads needed for other, unrelated short-lived work throughout the application — `LongRunning`'s dedicated-thread behavior avoids this specific problem for operations that are legitimately expected to run for a very long time.
+
+**Common Pitfall:** applying `LongRunning` reflexively to any task that merely "takes a while" (a few hundred milliseconds to a couple seconds) rather than reserving it for genuinely long-running (many minutes to indefinite) operations — creating a dedicated OS thread has its own real overhead (thread creation cost, one less thread the pool can reuse for other purposes), making `LongRunning` the wrong choice for tasks that are slow but still fundamentally transient.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is a .NET `WeakReference<T>`, and how does it let code hold a reference to an object without preventing the Garbage Collector from reclaiming it — distinct from `ConditionalWeakTable` covered earlier?**
+
+A `WeakReference<T>` holds a reference to an object that doesn't count toward keeping that object alive — the GC can still collect the referenced object at any time, and code holding the weak reference must explicitly check (`TryGetTarget`) whether the target is still alive before using it, since it might have already been collected.
+
+**The Mechanism:**
+```csharp
+var bigObject = new byte[100_000_000]; // a large object
+var weakRef = new WeakReference<byte[]>(bigObject);
+
+bigObject = null; // remove the ONLY strong reference
+
+GC.Collect(); // the GC is now free to reclaim it -- the weak reference did NOT keep it alive
+
+if (weakRef.TryGetTarget(out var target))
+{
+    Console.WriteLine("Still alive: " + target.Length); // only reached if GC hasn't collected it yet
+}
+else
+{
+    Console.WriteLine("Already collected."); // the more likely outcome after an explicit GC.Collect()
+}
+```
+
+**How this differs from `ConditionalWeakTable<TKey, TValue>` (covered earlier):** `ConditionalWeakTable` associates *extra data* with an object without preventing its collection, keyed by object identity, intended for attaching metadata to objects you don't own. A plain `WeakReference<T>` is simpler — it's just a non-owning reference to *one specific* object, useful for scenarios like caching where you want to hold onto an expensive-to-recreate object *if* memory pressure allows, but are fine with the GC reclaiming it under pressure rather than forcing it to stay resident indefinitely.
+
+**A realistic use case — a memory-sensitive cache that lets the GC decide what to evict:**
+```csharp
+private static readonly Dictionary<string, WeakReference<byte[]>> _cache = new();
+
+public byte[] GetOrCompute(string key)
+{
+    if (_cache.TryGetValue(key, out var weakRef) && weakRef.TryGetTarget(out var cached))
+        return cached; // still resident -- reuse it
+
+    var computed = ExpensiveComputation(key);
+    _cache[key] = new WeakReference<byte[]>(computed); // cache it, but don't force it to stay alive
+    return computed;
+}
+```
+Under memory pressure, the GC can reclaim cached entries this dictionary references weakly — the cache effectively "shrinks itself" automatically under pressure, rather than requiring explicit eviction logic (an LRU policy, a fixed size cap) the way a cache built on ordinary strong references would need.
+
+**Common Pitfall:** using `WeakReference<T>` for objects that are cheap to recreate, or for correctness-critical data that must never unexpectedly disappear — since the GC can reclaim a weakly-referenced object at essentially any time (including moments after it was created, under sufficient memory pressure), `WeakReference<T>` is only appropriate for genuinely optional, recomputable, cache-like data, never for anything the application actually depends on remaining available.
+
+---

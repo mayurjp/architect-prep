@@ -561,3 +561,101 @@ None of this tangling is inherent to "how tax is calculated" — it's purely a c
 **Common Pitfall:** treating all complexity as accidental and therefore "fixable with enough refactoring effort" — some domains (tax law, complex pricing/discounting rules, regulatory compliance logic) are genuinely, irreducibly complicated, and expecting a clean, simple abstraction to fully capture that complexity without loss is often unrealistic; the realistic goal for essential complexity is making it as *manageable and clearly expressed* as possible, not making it vanish.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is "Convention over Configuration," and how does it trade explicitness for reduced boilerplate — and when does that trade-off stop being worth it?**
+
+Convention over Configuration means a framework assumes sensible defaults based on naming/structure patterns, requiring explicit configuration only when you want to deviate from those defaults — ASP.NET Core MVC's routing (`ProductsController` automatically maps to `/products`) is a direct example already covered elsewhere.
+
+**Configuration-heavy — every single detail must be explicitly declared:**
+```xml
+<!-- A hypothetical fully-explicit configuration approach -->
+<controller name="Products" route="/products">
+  <action name="GetAll" method="GET" route="/products" />
+  <action name="GetById" method="GET" route="/products/{id}" />
+</controller>
+```
+Nothing is assumed — every route, every mapping must be spelled out explicitly, which is verbose but leaves zero ambiguity about what will happen.
+
+**Convention over Configuration — sensible defaults inferred from naming/structure:**
+```csharp
+public class ProductsController : ControllerBase // convention: maps to /products automatically
+{
+    [HttpGet] public IActionResult GetAll() { }       // convention: GET /products
+    [HttpGet("{id}")] public IActionResult GetById(int id) { } // convention: GET /products/{id}
+}
+```
+Far less boilerplate — the framework infers routing from naming patterns rather than requiring every mapping to be spelled out.
+
+**Why the trade-off isn't unconditionally good:** conventions are implicit — a developer unfamiliar with the specific framework's conventions has to *learn* what "ProductsController automatically becomes /products" means, rather than being able to read it directly from explicit configuration; conventions work great when the defaults genuinely match what most people want most of the time, and become a source of confusion/debugging difficulty when a project's actual needs deviate significantly from the framework's assumed defaults, requiring increasingly awkward "override the convention" configuration to compensate.
+
+**Common Pitfall:** fighting a framework's strong conventions with extensive configuration overrides because a project's structure doesn't naturally fit them — at that point, the convention-over-configuration approach is providing negative value (more total code/complexity than an explicitly-configured approach would have needed), and it's worth reconsidering whether the chosen framework/convention actually fits the problem, rather than continuously overriding its defaults.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is the "Law of Least Privilege" (Principle of Least Privilege) applied specifically to code/software design, not just user/system permissions?**
+
+Most commonly discussed in a security context (a user account should only have the permissions it genuinely needs), the same principle applies directly to code design: a class, method, or module should only be granted access to exactly the capabilities/data it genuinely needs to do its job — nothing broader "just in case."
+
+**A class granted broader access than it actually needs:**
+```csharp
+public class OrderConfirmationEmailSender
+{
+    private readonly AppDbContext _db; // the ENTIRE database context -- full read/write access to EVERYTHING
+    public void SendConfirmation(int orderId)
+    {
+        var order = _db.Orders.Find(orderId); // only ACTUALLY needs to read one Order
+    }
+}
+```
+This class only genuinely needs to *read* one specific `Order` — but injecting the full `AppDbContext` grants it silent, unused access to write to *any* table, and to read every other table in the entire schema, none of which its actual job requires.
+
+**Granting only the minimum access the class's actual responsibility needs:**
+```csharp
+public class OrderConfirmationEmailSender
+{
+    private readonly IOrderReader _orderReader; // a narrow interface, exposing ONLY read access to Orders
+    public void SendConfirmation(int orderId)
+    {
+        var order = _orderReader.GetById(orderId); // genuinely can't do anything else, even if compromised
+    }
+}
+```
+
+**Why this matters beyond "just tidiness":** if this class later has a bug (or is compromised via a dependency vulnerability), the narrower interface strictly limits the *blast radius* of what that bug/compromise can actually do — with the full `AppDbContext` injected, a bug here could accidentally (or maliciously) write to or read from tables that have nothing to do with sending an email confirmation; with `IOrderReader`, that's structurally impossible regardless of what goes wrong inside this specific class.
+
+**Common Pitfall:** injecting broad, general-purpose dependencies (a full `DbContext`, a general `IServiceProvider`) into classes "for convenience," reasoning "it's easier than defining a narrow interface for every single class" — this convenience comes at the direct cost of the Least Privilege guarantee, expanding every such class's potential blast radius unnecessarily, echoing the same reasoning behind the Interface Segregation Principle covered earlier, applied specifically through a security/blast-radius lens rather than a pure interface-design one.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is "Coupling" versus "Cohesion," and why is the combination "low coupling, high cohesion" considered the single most important structural goal across nearly every other named design principle?**
+
+Cohesion measures how strongly the responsibilities *within* one module/class belong together. Coupling measures how much one module/class depends on the internal details of another. Nearly every principle covered so far (SRP, ISP, DIP, Composition over Inheritance) can be understood as a specific technique for pushing toward the same underlying goal: **high cohesion, low coupling**.
+
+**Low cohesion — a class bundling unrelated responsibilities (the earlier God Object / SRP violation, revisited through this lens):**
+```csharp
+public class OrderManager // handles tax calculation, PDF generation, AND email sending -- three unrelated jobs
+{
+    public decimal CalculateTax(Order o) { ... }
+    public byte[] GeneratePdf(Order o) { ... }
+    public void SendEmail(Order o) { ... }
+}
+```
+Tax calculation, PDF generation, and email sending have nothing meaningfully to do with each other — bundling them into one class is low cohesion, exactly what SRP (covered earlier) argues against.
+
+**High coupling — a class reaching deep into another's internal implementation details (the earlier Law of Demeter violation, revisited through this lens):**
+```csharp
+decimal cash = order.Customer.Wallet.GetCash(); // reaches through THREE layers of another object's internals
+```
+This code is tightly coupled not just to `Customer`, but to the specific fact that `Customer` happens to have a `Wallet` with a `GetCash()` method — any internal restructuring of `Customer` ripples directly into this unrelated code.
+
+**Why "low coupling, high cohesion" is the unifying goal beneath the other named principles:** SRP pushes toward high cohesion (each class does ONE cohesive thing). DIP and the Law of Demeter push toward low coupling (depend on abstractions/immediate collaborators, not concrete internals of distant objects). ISP pushes toward low coupling (don't force a dependency on methods you don't use). Nearly every principle covered throughout this topic can be traced back to advancing one or both of these two underlying properties — they're less a checklist of unrelated rules and more different specific techniques for achieving the same two structural goals.
+
+**Common Pitfall:** treating each named principle (SRP, DIP, ISP, Law of Demeter, ...) as an independent rule to check off a list, without recognizing they're all pointing toward the same underlying "low coupling, high cohesion" goal — understanding the unifying goal makes it easier to judge *novel* situations these specific named principles don't directly address, by asking the more fundamental question directly: "does this design increase or decrease coupling/cohesion?"
+
+---

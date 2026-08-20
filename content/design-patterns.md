@@ -678,3 +678,132 @@ If a document has 10,000 characters but only 3 distinct `(font, size)` combinati
 **Common Pitfall:** making the shared flyweight object **mutable** — since a flyweight instance is referenced by potentially thousands of different logical objects simultaneously, mutating it in place would silently change the appearance/behavior of every one of them at once; flyweight objects must be treated as immutable once created, or the sharing that makes the pattern work becomes a correctness hazard instead of a memory optimization.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: Explain the Iterator pattern, and how C#'s `foreach`/`yield return` provide it as a built-in language feature rather than something you typically hand-roll.**
+
+The Iterator pattern provides a standard way to traverse a collection's elements sequentially without exposing the collection's internal structure (an array, a linked list, a tree) to the code doing the traversal — C#'s `IEnumerable<T>`/`IEnumerator<T>` interfaces and `foreach`/`yield return` keywords are this pattern, built directly into the language.
+
+**The pattern's classic (hand-rolled) shape:**
+```csharp
+public interface IIterator<T> { bool HasNext(); T Next(); }
+
+public class ListIterator<T> : IIterator<T>
+{
+    private readonly List<T> _items;
+    private int _position = 0;
+    public ListIterator(List<T> items) => _items = items;
+    public bool HasNext() => _position < _items.Count;
+    public T Next() => _items[_position++];
+}
+```
+The caller repeatedly calls `HasNext()`/`Next()` without ever needing to know whether the underlying collection is a `List<T>`, an array, or something else entirely.
+
+**C#'s built-in version — the exact same pattern, provided by the language itself:**
+```csharp
+foreach (var item in someCollection) { Console.WriteLine(item); }
+// Under the hood, this compiles to calling GetEnumerator(), then repeatedly MoveNext()/Current --
+// the SAME HasNext()/Next() shape, just with different names, built into IEnumerator<T>
+```
+```csharp
+public IEnumerable<int> GetEvenNumbers(int max)
+{
+    for (int i = 0; i <= max; i += 2)
+        yield return i; // the compiler generates an entire IEnumerator<T> implementation for you
+}
+```
+`yield return` lets you write iteration logic that *looks* like a simple loop, while the compiler automatically generates the full state-machine-based `IEnumerator<T>` implementation behind the scenes — you get the Iterator pattern's benefits (lazy, sequential traversal without exposing internal structure) without manually writing a class implementing `HasNext()`/`Next()` yourself.
+
+**Why this matters as a concrete illustration of "the pattern, not the specific code":** Design Patterns describe a *general solution shape*, not a mandate to write a specific class named `XyzIterator` — C#'s `foreach`/`yield return` genuinely *is* the Iterator pattern, just expressed as first-class language syntax rather than a hand-written class hierarchy, which is exactly why recognizing patterns in *existing* language/framework features (not just in your own hand-written code) is a valuable skill.
+
+**Common Pitfall:** assuming "using a design pattern" always means writing an explicit class structure matching the GoF book's exact diagrams — many patterns (Iterator being the clearest example) are so fundamental that mainstream languages have absorbed them directly into their syntax; recognizing "I'm already using the Iterator pattern every time I write `foreach`" is more useful than assuming the pattern only counts when hand-implemented from scratch.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: Explain the Bridge pattern, and how it differs from Adapter despite both separating an abstraction from an implementation.**
+
+Both patterns involve two cooperating class hierarchies, which makes them easy to confuse — but Adapter (covered earlier) is applied *after the fact*, to make an already-existing, incompatible interface work with code expecting something different. Bridge is a *deliberate, upfront design decision* to split an abstraction from its implementation from the very beginning, specifically so both can vary and evolve independently.
+
+**The problem Bridge solves — an abstraction with multiple implementations, where a naive design would need a combinatorial explosion of subclasses:**
+```csharp
+// WITHOUT Bridge: every combination needs its own subclass
+public class WindowsButton { }
+public class MacButton { }
+public class WindowsCheckbox { }
+public class MacCheckbox { }
+// Adding a THIRD platform (Linux) means 2 MORE new classes; adding a THIRD control type means 2 MORE
+```
+
+**Bridge — separating the abstraction (WHAT a control does) from the implementation (HOW it renders on a given platform):**
+```csharp
+public interface IRenderer { void RenderButton(string label); } // the IMPLEMENTATION side
+public class WindowsRenderer : IRenderer { public void RenderButton(string label) { /* Win32 drawing */ } }
+public class MacRenderer : IRenderer { public void RenderButton(string label) { /* Cocoa drawing */ } }
+
+public abstract class Control // the ABSTRACTION side -- holds a REFERENCE to an implementation
+{
+    protected IRenderer Renderer;
+    protected Control(IRenderer renderer) => Renderer = renderer;
+}
+public class Button : Control
+{
+    public Button(IRenderer renderer) : base(renderer) { }
+    public void Draw(string label) => Renderer.RenderButton(label);
+}
+
+var winButton = new Button(new WindowsRenderer()); // ANY control + ANY renderer, mixed freely
+```
+Adding a new platform means writing one new `IRenderer` implementation — adding a new control type means writing one new `Control` subclass — the two hierarchies vary **independently**, without a combinatorial explosion of `WindowsButton`/`MacButton`/`WindowsCheckbox`/`MacCheckbox`-style classes.
+
+**The core distinction from Adapter:** Adapter is reactive — applied to bridge an interface mismatch that already exists between two things not originally designed to work together. Bridge is proactive — designed in from the start specifically to let two hierarchies (an abstraction and its implementations) evolve independently, anticipating that both will need to vary before either one is even built.
+
+**Common Pitfall:** introducing Bridge's dual-hierarchy structure for an abstraction that will only ever have ONE implementation in practice — the pattern's entire value comes from letting abstraction and implementation vary *independently*; applying it speculatively, before there's a genuine need for multiple implementations, adds real structural complexity (two hierarchies instead of one) for a flexibility benefit that may never actually be exercised.
+
+---
+
+## Advanced — Question 5
+
+**Q5: Explain the Memento pattern, and how it captures an object's internal state for later restoration (undo functionality) without violating encapsulation by exposing that state publicly.**
+
+Memento lets you capture and externally store a snapshot of an object's internal state (for later "undo" restoration), *without* that object needing to expose its private internals through public getters/setters — the object itself controls exactly what gets saved and restored, keeping its encapsulation intact even while supporting full state rollback.
+
+**The Mechanism — three collaborating roles:**
+```csharp
+// The ORIGINATOR -- the object whose state we want to be able to undo/restore
+public class TextEditor
+{
+    private string _content = "";
+    public void Type(string text) => _content += text;
+    public string Content => _content;
+
+    // Creates a snapshot -- but the snapshot's INTERNALS stay private to TextEditor itself
+    public TextEditorMemento Save() => new TextEditorMemento(_content);
+    public void Restore(TextEditorMemento memento) => _content = memento.GetSavedContent();
+}
+
+// The MEMENTO -- an opaque snapshot; its constructor/accessor are only usable by TextEditor itself
+public class TextEditorMemento
+{
+    private readonly string _content;
+    internal TextEditorMemento(string content) => _content = content; // 'internal' -- NOT publicly constructible
+    internal string GetSavedContent() => _content; // 'internal' -- NOT publicly readable either
+}
+
+// The CARETAKER -- holds mementos for undo, but can't see or manipulate their CONTENTS at all
+public class UndoHistory
+{
+    private readonly Stack<TextEditorMemento> _history = new();
+    public void Push(TextEditorMemento m) => _history.Push(m);
+    public TextEditorMemento Pop() => _history.Pop();
+}
+```
+`UndoHistory` (the Caretaker) can store and retrieve `TextEditorMemento` objects for undo purposes, but it has **no way to read or modify what's actually inside** one — only `TextEditor` itself (the Originator) can create a memento or extract state back out of one, since the memento's own members are marked `internal` (or could be made fully private via a nested class), keeping the editor's internal representation completely hidden from the code managing the undo history.
+
+**Why this specifically preserves encapsulation, unlike a naive "just make everything public" approach:** a naive undo implementation might expose `_content` via a public property purely so external undo-management code can read/restore it directly — Memento avoids that entirely, letting the Caretaker manage *when* to save/restore snapshots without ever needing visibility into *what's actually inside* those snapshots.
+
+**Common Pitfall:** implementing a "Memento" that's really just a public DTO exposing every field of the originator's state openly — this technically achieves undo functionality, but abandons the pattern's actual defining benefit (preserving encapsulation) by making the snapshot's internals just as exposed as if there were no Memento pattern involved at all; a Memento's contents should be opaque to everything except the Originator that created it.
+
+---

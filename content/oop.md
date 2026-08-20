@@ -605,3 +605,103 @@ Calling `shape.Accept(svgRenderer)` triggers **two** virtual dispatches in seque
 **Common Pitfall:** reaching for the Visitor pattern when the class hierarchy itself changes frequently (adding new shape types) rather than the operations — Visitor makes adding new *operations* cheap but adding a new *type* to the hierarchy expensive (every existing visitor implementation must be updated to handle the new type), the exact inverse trade-off of ordinary polymorphism; it fits scenarios where the type hierarchy is stable but operations on it grow over time.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between an Abstract Method and a Virtual Method, and why must every non-abstract subclass override an abstract one while overriding a virtual one is optional?**
+
+Both allow a base class to declare a method that subclasses can customize, but they differ in whether the base class provides a default implementation at all — this directly determines whether overriding is mandatory or optional for subclasses.
+
+```csharp
+public abstract class Shape
+{
+    public abstract double GetArea();          // NO implementation at all -- must be overridden
+    public virtual string GetDescription() => "A shape"; // HAS a default implementation -- override optional
+}
+
+public class Circle : Shape
+{
+    public double Radius { get; set; }
+    public override double GetArea() => Math.PI * Radius * Radius; // MANDATORY -- won't compile without it
+    // GetDescription() not overridden here -- inherits "A shape" from the base class, perfectly valid
+}
+```
+
+**Why abstract methods force an override:** an abstract method has literally no body — there's nothing to execute if a concrete (non-abstract) subclass doesn't provide one, so the compiler requires every concrete subclass to supply an implementation before that subclass can be instantiated at all. A class containing even one un-overridden abstract method must itself remain abstract (uninstantiable).
+
+**Why virtual methods make overriding optional:** a virtual method already has a working default implementation — a subclass that doesn't care to customize that specific behavior can simply inherit the base class's version unchanged, which is exactly what happens when `Circle` doesn't override `GetDescription()`.
+
+**The practical design guideline this implies:** make a method `abstract` when there's genuinely no sensible default behavior *any* subclass could share (every shape's area calculation is fundamentally different) — make it `virtual` when there's a reasonable default most subclasses will want, but a few specific ones might need to customize.
+
+**Common Pitfall:** making a method `abstract` when a perfectly reasonable default implementation *does* exist for most subclasses — this forces every single subclass to write essentially identical boilerplate overrides, when marking it `virtual` with that common default would let only the genuinely-different subclasses bother overriding it at all.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is Mixin-style composition via C# 8+ Default Interface Methods, and how does it let multiple unrelated classes share behavior without inheriting from a common base class?**
+
+Default Interface Methods let an interface provide an actual implementation for a method, not just a signature — multiple unrelated classes implementing that interface all get the shared default behavior "for free," approximating a "mixin" (reusable behavior bolted onto otherwise-unrelated classes) without requiring a shared base class in a single-inheritance language like C#.
+
+**The problem — two genuinely unrelated classes need the SAME cross-cutting behavior:**
+```csharp
+public class Logger { /* needs a "Log" capability */ }
+public class ReportGenerator { /* ALSO needs the SAME "Log" capability, but has NOTHING else in common with Logger */ }
+```
+Since C# only allows single class inheritance, these two unrelated classes can't both inherit from a shared `LoggingBase` class if they already need to inherit from something else specific to their own domain.
+
+**Default Interface Methods providing shared behavior without requiring shared inheritance:**
+```csharp
+public interface ILoggable
+{
+    void WriteLog(string message) => Console.WriteLine($"[{GetType().Name}] {message}"); // DEFAULT implementation
+}
+
+public class Logger : ILoggable { } // gets WriteLog() for free, no override needed
+public class ReportGenerator : SomeOtherBaseClass, ILoggable { } // ALSO gets WriteLog() for free,
+                                                                    // despite inheriting from something ELSE entirely
+```
+Both classes implement `ILoggable` and both get the shared `WriteLog` behavior automatically — neither needed to inherit from a common base class, and `ReportGenerator` remains free to inherit from whatever base class its own domain actually requires, since interface implementation (unlike class inheritance) isn't limited to one at a time.
+
+**Why this is only an approximation of true mixins, not identical to them:** unlike genuine mixin systems in some other languages, C#'s default interface methods can't hold instance *state* (fields) — only behavior — so this technique shares reusable *logic*, not reusable *data*, which is a meaningful limitation compared to full mixin composition in languages that support it more completely.
+
+**Common Pitfall:** using default interface methods as a workaround to add shared, stateful behavior across unrelated classes — since interfaces still can't declare instance fields, any state the shared behavior needs must be threaded through some other mechanism (a property each implementing class must itself declare), which can make the "shared" implementation more fragile and implicit-contract-dependent than genuine mixin composition would be.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is the Null Object Pattern, and how does it eliminate defensive null-checking throughout a codebase by providing a "do nothing" implementation instead of `null`?**
+
+Rather than a method/property returning `null` to represent "no value" (forcing every caller to remember to null-check before using it), the Null Object Pattern returns a real, valid instance that implements the same interface but with harmless, no-op behavior — callers can use it exactly like any other instance, with zero special-case handling required.
+
+**Without the pattern — every caller must remember to null-check:**
+```csharp
+public ILogger? GetLogger(string category) =>
+    _configuredLoggers.TryGetValue(category, out var logger) ? logger : null;
+
+var logger = GetLogger("Payments");
+logger?.Log("Processing payment"); // EVERY call site must remember the "?." null-conditional
+```
+Forgetting the `?.` (or an equivalent null check) anywhere in the codebase risks a `NullReferenceException` — the burden of handling "no logger configured" is pushed onto every single caller, repeatedly.
+
+**With the Null Object Pattern — a real, harmless "do nothing" instance instead of null:**
+```csharp
+public class NullLogger : ILogger
+{
+    public void Log(string message) { /* deliberately does NOTHING */ }
+}
+
+public ILogger GetLogger(string category) =>
+    _configuredLoggers.TryGetValue(category, out var logger) ? logger : new NullLogger(); // NEVER returns null
+
+var logger = GetLogger("Payments");
+logger.Log("Processing payment"); // ALWAYS safe -- no null-check needed anywhere, ever
+```
+Every caller can now treat the return value uniformly, with zero special-case null handling — if no logger was actually configured, `NullLogger.Log()` simply does nothing, silently and safely, rather than requiring every call site to remember a defensive check.
+
+**Why this trades one kind of risk for another, rather than being a pure win:** eliminating `NullReferenceException` risk comes at the cost of *silent* no-op behavior — if a caller genuinely needed to know "there's no logger configured, something's misconfigured," the Null Object Pattern's silent do-nothing behavior can mask a real configuration problem that an explicit null (forcing a deliberate decision at each call site) might have surfaced more visibly.
+
+**Common Pitfall:** applying the Null Object Pattern to scenarios where "no value" is actually meaningful, important information the calling code needs to react to (not just safely ignore) — silently substituting a no-op object hides that signal entirely, which is appropriate for something like an optional logger (fine to skip logging silently) but actively harmful for something like "no payment method on file" (which the calling code genuinely needs to detect and handle, not silently no-op through).
+
+---

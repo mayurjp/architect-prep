@@ -556,3 +556,96 @@ public ref struct BufferView
 **Common Pitfall:** trying to store a `Span<T>` (or any `ref struct`) as a field on a class for "convenience," then being surprised the code doesn't compile — this restriction isn't an arbitrary limitation; it's the specific mechanism that makes `Span<T>`'s zero-copy, zero-allocation guarantees safe in the first place, and relaxing it would reintroduce the exact memory-safety risks `ref struct` exists to prevent.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is the difference between `default(T)` and `default!` (the null-forgiving operator), and why doesn't `default(T)` always mean `null`?**
+
+`default(T)` produces the "zero value" for whatever type `T` is — for reference types that's `null`, but for value types it's a genuinely non-null, all-zeros instance, not `null` at all.
+
+```csharp
+int i = default(int);        // 0, NOT null -- int is a value type
+bool b = default(bool);      // false
+DateTime d = default(DateTime); // 0001-01-01 00:00:00 -- a REAL, valid DateTime value, not null
+string s = default(string);  // null -- string IS a reference type
+
+// Generic code has no idea in advance which kind of type T will be:
+T CreateDefault<T>() => default(T); // returns null for reference types, zero-value for value types
+```
+
+**The null-forgiving operator `!` — a completely different, compile-time-only concept:**
+```csharp
+string? maybeNull = GetValue();
+string definitelyNotNull = maybeNull!; // tells the COMPILER "trust me, this isn't null" -- no runtime check at all
+```
+`!` doesn't change any runtime behavior whatsoever — it purely suppresses the nullable-reference-type compiler warning, asserting to the compiler (not verifying to the runtime) that a value the compiler thinks *might* be null is one you're certain isn't. If you're wrong, this still throws a `NullReferenceException` at runtime exactly as it would without the `!` — the operator only silences the compile-time warning, it adds no actual safety.
+
+**Why conflating these two is a common mistake:** `default(T)` is about producing an actual zero-value/null instance; `!` is purely a compiler-warning suppression with zero runtime effect — using `!` doesn't "convert" a null into a non-null value, and `default(T)` doesn't involve the compiler's nullability analysis at all.
+
+**Common Pitfall:** using `!` reflexively to silence every nullable-reference-type warning without actually verifying the value can't be null — this defeats the entire purpose of nullable reference type analysis (catching potential null-reference bugs at compile time) by asserting a guarantee that isn't actually true, deferring the exact bug the feature was designed to catch back to a runtime `NullReferenceException`.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is the difference between `IEnumerable<T>` and `IAsyncEnumerable<T>`, and how does `await foreach` change the iteration model to allow asynchronous work between elements?**
+
+`IEnumerable<T>`'s `MoveNext()` is a synchronous call — fetching the next element must complete immediately, blocking the calling thread if it's slow. `IAsyncEnumerable<T>` allows each "get the next element" step to itself be an asynchronous operation, letting a sequence yield elements as they become available (e.g., streamed from a database or network) without blocking a thread while waiting.
+
+**Producing an async-enumerable sequence with `yield return` inside an `async` iterator method:**
+```csharp
+public async IAsyncEnumerable<Order> GetOrdersAsync()
+{
+    await foreach (var row in _db.Orders.AsAsyncEnumerable()) // EF Core streams rows from the DB
+    {
+        await EnrichWithShippingInfoAsync(row); // an async operation BETWEEN yielding each element
+        yield return row;
+    }
+}
+```
+
+**Consuming it with `await foreach`:**
+```csharp
+await foreach (var order in GetOrdersAsync())
+{
+    Console.WriteLine(order.Id); // each iteration can involve awaiting the NEXT element's availability
+}
+```
+Between yielding each element, the producer can `await` genuinely asynchronous work (a database fetching the next row, a network stream receiving the next chunk) — the consuming thread isn't blocked waiting synchronously; it's released back to the thread pool exactly the same way any other `await` releases a thread, only resuming when the next element is actually ready.
+
+**Why this matters for exactly the kind of streaming scenario covered earlier (large API result sets):** `IAsyncEnumerable<T>` is the mechanism underlying ASP.NET Core's streaming API responses covered earlier — the server can start sending the first rows to the client while the database is still producing later ones, without any thread sitting blocked synchronously waiting for the entire result set to materialize first.
+
+**Common Pitfall:** using `IAsyncEnumerable<T>` for a sequence that's actually small and already fully available in memory — the added machinery (async state machine per iteration) has real overhead compared to plain synchronous `IEnumerable<T>` iteration; `IAsyncEnumerable<T>` earns its cost specifically when elements are genuinely produced asynchronously over time (streaming), not as a blanket replacement for all iteration.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is a Source-Generated Regular Expression (`[GeneratedRegex]`, .NET 7+), and how does it avoid the runtime cost that `new Regex(pattern)` traditionally incurs?**
+
+Historically, `Regex` had two modes: interpreted (parses the pattern and evaluates it against input on every match, some startup cost avoided but slower per-match) and `RegexOptions.Compiled` (JIT-compiles the pattern into actual IL at runtime the first time it's used, faster matching but with real startup cost paid during that first compilation, and unavailable at all under Native AOT since it relies on runtime code generation). `[GeneratedRegex]` sidesteps this trade-off entirely by generating the matching logic as plain C# source code, at **build** time.
+
+**The traditional trade-off:**
+```csharp
+private static readonly Regex _emailRegex = new(@"^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$", RegexOptions.Compiled);
+// RegexOptions.Compiled: fast matching, but pays JIT compilation cost on FIRST use,
+// and doesn't work AT ALL under Native AOT (covered earlier) since it needs runtime codegen
+```
+
+**The source-generated equivalent:**
+```csharp
+public partial class Validator
+{
+    [GeneratedRegex(@"^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$")]
+    private static partial Regex EmailRegex();
+}
+// The actual regex-matching logic is generated as ORDINARY C# SOURCE CODE at build time --
+// no runtime compilation step, no runtime code generation, works fully under Native AOT
+```
+At compile time, a Roslyn source generator (the same underlying mechanism covered earlier for source generators generally) analyzes the pattern string and emits a dedicated, hand-written-equivalent C# method implementing that specific regex's matching logic directly — by the time the application runs, there's no pattern-parsing or JIT-compiling step left to do at all; the matching code is already just... code, compiled normally along with everything else.
+
+**Why this matters specifically for Native AOT compatibility:** `RegexOptions.Compiled`'s runtime-codegen approach is exactly the kind of thing Native AOT structurally cannot support (covered earlier) — `[GeneratedRegex]` produces the equivalent performance benefit through a completely different mechanism (build-time source generation instead of runtime code generation), making it the AOT-compatible path to get compiled-regex-level performance.
+
+**Common Pitfall:** assuming `[GeneratedRegex]` is purely a Native AOT compatibility shim with no benefit otherwise — even in a normal (non-AOT) application, it also eliminates the first-use JIT-compilation delay `RegexOptions.Compiled` incurs, and produces a debuggable, steppable, ordinary C# method (visible in a debugger call stack) rather than an opaque runtime-generated one, both of which are genuine benefits independent of AOT considerations at all.
+
+---
