@@ -473,3 +473,86 @@ public record Point(int X, int Y);
 **Common Pitfall:** assuming a `class`'s primary constructor parameters are stored as fields automatically available for later reuse the same way a record's are — if a parameter is only referenced inside the constructor-equivalent scope but never used in any instance method, the compiler doesn't necessarily capture it as a field at all (it can optimize it away), which can surprise developers expecting record-like semantics on plain classes.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between `is`, `as`, and a direct cast `(T)`, and when should you use each?**
+
+All three check or convert an object's type, but they differ in what happens when the conversion isn't actually valid — the choice matters for both correctness and performance in hot paths.
+
+```csharp
+object obj = "hello";
+
+// Direct cast -- throws InvalidCastException if it fails
+string s1 = (string)obj;          // succeeds
+int i1 = (int)obj;                // throws InvalidCastException immediately
+
+// 'as' -- returns null instead of throwing if it fails (only works for reference/nullable types)
+string? s2 = obj as string;       // succeeds, s2 = "hello"
+int[]? arr = obj as int[];        // fails gracefully, arr = null (no exception)
+
+// 'is' -- returns a bool, optionally with pattern-matching to bind a variable
+if (obj is string s3) { Console.WriteLine(s3.Length); } // safe check + cast in one step
+```
+
+**When to use each:**
+- **Direct cast `(T)`** — when you're certain the type is correct and a failure would represent a genuine bug you *want* to surface loudly as an exception.
+- **`as`** — when a failed conversion is an expected, normal outcome you want to handle gracefully (checking for `null` afterward) rather than via exception handling, which is comparatively expensive.
+- **`is` (with pattern matching)** — the modern, preferred approach for "check and use if it matches" in one step, avoiding a separate null-check after `as` and avoiding a try/catch around a direct cast.
+
+**Common Pitfall:** using a direct cast inside a `try/catch` purely to emulate what `as` or `is` already provide more cheaply and idiomatically — exceptions in .NET carry non-trivial performance cost specifically because they capture a stack trace, making them a poor substitute for a conversion check that's actually expected to fail sometimes in normal program flow.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is the difference between `IEquatable<T>` and simply overriding `Equals(object)`, and why does implementing both matter for value-like types?**
+
+Overriding `Equals(object)` alone satisfies the base requirement for custom equality, but it forces every comparison through boxing (for value types) and a runtime type check — `IEquatable<T>` provides a strongly-typed `Equals(T)` overload that avoids both costs and is what many collection types (like `List<T>.Contains`) specifically look for to use a faster comparison path.
+
+```csharp
+public struct Point : IEquatable<Point>
+{
+    public int X, Y;
+
+    // Strongly-typed -- no boxing, no type-check needed, called directly by collections
+    public bool Equals(Point other) => X == other.X && Y == other.Y;
+
+    // Required override -- used when compared as 'object' (e.g., in non-generic collections)
+    public override bool Equals(object? obj) => obj is Point other && Equals(other);
+
+    public override int GetHashCode() => HashCode.Combine(X, Y);
+}
+```
+
+**Why both matter, especially for `struct` types:** without `IEquatable<T>`, calling `.Equals()` on a struct falls back to `ValueType.Equals`, which uses **reflection** to compare every field — noticeably slower than a hand-written field-by-field comparison. Generic collections (`List<T>.Contains`, `Dictionary<TKey, TValue>`) specifically check whether `T` implements `IEquatable<T>` and use it when available, meaning implementing it isn't just a style preference — it changes which code path a collection actually executes at runtime.
+
+**Common Pitfall:** implementing `IEquatable<T>.Equals(T)` but forgetting to also override `Equals(object)` and `GetHashCode()` consistently with it — if the two aren't kept in sync (e.g., `Equals(T)` compares different fields than `Equals(object)` ends up using), a type can behave inconsistently depending on whether it's compared through the strongly-typed or object-typed path, a subtle bug that's easy to introduce and hard to spot in code review.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is the difference between `ref struct` and an ordinary `struct`, and what specific restrictions does `ref struct` impose in exchange for its performance guarantees?**
+
+A `ref struct` (like `Span<T>`, which uses this exact mechanism) is a value type the compiler **guarantees never escapes to the heap** — it can only ever live on the stack, which is precisely what makes it safe to represent a "view" over memory (like a slice of an array) without risking that view outliving the memory it points into.
+
+```csharp
+public ref struct BufferView
+{
+    private Span<byte> _data;
+    public BufferView(Span<byte> data) => _data = data;
+}
+```
+
+**The restrictions this guarantee requires:**
+- **Cannot be boxed** — `object o = someRefStruct;` doesn't compile, since boxing would place it on the heap, violating the stack-only guarantee.
+- **Cannot be a field of a class** (only of another `ref struct`, or a local variable) — a class instance lives on the heap, so a `ref struct` field would need to live there too, which isn't allowed.
+- **Cannot be used across an `await` boundary or inside an iterator (`yield return`)** — both mechanisms involve the compiler potentially hoisting local state onto the heap (for async state machines) or into a heap-allocated enumerator object, either of which would violate the stack-only guarantee.
+- **Cannot be captured by a lambda/closure** — closures are compiled into heap-allocated classes holding captured variables, which again would put the `ref struct` on the heap.
+
+**Why this trade-off is worth it specifically for something like `Span<T>`:** these restrictions are exactly what let `Span<T>` safely represent "a view into a slice of memory" (an array, stack-allocated memory, or unmanaged memory) without any runtime tracking of whether the underlying memory is still valid — the compiler's static guarantee that it can never outlive the current stack frame is what makes it safe, at the cost of the flexibility ordinary structs have.
+
+**Common Pitfall:** trying to store a `Span<T>` (or any `ref struct`) as a field on a class for "convenience," then being surprised the code doesn't compile — this restriction isn't an arbitrary limitation; it's the specific mechanism that makes `Span<T>`'s zero-copy, zero-allocation guarantees safe in the first place, and relaxing it would reintroduce the exact memory-safety risks `ref struct` exists to prevent.
+
+---

@@ -539,3 +539,142 @@ The controller is completely decoupled from *which* class actually handles the c
 **Common Pitfall:** treating MediatR as a mandatory "best practice" for every project regardless of size — for a small application with few use cases, the indirection of "the controller sends a command to a mediator which finds a handler" adds a layer of ceremony (an extra file per operation, harder to `Ctrl+Click` and jump straight to the handling code) that a simple direct service-injection approach could handle just as well with less machinery.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: Explain the Adapter pattern versus the Facade pattern — both "wrap" something, so what's the actual difference in intent?**
+
+Both patterns put a class in front of existing code, which makes them easy to confuse — but they solve different problems: Adapter makes an **incompatible interface compatible**; Facade makes a **complex interface simple**.
+
+**Adapter — translates between two interfaces that don't match:**
+```csharp
+public interface IPaymentProcessor { void Charge(decimal amount); }
+
+public class LegacyBillingSystem { public void ProcessPayment(int cents) { /* ... */ } } // different signature/units entirely
+
+public class LegacyBillingAdapter : IPaymentProcessor
+{
+    private readonly LegacyBillingSystem _legacy;
+    public LegacyBillingAdapter(LegacyBillingSystem legacy) => _legacy = legacy;
+    public void Charge(decimal amount) => _legacy.ProcessPayment((int)(amount * 100)); // translates dollars -> cents
+}
+```
+The problem here is purely **incompatibility** — two interfaces that mean roughly the same thing but don't match in shape (different method names, different units, different parameter types); the Adapter's whole job is bridging that specific mismatch.
+
+**Facade — simplifies a complex, multi-step subsystem behind one easy entry point (already covered in depth earlier):**
+```csharp
+public class CheckoutFacade
+{
+    public void CompleteCheckout(Order order)
+    {
+        _inventory.Reserve(order);   // subsystem step 1
+        _payment.Charge(order);      // subsystem step 2
+        _shipping.Schedule(order);   // subsystem step 3
+    }
+}
+```
+Here, there's no interface *mismatch* at all — every subsystem method works fine on its own. The problem Facade solves is **complexity and number of steps**, not incompatibility.
+
+**The one-sentence distinction:** Adapter answers "these two things don't fit together, how do I make them fit?" Facade answers "this is fine but has too many pieces to coordinate, how do I make it simple to use?"
+
+**Common Pitfall:** calling any wrapper class an "Adapter" regardless of what problem it's actually solving — if the wrapped thing already has a perfectly usable, single-entry-point interface and the wrapper is purely reducing the number of calls a client has to make, that's a Facade, not an Adapter, even though both are structurally "a class wrapping other classes."
+
+---
+
+## Intermediate — Question 5
+
+**Q5: Explain the Composite pattern, and how it lets client code treat an individual object and a collection of objects through the exact same interface.**
+
+Composite lets you build tree structures of objects (a folder containing files and other folders; a UI panel containing controls and other panels) where client code can treat a single leaf item and an entire branch of nested items **identically**, through one shared interface — without needing to special-case "is this a single item or a group?" everywhere.
+
+**The Mechanism:**
+```csharp
+public interface IFileSystemItem { long GetSize(); }
+
+public class File : IFileSystemItem
+{
+    private readonly long _size;
+    public File(long size) => _size = size;
+    public long GetSize() => _size; // a LEAF -- no children
+}
+
+public class Folder : IFileSystemItem
+{
+    private readonly List<IFileSystemItem> _children = new();
+    public void Add(IFileSystemItem item) => _children.Add(item);
+
+    public long GetSize() => _children.Sum(c => c.GetSize()); // a COMPOSITE -- delegates to children
+}
+```
+
+**Using it — the client code doesn't know or care whether it's holding a single File or an entire nested Folder tree:**
+```csharp
+var root = new Folder();
+root.Add(new File(100));
+var subfolder = new Folder();
+subfolder.Add(new File(200));
+subfolder.Add(new File(50));
+root.Add(subfolder);
+
+long totalSize = root.GetSize(); // 350 -- recursively sums the ENTIRE tree, client calls ONE method
+```
+`root.GetSize()` looks identical whether `root` is a single file or an arbitrarily deep folder tree — the recursive delegation (`Folder.GetSize()` calling `GetSize()` on each of its own children, which might themselves be Folders) is what makes arbitrary nesting depth transparent to the caller.
+
+**Why this matters architecturally:** without Composite, client code handling "a file or a folder" would need explicit type checks and separate logic paths (`if (item is File) ... else if (item is Folder) recursively sum children ...`) scattered everywhere a file-system item is used — Composite pushes that recursive-handling logic into the `Folder` class itself, once, so every caller just sees one uniform interface regardless of tree depth.
+
+**Common Pitfall:** adding operations to the `IFileSystemItem` interface that only make sense for one side (e.g., `AddChild()` only makes sense for `Folder`, not `File`) — this forces `File` to implement a meaningless method (throwing `NotSupportedException`, echoing the earlier Interface Segregation Principle discussion), which is a common tension in Composite implementations; some designs accept this trade-off deliberately for full interface uniformity, others split the interface to avoid it.
+
+---
+
+## Advanced — Question 4
+
+**Q4: Explain the Flyweight pattern, and how it reduces memory usage by sharing common state across many logically-distinct objects.**
+
+Flyweight splits an object's data into **intrinsic** state (shared, identical across many instances, safe to reuse) and **extrinsic** state (unique per instance, supplied by the caller) — letting a system represent millions of logical objects while only actually allocating memory for the relatively small number of *distinct* intrinsic states among them.
+
+**The problem — naively, every character in a text document is its own object:**
+```csharp
+public class Character
+{
+    public char Symbol;
+    public string FontFamily;   // "Arial" -- repeated identically across THOUSANDS of characters
+    public int FontSize;        // 12 -- also repeated identically
+    public int X, Y;            // UNIQUE per character -- its specific position
+}
+// A 10,000-character document naively allocates 10,000 separate FontFamily strings, FontSize ints, etc.
+// even though there might only be 3 distinct (font, size) combinations used throughout the whole document
+```
+
+**Flyweight — share the repeated (intrinsic) part, keep only the unique (extrinsic) part per instance:**
+```csharp
+public class CharacterStyle // the FLYWEIGHT -- intrinsic, shared, immutable
+{
+    public readonly string FontFamily;
+    public readonly int FontSize;
+    public CharacterStyle(string font, int size) { FontFamily = font; FontSize = size; }
+}
+
+public class CharacterStyleFactory
+{
+    private readonly Dictionary<string, CharacterStyle> _cache = new();
+    public CharacterStyle GetStyle(string font, int size)
+    {
+        var key = $"{font}-{size}";
+        if (!_cache.TryGetValue(key, out var style))
+            _cache[key] = style = new CharacterStyle(font, size); // created ONCE per distinct combination
+        return style;
+    }
+}
+
+public class Character // holds only the UNIQUE, per-instance (extrinsic) data + a reference to a SHARED flyweight
+{
+    public char Symbol;
+    public int X, Y;                 // unique per character
+    public CharacterStyle Style;     // SHARED reference -- same object across thousands of characters
+}
+```
+If a document has 10,000 characters but only 3 distinct `(font, size)` combinations actually used, only 3 `CharacterStyle` objects ever get created — every one of the 10,000 `Character` instances holds a *reference* to one of those 3 shared objects, rather than its own private copy of the font/size data.
+
+**Common Pitfall:** making the shared flyweight object **mutable** — since a flyweight instance is referenced by potentially thousands of different logical objects simultaneously, mutating it in place would silently change the appearance/behavior of every one of them at once; flyweight objects must be treated as immutable once created, or the sharing that makes the pattern work becomes a correctness hazard instead of a memory optimization.
+
+---

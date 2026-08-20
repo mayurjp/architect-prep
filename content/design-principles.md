@@ -470,3 +470,94 @@ A producer shouldn't serialize its entire internal domain object (which might co
 **Common Pitfall:** applying "liberal in what you accept" so loosely that a consumer silently accepts and processes malformed or semantically-invalid data rather than genuinely-extra-but-valid fields — tolerance should apply to *unrecognized additions*, not to actually invalid or missing required data; being liberal about garbage input just relocates bugs downstream instead of catching them at the boundary.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the "Principle of Least Astonishment," and how does it differ from the other named principles (SOLID, DRY, YAGNI) in what kind of guidance it gives?**
+
+Most named principles give structural guidance (how to split classes, when to abstract). The Principle of Least Astonishment gives **behavioral** guidance: a component should behave the way a reasonable user of it would expect, based on its name, its type signature, and common conventions — surprising behavior, even if technically documented, is a design smell.
+
+**A method that violates it — surprising behavior hidden behind an innocuous-looking name:**
+```csharp
+public List<Order> GetOrders()
+{
+    _lastAccessedTimestamp = DateTime.UtcNow; // side effect a caller wouldn't expect from a "Get"
+    _db.Orders.Where(o => o.IsExpired).ToList().ForEach(o => _db.Orders.Remove(o)); // DELETES rows!
+    return _db.Orders.ToList();
+}
+```
+Nothing about the name `GetOrders()` suggests it also deletes expired orders as a side effect — a caller reasonably expecting a pure "read" operation (matching the strong convention that a `Get`-prefixed method just retrieves data) gets an unexpected, surprising mutation instead.
+
+**The same operation, honoring the principle:**
+```csharp
+public List<Order> GetOrders() => _db.Orders.ToList(); // does exactly what the name promises
+
+public void PurgeExpiredOrders() // a SEPARATE, honestly-named operation for the side effect
+{
+    _db.Orders.Where(o => o.IsExpired).ToList().ForEach(o => _db.Orders.Remove(o));
+}
+```
+
+**How this differs from the structural principles:** SOLID/DRY/YAGNI mostly ask "is this class/module structured well?" Least Astonishment asks a more human question: "if a new developer only reads this method's name and signature, would they correctly predict what it does?" It's less formally checkable than SOLID's rules, but arguably closer to what actually causes real-world bugs — a caller trusting a name that lies about its actual behavior.
+
+**Common Pitfall:** justifying a surprising side effect as "it's documented in the XML doc comment" — comments are easy to skip, and a name that actively misleads (even with accurate documentation elsewhere) sets a trap for the many developers who read call sites without opening every method's full documentation first.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is Command-Query Separation (CQS), and how does it relate to (but differ from) CQRS?**
+
+CQS is a principle at the **method** level: every method should either be a **Command** (performs an action, changes state, returns nothing) or a **Query** (returns data, changes nothing) — never both. CQRS (Command Query Responsibility Segregation, covered earlier at the architectural level) applies a similar idea but at the scale of an entire **system's** read/write models, not a single method's signature.
+
+**A method violating CQS — mixing a query and a command:**
+```csharp
+public bool TryWithdraw(decimal amount) // returns a value (query-like) AND mutates state (command-like)
+{
+    if (amount > _balance) return false;
+    _balance -= amount; // side effect
+    return true;         // also returns information
+}
+```
+This isn't necessarily *wrong* — `TryParse`-style methods across .NET's own BCL follow exactly this pattern deliberately — but strict CQS would say this conflates two responsibilities that should ideally be separate.
+
+**Following CQS strictly — separate methods for the query and the command:**
+```csharp
+public bool CanWithdraw(decimal amount) => amount <= _balance; // QUERY -- no side effect
+public void Withdraw(decimal amount) { _balance -= amount; }    // COMMAND -- no return value
+```
+
+**The relationship to CQRS:** CQRS scales the same core idea (don't mix reading and writing) up from a single method to an entire application's architecture — separate read models and write models, potentially separate databases entirely. CQS is a micro-level coding discipline; CQRS is a macro-level architectural pattern. A codebase can follow CQS at the method level without ever needing full CQRS at the architectural level, and vice versa — they're related by philosophy, not a strict dependency on one another.
+
+**Why strict CQS isn't always practical:** the `TryWithdraw`-style pattern (query and command combined) exists specifically to avoid a **race condition** between separately calling `CanWithdraw()` then `Withdraw()` — if another thread withdraws funds between those two separate calls, the balance could go negative despite the check having passed. Sometimes combining a check-and-act into one atomic operation is a deliberate, correct trade-off against strict CQS.
+
+**Common Pitfall:** applying CQS so rigidly that it forces a genuinely atomic check-and-act operation into two separate calls, reintroducing a race condition that a combined method would have avoided — CQS is a strong default, not an absolute rule that overrides correctness in concurrent scenarios.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is the difference between "Accidental Complexity" and "Essential Complexity" (a distinction from Fred Brooks' "No Silver Bullet"), and how does it help decide where refactoring effort is actually worth spending?**
+
+Essential Complexity is complexity inherent to the *problem itself* — it would exist no matter how well the code is written, because the underlying business domain genuinely is that complicated. Accidental Complexity is complexity introduced by *how the solution was built* — poor abstractions, unnecessary layers, tangled dependencies — and is, in principle, entirely fixable through better engineering.
+
+**Essential Complexity — inherent to the problem domain itself:**
+```text
+Calculating tax owed across US states, each with different rates, thresholds,
+exemptions, and filing rules that change yearly by legislative action.
+```
+No amount of clever refactoring eliminates this complexity — the *business rules themselves* are genuinely this intricate; the best code can do is represent that inherent complexity as clearly and manageably as possible, not make it disappear.
+
+**Accidental Complexity — an artifact of how the code happens to be built:**
+```csharp
+// Tax calculation logic ACCIDENTALLY tangled with database access, logging,
+// email notifications, and UI formatting all in one 800-line method
+public string CalculateAndFormatAndEmailAndLogTaxOwed(int userId) { /* ... */ }
+```
+None of this tangling is inherent to "how tax is calculated" — it's purely a consequence of how the code was organized, and (unlike the tax rules themselves) is fully addressable through better structure (Single Responsibility Principle, layering) without changing what the system actually needs to accomplish.
+
+**Why this distinction matters for prioritizing refactoring effort:** a team frustrated by a genuinely complex tax-calculation module should ask "is this complexity essential (the domain is just this complicated) or accidental (we tangled unrelated concerns together)?" — refactoring can meaningfully reduce the latter, but attempting to refactor away *essential* complexity is often just relocating it or hiding it, not actually simplifying the underlying problem the code has to solve.
+
+**Common Pitfall:** treating all complexity as accidental and therefore "fixable with enough refactoring effort" — some domains (tax law, complex pricing/discounting rules, regulatory compliance logic) are genuinely, irreducibly complicated, and expecting a clean, simple abstraction to fully capture that complexity without loss is often unrealistic; the realistic goal for essential complexity is making it as *manageable and clearly expressed* as possible, not making it vanish.
+
+---

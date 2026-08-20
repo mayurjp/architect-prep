@@ -473,3 +473,135 @@ This lets `Middle` guarantee its specific implementation of `Method()` can never
 **Common Pitfall:** sealing classes reflexively "for performance" across an entire codebase without considering whether genuine extension points are needed — over-sealing can force consumers into awkward composition-based workarounds for cases where controlled inheritance would have been the cleaner design; `sealed` is best applied deliberately to types whose behavior genuinely must not be altered (value-like types, security-sensitive classes), not as a blanket default.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between a Constructor and a Static Factory Method for creating objects, and when would you prefer the latter?**
+
+A constructor is the default, language-level way to create an instance. A Static Factory Method is an ordinary static method (often named `Create`, `Of`, or something domain-specific) that returns an instance instead — offering flexibility a constructor structurally can't provide.
+
+**A constructor — always returns a new instance of exactly this type:**
+```csharp
+public class Connection
+{
+    public Connection(string connectionString) { ... } // MUST return a new Connection
+}
+```
+
+**A Static Factory Method — can return a cached instance, a subtype, or even null:**
+```csharp
+public class Connection
+{
+    private Connection(string connectionString) { ... } // constructor made private
+
+    public static Connection? Create(string connectionString)
+    {
+        if (!IsValid(connectionString)) return null;          // constructors can't do this
+        if (_pool.TryGet(connectionString, out var existing))
+            return existing;                                   // return a CACHED instance
+        return new Connection(connectionString);                // or a genuinely new one
+    }
+}
+```
+
+**Why this flexibility matters:** a constructor in C# is required to either fully construct a new object or throw an exception — it cannot return `null`, return an already-existing cached instance, or return an instance of a *different* (derived) type. A static factory method faces none of these restrictions, since it's just an ordinary method that happens to produce instances.
+
+**A named factory method can also be more descriptive than an overloaded constructor:**
+```csharp
+// Ambiguous which "Point" this represents
+var p1 = new Point(3, 4);            // Cartesian? Polar?
+
+// Self-documenting via named factory methods instead of ambiguous constructor overloads
+var p2 = Point.FromCartesian(3, 4);
+var p3 = Point.FromPolar(radius: 5, angle: 0.93);
+```
+
+**Common Pitfall:** overusing static factory methods purely out of habit for types that have no genuine need for caching, subtype selection, or validation-that-returns-null — for a simple, always-succeeding, always-distinct object, a plain constructor is more idiomatic and doesn't hide object creation behind an extra layer of indirection for no real benefit.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is the Liskov Substitution Principle's connection to "Design by Contract," and how do preconditions/postconditions formalize what it means for a subtype to be substitutable?**
+
+Design by Contract, a concept from Bertrand Meyer, frames a method's obligations as a formal **contract**: preconditions (what must be true before calling it) and postconditions (what it guarantees will be true after it returns). LSP can be precisely restated in this vocabulary: a subtype must not strengthen preconditions or weaken postconditions relative to its base type.
+
+**A subtype violating LSP by strengthening a precondition:**
+```csharp
+public class Rectangle
+{
+    public virtual void SetDimensions(int width, int height) { Width = width; Height = height; }
+    // Precondition (implicit): width and height can be ANY positive integers
+}
+
+public class ValidatedRectangle : Rectangle
+{
+    public override void SetDimensions(int width, int height)
+    {
+        if (width > 1000) throw new ArgumentException("Too wide"); // STRENGTHENED precondition!
+        base.SetDimensions(width, height);
+    }
+}
+```
+Client code written against `Rectangle` that previously worked fine calling `SetDimensions(2000, 5)` now unexpectedly throws when handed a `ValidatedRectangle` instead — the subtype demanded *more* from its callers than the base type ever did, breaking substitutability, since a caller relying on the base contract has no reason to expect this extra restriction.
+
+**A subtype violating LSP by weakening a postcondition:**
+```csharp
+public class Repository
+{
+    public virtual List<Order> GetAll() // Postcondition (implicit): NEVER returns null, may return empty list
+        => _db.Orders.ToList();
+}
+
+public class CachedRepository : Repository
+{
+    public override List<Order>? GetAll() // WEAKENED postcondition -- can now return null!
+        => _cache.TryGetValue("orders", out var cached) ? cached : null;
+}
+```
+Callers written against the base type's guarantee ("this never returns null") now face a `NullReferenceException` when handed the subtype instead — the subtype provides *less* guarantee than callers were promised by the base type's contract.
+
+**Why this framing is useful beyond LSP's usual "Square/Rectangle" example:** it gives a precise, checkable rule — "can I strengthen this?" (no, for preconditions) and "can I weaken this?" (no, for postconditions) — rather than relying purely on intuition about whether a subtype "feels like" a valid specialization.
+
+**Common Pitfall:** assuming any additional validation in an override is automatically an LSP violation — the actual rule is specifically about *strengthening beyond what the base type's contract already promised callers*; if the base type's own documented contract already implied that restriction (even if not enforced in code), the override is just correctly enforcing an existing contract, not violating LSP.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is Double Dispatch, and how does the Visitor pattern use it to add new operations to a class hierarchy without modifying the hierarchy itself?**
+
+Ordinary virtual method calls in C# are **single dispatch** — the method that executes is chosen based on the runtime type of exactly one object (the receiver). Double Dispatch selects behavior based on the runtime types of **two** objects — the Visitor pattern is the classic technique for achieving this in a single-dispatch language like C#.
+
+**The problem Double Dispatch solves — behavior that depends on TWO types, not one:**
+```csharp
+public abstract class Shape { }
+public class Circle : Shape { }
+public class Square : Shape { }
+
+// You want DIFFERENT rendering logic depending on the COMBINATION of (Shape type, Renderer type)
+// e.g., rendering a Circle to SVG differs from rendering a Circle to a raster image
+```
+A single virtual method on `Shape` alone can dispatch based on the shape's type, but not simultaneously on which renderer is being used — that requires two dispatch decisions working together.
+
+**The Visitor pattern achieving Double Dispatch:**
+```csharp
+public interface IShapeVisitor { void Visit(Circle c); void Visit(Square s); }
+
+public abstract class Shape { public abstract void Accept(IShapeVisitor visitor); }
+public class Circle : Shape { public override void Accept(IShapeVisitor v) => v.Visit(this); }
+public class Square : Shape { public override void Accept(IShapeVisitor v) => v.Visit(this); }
+
+public class SvgRenderer : IShapeVisitor
+{
+    public void Visit(Circle c) { /* SVG-specific circle rendering */ }
+    public void Visit(Square s) { /* SVG-specific square rendering */ }
+}
+```
+Calling `shape.Accept(svgRenderer)` triggers **two** virtual dispatches in sequence: first, `Accept` dispatches based on `shape`'s actual runtime type (Circle vs Square), calling the right `Visit(this)` overload; then, that call itself dispatches to the correct `Visit` method based on the *visitor's* runtime type (via method overload resolution combined with `this`'s now-known concrete type) — together, the combination selects behavior based on both types simultaneously.
+
+**Why this matters architecturally:** it lets you add an entirely new operation (a new `IShapeVisitor` implementation, like a `RasterRenderer`) **without modifying `Circle` or `Square` at all** — new behaviors are added by writing new visitor classes, while the shape hierarchy itself stays closed to modification (an application of the Open/Closed Principle specifically for the "add new operations to an existing hierarchy" axis of change).
+
+**Common Pitfall:** reaching for the Visitor pattern when the class hierarchy itself changes frequently (adding new shape types) rather than the operations — Visitor makes adding new *operations* cheap but adding a new *type* to the hierarchy expensive (every existing visitor implementation must be updated to handle the new type), the exact inverse trade-off of ordinary polymorphism; it fits scenarios where the type hierarchy is stable but operations on it grow over time.
+
+---

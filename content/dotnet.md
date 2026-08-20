@@ -482,3 +482,94 @@ When object B is freed, the GC does *not* slide C leftward to close the gap the 
 **Common Pitfall:** treating LOH growth purely as "needs more RAM" and vertically scaling the container/VM — that buys temporary headroom but doesn't address the underlying allocation pattern, and the same fragmentation dynamic reproduces at the new, larger memory ceiling.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between the CLR (Common Language Runtime) and the BCL (Base Class Library), and how do they relate to "the .NET runtime" as a whole?**
+
+These terms get used loosely, but they refer to distinct pieces of the overall .NET platform — the CLR is the *execution engine*, the BCL is a *library of code* that runs on top of it.
+
+**The CLR — the runtime engine that executes your compiled code:**
+```text
+Responsibilities: JIT compilation (IL -> native machine code), Garbage Collection,
+                  type safety enforcement, exception handling infrastructure,
+                  thread management, security sandboxing (historically)
+```
+The CLR doesn't know or care what `List<T>` or `HttpClient` *do* — it just knows how to load assemblies, JIT-compile their IL instructions into native code, and manage memory/execution for whatever code is running.
+
+**The BCL — the standard library of pre-written classes shipped with .NET:**
+```csharp
+using System.Collections.Generic; // List<T>, Dictionary<TKey,TValue> -- BCL types
+using System.Net.Http;            // HttpClient -- BCL type
+using System.Linq;                // LINQ operators -- BCL
+```
+These are ordinary C# classes, compiled to IL just like your own code — they're executed *by* the CLR exactly the same way your application code is, they're just pre-written, extensively tested code that ships as part of the platform so every .NET application doesn't need to reimplement a list, a dictionary, or HTTP client logic from scratch.
+
+**How "the .NET runtime" relates to both:** when people say ".NET runtime," they usually mean the combination — the CLR (the engine) plus enough of the BCL loaded to support whatever the application needs. Downloading "the .NET 8 runtime" installs both pieces together as one unit.
+
+**Common Pitfall:** assuming BCL classes get some special treatment or privileged access from the CLR that user-written code doesn't — with rare, deliberate exceptions (very low-level types the runtime has intrinsic awareness of), BCL classes are ordinary managed code executing under the exact same CLR rules as any class you write yourself; there's no hidden "fast path" reserved only for Microsoft's own library code.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is `ConditionalWeakTable<TKey, TValue>`, and what specific memory-management problem does it solve that a regular `Dictionary` can't?**
+
+A regular `Dictionary<TKey, TValue>` holds a **strong reference** to every key and value it contains — as long as the dictionary itself is alive, none of its keys or values can ever be garbage collected, even if nothing else in the application still references them. `ConditionalWeakTable` instead holds keys **weakly**, letting entries disappear automatically once their key is no longer referenced anywhere else.
+
+**The problem — attaching extra data to an object you don't own or control the lifetime of:**
+```csharp
+// You want to attach some computed metadata to arbitrary objects without modifying their class
+var metadata = new Dictionary<object, ComputedMetadata>();
+metadata[someObject] = new ComputedMetadata { ... };
+// PROBLEM: as long as 'metadata' dictionary exists, 'someObject' can NEVER be garbage collected,
+// even after every other part of the application is done with it -- a memory leak
+```
+
+**`ConditionalWeakTable` solves this by holding keys weakly:**
+```csharp
+private static readonly ConditionalWeakTable<object, ComputedMetadata> _metadata = new();
+
+_metadata.Add(someObject, new ComputedMetadata { ... });
+// When 'someObject' is no longer referenced ANYWHERE else in the application,
+// the GC can collect it -- and its entry in this table disappears automatically too
+```
+The table's own reference to `someObject` doesn't count as keeping it alive — once every *other* reference to `someObject` is gone, both the object and its associated metadata entry become eligible for collection together, with no manual cleanup code required.
+
+**Real use cases:** this is exactly the mechanism .NET itself uses internally in some caching and reflection-related scenarios where framework code needs to associate extra data with arbitrary objects it doesn't own, without becoming responsible for knowing when those objects are done being used.
+
+**Common Pitfall:** reaching for `ConditionalWeakTable` as a general-purpose dictionary substitute "for safety" — it has real performance and API trade-offs compared to a regular dictionary (no enumeration in the same way, different concurrency characteristics) and is specifically suited to the narrow "attach ancillary data to objects whose lifetime you don't control" scenario, not general key-value storage.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is Tiered Compilation in the .NET JIT, and how does it balance startup speed against steady-state throughput without requiring any application code changes?**
+
+The JIT compiler faces a genuine tension: compiling every method with maximum optimization takes longer per-method (slowing startup, since methods must be compiled before their first call), but compiling everything quickly with minimal optimization leaves long-running hot methods running slower than they could be. Tiered Compilation resolves this by compiling methods **twice**, at different optimization levels, based on how often they're actually called.
+
+**The mechanism:**
+```text
+Method called for the FIRST time:
+    -> JIT compiles it QUICKLY, with minimal optimizations ("Tier 0")
+    -> gets the application running and responding sooner, since compilation itself is fast
+
+Method called REPEATEDLY (the JIT notices it's "hot"):
+    -> JIT recompiles it with FULL optimizations in the background ("Tier 1")
+    -> subsequent calls seamlessly switch to use the new, faster, fully-optimized version
+```
+A method called only once or twice during the entire application lifetime never pays the cost of expensive optimization at all (Tier 0 is good enough, since it's barely used) — while a method called millions of times in a hot loop eventually gets the full optimization treatment, since the cost of that extra optimization work is easily justified by how often it subsequently runs faster.
+
+**Why this specifically helps startup-sensitive scenarios:** an application with thousands of methods that each run only a handful of times during startup benefits enormously from Tier 0's fast initial compilation — without tiering, the JIT would spend significant time fully optimizing methods that barely matter for steady-state performance, directly working against the goal of getting the application up and responding quickly.
+
+**Configuring it (rarely needed, but available):**
+```xml
+<TieredCompilation>true</TieredCompilation> <!-- default: true in modern .NET -->
+<TieredPGO>true</TieredPGO> <!-- Profile-Guided Optimization: Tier 1 uses REAL observed call-site data
+                                  (which types actually showed up at a virtual call site, etc.)
+                                  to optimize even more aggressively than static analysis alone could -->
+```
+
+**Common Pitfall:** benchmarking a hot method's performance using only a handful of iterations and concluding the JIT/language is "slow" — a method measured before it's been promoted to Tier 1 is still running the deliberately-unoptimized Tier 0 version; meaningful microbenchmarks (as BenchmarkDotNet's warm-up phase specifically accounts for) need enough iterations for tiering to actually kick in before the measured numbers reflect steady-state performance.
+
+---
