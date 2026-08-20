@@ -888,3 +888,115 @@ Every Pod gets a sidecar container (in Kubernetes, injected automatically via a 
 **Common Pitfall:** adopting a service mesh as the *first* resilience investment for a small number of services (say, under 10) — the operational overhead of running and understanding a mesh's control plane is substantial, and for a small system, in-process libraries like Polly deliver most of the same resilience benefits with far less infrastructure complexity. Meshes earn their cost at genuine multi-team, multi-language, dozens-of-services scale.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the "shared library trap" in microservices, and why does sharing a common code library across service boundaries quietly reintroduce coupling?**
+
+Teams naturally want to avoid duplicating code — validation logic, DTOs, utility functions — across multiple microservices, and reach for a shared NuGet package as the obvious fix. This works fine for genuinely stable, low-level utilities, but sharing the wrong kind of code recreates the tight coupling microservices were adopted specifically to avoid.
+
+**The trap — sharing domain models across service boundaries:**
+```csharp
+// Shared.Contracts NuGet package, referenced by BOTH OrderService and PaymentService
+public class Order
+{
+    public int Id { get; set; }
+    public decimal Total { get; set; }
+    public OrderStatus Status { get; set; }
+}
+```
+If `OrderService` needs to add a new required field to `Order` for its own internal purposes, that change now ripples into `PaymentService`'s compiled dependency too — `PaymentService` must upgrade the shared package and potentially redeploy, even though nothing about *payments* actually changed. The two services are no longer independently deployable, which was the entire architectural point of splitting them apart.
+
+**What's safe to share versus what isn't:**
+- **Safe:** genuinely stable, low-level utilities with no business meaning of their own — a logging wrapper, a retry-policy helper, a base HTTP client configuration.
+- **Unsafe:** domain models, DTOs representing a specific service's data, or business rule logic — these are exactly the things that change as each service evolves independently, and sharing them wires services back together at the compile-time dependency level even though they communicate over the network at runtime.
+
+**The alternative for data that genuinely needs to cross service boundaries:** define the contract as a serialization format (a versioned JSON schema, a `.proto` file) rather than a shared compiled class — each service can then have its **own** local representation of "what an order looks like from my perspective," decoupled from any other service's internal model, communicating only through the wire format.
+
+**Common Pitfall:** justifying a shared domain-model library as "DRY" without recognizing that in a microservices context, a small amount of duplication across service boundaries is often the *correct* trade-off for preserving independent deployability — DRY optimizes for one codebase; microservices architecture explicitly optimizes for independently evolvable codebases, and those two goals conflict at exactly this boundary.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is the Anti-Corruption Layer (ACL) pattern, and how does it protect a microservice's domain model when integrating with a legacy system or a poorly-designed external API?**
+
+An Anti-Corruption Layer is a translation boundary that converts an external system's data shapes and concepts into your own service's clean domain model — preventing an external system's quirks, legacy naming, or inconsistent conventions from leaking into and polluting your own codebase.
+
+**Without an ACL — the legacy system's shape leaks directly into your domain:**
+```csharp
+// Legacy system returns this exact awkward shape; your OrderService just uses it as-is
+public class LegacyOrderResponse
+{
+    public string ord_id { get; set; }       // legacy naming convention
+    public string cust_ref_no { get; set; }  // meaningless abbreviation from the legacy system
+    public int status_cd { get; set; }       // magic numbers: 1=pending, 2=shipped, 3=???
+}
+// Your OrderService's business logic now has to understand THIS shape everywhere it touches orders
+```
+
+**With an ACL — a dedicated translation layer isolates the mess:**
+```csharp
+public class LegacyOrderAdapter
+{
+    public Order TranslateToOrder(LegacyOrderResponse legacy)
+    {
+        return new Order
+        {
+            Id = legacy.ord_id,
+            CustomerReference = legacy.cust_ref_no,
+            Status = legacy.status_cd switch
+            {
+                1 => OrderStatus.Pending,
+                2 => OrderStatus.Shipped,
+                _ => OrderStatus.Unknown
+            }
+        };
+    }
+}
+// The REST of your OrderService only ever sees the clean `Order` domain type
+```
+Every quirk of the legacy system — its naming conventions, magic status codes, awkward nesting — is translated exactly once, inside the ACL, into your own well-designed domain model. If the legacy system changes its API, only the adapter needs updating; the business logic that consumes `Order` throughout the rest of the service remains completely untouched.
+
+**Why this matters beyond just tidiness:** without an ACL, a legacy system's poor design decisions (inconsistent naming, magic numbers, awkward nesting) gradually spread throughout your own codebase as developers copy the external shape into more and more places for convenience — the ACL contains that "corruption" to one deliberate boundary instead of letting it metastasize.
+
+**Common Pitfall:** building an ACL that just renames fields 1:1 without actually re-modeling the concepts to fit your domain properly — a genuine ACL should translate *concepts*, not just field names; if the legacy system's `status_cd = 1` means something subtly different from your own domain's notion of "Pending," a shallow rename-only translation still lets a mismatched concept leak through.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is the Sidecar pattern, and how does it relate to (but differ from) a Service Mesh?**
+
+A Sidecar is a helper container deployed alongside a main application container within the same Pod, sharing its network namespace and lifecycle, handling a cross-cutting concern the main application doesn't need to implement itself — the Service Mesh's sidecar proxy (covered earlier) is one specific, widely-known application of this more general pattern, not a synonym for it.
+
+**The general Sidecar pattern — any auxiliary container solving a cross-cutting concern:**
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: order-service          # the main application container
+      image: myregistry/order-service:1.4.2
+    - name: log-shipper             # a SIDECAR -- ships logs, unrelated to the mesh
+      image: fluent-bit:latest
+      volumeMounts:
+        - { name: logs, mountPath: /var/log/app }
+```
+Here, `log-shipper` is a sidecar that tails the main container's log files and ships them to a centralized logging system — the application code itself doesn't need any logging-shipment logic; it just writes logs to a shared volume, and the sidecar handles getting them where they need to go.
+
+**How the Service Mesh's proxy is a *specific* sidecar:**
+```yaml
+containers:
+  - name: order-service
+    image: myregistry/order-service:1.4.2
+  - name: envoy-proxy               # ALSO a sidecar -- but specifically intercepts network traffic
+    image: envoyproxy/envoy:latest
+```
+The mesh's Envoy sidecar is architecturally identical in shape (an auxiliary container in the same Pod) to the log-shipper example — it just happens to solve a different cross-cutting concern (network traffic interception for mTLS/retries/observability) rather than log shipping.
+
+**Why the distinction matters:** "Sidecar" describes the deployment *shape* (a helper container co-located with the main one); "Service Mesh" describes a *specific, comprehensive system* built using that shape, dedicated entirely to service-to-service network concerns. Not every sidecar is part of a service mesh — log shippers, secret-fetching init-adjacent sidecars, and local metrics collectors are all legitimate sidecars that have nothing to do with mesh networking.
+
+**Common Pitfall:** conflating "using sidecars" with "running a service mesh" — a team might adopt sidecar containers for logging or secrets injection without any mesh at all, and conversely, adopting a full service mesh is a much larger operational commitment (a control plane, cert rotation, mesh-wide configuration) than simply "adding a sidecar container" for one narrow purpose.
+
+---

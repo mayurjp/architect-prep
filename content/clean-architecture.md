@@ -292,3 +292,131 @@ public class FundsTransferDomainService
 **Common Pitfall:** overusing Domain Services as a dumping ground for logic that's actually too lazy to model properly on an Entity — if a "Domain Service" ends up holding most of the business rules while your Entities become anemic property bags, that's a sign the modeling work of identifying true aggregate boundaries and invariants was skipped, not a sign Domain Services were the right tool.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is the difference between a Domain Model and an Anemic Domain Model, and why is the latter considered an anti-pattern in Clean Architecture / DDD?**
+
+A proper Domain Model bundles data together with the behavior/business rules that operate on it. An Anemic Domain Model separates them entirely — entities become pure data bags with public getters/setters, while all business logic lives elsewhere (typically in "service" classes), defeating much of the purpose of object-oriented domain modeling.
+
+**Anemic Domain Model — data with no behavior:**
+```csharp
+public class Order  // just a bag of properties, no logic of its own
+{
+    public decimal Total { get; set; }
+    public OrderStatus Status { get; set; }
+}
+
+public class OrderService  // ALL the actual business rules live here instead
+{
+    public void Cancel(Order order)
+    {
+        if (order.Status == OrderStatus.Shipped)
+            throw new InvalidOperationException("Cannot cancel a shipped order.");
+        order.Status = OrderStatus.Cancelled; // any code, anywhere, could also just do this directly!
+    }
+}
+```
+Nothing stops *any* other code elsewhere in the codebase from setting `order.Status = OrderStatus.Cancelled` directly, completely bypassing the "can't cancel a shipped order" rule — the rule only exists inside `OrderService.Cancel()`, but the entity's own public setter provides no protection against the invariant being violated some other way.
+
+**A proper Domain Model — behavior lives with the data it protects:**
+```csharp
+public class Order
+{
+    public decimal Total { get; private set; }
+    public OrderStatus Status { get; private set; } // no public setter -- can't be set from outside
+
+    public void Cancel()
+    {
+        if (Status == OrderStatus.Shipped)
+            throw new InvalidOperationException("Cannot cancel a shipped order.");
+        Status = OrderStatus.Cancelled;
+    }
+}
+```
+Now there is **no way** to change `Status` except by calling `Cancel()` (or other methods the `Order` class itself exposes) — the invariant is structurally enforced by the type itself, not just conventionally followed by whichever service classes happen to remember to check it.
+
+**Why this matters for Clean Architecture specifically:** an Anemic Domain Model pushes all business logic into the Application layer's use-case handlers, leaving the Domain layer as just data-transfer-object-like classes — which somewhat defeats the purpose of having a dedicated Domain layer at all, since "the rules that make this a valid Order" aren't actually protected by the Domain layer's own types.
+
+**Common Pitfall:** justifying an Anemic Domain Model as "simpler" or "easier for EF Core to map" — modern EF Core fully supports private setters and encapsulated behavior methods on entities; the anemic pattern is usually a habit carried over from older ORM limitations, not a genuine current technical constraint.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is a Specification pattern, and how does it let you reuse complex query logic across both the Application layer and unit tests without duplicating LINQ expressions?**
+
+A Specification encapsulates a piece of business-meaningful query/filtering logic (e.g., "orders eligible for auto-cancellation") as a reusable, named, testable object — instead of that same `Where` clause being copy-pasted across a repository method, a background job, and a report, all slightly drifting out of sync over time.
+
+**Without a Specification — the same business rule duplicated in multiple places:**
+```csharp
+// In OrderRepository
+var staleOrders = _db.Orders.Where(o => o.Status == OrderStatus.Pending && o.CreatedAt < DateTime.UtcNow.AddDays(-7));
+
+// In a background cleanup job, written independently, SLIGHTLY different (bug: 7 vs 5 days)
+var oldOrders = _db.Orders.Where(o => o.Status == OrderStatus.Pending && o.CreatedAt < DateTime.UtcNow.AddDays(-5));
+```
+
+**With a Specification — the rule is defined once, reused everywhere:**
+```csharp
+public class StaleOrderSpecification : Specification<Order>
+{
+    public override Expression<Func<Order, bool>> ToExpression()
+        => o => o.Status == OrderStatus.Pending && o.CreatedAt < DateTime.UtcNow.AddDays(-7);
+}
+
+// Repository
+var staleOrders = _repository.Find(new StaleOrderSpecification());
+// Background job -- reuses the EXACT same rule, can't drift out of sync
+var oldOrders = _repository.Find(new StaleOrderSpecification());
+```
+Because `ToExpression()` returns a genuine `Expression<Func<T, bool>>`, EF Core can still translate it into SQL (it's not just an in-memory predicate) — the Specification composes into `IQueryable` the same way a hand-written `Where` clause would, while giving that specific business rule a name and a single place to change it.
+
+**The testing benefit:** the specification's logic can be unit tested in complete isolation, against plain in-memory objects, without needing a database or repository at all:
+```csharp
+[Fact]
+public void StaleOrderSpecification_MatchesOrdersOlderThan7Days()
+{
+    var spec = new StaleOrderSpecification();
+    var predicate = spec.ToExpression().Compile();
+    Assert.True(predicate(new Order { Status = OrderStatus.Pending, CreatedAt = DateTime.UtcNow.AddDays(-8) }));
+    Assert.False(predicate(new Order { Status = OrderStatus.Pending, CreatedAt = DateTime.UtcNow.AddDays(-3) }));
+}
+```
+
+**Common Pitfall:** introducing the Specification pattern for simple, one-off queries that are only ever used in a single place — the pattern earns its complexity specifically when a business rule is genuinely reused across multiple call sites (or needs isolated unit testing independent of the database), not as a blanket wrapper around every `Where` clause in the codebase.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is the "Ports and Adapters" (Hexagonal Architecture) way of describing the same boundary Clean Architecture enforces, and how do the two relate?**
+
+Hexagonal Architecture (Ports and Adapters), introduced by Alistair Cockburn, and Clean Architecture (Robert C. Martin) were developed independently but describe essentially the same core idea using different vocabulary — recognizing this helps when reading codebases or articles that use one framing versus the other.
+
+**Hexagonal's vocabulary — Ports and Adapters:**
+```text
+                    ┌─────────────────────┐
+   HTTP Adapter ───►│                     │◄─── Database Adapter
+   (driving)        │   Application Core   │      (driven)
+                    │   (the "hexagon")    │
+   CLI Adapter  ───►│                     │◄─── Email Adapter
+   (driving)        └─────────────────────┘      (driven)
+```
+- A **Port** is an interface the application core defines, describing a capability it needs (`IOrderRepository`) or exposes (`IOrderService`).
+- An **Adapter** is a concrete implementation of a Port, translating between the outside world and the core (a `SqlOrderRepository` adapts a Port to a real database; an HTTP controller adapts an incoming request to a call into the core).
+- **Driving adapters** (HTTP, CLI) initiate calls *into* the core; **driven adapters** (database, email) are called *by* the core.
+
+**Clean Architecture's vocabulary for the same structural idea:**
+```text
+Domain/Application layers  <-->  the "hexagon" / application core
+Infrastructure layer        <-->  driven adapters (database, external services)
+Presentation layer           <-->  driving adapters (HTTP controllers, CLI)
+Interfaces defined in Application layer (IOrderRepository)  <-->  Ports
+```
+
+**Why they're considered essentially the same idea:** both insist that the core business logic depend only on abstractions it defines itself, with all technology-specific detail (databases, web frameworks, message queues) living in outer, swappable implementations — Clean Architecture describes this with **concentric circles and a Dependency Rule**; Hexagonal describes the identical structural constraint with a **hexagon and Ports/Adapters** terminology. A codebase following either faithfully looks structurally almost identical to one following the other.
+
+**Common Pitfall:** treating "Clean Architecture" and "Hexagonal Architecture" as meaningfully different methodologies requiring a team to pick one "correctly" — in practice, teams and articles often mix the vocabulary freely (calling an interface both a "Port" and simply "an Application layer interface" in the same codebase), and the actual architectural discipline (dependencies point inward, technology detail stays at the edges) matters far more than which naming convention is used to describe it.
+
+---

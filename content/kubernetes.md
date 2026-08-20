@@ -272,3 +272,113 @@ This requires a **metrics adapter** (like the Prometheus Adapter) translating yo
 **Common Pitfall:** setting `minReplicas` too low for a service with a slow cold start (JIT warm-up, EF Core model building) — if traffic spikes faster than new Pods can become "Ready" (pass their readiness probe), the existing Pods get overwhelmed before the HPA's scale-up has actually finished taking effect, since new replicas take real wall-clock time to start and warm up, not just to be scheduled.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is a Kubernetes `Secret`, and what does "encoded, not encrypted" actually mean about how it's stored?**
+
+A `Secret` is a Kubernetes object for storing sensitive data (passwords, tokens, TLS certificates) separately from a Pod's own configuration/image — but it's important to understand precisely what protection it does and doesn't provide by default.
+
+**Creating and mounting a Secret:**
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-credentials
+type: Opaque
+data:
+  password: cGFzc3dvcmQxMjM=   # this is Base64("password123") -- NOT encrypted
+```
+```yaml
+containers:
+  - name: api
+    envFrom:
+      - secretRef:
+          name: db-credentials
+```
+
+**What "encoded, not encrypted" means concretely:** the `data` field's values are Base64-encoded, a reversible, non-secret encoding scheme — `echo cGFzc3dvcmQxMjM= | base64 -d` instantly reveals `password123`. Base64 exists here purely so the YAML can represent arbitrary binary data as text, **not** as a security mechanism; anyone with read access to the Secret object (via `kubectl get secret db-credentials -o yaml`) can trivially decode it.
+
+**Where actual protection comes from:**
+- **RBAC** — restricting *who* can read Secret objects in the first place is the primary real defense, not the Base64 encoding itself.
+- **Encryption at rest in `etcd`** — Kubernetes supports (but doesn't enable by default in every distribution) encrypting Secret data within `etcd`'s own storage, protecting against someone gaining direct access to the underlying `etcd` data files.
+- **External secret managers** — mounting secrets from Azure Key Vault or HashiCorp Vault via a CSI driver keeps the actual secret value out of `etcd`/Kubernetes objects entirely, with Kubernetes only holding a reference to fetch it dynamically.
+
+**Common Pitfall:** treating a Kubernetes `Secret` as sufficiently protected purely because it's a different object `kind` than a `ConfigMap` — without RBAC restrictions and/or etcd encryption at rest actually configured, a `Secret` provides essentially the same protection as a `ConfigMap` against anyone who already has cluster read access; the "Secret" naming describes intent, not an automatic security guarantee.
+
+---
+
+## Intermediate — Question 3
+
+**Q3: What is a Kubernetes `StatefulSet`, and why can't a plain `Deployment` handle workloads like a database cluster?**
+
+A `Deployment` treats its Pods as interchangeable, disposable replicas — any Pod can be killed and replaced by an identical one at any time, with no notion of individual Pod identity. A `StatefulSet` exists specifically for workloads where each replica needs a **stable, unique identity** and **stable, persistent storage** tied to that specific identity — exactly what a database cluster needs and a stateless web API doesn't.
+
+**What a `Deployment` can't guarantee:**
+```text
+Deployment "web-api" with 3 replicas:
+  web-api-7d9f8b-x4k2p, web-api-7d9f8b-m9q1r, web-api-7d9f8b-z8t3w
+  -- random suffixes, no ordering, any pod can be replaced by a NEW pod with a DIFFERENT name
+```
+For a stateless API, this is fine — every replica is identical and interchangeable. For a database cluster where "node 0 is the primary, nodes 1-2 are replicas," it's not.
+
+**What a `StatefulSet` provides instead:**
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: postgres }
+spec:
+  serviceName: postgres
+  replicas: 3
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "10Gi" } } }
+```
+```text
+Resulting Pods: postgres-0, postgres-1, postgres-2
+-- stable, PREDICTABLE names (not random suffixes)
+-- postgres-0's PersistentVolumeClaim ALWAYS reattaches to a recreated postgres-0, never to postgres-1
+-- Pods are created/scaled/terminated in ORDER (0, then 1, then 2), not all simultaneously
+```
+If `postgres-1` crashes and is recreated, it comes back as `postgres-1` again, with the *same* persistent volume it had before — a plain `Deployment`'s replacement Pod would get a brand-new random name and (without extra configuration) potentially a fresh, empty volume, which is catastrophic for a database node expecting its data to still be there.
+
+**Common Pitfall:** using a `Deployment` with a shared `PersistentVolumeClaim` across multiple replicas as a workaround for stateful workloads — most storage backends don't support multiple Pods writing to the same volume concurrently in a safe way (`ReadWriteOnce` access mode explicitly forbids it), making this a data-corruption risk rather than a genuine substitute for `StatefulSet`'s per-replica volume model.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is a Kubernetes Admission Webhook, and how does it differ from RBAC in what it can enforce?**
+
+RBAC answers "is this user/service account *allowed* to perform this action at all" (a yes/no permission check). An Admission Webhook runs **after** RBAC authorization succeeds but **before** an object is actually persisted to `etcd`, letting you validate or even mutate the object's *content* — enforcing rules RBAC has no concept of, like "every Pod must declare resource limits" or "images must come from our approved registry."
+
+**Validating Admission Webhook — reject an object that violates a policy:**
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata: { name: require-resource-limits }
+webhooks:
+  - name: require-limits.mycompany.com
+    clientConfig:
+      service: { name: policy-webhook-service, namespace: policy-system, path: "/validate" }
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: ["apps"]
+        resources: ["deployments"]
+```
+The referenced webhook service receives the incoming Deployment object, inspects it (e.g., checking every container has `resources.limits` set), and returns an allow/deny decision — a user with full RBAC permission to create Deployments can still have their specific Deployment rejected here for violating the resource-limits policy, something RBAC itself has no mechanism to express (RBAC only knows about verbs and resource types, not the *content* of the object being created).
+
+**Mutating Admission Webhook — silently modify an object before it's stored:**
+```text
+A Pod is submitted without a "team" label
+    -> Mutating webhook intercepts it
+    -> automatically injects labels: { team: "unspecified", cost-center: "shared" }
+    -> the object that actually gets stored in etcd already has these labels added
+```
+This is how tools like Istio's automatic sidecar injection work — a Pod submitted with no awareness of the service mesh gets an Envoy sidecar container silently added to its spec by a mutating webhook before it's ever actually scheduled.
+
+**Why this matters architecturally:** admission webhooks are the mechanism behind policy-as-code tools like OPA Gatekeeper and Kyverno — letting platform teams enforce organization-wide standards (mandatory labels, banned image registries, required security contexts) uniformly across every team's Kubernetes manifests, at the API server level, rather than relying on every team remembering to follow a written convention.
+
+**Common Pitfall:** deploying a validating/mutating webhook without a correctly configured `failurePolicy` — if the webhook service itself becomes unavailable, `failurePolicy: Fail` (the safer default for security-critical policies) blocks *all* matching object creation cluster-wide until the webhook recovers, which can cause a wider outage than the policy violation it was meant to prevent if the webhook's own reliability isn't held to a very high standard.
+
+---

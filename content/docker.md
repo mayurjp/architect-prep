@@ -271,3 +271,85 @@ ADD https://example.com/file.txt /app/         # ADD can also fetch remote URLs
 **When `ADD` is still the right tool:** the auto-extraction behavior is occasionally genuinely useful (unpacking a downloaded SDK tarball as part of a build stage) — but even Docker's own official documentation recommends `COPY` plus an explicit `RUN tar -xzf ...` for anything beyond that narrow case, specifically so the extraction step is visible and intentional in the Dockerfile rather than an implicit side effect of the instruction you chose.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is a Docker Registry, and how does an image name/tag (e.g., `mcr.microsoft.com/dotnet/aspnet:8.0`) map to it?**
+
+A Registry is a storage and distribution service for Docker images — Docker Hub is the default public registry, but organizations commonly run private registries (Azure Container Registry, AWS ECR, GitHub Container Registry) for their own images.
+
+**Anatomy of an image reference:**
+```text
+mcr.microsoft.com/dotnet/aspnet:8.0
+└────────┬───────┘└─────┬────┘└┬┘
+     registry         repository  tag
+     (host)           (image name) (version)
+```
+- **Registry host** — where the image is stored/pulled from; omitting it defaults to Docker Hub.
+- **Repository** — the image's name, often with a namespace (`dotnet/aspnet` groups related Microsoft-published images).
+- **Tag** — a human-readable version label (`8.0`, `latest`, `8.0.1-alpine`) pointing to a specific image build.
+
+**Pulling and pushing:**
+```bash
+docker pull mcr.microsoft.com/dotnet/aspnet:8.0        # download from the registry
+docker tag my-api:latest myregistry.azurecr.io/my-api:1.4.2  # re-tag for a private registry
+docker push myregistry.azurecr.io/my-api:1.4.2          # upload to the private registry
+```
+
+**Common Pitfall:** relying on the `latest` tag in production deployments — `latest` is just a convention (a mutable pointer that a `docker push` can silently move to point at a completely different image), not a guarantee of "the newest stable version." A deployment pinned to `latest` can pull a different image today than it did yesterday with zero code change on your end, defeating reproducible deployments; pin to an explicit version tag (or better, an immutable image digest) instead.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is a Docker health check, and how does it differ from a Kubernetes liveness/readiness probe?**
+
+Both answer "is this container actually healthy," but a Docker-native `HEALTHCHECK` operates at the single-container level (visible via `docker ps`), whereas Kubernetes probes are what actually drive orchestration decisions (routing traffic, restarting pods) when running under Kubernetes — the two overlap in purpose but aren't the same mechanism.
+
+**Docker-native health check (in the Dockerfile):**
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+```
+Docker runs this command periodically inside the running container and marks it `healthy`/`unhealthy`/`starting` — visible via `docker ps` (showing `Up 2 minutes (healthy)`), useful for local development and `docker-compose`'s `depends_on: condition: service_healthy`.
+
+**Kubernetes probes (in the Pod spec) — this is what actually matters in a K8s cluster:**
+```yaml
+livenessProbe:
+  httpGet: { path: /health/live, port: 8080 }
+readinessProbe:
+  httpGet: { path: /health/ready, port: 8080 }
+```
+Kubernetes **does not read or use the Dockerfile's `HEALTHCHECK` directive at all** — it has its own, separate probe configuration in the Pod spec, and this is what actually determines whether traffic is routed to a Pod (readiness) or whether it gets restarted (liveness).
+
+**Why this distinction trips people up:** a team migrating a `docker-compose`-based setup (relying on `HEALTHCHECK`) to Kubernetes often assumes the existing Dockerfile health check "just works" in the new environment — it doesn't; Kubernetes-specific `livenessProbe`/`readinessProbe` configuration must be added separately in the Pod/Deployment manifest, since Kubernetes has no awareness of the Dockerfile's `HEALTHCHECK` instruction whatsoever.
+
+**Common Pitfall:** defining a Dockerfile `HEALTHCHECK` and assuming that alone provides production-grade health monitoring once deployed to Kubernetes — it's inert there; Kubernetes-native probes are the only mechanism that actually affects traffic routing and restart behavior in a K8s cluster.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What are Docker build cache mounts (`--mount=type=cache`), and how do they solve a caching problem that layer caching alone can't?**
+
+Regular Docker layer caching (covered earlier) caches an entire `RUN` instruction's result as one layer — but package manager caches (NuGet, npm) inside that layer are still thrown away and rebuilt from scratch whenever the layer needs to rebuild at all, even for a tiny dependency change. Cache mounts solve this by persisting a specific *directory* across builds, independent of the layer cache.
+
+**Without a cache mount — restoring dependencies re-downloads everything on any cache miss:**
+```dockerfile
+COPY ["MyApp.csproj", "./"]
+RUN dotnet restore "MyApp.csproj"  # if this layer needs to rebuild, EVERY package re-downloads from scratch
+```
+
+**With a cache mount — the NuGet package cache persists across builds, even when the layer itself rebuilds:**
+```dockerfile
+COPY ["MyApp.csproj", "./"]
+RUN --mount=type=cache,target=/root/.nuget/packages \
+    dotnet restore "MyApp.csproj"
+```
+The `/root/.nuget/packages` directory is preserved in a special build cache **outside** the resulting image layer, persisting across separate `docker build` invocations even when the `.csproj` changes and the `RUN` instruction's own layer cache is invalidated — so only *newly added or changed* packages need to be downloaded, not the entire dependency graph from scratch.
+
+**Why this is a distinct mechanism from layer caching:** layer caching works at the granularity of "did this entire instruction's inputs change" (all-or-nothing per layer); a cache mount instead persists a specific *directory's contents* across builds regardless of whether the layer itself was cache-hit or cache-miss, solving the specific pain of "even a one-line dependency addition forces a multi-minute full package re-download."
+
+**Common Pitfall:** using cache mounts but forgetting they require BuildKit (`DOCKER_BUILDKIT=1`, the default in modern Docker) and aren't portable to every CI environment without configuration — some CI runners' Docker layer caching setups (e.g., certain remote-cache configurations) need explicit configuration to actually persist cache-mount contents between CI runs, since a fresh CI runner with no persisted build cache gains nothing from a cache mount on its very first build.
+
+---

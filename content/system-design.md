@@ -798,3 +798,92 @@ Unlike a read replica (every replica has a *full copy* of the same data), each s
 **Common Pitfall:** sharding prematurely, before actually hitting a genuine storage/throughput ceiling that read replicas and caching can't solve — sharding is difficult to reverse (re-sharding a live system to change the key or add shards is one of the hardest operational migrations in distributed systems), so it should be the last lever pulled, not the first.
 
 ---
+
+## Beginner — Question 3
+
+**Q3: What is a Load Balancer, and what's the difference between Layer 4 (transport-level) and Layer 7 (application-level) load balancing?**
+
+A load balancer distributes incoming traffic across multiple backend servers so no single instance is overwhelmed — but *how* it decides where to route each request depends on which layer of the network stack it operates at.
+
+**Layer 4 (Transport) — routes based on IP address and port, without looking at the actual HTTP content:**
+```text
+Client -> L4 Load Balancer -> picks a backend based on TCP connection info alone
+                            -> forwards raw TCP packets, doesn't parse HTTP at all
+```
+Extremely fast (no need to parse the request), but genuinely "blind" to what's inside — it can't route based on a URL path, a header, or cookie-based session affinity, since it never looks past the TCP/IP layer.
+
+**Layer 7 (Application) — routes based on actual HTTP content:**
+```text
+Client -> L7 Load Balancer -> reads the HTTP request (path, headers, cookies)
+                            -> routes /api/* to the API backend pool,
+                               /images/* to a static-content pool,
+                               based on a "session" cookie for sticky sessions
+```
+Slower per-request (must parse HTTP), but enables intelligent routing decisions — path-based routing, weighted traffic splitting for canary releases, and SSL/TLS termination all require understanding the actual HTTP request, which only an L7 balancer can do.
+
+**Why this distinction matters for architecture decisions:** a simple, high-throughput internal service-to-service load balancer might deliberately choose L4 for raw speed when routing logic is trivial (round-robin across identical instances); a public-facing API gateway almost always needs L7, since path-based routing, header inspection for auth, and canary traffic splitting all require application-layer awareness.
+
+**Common Pitfall:** assuming any "load balancer" provides the same routing capabilities — deploying an L4 load balancer in front of a system that needs path-based routing or sticky sessions will simply not support those features, requiring a swap to an L7 balancer (or an additional L7 layer behind the L4 one) rather than a configuration tweak.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is the difference between horizontal and vertical scaling, and why does horizontal scaling require the application itself to be designed for it?**
+
+**Vertical scaling** ("scale up") means giving a single server more resources — more CPU, more RAM, a faster disk. **Horizontal scaling** ("scale out") means adding more servers running the same application, splitting load across them. They sound like two flavors of the same idea, but horizontal scaling has an architectural prerequisite vertical scaling doesn't.
+
+**Vertical scaling — no application changes needed, but has a hard ceiling:**
+```text
+Before: 1 server, 4 CPU cores, 16GB RAM
+After:  1 server, 32 CPU cores, 256GB RAM  -- same application code, just bigger hardware
+```
+Simple, but bounded by the largest single machine available, and represents a single point of failure — if that one (now very expensive) server goes down, the entire application is down.
+
+**Horizontal scaling — requires the application to not depend on server-local state:**
+```text
+Before: 1 server handling all requests
+After:  5 identical servers behind a load balancer, EACH capable of handling ANY request
+```
+This only works correctly if **any** of the 5 servers can handle **any** incoming request — which requires the application to be effectively **stateless** at the server level. If a server keeps session data in its own local memory (an in-memory `IMemoryCache` storing "is this user logged in"), a request routed to a *different* server than the one that handled the user's login has no idea who they are.
+
+**What "designing for horizontal scaling" actually requires:**
+- **Externalizing session/state** — moving session data to a shared store (Redis, a database) that every server instance can read, rather than keeping it in one server's local memory.
+- **Sticky sessions as a partial workaround** — configuring the load balancer to always route a given user to the *same* server (based on a cookie) sidesteps the problem without externalizing state, but reintroduces a single point of failure for that user (if their assigned server goes down, their session is lost) and complicates even traffic distribution.
+- **Idempotent, side-effect-aware request handling** — since requests from the same logical operation might not always land on the same server (especially with retries), handlers need to tolerate that reality rather than assuming continuity across requests.
+
+**Common Pitfall:** adding more server instances behind a load balancer as a scaling fix, without first checking whether the application holds any server-local state — this doesn't scale throughput at all if requests requiring that local state keep failing or behaving inconsistently on servers that don't have it, and simply reveals the statelessness gap as intermittent, confusing bugs rather than raw capacity.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is a Bloom Filter, and how does it let a system check "might this exist?" using a tiny fraction of the memory a full lookup structure would require?**
+
+A Bloom Filter is a probabilistic data structure that can tell you **definitely not present** or **possibly present** for a given item — trading a small, tunable false-positive rate for dramatically lower memory usage than storing the actual set of items would require, useful when you need to cheaply rule out the vast majority of "definitely not there" cases before paying for an expensive lookup.
+
+**The Mechanism (conceptually):**
+```text
+A Bloom Filter is a bit array + several hash functions.
+Adding "user123": hash it with 3 different hash functions -> set 3 corresponding bits to 1
+Checking "user456": hash it the same 3 ways -> check those 3 bit positions
+    - If ANY of the 3 bits is 0 -> DEFINITELY not in the set
+    - If ALL 3 bits are 1 -> POSSIBLY in the set (could be a false positive from bit overlap)
+```
+Because multiple different inputs can happen to set overlapping bits, a Bloom Filter can produce **false positives** (says "maybe present" for something never actually added) but **never false negatives** (if it says "definitely not present," that's always correct) — this asymmetry is exactly what makes it useful as a cheap pre-filter, not a replacement for the real lookup.
+
+**A concrete use case — avoiding wasted disk reads in a database engine:**
+```text
+Cassandra/RocksDB-style LSM-tree storage engines keep a Bloom Filter per on-disk data file.
+Before doing an expensive disk read to check "does key X exist in this file?",
+the engine checks the file's Bloom Filter first.
+  - Filter says "definitely not" -> skip this file entirely, saving a disk read
+  - Filter says "maybe" -> do the actual (more expensive) disk read to confirm
+```
+Since a single logical read might otherwise need to check dozens of on-disk files for a key that only actually exists in one (or none) of them, a Bloom Filter per file lets the engine skip the vast majority of files with zero disk I/O, only paying the real read cost for files that might actually contain the key.
+
+**Other common use cases:** checking whether a URL has already been crawled (web crawlers), checking whether a username is already taken before hitting the database (accepting a small false-positive rate that just triggers one extra confirming query), and detecting duplicate items in a stream without storing every item seen so far.
+
+**Common Pitfall:** using a Bloom Filter where false positives are unacceptable — e.g., using one alone as a security check ("has this token been revoked?") without a confirming lookup for "maybe" results would incorrectly treat some *not-actually-revoked* items as revoked; a Bloom Filter is only safe to use as a cheap **pre-filter** before an authoritative check, never as the sole source of truth for a decision where false positives cause real harm.
+
+---
