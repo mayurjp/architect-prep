@@ -1,5 +1,5 @@
 {
-  "name": "architect-prep",
+  "name": "learning",
   "version": "1.0.0",
   "private": true,
   "description": "Static learning-question bank for .NET-centric backend interview prep. Content lives in /content as markdown; scripts/build.js compiles it into /docs for GitHub Pages.",
