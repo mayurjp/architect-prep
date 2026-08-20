@@ -514,3 +514,110 @@ The resource server has to make this network round-trip to the Authorization Ser
 **Common Pitfall:** choosing JWTs by default without considering that the specific use case might genuinely need instant revocation (a scenario like the "employee fired, must lose access immediately" case covered earlier) — Opaque tokens with introspection, despite the added latency cost, directly solve that specific requirement in a way a plain JWT structurally cannot without additional deny-list infrastructure layered on top.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between "Authentication" happening at the API Gateway versus at each individual backend microservice, and why do most architectures do BOTH rather than picking just one?**
+
+Covered under the microservices security material at a conceptual level (authenticate at the edge, authorize everywhere) — the specific reasoning for validating a token at *both* layers, rather than trusting the gateway's check alone, is worth understanding concretely.
+
+**Gateway-only authentication — the API Gateway checks the token, backend services trust it blindly:**
+```text
+Client -> API Gateway (validates JWT signature/expiry) -> Order Service (trusts the
+          gateway completely, does NO token validation of its own)
+```
+This works *as long as* every single request genuinely passes through the gateway — but if `OrderService` is ever reachable directly (a misconfigured internal network route, another service calling it directly bypassing the gateway, or simply a future architecture change nobody remembered to re-audit), there's **no authentication check at all** at that point, since `OrderService` itself never learned how to validate a token independently.
+
+**Defense-in-depth — EVERY service independently validates, even though the gateway already did:**
+```csharp
+// OrderService's OWN Program.cs -- validates the JWT itself, INDEPENDENTLY of whether
+// the gateway already checked it
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options => { options.Authority = "https://identity.mycompany.com"; });
+```
+Even though the gateway already validated this exact token moments earlier, `OrderService` performs its *own*, independent validation — if `OrderService` is ever reached through any path other than the gateway (intentionally or by misconfiguration), it still correctly rejects unauthenticated requests on its own, rather than silently trusting that "surely this only ever comes through the gateway."
+
+**Why this isn't wasteful redundancy but genuine defense-in-depth:** relying solely on the gateway's check makes the *entire system's* security depend on one specific network topology assumption (everything routes through the gateway) never being violated, ever, by any future change — a single point of failure for the whole system's authentication; having every service validate independently means a network misconfiguration or a bypassed gateway is a much smaller, contained problem (that one specific access path is unauthenticated) rather than a catastrophic, system-wide authentication bypass.
+
+**Common Pitfall:** skipping per-service token validation "since the gateway already checked it, why do the same work twice" — validating a JWT's signature/expiry is computationally cheap (no network call, purely local cryptographic verification), making the redundancy cost genuinely negligible compared to the security benefit of not depending entirely on network topology remaining exactly as originally designed, forever, without any future misconfiguration risk.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is the "Confused Deputy Problem" in the context of OAuth, and how does the `state` parameter in the Authorization Code flow (covered earlier) specifically defend against it?**
+
+The Confused Deputy Problem describes a scenario where an attacker tricks a legitimate, trusted party (the "deputy" — here, your application) into misusing its own legitimate authority on the attacker's behalf, without the deputy realizing it's being manipulated — in OAuth specifically, this manifests as an attacker hijacking the authorization flow to link *their own* third-party account to the *victim's* session on your application.
+
+**The attack this specifically enables without the `state` parameter:**
+```text
+1. Attacker starts a LEGITIMATE OAuth flow with Google on THEIR OWN account, gets as far
+   as receiving a valid authorization CODE for their own account
+2. Attacker tricks the victim into visiting: https://yourapp.com/oauth/callback?code=ATTACKERS_CODE
+   (e.g., via a crafted link sent in a phishing email)
+3. The victim, ALREADY LOGGED IN to yourapp.com, has their browser send this request
+4. Your application's callback handler exchanges ATTACKERS_CODE for a token, and (WITHOUT
+   the state check) LINKS the resulting Google identity to the CURRENTLY LOGGED IN
+   victim's account -- the attacker's Google account is now linked to the VICTIM's app account!
+5. The attacker can now log into the VICTIM's application account using THEIR OWN Google credentials
+```
+
+**The `state` parameter — a per-flow, unguessable value the application generates and verifies matches on return:**
+```csharp
+// Step 1: BEFORE redirecting to the identity provider, generate and remember a random state value,
+// tied to the CURRENT user's own session
+var state = GenerateSecureRandomString();
+HttpContext.Session.SetString("oauth_state", state);
+var authUrl = $"https://accounts.google.com/o/oauth2/auth?client_id=...&state={state}&...";
+return Redirect(authUrl);
+
+// Step 2: when the callback arrives, verify the returned state matches what THIS session generated
+[HttpGet("oauth/callback")]
+public IActionResult Callback(string code, string state)
+{
+    var expectedState = HttpContext.Session.GetString("oauth_state");
+    if (state != expectedState) return BadRequest("Invalid state -- possible CSRF/session-fixation attempt.");
+    // only proceed with the code exchange if state genuinely matches THIS user's own initiated flow
+}
+```
+Because the attacker's OAuth flow (started on their own browser, for their own account) generated a **different** `state` value than whatever the victim's own session expects, the victim's application correctly detects the mismatch and rejects the attacker's `code` — the attacker can't forge a `state` value that matches the victim's specific session, since the victim's session generated and is checking against its own random value the attacker never saw.
+
+**Why this is genuinely a CSRF-family defense, not just an unrelated OAuth quirk:** this is structurally identical to the CSRF anti-forgery token pattern covered much earlier (a server-generated, unguessable value the client must echo back, proving the request genuinely originated from a flow the server itself initiated) — applied specifically to the OAuth callback step, defending against an attacker hijacking someone else's already-authenticated session via a maliciously-crafted callback URL.
+
+**Common Pitfall:** implementing an OAuth "Sign in with X" integration by copying a tutorial's code that omits `state` validation entirely (many simplified tutorials skip it for brevity) — without it, the integration is specifically vulnerable to this account-linking hijack, a genuinely serious vulnerability class that's easy to miss precisely because the OAuth flow otherwise "works correctly" in every normal, non-attack scenario during testing.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is "Token Binding" (or its more modern successor, DPoP — Demonstrating Proof-of-Possession), and how does it prevent a stolen access token from being usable by an attacker on a different device?**
+
+An ordinary bearer token (covered throughout — JWT or opaque) is exactly what its name implies: **whoever bears (possesses) it** can use it, with no verification that the presenter is the same party the token was originally issued to. If a bearer token is stolen (via XSS, a compromised network, a leaked log), the thief can use it from anywhere, on any device, indistinguishable from the legitimate holder. DPoP closes this specific gap by cryptographically binding a token to the specific client that originally requested it.
+
+**Ordinary bearer token — usable by ANYONE who possesses it, from ANY device:**
+```http
+GET /api/orders
+Authorization: Bearer eyJhbGci... 
+-- the server has NO way to verify this request is coming from the SAME device/client
+   the token was originally issued to -- if this exact string is stolen, it's fully
+   usable by the thief, from a completely different machine, indistinguishable from
+   the legitimate original holder
+```
+
+**DPoP — the client proves possession of a private key on EVERY request, not just at token issuance:**
+```http
+GET /api/orders
+Authorization: DPoP eyJhbGci...
+DPoP: eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2In0... (a fresh, per-request proof, signed
+       by a PRIVATE KEY that stays on the legitimate client's own device and NEVER travels
+       over the network at all)
+```
+When the token was originally issued, the client generated a public/private key pair, keeping the private key locally and only sending the *public* key to the Authorization Server (bound into the issued token itself). On every subsequent API request, the client must generate a fresh, short-lived proof — signed with that same private key — demonstrating it still possesses the private key corresponding to the public key the token was bound to.
+
+**Why stealing just the bearer token string is no longer sufficient for an attacker under DPoP:** even if an attacker steals the DPoP-bound access token itself (via the same XSS/log-leak paths that would fully compromise an ordinary bearer token), they **cannot** forge a valid DPoP proof for subsequent requests without also possessing the private key — which never left the legitimate client's device, was never transmitted over the network, and isn't recoverable from the stolen token string alone; the stolen token is now useless without the private key that never left the original device.
+
+**Why this represents a genuinely different security model, not just an incremental hardening:** ordinary bearer tokens make "possessing the token string" and "being the legitimate client" the same thing by definition — DPoP separates them, requiring *both* the token *and* proof of possessing a specific private key that was never transmitted anywhere, meaningfully raising the bar for what a token theft alone can actually accomplish.
+
+**Common Pitfall:** implementing DPoP but allowing an overly generous validity window on each proof (or failing to check proof replay via a `jti`-style uniqueness check) — a DPoP proof is meant to be single-use and short-lived; without proper replay protection, an attacker who intercepts *one* valid request (token + its accompanying DPoP proof, together) within the proof's validity window could still replay that exact request once, even without ever obtaining the private key itself — the security benefit specifically depends on correctly enforcing proof freshness and single-use, not merely requiring a proof to exist at all.
+
+---

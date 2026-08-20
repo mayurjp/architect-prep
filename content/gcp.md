@@ -457,3 +457,92 @@ When someone (or some CI pipeline) attempts to deploy an image to this GKE clust
 **Common Pitfall:** configuring Binary Authorization policies but leaving a broad exemption for "break-glass" emergency deployments that's rarely audited afterward — an emergency-access mechanism is often genuinely necessary operationally, but if it's not tightly scoped and actively monitored, it becomes the obvious path an attacker (or an overly casual internal process) uses to bypass the entire attestation requirement the policy was meant to enforce.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between a GCP Region and a Zone, and how does deploying across multiple Zones within one Region protect against a different failure scale than deploying across multiple Regions?**
+
+Mirroring the same conceptual distinction covered for Azure's Availability Zones/Sets — a GCP Zone is an isolated location within a Region (its own independent power/cooling/networking), while a Region is a broader geographic area containing multiple Zones; each level of grouping protects against a different scale of failure.
+
+**Zones within one Region — protect against a single datacenter-level failure:**
+```text
+Region "us-central1" contains Zones: us-central1-a, us-central1-b, us-central1-c
+-- each Zone is a genuinely separate physical facility with independent infrastructure
+-- deploying VMs/GKE nodes across MULTIPLE zones within us-central1 protects against
+   ONE zone's facility having an outage (power failure, cooling failure, etc.)
+```
+
+**Regions — protect against a broader, geography-level failure:**
+```text
+us-central1 (Iowa) vs us-east1 (South Carolina) vs europe-west1 (Belgium)
+-- deploying across MULTIPLE REGIONS protects against something affecting an
+   ENTIRE geographic area -- a regional power grid event, a natural disaster
+   affecting a whole metro area, or (rarely) a region-wide GCP service issue
+```
+
+**Why this two-level structure matters for architecture decisions:** a multi-zone deployment (cheap, low extra latency, since zones within a region are physically close) is usually the right first line of defense for most applications' availability needs — multi-region deployment (covered under the earlier GCP global load balancing / Anycast discussion) is a larger commitment (higher complexity, potential data-residency/compliance considerations, cross-region data replication costs) reserved for applications with genuinely demanding global availability or geographic-proximity latency requirements.
+
+**Common Pitfall:** deploying a "highly available" application entirely within a single Zone, mistakenly believing GCP's regional infrastructure automatically provides redundancy — a single-zone deployment has no protection at all against that one zone's specific facility having an outage; genuine zone-level redundancy requires deliberately spreading instances/nodes across multiple zones within the region, which doesn't happen automatically just by deploying "in us-central1" without explicit multi-zone configuration.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is GCP's Memorystore, and how does choosing between its Redis and Memcached engine options map onto genuinely different caching use-case needs, not just "pick whichever is more familiar"?**
+
+Memorystore is GCP's fully-managed caching service, offered as either a managed Redis instance or a managed Memcached instance — the choice isn't arbitrary; each engine has meaningfully different capabilities that suit different caching needs.
+
+**Memcached — simpler, pure key-value caching, horizontally scalable by design:**
+```text
+SET product:5 "{\"name\":\"Keyboard\",\"price\":29.99}"
+GET product:5
+-- Memcached's design is INTENTIONALLY simple: it's a distributed hash table, nothing more.
+-- Natively multi-threaded and straightforward to scale HORIZONTALLY by just adding more nodes,
+   since it has no built-in replication/persistence complexity to coordinate across nodes.
+```
+
+**Redis — a genuine data structure server, with capabilities far beyond simple key-value caching:**
+```text
+ZADD leaderboard 1500 "player1"          -- Sorted Sets (covered earlier for leaderboards)
+LPUSH recent-orders "order-123"           -- Lists
+HSET user:42 name "Alice" email "a@..."  -- Hashes
+EXPIRE session:abc123 3600                -- TTL (covered earlier)
+-- Redis supports rich data structures, pub/sub messaging, Lua scripting, and OPTIONAL
+   persistence (snapshotting to disk) -- genuinely more than "just a cache"
+```
+
+**Why the choice matters, not just "which one do I already know":** if the actual need is purely "cache simple key-value pairs, scale horizontally without fuss," Memcached's simplicity is a genuine advantage, not a limitation — it has less operational complexity to reason about. If the need involves the richer capabilities Redis provides natively (the Sorted-Set leaderboard pattern, pub/sub for real-time features, atomic multi-step operations via Lua scripting), Memcached simply doesn't have those capabilities at all, making Redis the only viable choice regardless of team familiarity.
+
+**Common Pitfall:** choosing Redis by default for every caching need "because it's more popular/full-featured," when a project's actual requirements are pure, simple key-value caching that Memcached would serve with genuinely less operational complexity — the extra capabilities Redis provides aren't free (more moving parts, more configuration surface), and are only worth that cost when the application genuinely uses those specific richer capabilities, not as an unconditional default choice.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is GCP's Spanner "TrueTime"-based External Consistency guarantee (touched on earlier), and how does it differ from ordinary Strong Consistency in what specific additional property it provides across geographically distributed transactions?**
+
+Covered earlier at a mechanism level (TrueTime uses atomic clocks/GPS for bounded-uncertainty global time) — the specific *consistency guarantee* this enables, "External Consistency," is subtly stronger than what's typically meant by "Strong Consistency" in other distributed databases, and the distinction matters for understanding exactly what Spanner uniquely provides.
+
+**Ordinary Strong Consistency — guarantees reads reflect the latest COMMITTED write, but says nothing about REAL-WORLD TIME ordering across transactions on different nodes:**
+```text
+Transaction A commits on Node 1 at real-world time T1
+Transaction B commits on Node 2 at real-world time T2 (slightly AFTER T1, in the real world)
+-- ordinary strong consistency guarantees each transaction's OWN reads see its OWN prior writes,
+   but doesn't necessarily guarantee that a THIRD observer sees A's effects before B's effects,
+   even though A genuinely happened first in real-world wall-clock time
+```
+
+**Spanner's External Consistency — transaction commit ORDER matches REAL-WORLD TIME order, globally, provably:**
+```text
+If Transaction A finishes committing (in real-world time) BEFORE Transaction B even STARTS,
+Spanner GUARANTEES that any observer, anywhere in the world, who can see BOTH transactions'
+effects will see them in that SAME real-world order -- never see B's effects without ALSO
+seeing A's, if A genuinely completed first in actual wall-clock time
+```
+This is a stronger, more intuitive guarantee than typical distributed "strong consistency" — it specifically ties the *database's* notion of transaction ordering to genuine, real-world wall-clock time ordering, globally, which is what TrueTime's bounded-uncertainty atomic-clock synchronization specifically makes provable rather than merely probable.
+
+**Why this specific guarantee required inventing TrueTime rather than using ordinary distributed consensus alone:** achieving genuine real-world-time ordering guarantees across globally-distributed nodes requires knowing, with tight, *provable* bounds, how synchronized the different nodes' clocks actually are — ordinary NTP-synchronized clocks have uncertain, sometimes significant drift, insufficient for provable real-world-time ordering guarantees; TrueTime's atomic-clock/GPS-based approach specifically bounds that uncertainty tightly enough (typically single-digit milliseconds) to make the External Consistency guarantee mathematically provable rather than merely "usually true in practice."
+
+**Common Pitfall:** treating "Strong Consistency" and Spanner's "External Consistency" as interchangeable marketing terms for the same thing — External Consistency is a specifically *stronger*, real-world-time-anchored guarantee that most other "strongly consistent" distributed databases (lacking TrueTime's specific atomic-clock infrastructure) cannot actually provide, even when they also market themselves as strongly consistent; the distinction matters specifically for applications with genuine real-world causality/ordering requirements across globally-distributed transactions.
+
+---

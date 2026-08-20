@@ -505,3 +505,99 @@ Unlike a Canary's essentially random 5%/10%/50%/100% traffic split, each ring he
 **Common Pitfall:** defining rings but progressing through them on a fixed calendar schedule regardless of whether the current ring is actually showing healthy metrics — the entire value of a ring strategy depends on genuinely verifying each ring is healthy before advancing to the next, larger one; advancing on a fixed timer without that verification reduces the ring structure to just a fancier-sounding, still-blind rollout schedule.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between a "Build Artifact" cache and a "Dependency" cache in CI, and why does caching the wrong one provide little to no speedup?**
+
+Both aim to speed up CI runs by avoiding redundant work, but they cache fundamentally different things — a dependency cache avoids re-downloading unchanged packages; a build artifact cache avoids re-compiling unchanged code entirely. Conflating them (or only implementing one when the bottleneck is actually the other) explains why some teams add caching to CI and see disappointing speedup.
+
+**Dependency caching — avoids re-DOWNLOADING packages that haven't changed:**
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: ~/.nuget/packages
+    key: nuget-${{ hashFiles('**/*.csproj') }} # cache key based on project files' content
+- run: dotnet restore # much faster on a cache HIT -- packages already present locally
+- run: dotnet build   # STILL recompiles EVERYTHING from scratch -- restore caching doesn't touch this
+```
+This speeds up the `restore` step specifically (skipping redundant package downloads) but does **nothing** for the `build` step's actual compilation time — a codebase with heavy compilation time (many projects, complex generic code) sees little benefit from dependency caching alone, since compilation still happens fully from scratch every run.
+
+**Build artifact / incremental-build caching — avoids RE-COMPILING code that hasn't changed:**
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: |
+      **/obj
+      **/bin
+    key: build-${{ hashFiles('**/*.cs', '**/*.csproj') }} # cache key based on SOURCE content
+- run: dotnet build --no-restore # can potentially SKIP recompiling unchanged projects entirely
+```
+This targets the actual compilation output, letting the build tool recognize "these specific files/projects haven't changed since the last cached build" and skip recompiling them — a fundamentally different, and for compilation-heavy codebases, often far more impactful optimization than dependency caching alone.
+
+**Why teams sometimes add caching and see disappointing results:** if the actual CI bottleneck is compilation time (a large solution with many projects) but the team only implements dependency/package caching, they've optimized a step that wasn't the actual bottleneck at all — profiling *which specific pipeline step* actually consumes the most time (restore vs. build vs. test) before deciding what to cache avoids this exact "cached the wrong thing" disappointment.
+
+**Common Pitfall:** copy-pasting a generic "add caching to CI" configuration from a tutorial or another project without first measuring which specific step in *your own* pipeline is actually slow — caching the dependency-restore step provides real but limited benefit if restore was already fast and compilation was the actual bottleneck, or vice versa; the right cache to add depends entirely on where your own pipeline's time is genuinely being spent.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is a "Merge Queue" (also called a "Merge Train"), and how does it prevent the specific bug class where two individually-passing PRs break the main branch once BOTH are merged together?**
+
+Traditional CI verifies each Pull Request against the *current* main branch individually — but if two PRs are both approved and merged around the same time, each was only ever tested against main *before* the other one merged, not against the combined result of both changes together; a Merge Queue closes this specific gap.
+
+**The bug a Merge Queue prevents — two PRs, each individually fine, that conflict once BOTH are applied:**
+```text
+PR A: changes OrderService's method signature from GetOrder(int id) to GetOrder(Guid id)
+PR B: adds a NEW caller of OrderService.GetOrder(int id) -- written and tested against
+      main BEFORE PR A merged, so it still calls the OLD int-based signature
+
+Both PRs pass CI individually (each tested against main as it existed at THAT time).
+Both get merged. The RESULTING main branch is now BROKEN -- PR B's new code calls a
+method signature PR A just changed -- but NEITHER PR's own CI run ever actually tested
+this specific combination together.
+```
+
+**A Merge Queue serializes merges, testing each against the ACTUAL, up-to-the-moment state of main:**
+```yaml
+# GitHub's native merge queue (conceptual usage)
+# When a PR is added to the queue, GitHub automatically creates a temporary
+# combined branch merging main + this PR + any OTHER PRs already ahead of it in the queue,
+# and runs CI against THAT combined state -- not just the PR in isolation
+```
+Instead of merging PRs directly the moment each is individually approved, a Merge Queue holds them, testing each one against main **plus every other PR already ahead of it in the queue** — if PR B's combination with PR A's already-queued change would break something, that failure is caught *before* either merges, rather than discovered only after both have already landed on main.
+
+**Why this matters more as team size and merge frequency grow:** for a small team merging a few PRs a day, the odds of two individually-fine PRs conflicting once combined are low enough that manual vigilance (a developer noticing "oh, someone just changed that signature, let me rebase") often suffices — for a larger team merging dozens of PRs per hour, this exact "two fine PRs, broken combination" bug becomes a near-certainty without an automated mechanism specifically designed to catch it before it reaches main.
+
+**Common Pitfall:** relying purely on "require branches to be up to date before merging" (a common, simpler GitHub branch protection setting) as a substitute for a genuine merge queue — that setting only requires a PR to be rebased against main's *current* state at the moment someone clicks merge, but doesn't protect against a *second* PR merging moments later that the first PR's already-completed CI run never actually saw; a true merge queue's serialized, combination-aware testing is a meaningfully stronger guarantee than "just require an up-to-date branch."
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is "Progressive Delivery" as a term encompassing Canary, Feature Flags, and Ring deployments together, and how does it differ from traditional Continuous Deployment's "ship and it's live for everyone" model?**
+
+Traditional Continuous Deployment (covered earlier) treats "deployed" and "live for all users" as the same moment — Progressive Delivery deliberately decouples them, treating deployment as just the first of several independently-controllable steps toward full exposure, combining several of the techniques covered throughout this topic into one unified philosophy.
+
+**Traditional Continuous Deployment — deploy IS release, for everyone, simultaneously:**
+```text
+Code merged -> CI passes -> deployed to production -> IMMEDIATELY live for 100% of users
+-- "deployed" and "released to everyone" are the SAME event
+```
+
+**Progressive Delivery — deployment and exposure are DELIBERATELY SEPARATE, controllable independently:**
+```text
+Code merged -> CI passes -> DEPLOYED to production (but NOT yet visible/active for anyone)
+    -> Feature Flag controls WHO sees the new behavior (internal team first, per Ring strategy)
+    -> Canary Analysis automatically evaluates health metrics as exposure gradually increases
+    -> Gradual ramp: 1% -> 5% -> 25% -> 100%, each step gated on the PREVIOUS step's health
+-- "deployed" and "released to everyone" are now potentially DAYS apart, deliberately
+```
+The code can be sitting in production, fully deployed, for days before 100% of users ever see its new behavior — deployment risk (does the build work, does it start correctly) and release risk (does the new behavior perform well for real users at scale) are handled as two genuinely separate concerns, each with its own dedicated tooling (deployment pipelines for the former, feature flags/canary analysis/rings for the latter).
+
+**Why this separation is the actual unifying insight behind Canary/Rings/Feature-Flags being grouped under one "Progressive Delivery" umbrella term:** each of those individually-covered techniques is really just a different *dimension* along which exposure can be progressively increased (a percentage of random traffic, a deliberately-chosen population, a boolean flag toggle) — Progressive Delivery is the recognition that these aren't separate, competing techniques so much as complementary tools for the same underlying philosophy: decouple "is the code deployed" from "who can actually see/use it," and increase exposure deliberately, with health verification at each step, rather than jumping straight from "just merged" to "live for everyone."
+
+**Common Pitfall:** treating "we do Continuous Deployment" and "we do Progressive Delivery" as the same maturity level — genuine Progressive Delivery requires meaningfully more tooling investment (feature flag infrastructure, automated canary analysis, ring/cohort management) than Continuous Deployment alone requires; a team can have excellent CI/CD automation (fast, reliable, frequent deploys) while still exposing every change to 100% of users the instant it deploys, which is Continuous Deployment without the additional exposure-control layer Progressive Delivery specifically adds on top.
+
+---

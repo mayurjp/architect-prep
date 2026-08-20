@@ -521,3 +521,120 @@ Because the malicious package still provides working functionality (so nothing a
 **Common Pitfall:** assuming supply-chain risk is limited to "known vulnerabilities in legitimate packages" (the CVE-scanning mental model) — a typosquatted or genuinely malicious package has no CVE to detect in the first place, since it's not a flawed *legitimate* package; it's an entirely different threat category requiring name-verification and provenance-checking practices that vulnerability scanning alone doesn't address.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the difference between Authentication's "Something You Know / Have / Are" factor categories, and why does true Multi-Factor Authentication require factors from DIFFERENT categories, not just multiple checks from the same one?**
+
+Covered earlier at a high level (MFA/TOTP) — the specific classification worth understanding is that genuine multi-factor authentication requires combining factors from **different** categories, since combining multiple checks from the *same* category doesn't meaningfully improve security the way crossing categories does.
+
+**The three factor categories:**
+```text
+Something you KNOW:  a password, a PIN, a security question answer
+Something you HAVE:  a phone (receiving a TOTP code), a hardware security key, a smart card
+Something you ARE:   a fingerprint, facial recognition, a retina scan (biometrics)
+```
+
+**Two checks from the SAME category — not genuine MFA, despite requiring two steps:**
+```text
+Step 1: enter your password
+Step 2: answer a security question ("What's your mother's maiden name?")
+-- BOTH of these are "something you KNOW" -- an attacker who phished/guessed your password
+   through social engineering has a meaningfully higher chance of ALSO knowing or guessing
+   your security question answer, since both rely on the SAME underlying vulnerability
+   (knowledge that can be learned, guessed, or phished)
+```
+
+**Two checks from DIFFERENT categories — genuine MFA, meaningfully harder to compromise BOTH:**
+```text
+Step 1: enter your password (something you KNOW)
+Step 2: enter the code from your authenticator app (something you HAVE -- your physical phone)
+-- an attacker who phishes your PASSWORD gains NOTHING toward also possessing your PHYSICAL
+   DEVICE -- these are genuinely independent attack surfaces, requiring fundamentally
+   different compromise techniques (phishing vs. physical theft/malware on the device itself)
+```
+
+**Why this distinction matters beyond terminology pedantry:** a system requiring "two passwords" or "a password plus a security question" provides a false sense of security — both remain vulnerable to the exact same category of attack (credential phishing, social engineering, data breaches exposing "known" information), meaning compromising one often correlates strongly with being able to compromise the other; genuine cross-category MFA forces an attacker to succeed at two *categorically different* attacks, which is a substantially higher bar.
+
+**Common Pitfall:** implementing "two-step verification" using two factors from the same category (a password plus a memorized PIN, both "something you know") and marketing it as equivalent to genuine MFA — this provides meaningfully weaker protection than true cross-category MFA, since a single attack vector (credential phishing, a data breach exposing "known" information) can potentially compromise both factors simultaneously.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is a Zip Slip vulnerability, and how does a maliciously-crafted archive file exploit naive extraction code to write files outside the intended extraction directory — the archive-based cousin of the earlier Path Traversal vulnerability?**
+
+Covered earlier for a single, user-supplied file path — Zip Slip is the same underlying vulnerability class (writing to an unintended location via `../` path traversal), but triggered through a maliciously-crafted **archive file's internal entry names**, rather than a single request parameter.
+
+**The vulnerable pattern — extracting a ZIP archive without validating each entry's path:**
+```csharp
+using var archive = ZipFile.OpenRead(uploadedZipPath);
+foreach (var entry in archive.Entries)
+{
+    var destinationPath = Path.Combine(extractionDirectory, entry.FullName); // NAIVE concatenation
+    entry.ExtractToFile(destinationPath); // extracts WHEREVER entry.FullName says, no validation
+}
+```
+A ZIP file's internal entries can have arbitrary names — including `../../../Windows/System32/malicious.dll` or `../../wwwroot/backdoor.aspx` — a crafted archive containing an entry named this way, when extracted naively, writes a file **outside** the intended extraction directory entirely, potentially overwriting a system file, planting a web shell in a publicly-servable directory, or corrupting application files.
+
+**The fix — validate that EVERY entry's resolved destination stays within the intended directory, exactly mirroring the earlier path traversal fix:**
+```csharp
+using var archive = ZipFile.OpenRead(uploadedZipPath);
+var basePath = Path.GetFullPath(extractionDirectory);
+
+foreach (var entry in archive.Entries)
+{
+    var destinationPath = Path.GetFullPath(Path.Combine(basePath, entry.FullName));
+    if (!destinationPath.StartsWith(basePath, StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException($"Entry '{entry.FullName}' would extract outside the target directory.");
+    entry.ExtractToFile(destinationPath);
+}
+```
+Exactly the same resolved-full-path validation technique covered for the single-file Path Traversal case, applied per-entry across every file inside the archive — since a malicious archive could contain dozens of entries, each one individually needs this same check, not just a check on the archive's own filename.
+
+**Why this is specifically dangerous for any feature accepting user-uploaded archives:** a "upload a ZIP of your project files" or "import a backup archive" feature is a natural target — the attacker doesn't need to find a way to submit a single malicious path directly; they simply craft one archive containing entries with traversal sequences, and any naive extraction code processes every entry in the archive without validation, multiplying the attack surface across every entry rather than a single input field.
+
+**Common Pitfall:** validating the ZIP file's *own* filename/upload path carefully (following good upload-validation practices generally) while completely overlooking that the *contents inside* the archive also need the exact same path-traversal validation — the outer file being safely named and stored doesn't say anything about what the *entries inside it* are named, and it's specifically those internal entry names that carry the actual Zip Slip risk.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is a Race Condition vulnerability in the specific context of a "Time-of-Check to Time-of-Use" (TOCTOU) security flaw, and how can it let an attacker bypass a security check that appears correct when read as a single, sequential piece of code?**
+
+A TOCTOU vulnerability occurs when there's a gap between when a security condition is *checked* and when the corresponding action is actually *performed* — an attacker who can act during that gap can invalidate the check's result before it's actually relied upon, even though the code, read sequentially, looks like it correctly checks-then-acts.
+
+**The vulnerable pattern — checking a balance, THEN acting on it, with a gap in between:**
+```csharp
+public async Task<bool> Withdraw(int accountId, decimal amount)
+{
+    var account = await _db.Accounts.FindAsync(accountId);
+    if (account.Balance < amount) return false; // CHECK: is there enough balance?
+
+    // <-- THE GAP: if a DIFFERENT concurrent request ALSO passes this same check
+    //     for the SAME account, both requests proceed past this point believing
+    //     they've individually verified sufficient funds
+
+    account.Balance -= amount; // USE: perform the withdrawal, based on a check that
+    await _db.SaveChangesAsync(); // may no longer reflect the ACTUAL current balance
+    return true;
+}
+```
+If two concurrent requests both call `Withdraw` for the same account at nearly the same moment, **both** can read the same (sufficient) balance during their respective checks, **both** pass the `if` condition, and **both** proceed to subtract the amount — potentially allowing a withdrawal to succeed twice against a balance that should only have supported it once, exactly the kind of exploitable race condition an attacker can deliberately trigger by firing concurrent requests.
+
+**The fix — eliminate the check-then-act GAP using an atomic, database-enforced operation:**
+```csharp
+// A single, ATOMIC database operation -- the check and the update happen as ONE indivisible step,
+// with no gap an attacker's concurrent request could exploit
+var rowsAffected = await _db.Database.ExecuteSqlInterpolatedAsync(
+    $"UPDATE Accounts SET Balance = Balance - {amount} WHERE Id = {accountId} AND Balance >= {amount}");
+
+if (rowsAffected == 0) return false; // the WHERE clause's condition failed atomically -- no race possible
+```
+By expressing the check (`Balance >= amount`) as part of the *same atomic* `UPDATE` statement's `WHERE` clause, rather than as a separate, earlier read-then-decide step, there's no gap for a concurrent request to exploit — the database engine itself guarantees this check-and-update happens as one indivisible operation, which is the general fix pattern for TOCTOU-style races: collapse the check and the action into a single atomic operation, rather than relying on application-level sequential code that *looks* correct but has an exploitable gap between reading state and acting on it.
+
+**Why this vulnerability class is specifically dangerous — it's invisible reading the code sequentially:** a code reviewer reading `Withdraw()` top-to-bottom sees a check followed immediately by an action and reasonably concludes "this looks correct" — the vulnerability only exists because of what happens *concurrently*, from a completely different request, during the brief window between those two lines; this is exactly why TOCTOU bugs are notoriously hard to catch in code review and often only surface under genuine concurrent load or from a deliberate, timed attack.
+
+**Common Pitfall:** attempting to "fix" a TOCTOU race by adding an in-application `lock` statement around the check-then-act sequence — a plain in-process `lock` only serializes access *within a single server process*; in any horizontally-scaled deployment (multiple server instances, the default for any application designed for real-world load, per the earlier horizontal scaling discussion), a `lock` on one instance does nothing to prevent a *different* instance from concurrently executing the same check-then-act race — genuine protection requires either a database-level atomic operation (as shown above) or a genuinely distributed lock (covered earlier for the distributed billing-job scenario), not an in-process-only synchronization primitive.
+
+---

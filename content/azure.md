@@ -474,3 +474,96 @@ Configured ahead of time, Azure AD is told "trust OIDC tokens issued by GitHub A
 **Common Pitfall:** configuring the trust relationship too broadly (trusting OIDC tokens from *any* workflow in an organization's entire GitHub account, rather than a specific repository and branch) — this defeats much of the security benefit, since a compromised or malicious workflow anywhere in the broader trusted scope could then obtain Azure credentials intended for a completely different, specific pipeline.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is Azure's Availability Zone versus Availability Set, and how do they differ in the specific kind of infrastructure failure each one actually protects against?**
+
+Both are Azure mechanisms for spreading VM instances to survive infrastructure failure, but they operate at very different physical scales — an Availability Set protects against failures within one datacenter, while an Availability Zone protects against the loss of an entire datacenter itself.
+
+**Availability Set — spreads VMs across different racks/hardware WITHIN one datacenter:**
+```text
+Availability Set with 3 VMs, spread across different:
+  - Fault Domains (different physical racks, different power/network switches)
+  - Update Domains (so Azure's own host-OS patching doesn't reboot all 3 VMs simultaneously)
+-- protects against: a single rack losing power, a single host needing a reboot for patching
+-- does NOT protect against: the entire datacenter/building losing power, a regional outage
+```
+
+**Availability Zone — spreads VMs across physically SEPARATE datacenters within one Azure region:**
+```text
+Availability Zones 1, 2, 3 within "East US" region -- each is a genuinely separate physical
+datacenter (or cluster of datacenters), with independent power, cooling, and networking
+-- protects against: an ENTIRE datacenter going offline (a building-level power failure,
+   a fire, a major cooling system failure) -- something an Availability Set CANNOT protect against,
+   since all its VMs are still physically in the SAME building
+```
+
+**Why choosing between them (or combining both) matters for actual resilience design:** an application using only an Availability Set is protected against comparatively common, smaller-scale failures (one rack, one host) but remains fully exposed to a rare-but-real entire-datacenter-level outage; spreading VMs across Availability Zones instead (or in addition) protects against that larger blast radius too, at the cost of slightly higher network latency between zone-spread VMs compared to VMs sitting in the same building.
+
+**Common Pitfall:** treating "we're using an Availability Set" as equivalent resilience to "we're using Availability Zones" — they protect against genuinely different failure scales, and a design relying solely on an Availability Set for what's meant to be datacenter-outage-level resilience has a real, unaddressed gap, even though both mechanisms superficially sound similar ("spreading VMs around for redundancy").
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is Azure Event Grid, and how does its role differ from Azure Service Bus (covered earlier) despite both being "event/message" services?**
+
+Both move information from a producer to consumers, but they're built for different shapes of workload — Service Bus is designed for reliable, ordered, transactional **messaging** between known services; Event Grid is designed for massive-scale, low-latency **event routing** from many different Azure resource types to many different reactive subscribers, more similar in spirit to the Eventarc/CloudEvents pattern covered under GCP.
+
+**Service Bus (covered earlier) — reliable messaging with delivery guarantees, retries, dead-lettering, ordering:**
+```csharp
+await sender.SendMessageAsync(new ServiceBusMessage(orderJson));
+// Guarantees: at-least-once delivery, message ordering (with sessions), dead-letter queue,
+// designed for APPLICATION-to-APPLICATION messaging with strong delivery semantics
+```
+
+**Event Grid — massive-scale routing of discrete EVENTS from Azure resources themselves, to many subscriber types:**
+```json
+{
+  "eventType": "Microsoft.Storage.BlobCreated",
+  "subject": "/blobServices/default/containers/uploads/blobs/report.pdf",
+  "eventTime": "2026-08-20T10:00:00Z",
+  "data": { "url": "https://mystorageaccount.blob.core.windows.net/uploads/report.pdf" }
+}
+```
+Event Grid natively understands events emitted by Azure resources themselves (a Blob Storage upload, a Resource Group change, an IoT Hub device event) and routes them to any of many subscriber types (an Azure Function, a Logic App, a Service Bus queue, a webhook) — its core strength is *very high-volume, low-latency fan-out* of discrete "something happened" notifications, not guaranteed ordered delivery or transactional messaging semantics the way Service Bus provides.
+
+**Why you'd choose one over the other for a given scenario:** reacting to "a file was uploaded to Blob Storage" or "a new VM was created" is a natural Event Grid scenario (an Azure-native event, needing simple, massively-scaled fan-out to whichever functions/services care) — coordinating a multi-step order-processing workflow with guaranteed delivery, retry policies, and dead-lettering (the Saga-style scenarios covered extensively earlier) is squarely Service Bus's domain, where its stronger delivery guarantees and ordering support genuinely matter.
+
+**Common Pitfall:** using Event Grid for a scenario needing strict message ordering or guaranteed, retriable delivery with dead-lettering — Event Grid's design center is high-volume, best-effort-ish fan-out of discrete events, not the strict delivery/ordering guarantees Service Bus is specifically built to provide; picking the wrong one for a workload needing the *other's* specific guarantees leads to subtle reliability gaps that only surface under real production failure conditions.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is Azure's Availability Zone-aligned "Zone-Redundant" database configuration (e.g., Zone-Redundant Azure SQL), and how does its automatic failover differ from the manually-configured Active Geo-Replication covered earlier for cross-REGION resilience?**
+
+Covered earlier for cross-*region* disaster recovery (Active Geo-Replication, Auto-Failover Groups) — Zone-Redundant configuration addresses a different, more localized resilience tier: surviving the loss of one Availability Zone *within* a single region, with fully automatic (not manually-triggered) failover, faster and with less data-loss risk than a cross-region failover.
+
+**Cross-region Active Geo-Replication (covered earlier) — manual/coordinated failover, higher latency, larger blast radius protection:**
+```text
+Primary: East US region
+Secondary: West US region (thousands of miles away)
+-- Protects against: an ENTIRE REGION going offline
+-- Failover: typically requires manual initiation (or automated via Auto-Failover Groups,
+   but still involves meaningful delay/coordination), and since replication is asynchronous
+   over a long distance, SOME data loss (RPO > 0) is expected in a sudden failover
+```
+
+**Zone-Redundant configuration — automatic failover WITHIN a region, minimal data loss:**
+```text
+Primary: Availability Zone 1 (East US)
+Synchronous replica: Availability Zone 2 (East US) -- same REGION, different datacenter
+-- Protects against: ONE Availability Zone going offline (not the whole region)
+-- Failover: AUTOMATIC, and because zones within a region are close enough for SYNCHRONOUS
+   replication (unlike the long-distance cross-region case), failover typically has ZERO
+   or near-zero data loss (much lower RPO than cross-region)
+```
+Because Availability Zones within one region are physically close enough (typically within the same metro area) to support **synchronous** replication without unacceptable latency, a Zone-Redundant database can fail over to a different zone automatically, with minimal-to-zero data loss — a meaningfully stronger guarantee than cross-region replication can offer, precisely because cross-region distances are too great for synchronous replication to be practical (the same physics-imposed latency constraint covered earlier for cross-region async replication).
+
+**Why both tiers are typically used together, not as alternatives:** Zone-Redundancy handles the common case (one datacenter/zone failing) automatically and with minimal data loss; cross-region replication remains necessary as a second layer for the rarer, larger-blast-radius case (an entire region becoming unavailable) that zone-redundancy alone cannot protect against — a genuinely resilient architecture layers both, using zone-redundancy as the fast, automatic first line of defense and cross-region as the slower, larger-scope backup.
+
+**Common Pitfall:** assuming Zone-Redundant configuration alone is sufficient disaster-recovery protection and skipping cross-region replication entirely "since we already have redundancy" — Zone-Redundancy explicitly does not protect against a genuine region-wide outage (all zones within a region can theoretically be affected by sufficiently large-scale events), which is exactly the gap cross-region replication is specifically designed to close.
+
+---
