@@ -348,3 +348,104 @@ The output is a single native executable, not a `.dll` requiring `dotnet MyApp.d
 **Common Pitfall:** attempting to Native-AOT-compile an existing application without auditing its dependencies for reflection-heavy libraries first — a codebase using heavy runtime reflection, dynamic proxies (common in some DI/mocking setups), or non-source-generated JSON serialization will fail to publish or throw `NotSupportedException` at runtime in ways that are often only discovered after attempting the AOT publish, not from reading the application's source code alone.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the difference between `StringBuilder.Append()` chaining and string interpolation inside a loop, and does the "StringBuilder is always faster" rule of thumb always hold?**
+
+`StringBuilder` (covered earlier for avoiding O(n²) concatenation in a loop) isn't universally faster than string interpolation — the performance difference depends heavily on *how many* concatenations actually happen and whether they're inside a loop at all.
+
+**Inside a loop — StringBuilder is the clear, meaningful win (as covered earlier):**
+```csharp
+var sb = new StringBuilder();
+for (int i = 0; i < 10000; i++) sb.Append(i).Append(',');
+string result = sb.ToString(); // O(n) total -- one buffer, resized amortized rarely
+```
+
+**A SINGLE interpolation, not in a loop — the compiler already handles this efficiently:**
+```csharp
+string message = $"Order {orderId} totaling {total:C} placed at {timestamp}";
+// The C# compiler translates this into an efficient String.Format/String.Create call --
+// NOT into a slow chain of naive intermediate string allocations
+```
+For a one-off, fixed number of interpolated values, the compiler already generates efficient code — introducing a `StringBuilder` here adds verbosity without any measurable performance benefit, since there's no O(n²) loop-based re-copying problem to solve in the first place.
+
+**Why "always use StringBuilder" is an oversimplification:** the actual performance problem StringBuilder solves is specifically the *repeated* concatenation pattern inside a loop, where each `+=` copies the ever-growing string so far — a single interpolated string with a handful of values, executed once, never hits that repeated-copying problem at all, so there's nothing for `StringBuilder` to meaningfully improve.
+
+**Common Pitfall:** reflexively wrapping every string-building operation in a `StringBuilder` regardless of whether a loop is actually involved — this is a defensible instinct in spirit, but applying it to single, non-looped interpolations adds unnecessary verbosity for zero real performance gain, since the actual bottleneck StringBuilder addresses (repeated copying) simply isn't present in that code path.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is Server-Side Caching Stampede (also called "Cache Avalanche" or "Thundering Herd"), and how does it cause a system to fail exactly when a cache expires, rather than being protected by the cache?**
+
+A Caching Stampede occurs when a popular cached item expires, and a large number of concurrent requests **simultaneously** discover the cache miss and all rush to recompute/refetch the same underlying data at once — briefly overwhelming the backend the cache was supposed to be protecting, precisely at the moment the cache should have been helping most.
+
+**The failure sequence:**
+```text
+1. A popular product page's data is cached, TTL = 60 seconds
+2. 10,000 requests/second are hitting this page, all served instantly from cache -- backend is idle
+3. The cache entry EXPIRES at exactly T+60s
+4. The VERY NEXT 10,000 requests in that same second ALL see a cache miss simultaneously
+5. ALL 10,000 requests independently query the backend database at once,
+   for the EXACT SAME data, at the EXACT SAME moment
+6. The database, which was comfortably idle a moment ago, suddenly receives 10,000
+   redundant identical queries simultaneously -- and may fall over under the sudden load
+```
+The cache didn't fail to help — it worked perfectly for 60 seconds — but the *moment* of expiration creates a synchronized spike of redundant work that the caching layer was specifically supposed to prevent.
+
+**Mitigation 1 — a distributed lock ensuring only ONE request recomputes on a miss:**
+```csharp
+if (!cache.TryGetValue(key, out var data))
+{
+    if (await _distributedLock.TryAcquireAsync(key, TimeSpan.FromSeconds(5)))
+    {
+        data = await FetchFromDatabaseAsync(); // only ONE request actually does this
+        cache.Set(key, data, TimeSpan.FromSeconds(60));
+        _distributedLock.Release(key);
+    }
+    else
+    {
+        await Task.Delay(100);
+        data = cache.Get(key); // other 9,999 requests wait briefly, then read what the lock-holder just cached
+    }
+}
+```
+
+**Mitigation 2 — staggered/jittered expiration times, avoiding synchronized expiry across many keys:**
+```csharp
+var ttl = TimeSpan.FromSeconds(60 + Random.Shared.Next(-10, 10)); // spread expiration across a window
+cache.Set(key, data, ttl);
+```
+Adding random jitter to TTLs means different cache entries (or even the same entry across different cache-population times) don't all expire at precisely the same synchronized moment, spreading recomputation load over time rather than concentrating it into one spike.
+
+**Common Pitfall:** setting identical, fixed TTLs across many related cache entries populated at the same time (e.g., warming an entire cache during a deployment) — without jitter, all those entries expire in perfect synchrony later, recreating exactly the stampede scenario the cache was meant to prevent, just delayed by one TTL cycle.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is Escape Analysis, and how does the .NET JIT use it to allocate certain objects on the stack instead of the heap, avoiding GC pressure entirely for those specific allocations?**
+
+Ordinarily, every `class` instance in C# is heap-allocated, later requiring the Garbage Collector to reclaim it. Escape Analysis is a JIT optimization technique that determines whether an object's lifetime is provably confined entirely to the current method — if so, the JIT can allocate it on the **stack** instead, which is automatically reclaimed the instant the method returns, with zero GC involvement.
+
+**A case where an object provably never "escapes" the method:**
+```csharp
+public int SumSquares(int a, int b)
+{
+    var pair = new ValueTuple<int, int>(a, b); // (illustrative -- value tuples are already structs)
+    return pair.Item1 * pair.Item1 + pair.Item2 * pair.Item2;
+    // 'pair' is used ENTIRELY within this method and never returned, stored in a field,
+    // or passed to another method that might retain a reference to it
+}
+```
+Because the JIT can prove `pair` never leaves the scope of this single method call (it's not returned, not assigned to a field, not captured by a closure), it's a candidate for stack allocation rather than heap allocation — even for what would ordinarily be a heap-allocated reference type in less favorable circumstances.
+
+**Why this matters for GC pressure specifically:** an object allocated on the stack is automatically reclaimed the instant the stack frame unwinds (the method returns) — it never enters the GC's tracked heap at all, meaning it contributes zero pressure to Gen 0 collections, unlike an equivalent heap allocation that the GC must eventually notice is unreachable and reclaim.
+
+**Why you generally shouldn't write code specifically *hoping* to trigger escape analysis:** unlike explicit stack-allocation mechanisms (`stackalloc`, or `ref struct` types like `Span<T>` which *guarantee* stack-only placement by language rule), Escape Analysis is an **implicit, best-effort JIT optimization** — whether it actually applies to any given object depends on the specific JIT version, the exact shape of the surrounding code, and inlining decisions, none of which are part of any documented guarantee a developer can reliably depend on across .NET versions or even different JIT compilation passes of the same code.
+
+**Common Pitfall:** writing deliberately convoluted code specifically trying to "help" escape analysis kick in, treating it as a reliable, controllable optimization technique — for genuinely guaranteed stack allocation, `Span<T>`/`ref struct`/`stackalloc` (with their explicit compiler-enforced rules, covered earlier) are the correct, dependable tools; Escape Analysis is better understood as "a nice bonus the JIT sometimes provides," not a technique to actively design code around.
+
+---

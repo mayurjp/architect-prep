@@ -422,3 +422,127 @@ The moment `.AsEnumerable()` (or `.ToList()`, or passing to a method typed as `I
 **Common Pitfall:** treating any `IQueryable`-breaking exception as "just call `.ToList()` right before the problematic line" without checking whether that materializes the *entire* table first — the fix should isolate exactly which single operation needs client-side evaluation and keep everything else, including any filtering that can stay server-side, translated to SQL for as long as possible.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the difference between `Add()`, `Attach()`, and `Update()` on a `DbContext`, and why does mixing them up cause EF Core to generate the wrong SQL statement?**
+
+All three add an entity to the `DbContext`'s change tracker, but they set a different initial `EntityState` — which directly determines whether `SaveChanges()` generates an `INSERT`, an `UPDATE`, or nothing at all.
+
+```csharp
+var product = new Product { Id = 5, Name = "Keyboard" };
+
+context.Products.Add(product);      // EntityState.Added -> SaveChanges() generates an INSERT
+context.Products.Attach(product);   // EntityState.Unchanged -> SaveChanges() does NOTHING for this entity
+context.Products.Update(product);   // EntityState.Modified -> SaveChanges() generates an UPDATE for EVERY property
+```
+
+**Why this matters in a common real-world scenario — receiving an entity from an API request that should update an existing row:**
+```csharp
+[HttpPut("{id}")]
+public IActionResult UpdateProduct(int id, Product product)
+{
+    context.Products.Update(product); // marks it Modified -- generates UPDATE for ALL columns
+    context.SaveChanges();
+}
+```
+`Update()` marks *every* property as modified, regardless of whether it actually changed — this generates an `UPDATE` statement touching every column, even ones that were identical to what's already in the database. For a table with many columns (or ones with database-level triggers reacting to specific column changes), this can be wasteful or produce unintended side effects compared to a targeted update of only the fields that actually changed.
+
+**Common Pitfall:** calling `Add()` on an entity that already exists in the database (has a non-default primary key from a previous save) — since `Add()` always marks the entity `Added`, EF Core attempts an `INSERT` with a primary key that already exists, producing a primary-key-violation exception at the database level rather than the intended update.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is EF Core's `TPH` (Table Per Hierarchy) inheritance mapping strategy, and what's the trade-off against `TPT` (Table Per Type)?**
+
+When a C# class hierarchy (e.g., `Payment` with subclasses `CreditCardPayment` and BankTransferPayment) needs to be persisted, EF Core offers different strategies for mapping that inheritance onto relational tables — TPH and TPT represent opposite trade-offs between query simplicity and schema normalization.
+
+**TPH (Table Per Hierarchy) — one single table for the entire hierarchy, EF Core's default:**
+```csharp
+public abstract class Payment { public int Id; public decimal Amount; }
+public class CreditCardPayment : Payment { public string CardNumber; }
+public class BankTransferPayment : Payment { public string IBAN; }
+```
+```sql
+-- ONE table, with a "discriminator" column and NULLABLE columns for every subclass's fields
+CREATE TABLE Payments (
+    Id INT, Amount DECIMAL, Discriminator NVARCHAR(50),
+    CardNumber NVARCHAR(20) NULL,   -- NULL for BankTransferPayment rows
+    IBAN NVARCHAR(34) NULL          -- NULL for CreditCardPayment rows
+);
+```
+Querying the base type or any subtype requires **no joins at all** — everything lives in one table — but the table accumulates nullable columns for every subclass's fields, and the schema doesn't enforce "a CreditCardPayment must have a CardNumber" the way a dedicated table's `NOT NULL` constraint could.
+
+**TPT (Table Per Type) — a separate table per class, joined via shared primary keys:**
+```sql
+CREATE TABLE Payments (Id INT PRIMARY KEY, Amount DECIMAL);
+CREATE TABLE CreditCardPayments (Id INT PRIMARY KEY REFERENCES Payments(Id), CardNumber NVARCHAR(20) NOT NULL);
+CREATE TABLE BankTransferPayments (Id INT PRIMARY KEY REFERENCES Payments(Id), IBAN NVARCHAR(34) NOT NULL);
+```
+This properly normalizes the schema (each subclass's specific fields can be `NOT NULL`, genuinely enforced), but querying a specific subtype (or the base type across all subtypes) now requires a `JOIN` between the base table and the relevant subtype table(s) — more relationally "correct," but with real query-performance cost as the hierarchy grows.
+
+**Why TPH is EF Core's default despite the schema-normalization downside:** query performance — avoiding joins entirely for common operations (loading any `Payment` regardless of subtype) usually matters more in practice than the nullable-column schema imperfection, especially for hierarchies that aren't too deep or wide.
+
+**Common Pitfall:** choosing TPT purely for "proper database normalization" without benchmarking the actual query performance impact on a hierarchy queried frequently — the join overhead is real and compounds with hierarchy depth, and many teams that start with TPT for its cleaner schema later migrate to TPH specifically after noticing query performance degrade as the application and hierarchy grow.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What is an EF Core Interceptor, and how does it differ from a SaveChanges override for implementing cross-cutting concerns like auditing or soft-delete?**
+
+An `IInterceptor` (specifically `ISaveChangesInterceptor` for save operations, or `IDbCommandInterceptor` for raw SQL commands) lets you hook into EF Core's internal pipeline at specific points — reusable across multiple `DbContext` types, unlike overriding `SaveChanges()` directly on one specific context class.
+
+**Overriding `SaveChanges()` directly — works, but tied to one specific `DbContext` class:**
+```csharp
+public class AppDbContext : DbContext
+{
+    public override int SaveChanges()
+    {
+        foreach (var entry in ChangeTracker.Entries<IAuditable>())
+        {
+            if (entry.State == EntityState.Added) entry.Entity.CreatedAt = DateTime.UtcNow;
+        }
+        return base.SaveChanges();
+    }
+}
+```
+This logic only applies to `AppDbContext` — a second `DbContext` class in the same solution (perhaps for a separate bounded context) would need this exact logic duplicated into its own override.
+
+**An Interceptor — reusable across any `DbContext` it's registered with:**
+```csharp
+public class AuditingInterceptor : SaveChangesInterceptor
+{
+    public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
+    {
+        foreach (var entry in eventData.Context!.ChangeTracker.Entries<IAuditable>())
+        {
+            if (entry.State == EntityState.Added) entry.Entity.CreatedAt = DateTime.UtcNow;
+        }
+        return result;
+    }
+}
+
+// Registered once, works for ANY DbContext that opts in
+optionsBuilder.AddInterceptors(new AuditingInterceptor());
+```
+The same `AuditingInterceptor` class can be registered against multiple different `DbContext` types across a solution — the auditing logic is written once, as a standalone, testable class, rather than copy-pasted into every context's `SaveChanges()` override.
+
+**Where Interceptors go further than a `SaveChanges` override can — intercepting raw SQL commands:**
+```csharp
+public class SqlLoggingInterceptor : DbCommandInterceptor
+{
+    public override InterceptionResult<DbDataReader> ReaderExecuting(
+        DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
+    {
+        _logger.LogInformation("Executing SQL: {Sql}", command.CommandText); // logs EVERY query, not just saves
+        return result;
+    }
+}
+```
+`SaveChanges()` overrides only ever see write operations — an interceptor can also observe every *read* query EF Core issues, useful for cross-cutting concerns like comprehensive SQL logging or query-level performance instrumentation that a `SaveChanges` override structurally cannot provide, since it only runs for writes.
+
+**Common Pitfall:** implementing the exact same cross-cutting logic (soft-delete filtering, auditing timestamps) independently in multiple `DbContext` subclasses' `SaveChanges()` overrides across a growing solution — once that logic needs to apply consistently across more than one context, an Interceptor registered against all of them (rather than duplicated per-context overrides slowly drifting out of sync) is the more maintainable choice.
+
+---

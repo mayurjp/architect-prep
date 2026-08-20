@@ -404,3 +404,132 @@ For each mutant, the tool re-runs the full test suite. If **at least one test fa
 **Common Pitfall:** treating "kill 100% of mutants" as a hard target the way "100% code coverage" is sometimes (mis)treated — some surviving mutants represent genuinely equivalent code changes with no observable behavioral difference (a mutant that can never actually be distinguished by any test, because the code paths produce identical results), and chasing an artificial 100% mutation-kill score can lead to writing tests that verify implementation details rather than genuine behavior, the same anti-pattern coverage-chasing produces.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is a "Flaky Test," and what are the most common root causes that make a test pass sometimes and fail other times with no code changes in between?**
+
+A Flaky Test is one whose outcome (pass/fail) is inconsistent across runs of the *exact same code* — genuinely undermining trust in the test suite, since a failure could mean either a real regression or just "that test being flaky again," and teams often start ignoring failures altogether once flakiness becomes common enough.
+
+**The most common root causes:**
+
+**1. Reliance on real time / `DateTime.Now`:**
+```csharp
+Assert.True(DateTime.Now.Hour < 12); // fails half the time depending on when the test happens to run!
+```
+Fixed by injecting a controllable time source (`TimeProvider`, covered earlier) instead of depending on wall-clock time.
+
+**2. Shared mutable state across tests (covered earlier for xUnit parallelization):**
+```csharp
+private static List<Order> _orders = new(); // static, shared across all test instances -- one test's data pollutes another's
+```
+
+**3. Unawaited asynchronous work:**
+```csharp
+[Fact]
+public void SendsNotification()
+{
+    _service.SendNotificationAsync(); // NOT awaited -- the test may finish and assert BEFORE this completes
+    Assert.True(_notificationSent); // races against the actual async work finishing
+}
+```
+The test doesn't wait for the asynchronous operation to genuinely finish before asserting on its effect — whether the assertion sees the completed or still-in-progress state depends on timing that varies run to run.
+
+**4. Test execution order dependency:**
+```csharp
+[Fact] public void Test1_CreatesUser() { /* creates a user the NEXT test secretly depends on */ }
+[Fact] public void Test2_AssumesUserExists() { /* fails if run BEFORE Test1, or in a different order */ }
+```
+Tests that silently depend on another specific test having already run (rather than being fully self-contained, per the earlier AAA/isolation discussion) become order-dependent — passing or failing depending on test-runner scheduling that isn't guaranteed to stay consistent.
+
+**5. External dependencies (network calls, real databases) with variable latency/availability:**
+A test hitting a real external service occasionally times out or gets a transient network hiccup unrelated to the code being tested at all.
+
+**Why flaky tests are worse than simply "a bug in the test":** once a team learns a specific test "just fails sometimes," the natural (if unhealthy) response is to re-run the pipeline and ignore the failure — which means that test's *actual, meaningful* failures (when it genuinely catches a real regression) get dismissed with the same "probably just flaky" reflex, silently eroding the entire test suite's value as a safety net.
+
+**Common Pitfall:** "fixing" a flaky test by simply adding a retry/re-run mechanism at the CI level rather than fixing its actual root cause — this hides the symptom (the pipeline goes green eventually) while leaving the underlying non-determinism in place, and doesn't help at all when the same root cause (shared state, unawaited async work) eventually causes a *real* bug in production that the flaky test could have caught if it were reliable.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is Snapshot Testing, and what specific kind of regression does it catch that ordinary assertion-based tests often miss?**
+
+Snapshot Testing captures the complete output of some operation (a rendered UI component, a serialized object, a generated report) the first time a test runs, saves it as a reference "snapshot," and on every subsequent run compares the current output against that saved snapshot — flagging *any* difference, including ones a developer might not have thought to write an explicit assertion for.
+
+**Ordinary assertion-based testing only checks what you thought to check:**
+```csharp
+[Fact]
+public void GeneratesInvoice()
+{
+    var invoice = _generator.Generate(order);
+    Assert.Equal("INV-1001", invoice.Number);     // checks ONE specific field
+    Assert.Equal(99.99m, invoice.Total);           // checks ANOTHER specific field
+    // If the invoice's DATE FORMAT or LAYOUT changes, this test says NOTHING about it,
+    // because nobody thought to assert on those specific aspects
+}
+```
+
+**Snapshot testing captures and compares the ENTIRE output, catching changes nobody explicitly asserted on:**
+```csharp
+[Fact]
+public Task GeneratesInvoice_MatchesSnapshot()
+{
+    var invoice = _generator.Generate(order);
+    return Verify(invoice); // Verify.Xunit -- compares against a saved .verified.txt snapshot file
+}
+```
+The very first run creates a reference snapshot file capturing the *entire* serialized invoice output — every subsequent run diffs the current output against that file, flagging **any** change at all (a date format tweak, a reordered field, a new property nobody remembered to add an assertion for) as a test failure requiring explicit review, not just the handful of specific fields someone happened to write an `Assert.Equal` for.
+
+**Why this catches regressions ordinary assertions structurally can't:** a developer writing assertions can only check for changes they *anticipated* — snapshot testing instead asks "did the output change **at all** compared to the last known-good version," catching entirely unanticipated regressions (a formatting change, an accidentally-added debug field) that no one thought to write a specific assertion against.
+
+**The trade-off — reviewing a snapshot diff requires human judgment every time it changes:**
+```bash
+dotnet test # a snapshot mismatch fails the test and shows a diff
+# a human must review: is this diff an INTENDED change (approve/update the snapshot)
+# or an ACCIDENTAL regression (fix the code instead)?
+```
+Every legitimate, intentional output change requires a human to review the diff and explicitly "accept" the new snapshot as the new reference — unlike a targeted assertion, which only needs updating when the specific field it checks intentionally changes.
+
+**Common Pitfall:** blindly approving/updating snapshots without actually reading the diff, out of habit or time pressure ("tests are failing, let's just accept the new snapshot and move on") — this defeats the entire purpose of snapshot testing, since an actual regression hiding in that diff gets silently accepted as the new "correct" baseline rather than caught.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is Property-Based Testing, and how does it differ fundamentally from example-based unit testing (writing specific `[InlineData]` cases) in what it actually verifies?**
+
+Example-based testing (including `[Theory]`/`[InlineData]`, covered earlier) verifies specific, hand-picked input/output pairs a developer thought to write. Property-Based Testing instead defines a **general property** that should hold true for *any* valid input, then has the testing framework automatically generate hundreds or thousands of random inputs trying to find one that breaks that property.
+
+**Example-based — verifies specific cases the developer thought of:**
+```csharp
+[Theory]
+[InlineData(new[] { 3, 1, 2 }, new[] { 1, 2, 3 })]
+[InlineData(new[] { 5 }, new[] { 5 })]
+public void Sort_OrdersElements(int[] input, int[] expected)
+{
+    Assert.Equal(expected, MySort(input));
+}
+```
+This only verifies the exact cases explicitly listed — an edge case the developer didn't think to include (an array with duplicate values, a very large array, negative numbers) simply isn't checked at all.
+
+**Property-based — verifies a general RULE holds across many randomly-generated inputs:**
+```csharp
+[Property] // FsCheck-style property test
+public bool Sort_AlwaysProducesAscendingOrder(int[] input)
+{
+    var sorted = MySort(input);
+    for (int i = 1; i < sorted.Length; i++)
+        if (sorted[i - 1] > sorted[i]) return false; // property VIOLATED
+    return true;
+}
+// The framework automatically generates HUNDREDS of random arrays -- empty, huge, all-duplicates,
+// negative numbers, single-element -- searching for ANY input that breaks the "always ascending" property
+```
+Instead of asserting specific input/output pairs, this defines the *general property* a correct sort must satisfy ("the output is always in ascending order") — the testing framework's random-generation engine searches for a counterexample far more broadly and systematically than a developer manually writing example cases would typically think to cover.
+
+**A powerful additional feature — automatic "shrinking" of a found failure to a minimal reproducing case:** when property-based testing finds an input that breaks the property, it doesn't just report the (potentially huge, complex) random input that failed — it automatically tries progressively smaller/simpler variations of that same failing input, converging on the smallest possible counterexample that still reproduces the failure, making the actual bug far easier to diagnose than a giant randomly-generated array would be.
+
+**Common Pitfall:** trying to express every test as a property-based test — some behaviors (a specific business rule like "orders over $1000 get free shipping") are inherently about specific, concrete values rather than a general mathematical property, and are more naturally and clearly expressed as example-based tests; property-based testing shines specifically for algorithmic code with genuine mathematical invariants (sorting, serialization round-trips, mathematical operations), not as a wholesale replacement for example-based testing everywhere.
+
+---

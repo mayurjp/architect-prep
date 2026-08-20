@@ -401,3 +401,92 @@ UPDATE STATISTICS Orders WITH FULLSCAN; -- recompute using every row, not a samp
 **Common Pitfall:** diagnosing a sudden query slowdown as an indexing problem (adding more indexes) when the actual cause is stale statistics causing the optimizer to *mis-estimate* row counts and pick a poor plan despite perfectly good indexes already existing — checking the *estimated* vs *actual* row counts in an execution plan (a large mismatch between the two is the tell-tale sign) should come before assuming an index is missing.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the difference between `CHAR`, `VARCHAR`, and `NVARCHAR` in SQL Server, and when should you choose each?**
+
+All three store text, but they differ in fixed vs. variable length and character encoding — the wrong choice wastes storage or silently breaks non-English text.
+
+**`CHAR(n)` — fixed-length, always pads with spaces to exactly `n` characters:**
+```sql
+CREATE TABLE Codes (CountryCode CHAR(2)); -- "US" stored as exactly 2 bytes, always
+INSERT INTO Codes VALUES ('US'); -- fine, exactly 2 characters
+
+CREATE TABLE Padded (Code CHAR(10));
+INSERT INTO Padded VALUES ('AB'); -- stored as 'AB        ' (padded with 8 trailing spaces!)
+```
+Best suited for genuinely fixed-length data (country codes, fixed-format IDs) where padding waste is negligible and the fixed width simplifies storage.
+
+**`VARCHAR(n)` — variable-length, stores only the actual characters used, up to `n`:**
+```sql
+CREATE TABLE Products (Name VARCHAR(100)); -- "Keyboard" stores as 8 bytes, not 100
+```
+No padding waste, but only supports single-byte character encodings (fine for English/Latin-script text, **not** safe for arbitrary Unicode like Chinese, Arabic, or emoji).
+
+**`NVARCHAR(n)` — variable-length, Unicode (UTF-16), supports virtually any language's characters:**
+```sql
+CREATE TABLE Products (Name NVARCHAR(100)); -- safely stores "键盘", "لوحة المفاتيح", "🎹", etc.
+```
+Uses roughly double the storage per character compared to `VARCHAR` (2 bytes per character instead of 1), since it supports the full Unicode range — the standard, safe default for any text field that might ever contain non-English input, which in practice is most user-facing text in a globally-used application.
+
+**Common Pitfall:** using `VARCHAR` for user-facing name/text fields assuming "our users are all English speakers" — this assumption frequently breaks later (a user's name legitimately contains non-Latin characters, or the application expands to new markets), and migrating an existing `VARCHAR` column to `NVARCHAR` after significant data already exists requires a genuine schema migration, not a quick fix; defaulting to `NVARCHAR` for text fields upfront avoids this entirely unless storage optimization for a specifically-constrained, guaranteed-ASCII field is a deliberate, verified requirement.
+
+---
+
+## Intermediate — Question 5
+
+**Q5: What is a SQL Server Trigger, and what specific risks make triggers a controversial tool that many teams deliberately avoid for anything beyond narrow use cases?**
+
+A Trigger is a block of T-SQL code that executes automatically in response to a table event (`INSERT`, `UPDATE`, `DELETE`) — powerful because it fires no matter what caused the change (application code, a script, a DBA's manual query), but that same "always fires, invisibly" property is exactly what makes triggers controversial.
+
+**A trigger enforcing an audit trail automatically:**
+```sql
+CREATE TRIGGER trg_Orders_Audit ON Orders
+AFTER UPDATE AS
+BEGIN
+    INSERT INTO OrderAuditLog (OrderId, ChangedAt, OldTotal, NewTotal)
+    SELECT i.Id, GETUTCDATE(), d.Total, i.Total
+    FROM inserted i JOIN deleted d ON i.Id = d.Id; -- special "inserted"/"deleted" pseudo-tables
+END;
+```
+
+**Why triggers are controversial:**
+- **Invisible, "spooky action at a distance"** — a developer running a plain `UPDATE Orders SET Total = 100 WHERE Id = 5` has no visual indication in that statement that it's also going to fire an audit-log insert, or possibly cascading business logic, elsewhere entirely; understanding the full effect of one line of SQL requires knowing every trigger attached to that table.
+- **Performance impact hidden from the calling code** — a seemingly simple, fast `UPDATE` statement can become dramatically slower if a trigger attached to that table does expensive work, with nothing in the calling application code hinting at why a simple update suddenly takes much longer.
+- **Debugging complexity** — a bug caused by trigger logic doesn't show up in application-level stack traces or logs at all, since triggers execute entirely within the database engine; tracking down "why did this row get an unexpected value" can require specifically knowing to check for triggers, which isn't always the first place developers look.
+- **Recursive/cascading trigger chains** — a trigger on Table A that updates Table B, which has its own trigger updating Table A again, can create confusing (and sometimes infinite) cascades that are hard to reason about from reading either trigger in isolation.
+
+**Where triggers still have a defensible, narrow use case:** enforcing data-integrity rules that genuinely must apply regardless of *what* wrote to the table (any application, any ad-hoc script, any future system) — an audit trail that must never be bypassable, even by a direct database script, is a legitimate case; ordinary business logic that only the application itself needs to enforce usually belongs in application code instead, where it's visible, testable, and debuggable through normal means.
+
+**Common Pitfall:** using a trigger to implement ordinary business logic (calculating a derived field, sending a notification) that could just as easily live in application code — this hides business logic in a place most developers don't think to look, and couples business rules to the specific database engine in a way that's hard to unit test or reason about compared to equivalent application-layer code.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is Columnstore Indexing in SQL Server, and why does it dramatically outperform a traditional rowstore index for large-scale analytical (OLAP) queries?**
+
+A traditional (rowstore) index organizes data row-by-row — great for OLTP workloads fetching a handful of specific rows, but inefficient for analytical queries that aggregate one or two columns across millions of rows, since the engine still has to read entire rows to get at those few columns. A Columnstore index physically reorganizes storage by *column* instead, dramatically speeding up exactly that kind of aggregate query.
+
+**The mechanism — data stored column-by-column, not row-by-row:**
+```sql
+CREATE CLUSTERED COLUMNSTORE INDEX CCI_Sales ON SalesFact;
+```
+```sql
+-- An aggregate query touching only 2 of the table's 30 columns
+SELECT ProductCategory, SUM(Revenue) FROM SalesFact GROUP BY ProductCategory;
+```
+With a rowstore index, satisfying this query still requires reading every column of every row (since rows are stored together), even though only `ProductCategory` and `Revenue` are actually needed. With a Columnstore index, `ProductCategory` and `Revenue` are physically stored as separate, contiguous column segments — the engine reads *only* those two columns' data from disk, skipping the other 28 columns entirely, and can apply extremely efficient compression since each column segment contains similar, repetitive data (far more compressible than a full row mixing many different data types together).
+
+**Why this matters for aggregate-heavy analytical workloads specifically:** columnstore's compression and column-only I/O commonly provide **10x or greater** query performance improvements for aggregate queries over large fact tables, compared to the same query against an equivalent rowstore-indexed table — this is the same fundamental columnar-storage advantage that makes BigQuery (covered under GCP) so effective for analytical queries, applied within SQL Server itself.
+
+**The trade-off — poor fit for OLTP-style single-row operations:**
+```sql
+UPDATE SalesFact SET Revenue = 150 WHERE Id = 12345; -- a single-row update
+```
+Columnstore indexes are optimized for bulk analytical reads, not frequent small updates — updating a single row in a columnstore-indexed table is considerably more expensive than the equivalent rowstore operation, since it disrupts the column-segment compression structure; columnstore is the wrong choice for a table receiving continuous small transactional writes.
+
+**Common Pitfall:** applying a Columnstore index to a heavily-updated OLTP table expecting a pure performance win — columnstore specifically trades write performance for read/aggregate performance, making it the right tool for data warehouses and reporting tables, and the wrong tool for a table serving as an application's primary transactional read/write workload.
+
+---

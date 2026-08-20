@@ -319,3 +319,89 @@ try {
 **Common Pitfall:** reaching for multi-document transactions as a substitute for proper data modeling — if a design frequently needs multi-document transactions to maintain consistency, that's often a sign the data should have been embedded together in one document (per NoSQL's core modeling philosophy) rather than split across documents that now require expensive coordinated writes to stay consistent.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is a Time-To-Live (TTL) index, and how does it let a NoSQL database automatically expire and delete data without a scheduled cleanup job?**
+
+A TTL index tells the database to automatically delete documents after a specified duration has passed since a timestamp field's value — replacing a manually-scheduled cleanup job (a cron task running `DELETE WHERE CreatedAt < ...`) with a declarative, database-native expiration rule.
+
+**Setting up a TTL index in MongoDB:**
+```javascript
+db.sessions.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 3600 }); // expire 1 hour after createdAt
+
+db.sessions.insertOne({ userId: "alice", createdAt: new Date() });
+// This document is AUTOMATICALLY deleted by MongoDB's background process
+// roughly 1 hour later -- no application code or scheduled job needed
+```
+A background process periodically scans the TTL-indexed field and removes any document whose `createdAt` value is now older than the configured expiration window — entirely automatic, requiring no application-level "cleanup" logic to remember to run.
+
+**Redis's simpler, per-key equivalent (covered conceptually earlier for the shopping cart use case):**
+```javascript
+SET session:alice "sessiondata" EX 3600 // expires in exactly 3600 seconds
+```
+Redis's TTL mechanism is even more granular — set individually per key at write time, rather than via a schema-level index affecting an entire collection uniformly.
+
+**Why this matters operationally, beyond just convenience:** without a TTL mechanism, transient data (sessions, temporary caches, short-lived tokens) accumulates indefinitely unless something reliably remembers to clean it up — a scheduled job that fails silently, gets accidentally disabled, or falls behind under load can let a "temporary" collection grow unboundedly, consuming storage and degrading query performance over time; a database-native TTL mechanism removes that operational dependency on a separate, independently-failing cleanup process entirely.
+
+**Common Pitfall:** assuming a TTL-based deletion happens at the *exact* moment the expiration time is reached — MongoDB's TTL background process runs periodically (roughly every 60 seconds, not continuously), so there's an inherent, small delay between "technically expired" and "actually deleted"; applications relying on TTL for genuinely precise, split-second expiration timing (rather than approximate cleanup) need to layer additional application-level expiration checks on top rather than relying on the TTL index alone for exact timing.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is Read/Write Concern (or Consistency Level) tuning in a NoSQL database, and how does it let you dial in a different durability/availability trade-off per operation rather than accepting one global setting?**
+
+Many NoSQL databases let you specify, on a **per-operation** basis, how many replicas must acknowledge a write (or be consulted for a read) before the operation is considered successful — letting a single database cluster serve both "must be durable no matter what" writes and "fast, best-effort" writes side by side, rather than forcing one uniform trade-off across everything.
+
+**MongoDB Write Concern — tuning per-write durability:**
+```javascript
+// "w: 1" -- only the PRIMARY node needs to acknowledge -- fastest, least durable
+db.orders.insertOne(order, { writeConcern: { w: 1 } });
+
+// "w: majority" -- a MAJORITY of replica set members must acknowledge -- slower, survives a primary failure
+db.payments.insertOne(payment, { writeConcern: { w: "majority" } });
+```
+A shopping cart update (low stakes if occasionally lost) might reasonably use `w: 1` for speed — while a payment record (unacceptable to lose even if the primary node crashes moments after acknowledging) uses `w: "majority"`, accepting the added latency of waiting for multiple nodes to confirm, specifically because the durability guarantee matters more for that particular write.
+
+**Read Concern — a parallel tuning knob for what a read is allowed to see:**
+```javascript
+// "local" -- read whatever the queried node currently has, even if it might later be rolled back
+db.orders.find().readConcern("local");
+
+// "majority" -- only return data that's been acknowledged by a majority of replicas
+// (guaranteed not to be rolled back later, even if the current primary fails)
+db.payments.find().readConcern("majority");
+```
+
+**Why this per-operation tunability matters architecturally:** it avoids the false choice of "configure the entire database for maximum durability" (paying a latency cost on every single write, even low-stakes ones) versus "configure for maximum speed" (risking losing critical data) — a single cluster can serve both needs simultaneously, with each operation explicitly declaring the trade-off appropriate to *that specific* piece of data's actual importance.
+
+**Common Pitfall:** using the fastest, least durable write concern (`w: 1`) uniformly across an entire application "for performance," including for genuinely critical writes like financial transactions — the speed gain from the weakest write concern is real, but applying it indiscriminately to data that can't tolerate loss (rather than reserving the weaker setting specifically for data where occasional loss is genuinely an acceptable trade-off) trades away durability guarantees the business actually needed.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is a Secondary Index in a NoSQL database, and why does adding one to a document/key-value store carry different cost implications than adding one to a relational database?**
+
+A Secondary Index lets you efficiently query by a field *other* than the primary key/partition key — necessary because NoSQL databases are fundamentally optimized around fast lookups by their primary key, and querying by anything else without an index typically means scanning every document/row.
+
+**Without a secondary index — querying a non-key field requires a full scan:**
+```javascript
+// Partitioned/keyed by _id -- querying by "email" with no index means scanning EVERY document
+db.users.find({ email: "alice@example.com" }); // full collection scan, O(n)
+```
+
+**With a secondary index — the query becomes efficient:**
+```javascript
+db.users.createIndex({ email: 1 });
+db.users.find({ email: "alice@example.com" }); // now uses the index -- O(log n), not a full scan
+```
+
+**Why this carries different cost implications in distributed NoSQL systems specifically:** in a horizontally-sharded/partitioned NoSQL database, a secondary index often can't simply live on the same node as the data it indexes — data is partitioned by the *primary* key, but a secondary index needs to be queryable by a *different* field's value, which might correspond to documents scattered across many different partitions/shards. Some NoSQL systems solve this with a **global secondary index** (a separate, independently-partitioned index structure, adding real write-amplification cost since every write must now also update this separate structure, potentially on a different node) versus a **local secondary index** (only indexes data within the same partition, meaning a query still needs to fan out to every partition to be complete, similar to the fan-out problem covered for poorly-chosen partition keys).
+
+**Contrast with a relational database:** a secondary index in SQL Server or PostgreSQL lives on the *same* database instance as the table it indexes — there's no cross-node distribution complexity to reason about, just the familiar write-amplification cost (every insert/update also updates the index) that's true of any database's secondary indexes, without the additional distributed-systems dimension NoSQL's horizontal partitioning introduces.
+
+**Common Pitfall:** adding secondary indexes liberally in a distributed NoSQL database the same way one might in a single-node relational database — each additional secondary index in a partitioned NoSQL system can meaningfully increase write latency/cost (updating a separate, potentially cross-node index structure on every write) in a way that's less pronounced in a single-node relational database, making index proliferation a more consequential decision in a distributed NoSQL context.
+
+---
