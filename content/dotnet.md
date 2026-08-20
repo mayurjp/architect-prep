@@ -316,6 +316,44 @@ Web servers should *never* execute long-running, CPU-bound work on the Thread Po
 
 ---
 
+## Scenario — Question 4
+
+**Q4: Your ASP.NET Core service runs fine under normal load, but once every few minutes a request takes 200-500ms longer than usual for no apparent reason — CPU and memory both look completely normal, and there's no obvious database slowness. `dotnet-counters` shows periodic spikes in "% Time in GC" that line up with the slow requests. What's happening, and how do you address it?**
+
+Occasional, brief latency spikes correlated with GC activity — while CPU/memory look otherwise fine — is the signature of a **Gen 2 (or "blocking") garbage collection** pausing the application, as opposed to the far cheaper, near-continuous Gen 0 collections that don't produce noticeable pauses.
+
+**Why this specific pattern points to Gen 2:**
+```text
+Gen 0 collections: happen constantly, microseconds each, invisible in request latency
+Gen 1 collections: happen less often, still sub-millisecond typically
+Gen 2 collections: happen rarely, but must trace the ENTIRE live object graph --
+                   can take tens to hundreds of milliseconds on a service with a
+                   large working set, and (without Background/Concurrent GC) they
+                   fully pause all application threads while they run
+```
+A request that happens to be in-flight exactly when a Gen 2 collection kicks in gets its processing paused mid-request for however long that collection takes — explaining why it's intermittent (only requests overlapping a Gen 2 pause are affected) rather than a constant, evenly-distributed slowdown.
+
+**Diagnosing it further:**
+```bash
+dotnet-counters monitor -p <pid> --counters System.Runtime
+# Watch "Gen 2 GC Count" ticking up in lockstep with the latency spikes,
+# and "% Time in GC" spiking specifically at those moments
+```
+
+**The fixes, roughly in order of effort:**
+1. **Enable Background (Concurrent) GC if not already on** — lets most of the Gen 2 collection's tracing work happen on a dedicated GC thread *while application threads keep running*, only pausing briefly for the final short "stop-the-world" phase rather than the entire collection.
+```xml
+<ConcurrentGarbageCollection>true</ConcurrentGarbageCollection> <!-- default true in most templates, worth confirming -->
+```
+2. **Reduce Gen 2 promotion pressure** — objects only reach Gen 2 by surviving multiple earlier collections; a common root cause is holding references to objects longer than necessary (an ever-growing cache, a large object graph kept alive by a static collection), artificially aging objects into the expensive generation that should have been collected cheaply in Gen 0/1.
+3. **Consider Server GC with multiple heaps** — if the service runs on a multi-core machine, Server GC parallelizes collection work across per-core heaps, often reducing the wall-clock pause duration of any given Gen 2 collection compared to Workstation GC's single-heap model.
+
+**Common Pitfall:** chasing this as an application logic bug (profiling business logic code paths) when the actual cause is entirely in memory/object-lifetime management — the fix lives in *what's being held alive and for how long*, not in the code path that happens to be running when the pause occurs; that code is simply an innocent bystander paused by the runtime.
+
+---
+
+---
+
 ## Intermediate — Question 6
 
 **Q6: What is the difference between Workstation GC and Server GC in .NET, and when does it matter?**
@@ -383,5 +421,64 @@ context.Unload(); // marks it collectible; GC reclaims it once nothing holds a r
 - `isCollectible: true` is what makes an ALC unloadable — without it, assemblies loaded into it live for the process lifetime just like the default ALC.
 
 **Common Pitfall:** Unloading an ALC doesn't happen instantly — `Unload()` only marks it eligible. If any object created from a type in that ALC (or even an open `FileStream` opened by plugin code) is still referenced anywhere in your app, the GC can't collect it, and the "unloaded" plugin assembly silently stays resident. Plugin hosts typically use a `WeakReference` to the ALC itself and poll `IsAlive` in tests to catch leaks.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is the difference between `Task.WhenAll` and `Task.WhenAny`, and when do you use each?**
+
+Both combine multiple in-flight `Task`s into a single awaitable, but they answer different questions: "wait for everything" versus "wait for whichever finishes first."
+
+**`Task.WhenAll` — wait for every task to complete, run them concurrently:**
+```csharp
+var productsTask = GetProductsAsync();
+var categoriesTask = GetCategoriesAsync();
+var reviewsTask = GetReviewsAsync();
+
+await Task.WhenAll(productsTask, categoriesTask, reviewsTask); // waits for ALL three
+
+var products = await productsTask;     // already completed, returns instantly
+var categories = await categoriesTask;
+var reviews = await reviewsTask;
+```
+All three requests fire concurrently rather than sequentially — total wait time is roughly the *slowest* of the three, not the sum of all three, which is the whole point of using it over three separate sequential `await` calls.
+
+**`Task.WhenAny` — proceed as soon as the FIRST task finishes, others keep running:**
+```csharp
+var primaryApi = CallPrimaryServiceAsync();
+var fallbackApi = CallFallbackServiceAsync();
+
+var firstCompleted = await Task.WhenAny(primaryApi, fallbackApi);
+var result = await firstCompleted; // get the result of whichever one actually finished first
+```
+Useful for racing multiple redundant sources (hedged requests) or implementing a timeout pattern: `await Task.WhenAny(actualWork, Task.Delay(TimeSpan.FromSeconds(5)))` lets you detect "5 seconds passed before the real work finished" without cancelling the real work outright.
+
+**Common Pitfall with `WhenAll`:** if one of the tasks throws, `Task.WhenAll` still waits for *all* tasks to finish (successful or not) before throwing — and it only surfaces the **first** exception via `await`, silently discarding others unless you inspect `Task.Exception.InnerExceptions` on the aggregate afterward. A team debugging "why did only one exception show up when three tasks failed" often doesn't realize `WhenAll`'s awaited result swallows the rest by default.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is Large Object Heap (LOH) fragmentation, and why can a .NET service's memory usage grow indefinitely even without a genuine memory leak?**
+
+Objects ≥ 85,000 bytes are allocated directly on the **Large Object Heap**, a separate GC-managed heap segment from Gen 0/1/2, and — critically — the LOH is **not compacted by default**. That single fact is the root of LOH fragmentation.
+
+**The Mechanism:**
+```text
+LOH state over time (■ = live object, □ = freed gap):
+[■■■■■][□□□□□][■■■■■][□□□□□□□□□][■■■■■]
+   A      (freed)   B     (freed)    C
+```
+When object B is freed, the GC does *not* slide C leftward to close the gap the way it compacts the regular (small-object) generations — it just marks that region as free space to be reused *if* a future allocation happens to fit exactly in that gap. If incoming large objects are all slightly bigger than the available gaps, the GC has no choice but to grow the LOH segment further, even though there's technically "enough" free memory scattered across unusable-sized gaps.
+
+**Why this happens in practice:** a common trigger is allocating variably-sized large buffers (e.g., processing uploaded files or building large JSON responses as `byte[]`) where sizes vary just enough that freed gaps rarely fit the next allocation cleanly — over hours or days, the LOH segment can balloon in *reserved* size even though *live* data stays roughly constant, looking exactly like a memory leak in a process memory graph.
+
+**Mitigations:**
+1. **`GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce`** — explicitly requests the next Gen 2 collection to compact the LOH once, useful as a targeted remediation after a known allocation spike.
+2. **Avoid large, variably-sized allocations in hot paths** — use `ArrayPool<T>.Shared` to rent/return same-sized buffers repeatedly instead of allocating fresh `byte[]` arrays of varying size each time, which sidesteps LOH fragmentation entirely by reusing fixed-size buffers.
+3. **Reduce the object size below the 85,000-byte LOH threshold** where feasible (e.g., processing data in smaller chunks) so allocations land on the compacted Gen 0-2 heaps instead.
+
+**Common Pitfall:** treating LOH growth purely as "needs more RAM" and vertically scaling the container/VM — that buys temporary headroom but doesn't address the underlying allocation pattern, and the same fragmentation dynamic reproduces at the new, larger memory ceiling.
 
 ---

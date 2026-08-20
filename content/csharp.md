@@ -382,3 +382,94 @@ public class ToStringGenerator : IIncrementalGenerator
 **Common Pitfall:** generators only see syntax/semantics available *at compile time* — they cannot generate code based on runtime configuration, database schemas, or anything not knowable until the app actually runs. That's still Reflection's (or runtime codegen's) job.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is the `nameof` operator, and why is it preferred over hardcoding a member's name as a string literal?**
+
+`nameof` is a compile-time operator that returns the simple name of a variable, type, or member as a string — evaluated by the compiler, not at runtime, so the returned string is always guaranteed to match the actual identifier.
+
+```csharp
+public class User
+{
+    public string Name { get; set; } = string.Empty;
+
+    public void Validate()
+    {
+        if (string.IsNullOrEmpty(Name))
+            throw new ArgumentException("Name cannot be empty.", nameof(Name)); // "Name", not a hardcoded string
+    }
+}
+```
+
+**Why this matters:** if a developer later renames the `Name` property to `FullName` via an IDE rename refactor, every `nameof(Name)` reference is automatically updated by the refactoring tool along with the property itself — a hardcoded string literal `"Name"` scattered through exception messages, logging calls, or `INotifyPropertyChanged` implementations would silently go stale, still saying `"Name"` even though the property no longer exists, and no compiler error would ever catch the mismatch.
+
+**Common use cases:** parameter validation exceptions (`ArgumentNullException(nameof(param))`), `INotifyPropertyChanged.PropertyChanged` event raises, and reflection-adjacent APIs (like ASP.NET Core's `nameof(ControllerName.ActionMethod)` for generating links) where a typo in a hand-typed string would only surface as a runtime bug, not a compile error.
+
+**Common Pitfall:** assuming `nameof` also works for entirely dynamic scenarios like a JSON property name resolved at runtime — it only works on identifiers that exist and are resolvable at compile time; it cannot substitute for genuinely dynamic string construction.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is "multiple enumeration" of an `IEnumerable<T>`, and why can it silently cause bugs or performance problems?**
+
+An `IEnumerable<T>` built from a LINQ query (`Where`, `Select`, etc.) represents a **deferred, re-runnable** computation, not a materialized collection — every time you enumerate it (via `foreach`, `.Count()`, `.ToList()`, etc.), the entire query pipeline executes again from scratch.
+
+```csharp
+IEnumerable<int> expensiveQuery = numbers.Where(n => IsPrime(n)); // deferred, not yet run
+
+if (expensiveQuery.Any())               // enumeration #1 -- runs IsPrime() on every number
+{
+    foreach (var n in expensiveQuery)   // enumeration #2 -- runs IsPrime() on EVERY number AGAIN
+        Console.WriteLine(n);
+}
+```
+If `IsPrime` is expensive, or if the source is something that can only sensibly be read once (a database reader, a network stream), this isn't just wasted CPU — it can produce **different results each time**, or throw entirely, since the underlying resource may have already been consumed or the data may have changed between enumerations (e.g., a query against a live database returning a different row set the second time).
+
+**The fix — materialize once, reuse the concrete collection:**
+```csharp
+var results = numbers.Where(n => IsPrime(n)).ToList(); // executed ONCE, cached in memory
+
+if (results.Any())          // operates on the in-memory List, no re-execution
+{
+    foreach (var n in results) // same cached list
+        Console.WriteLine(n);
+}
+```
+
+**Common Pitfall:** passing an `IEnumerable<T>` parameter into a method that both checks `.Any()` and then iterates it — a method signature of `IEnumerable<T>` gives no compile-time signal to the caller (or to the method's own author) about whether the sequence is a cheap in-memory list or an expensive deferred query, which is exactly why many style guides recommend materializing (`.ToList()`) as soon as a sequence needs to be used more than once, rather than passing the raw deferred `IEnumerable<T>` around.
+
+---
+
+## Advanced — Question 5
+
+**Q5: What are Primary Constructors (C# 12), and how do they behave differently on a `class` versus a `record`?**
+
+A primary constructor lets you declare a class or struct's constructor parameters directly in the type declaration itself, eliminating the boilerplate of a separate constructor body just to assign fields — a feature `record` types already had since C# 9, now generalized to ordinary classes and structs.
+
+**On an ordinary `class` — parameters are captured, NOT automatically exposed as properties:**
+```csharp
+public class OrderProcessor(IOrderRepository repository, ILogger logger)
+{
+    public async Task ProcessAsync(Order order)
+    {
+        logger.LogInformation("Processing order {Id}", order.Id); // 'logger' used directly, like a captured field
+        await repository.SaveAsync(order);
+    }
+}
+```
+`repository` and `logger` behave like private captured parameters accessible throughout the class body — but critically, they are **not** public properties. `new OrderProcessor(...).logger` doesn't compile; if you want a public property, you must declare one yourself (`public ILogger Logger { get; } = logger;`).
+
+**On a `record` — parameters ARE automatically exposed as public init-only properties, plus value equality:**
+```csharp
+public record Point(int X, int Y);
+// Automatically generates: public int X { get; init; } and public int Y { get; init; },
+// PLUS value-based Equals/GetHashCode/ToString/with-expressions
+```
+
+**Why the difference:** a `record`'s entire purpose is to model an immutable value with structural equality, so its primary constructor parameters are assumed to *be* the record's public data by default. An ordinary `class` makes no such assumption — primary constructor parameters there are just a convenient way to receive dependencies/values without writing a manual constructor body, not an implicit request for public properties or value equality.
+
+**Common Pitfall:** assuming a `class`'s primary constructor parameters are stored as fields automatically available for later reuse the same way a record's are — if a parameter is only referenced inside the constructor-equivalent scope but never used in any instance method, the compiler doesn't necessarily capture it as a field at all (it can optimize it away), which can surprise developers expecting record-like semantics on plain classes.
+
+---

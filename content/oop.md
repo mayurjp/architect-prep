@@ -368,3 +368,108 @@ var app = builder.Build();
 **Common Pitfall:** treating a DI container's `.Resolve<T>()` call as acceptable anywhere convenient "since the container is already there." If it happens outside the Composition Root, it's the Service Locator anti-pattern wearing a DI container's clothing — the class's real dependencies are hidden from its constructor signature, making it harder to reason about and test.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is the difference between an "is-a" relationship and a "has-a" relationship in OOP, and why does mixing them up lead to bad designs?**
+
+These are the two fundamental ways one class can relate to another — inheritance (is-a) versus composition (has-a) — and choosing the wrong one for a given relationship is one of the most common sources of fragile object models.
+
+**"Is-a" — inheritance, for genuine specialization:**
+```csharp
+public class Animal { public virtual void Eat() { } }
+public class Dog : Animal { } // "a Dog IS an Animal" -- a Dog can be used anywhere an Animal is expected
+```
+This should only be used when the derived type is *substitutable* for the base type in every context (the Liskov Substitution Principle) — a `Dog` really is a kind of `Animal`, with all the same fundamental behaviors, just specialized.
+
+**"Has-a" — composition, for a part/capability relationship:**
+```csharp
+public class Car
+{
+    private readonly Engine _engine; // "a Car HAS an Engine" -- not a kind of Engine
+    public Car(Engine engine) => _engine = engine;
+    public void Start() => _engine.Ignite();
+}
+```
+A `Car` is not a specialized kind of `Engine` — it *contains* one and delegates to it. Modeling this as inheritance (`class Car : Engine`) would be nonsensical and would expose `Engine`'s internal methods on `Car` inappropriately.
+
+**Why mixing them up causes real problems:** the classic anti-pattern is inheriting purely for **code reuse** rather than genuine substitutability — e.g., making `Square` inherit from `Rectangle` because "it's almost the same code," when a `Square` cannot actually honor `Rectangle`'s behavioral contract (independently settable width/height) without breaking callers, as covered in the Liskov Substitution Principle. The fix in cases like that is almost always to switch from inheritance to composition or a shared interface.
+
+**Common Pitfall:** choosing inheritance because it "saves typing" a delegating wrapper method, without checking whether the "is-a" relationship genuinely holds in every case a caller might use it — composition is more verbose upfront but far more flexible and safe when the relationship isn't a true specialization.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is method overloading resolution, and how does the C# compiler decide which overload to call when multiple candidates could match?**
+
+When a class has several methods with the same name but different parameter lists, the compiler must pick exactly one at compile time using a specific, deterministic set of rules — understanding this matters because subtle ambiguity or surprising overload choices are a real source of bugs.
+
+**The resolution process, roughly:**
+```csharp
+void Process(int x) { Console.WriteLine("int"); }
+void Process(long x) { Console.WriteLine("long"); }
+void Process(object x) { Console.WriteLine("object"); }
+
+Process(5);        // "int" -- exact type match wins
+Process(5L);       // "long" -- exact type match wins
+Process("hello");  // "object" -- no exact match, but string converts to object
+```
+The compiler first looks for an exact type match; if none exists, it looks for the "most specific" applicable conversion — a narrower/more derived parameter type beats a broader one when multiple conversions are possible.
+
+**Where this gets genuinely tricky — nullable and generic overloads:**
+```csharp
+void Process(int? x) { } // nullable int
+void Process(int x) { }
+
+Process(5); // calls Process(int) -- the compiler prefers the non-nullable exact match
+```
+
+**A common ambiguity bug — extension methods vs instance methods:**
+```csharp
+public static class StringExtensions
+{
+    public static bool IsValid(this string s) => !string.IsNullOrEmpty(s);
+}
+public class MyString
+{
+    public bool IsValid() => true; // instance method with the SAME name
+}
+```
+Instance methods **always** win over extension methods with the same signature, regardless of which one a developer "intended" to call — extension method resolution only kicks in when no applicable instance method exists at all, which can silently mask a bug if a developer assumed their extension method was being called.
+
+**Common Pitfall:** adding a new, more general overload to an existing class (e.g., adding `Process(object x)` to a class that previously only had `Process(int x)`) — for a call site passing an `int`, `Process(int)` still wins (exact match beats the new broader overload), but this can still create genuinely ambiguous compiler errors in edge cases involving implicit conversions across multiple candidate overloads, which is why overload sets should be designed deliberately rather than grown ad hoc.
+
+---
+
+## Advanced — Question 4
+
+**Q4: What is the difference between `sealed` classes/methods and access modifiers, and what performance and design benefits does `sealed` actually provide?**
+
+`sealed` prevents further inheritance (on a class) or further overriding (on a method) — a fundamentally different kind of restriction than access modifiers (`private`/`protected`/`public`), which control *visibility*, not *extensibility*.
+
+**Sealing a class — no one can inherit from it at all:**
+```csharp
+public sealed class Money
+{
+    public decimal Amount { get; }
+    public string Currency { get; }
+    // No class can ever do: public class SpecialMoney : Money { }
+}
+```
+
+**Sealing an overridden method — stops further overriding down the hierarchy:**
+```csharp
+public class Base { public virtual void Method() { } }
+public class Middle : Base { public sealed override void Method() { } } // seals it HERE
+public class Derived : Middle { public override void Method() { } } // COMPILE ERROR -- can't override a sealed override
+```
+This lets `Middle` guarantee its specific implementation of `Method()` can never be replaced by any further subclass, even though the original `Base.Method()` was `virtual` and overridable in general.
+
+**The performance benefit — devirtualization:** when the JIT compiler can prove a method can never be overridden (because the class is `sealed`, or the method itself is sealed), it can sometimes skip the virtual method table (vtable) lookup entirely and call the method directly — a "devirtualized" call, which is measurably faster in hot paths, though the JIT already does significant devirtualization analysis on its own even without `sealed` in many cases.
+
+**The design benefit — protecting invariants:** a class that carefully enforces invariants in its constructor and methods (like `Money` above, ensuring `Amount` and `Currency` always stay consistent) can be undermined by an unexpected subclass overriding a method and violating those invariants in a way the original author never anticipated. Sealing communicates "this class's behavior is complete and intentional — extend via composition, not inheritance" (matching the earlier "composition over inheritance" guidance).
+
+**Common Pitfall:** sealing classes reflexively "for performance" across an entire codebase without considering whether genuine extension points are needed — over-sealing can force consumers into awkward composition-based workarounds for cases where controlled inheritance would have been the cleaner design; `sealed` is best applied deliberately to types whose behavior genuinely must not be altered (value-like types, security-sensitive classes), not as a blanket default.
+
+---

@@ -368,3 +368,105 @@ Adding a new discount type means writing a new `IDiscountStrategy` implementatio
 **Common Pitfall:** believing "I used an interface and Strategy, therefore this code is OCP-compliant" without checking whether something else (a factory, a switch, a hardcoded list) still needs editing every time a new variant is added.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is YAGNI ("You Aren't Gonna Need It"), and how does it interact with the Open/Closed Principle's advice to design for extension?**
+
+YAGNI says: don't build functionality, abstraction layers, or configuration options for a requirement you don't have yet, based on a guess that you *might* need it later. It sits in apparent tension with OCP's "design for extension" — but the two are actually compatible once you separate *designing for known variation* from *speculating about unknown future variation*.
+
+**Speculative, YAGNI-violating "flexibility":**
+```csharp
+public interface IDiscountStrategy { decimal Apply(decimal price); }
+public class StandardDiscount : IDiscountStrategy { public decimal Apply(decimal p) => p; }
+// Only ONE discount type exists today, but a full Strategy pattern was built "in case we need more"
+```
+If there's only ever been one discount type, and no concrete plan for a second, this interface and its indirection is pure speculative complexity — it adds a layer future readers must understand, for a variation that may never materialize.
+
+**OCP applied to a requirement that's actually, concretely happening:**
+```csharp
+// The business has confirmed: Premium and VIP discounts launch next sprint
+public interface IDiscountStrategy { decimal Apply(decimal price); }
+public class PremiumDiscount : IDiscountStrategy { ... }
+public class VipDiscount : IDiscountStrategy { ... }
+```
+Here, the abstraction earns its keep immediately — it's not speculation, it's modeling a real, current requirement that already has more than one concrete case.
+
+**The reconciling principle:** YAGNI says don't build for a *guessed* future. OCP says *when a real variation point already exists* (two or more concrete cases today, or a near-certain, committed one), design that specific point so adding a third case doesn't require modifying existing code. Neither principle argues for abstracting everything defensively; they agree that abstractions should be justified by concrete, present evidence of variation, not speculation.
+
+**Common Pitfall:** invoking YAGNI to justify a rigid, un-extensible design even when a second concrete variant already exists in the current requirements — YAGNI is about not building for imagined *future* needs, not an excuse to skip reasonable design for needs that are already real and known today.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: What is the Interface Segregation Principle (ISP), and how is it different from just "keeping interfaces small"?**
+
+ISP states that clients should not be forced to depend on methods they don't use — but the precise idea is about *what each specific client actually needs*, not merely an arbitrary rule that "interfaces should have few methods."
+
+**A "small" interface that still violates ISP:**
+```csharp
+public interface IWorker
+{
+    void Work();
+    void Eat(); // fine for a HumanWorker, meaningless for a RobotWorker
+}
+
+public class RobotWorker : IWorker
+{
+    public void Work() { /* ... */ }
+    public void Eat() => throw new NotSupportedException(); // forced to implement something irrelevant
+}
+```
+This interface is small (two methods) but still violates ISP, because `RobotWorker` is forced to depend on (and provide some implementation for) a method that's meaningless for it — smallness alone doesn't guarantee every implementer actually needs every member.
+
+**Segregating by actual client need, not just splitting arbitrarily:**
+```csharp
+public interface IWorkable { void Work(); }
+public interface IFeedable { void Eat(); }
+
+public class HumanWorker : IWorkable, IFeedable { ... }
+public class RobotWorker : IWorkable { ... } // only implements what actually applies
+```
+Now `RobotWorker` depends only on `IWorkable` — it's never forced to provide a nonsensical `Eat()` implementation, because the interface segregation was driven by *which capabilities different clients genuinely need*, not by an arbitrary method-count target.
+
+**How this differs from "just keep interfaces small":** you could split `IWorker` into ten tiny one-method interfaces and still violate ISP's actual intent if a given implementer is forced to implement several of those ten it doesn't need together as a bundle — the goal is that each interface represents one cohesive **role** a client either needs entirely or not at all, not an arbitrary size limit.
+
+**Common Pitfall:** over-segregating single-method interfaces so aggressively that a class implementing five unrelated tiny interfaces creates its own kind of confusion (no clear sense of the class's cohesive "role") — ISP is about matching interface boundaries to real client needs, not minimizing method count as a goal in itself.
+
+---
+
+## Advanced — Question 3
+
+**Q3: What is the Robustness Principle ("Postel's Law" — "be conservative in what you send, liberal in what you accept"), and how does it apply to designing APIs and message contracts?**
+
+Postel's Law, originally coined for network protocol design, says a system should be strict and predictable about what it sends out, but tolerant and forgiving about what it accepts from others — applied to API/message design, it's a key technique for evolving contracts without constant breaking changes.
+
+**"Liberal in what you accept" — tolerant reading of incoming data:**
+```csharp
+public class OrderCreatedEvent
+{
+    public int OrderId { get; set; }
+    public decimal Total { get; set; }
+    // A NEW field a producer might add later
+    public string? PromoCode { get; set; }
+}
+
+// A consumer using System.Text.Json ignores unrecognized fields by default --
+// if the producer adds yet ANOTHER new field tomorrow, this consumer doesn't break
+var order = JsonSerializer.Deserialize<OrderCreatedEvent>(json);
+```
+A consumer that only reads the specific fields it cares about (rather than, say, strictly validating that the payload contains *exactly* an expected set of fields and rejecting anything extra) tolerates a producer adding new fields over time without a coordinated deployment.
+
+**"Conservative in what you send" — don't emit more variability than necessary:**
+```csharp
+// Sending a WELL-DEFINED, minimal, explicit contract -- not "whatever fields happen to exist internally"
+var event = new OrderCreatedEvent { OrderId = order.Id, Total = order.Total }; // explicit, deliberate shape
+```
+A producer shouldn't serialize its entire internal domain object (which might contain incidental fields that change on any internal refactor) — it should emit a deliberately-designed, minimal contract, precisely because consumers are relying on that shape staying predictable.
+
+**Why this matters for distributed systems specifically:** this is the same underlying idea that lets GraphQL and additive-only REST evolution avoid constant version bumps (from the GraphQL/REST versioning discussion) — systems that are strict senders but tolerant receivers can evolve independently without every change requiring synchronized deployment across every service.
+
+**Common Pitfall:** applying "liberal in what you accept" so loosely that a consumer silently accepts and processes malformed or semantically-invalid data rather than genuinely-extra-but-valid fields — tolerance should apply to *unrecognized additions*, not to actually invalid or missing required data; being liberal about garbage input just relocates bugs downstream instead of catching them at the boundary.
+
+---

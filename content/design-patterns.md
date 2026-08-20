@@ -403,3 +403,139 @@ boss2.Health = 1500; // customize the copy without touching the template or boss
 **Common Pitfall:** implementing `Clone()` as a shallow copy by default (`MemberwiseClone()`) when the object contains mutable reference-type fields — as with the general shallow-vs-deep-copy issue, forgetting to deep-clone a nested list or object means the "clone" still shares mutable state with the original, causing changes to one to unexpectedly affect the other.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: Explain the Template Method pattern and how it differs from the Strategy pattern.**
+
+Template Method defines the *skeleton* of an algorithm in a base class, with specific steps deferred to subclasses via overridable methods — the overall sequence of steps is fixed, only individual steps vary.
+
+**The Mechanism:**
+```csharp
+public abstract class DataExporter
+{
+    // The Template Method -- defines the FIXED overall algorithm shape
+    public void Export()
+    {
+        var data = FetchData();
+        var formatted = FormatData(data);   // varies per subclass
+        WriteOutput(formatted);              // varies per subclass
+    }
+
+    protected abstract string FormatData(List<string> data);
+    protected abstract void WriteOutput(string content);
+    private List<string> FetchData() => new() { "row1", "row2" }; // shared, not overridable
+}
+
+public class CsvExporter : DataExporter
+{
+    protected override string FormatData(List<string> data) => string.Join(",", data);
+    protected override void WriteOutput(string content) => File.WriteAllText("out.csv", content);
+}
+```
+Calling `csvExporter.Export()` always runs `FetchData` → `FormatData` → `WriteOutput` in that fixed order — subclasses can't reorder or skip steps, only supply their own implementation for the designated overridable ones.
+
+**How this differs from Strategy:** Strategy (covered earlier) swaps out an *entire algorithm* as one interchangeable unit via composition — the context holds a reference to a strategy object and delegates the whole operation to it. Template Method instead fixes the overall *sequence* in a base class and only lets subclasses customize individual *steps* within that sequence, via inheritance rather than composition.
+
+**Common Pitfall:** using Template Method where the "steps" actually need to vary independently of each other in ways inheritance can't cleanly express (e.g., mixing and matching different `FormatData` and `WriteOutput` combinations across many exporters) — that combinatorial need is a sign Strategy (composing independent, swappable pieces) fits better than a single rigid inheritance hierarchy.
+
+---
+
+## Intermediate — Question 4
+
+**Q4: Explain the Chain of Responsibility pattern, and how ASP.NET Core middleware is a concrete implementation of it.**
+
+Chain of Responsibility passes a request along a chain of potential handlers, where each handler decides either to process the request itself, pass it to the next handler in the chain, or both — the sender doesn't need to know which handler (if any) will ultimately deal with it.
+
+**The Mechanism:**
+```csharp
+public abstract class SupportHandler
+{
+    protected SupportHandler? Next;
+    public SupportHandler SetNext(SupportHandler next) { Next = next; return next; }
+    public abstract void Handle(Ticket ticket);
+}
+
+public class Tier1Support : SupportHandler
+{
+    public override void Handle(Ticket ticket)
+    {
+        if (ticket.Severity <= 1) { Console.WriteLine("Tier 1 resolved it"); return; }
+        Next?.Handle(ticket); // pass it along if this handler can't deal with it
+    }
+}
+public class Tier2Support : SupportHandler
+{
+    public override void Handle(Ticket ticket)
+    {
+        if (ticket.Severity <= 2) { Console.WriteLine("Tier 2 resolved it"); return; }
+        Next?.Handle(ticket);
+    }
+}
+
+var tier1 = new Tier1Support();
+tier1.SetNext(new Tier2Support());
+tier1.Handle(new Ticket { Severity = 2 }); // Tier 1 passes it to Tier 2, which resolves it
+```
+
+**Why ASP.NET Core middleware IS this pattern:** each middleware component is a "handler" that receives the `HttpContext`, decides whether to handle it and short-circuit (e.g., return a cached response) or call `next()` to pass it further down the chain, exactly matching the pattern's shape.
+```csharp
+app.Use(async (context, next) =>
+{
+    if (context.Request.Headers.ContainsKey("X-Cached-Response"))
+    {
+        await context.Response.WriteAsync("cached"); // handles it, does NOT call next()
+        return;
+    }
+    await next(); // pass to the next middleware in the chain
+});
+```
+
+**Common Pitfall:** building a chain where handlers have hidden, order-dependent assumptions about each other (e.g., Handler C assumes Handler A already set some contextual state) — this quietly breaks the pattern's core promise that handlers can be reordered or removed independently, turning what should be a flexible chain into a fragile, implicitly-coupled sequence.
+
+---
+
+## Advanced — Question 3
+
+**Q3: Explain the Mediator pattern, and why MediatR (a popular .NET library) is built around it for implementing CQRS.**
+
+The Mediator pattern centralizes communication between a set of objects behind a single mediator object, so those objects communicate *through* the mediator rather than referencing each other directly — reducing a tangled web of many-to-many object references down to a hub-and-spoke shape.
+
+**Without a Mediator — components reference each other directly:**
+```csharp
+public class OrderController
+{
+    private readonly OrderValidator _validator;
+    private readonly InventoryService _inventory;
+    private readonly EmailService _email;
+    // The controller must know about and directly wire up EVERY collaborator
+}
+```
+
+**With a Mediator (MediatR) — the controller only knows about `IMediator`:**
+```csharp
+public class OrdersController : ControllerBase
+{
+    private readonly IMediator _mediator; // the ONLY dependency
+
+    [HttpPost]
+    public async Task<IActionResult> Create(CreateOrderCommand command)
+    {
+        var result = await _mediator.Send(command); // MediatR routes this to the correct handler
+        return Ok(result);
+    }
+}
+
+public class CreateOrderCommandHandler : IRequestHandler<CreateOrderCommand, OrderResult>
+{
+    // THIS class knows about the validator, inventory service, etc. -- the controller doesn't
+    public async Task<OrderResult> Handle(CreateOrderCommand request, CancellationToken ct) { ... }
+}
+```
+The controller is completely decoupled from *which* class actually handles the command, or what that handler's own dependencies are — it only depends on the generic `IMediator` abstraction.
+
+**Why this fits CQRS naturally:** CQRS already wants a clean separation between "here's a Command/Query" and "here's the code that handles it" — MediatR's `IRequestHandler<TRequest, TResponse>` convention gives every command and query its own dedicated, single-responsibility handler class, found and invoked automatically via `_mediator.Send()`, without controllers accumulating a dozen injected service dependencies as the application grows.
+
+**Common Pitfall:** treating MediatR as a mandatory "best practice" for every project regardless of size — for a small application with few use cases, the indirection of "the controller sends a command to a mediator which finds a handler" adds a layer of ceremony (an extra file per operation, harder to `Ctrl+Click` and jump straight to the handling code) that a simple direct service-injection approach could handle just as well with less machinery.
+
+---
