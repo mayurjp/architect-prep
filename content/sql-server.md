@@ -588,3 +588,72 @@ This is the most forceful intervention — rather than letting the optimizer mak
 **Common Pitfall:** reaching for `OPTION (RECOMPILE)` as the default fix for every parameter-sniffing symptom without considering its own cost — for a query executed thousands of times per second, the *compilation* overhead `RECOMPILE` reintroduces on every single execution can itself become the new bottleneck; Query Store's Forced Plan approach (pin a known-good plan, keep the caching benefit) is often the better trade-off for genuinely high-frequency queries, reserving `RECOMPILE` for lower-frequency queries where compilation cost is comparatively negligible.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between `DELETE`, `TRUNCATE`, and `DROP` in SQL Server, in terms of what they remove and how they're logged?**
+
+`DELETE` removes rows matching a `WHERE` clause (or all rows, if omitted) one at a time, fully logged in the transaction log (each row deletion individually recorded, making it rollback-able and slower for large tables). `TRUNCATE` removes *all* rows from a table by deallocating entire data pages at once — minimally logged, and dramatically faster for clearing a large table, but cannot use a `WHERE` clause. `DROP` removes the table's entire structure, not just its rows.
+
+```sql
+DELETE FROM Orders WHERE OrderDate < '2020-01-01'; -- selective, fully logged, slower for many rows
+
+TRUNCATE TABLE StagingOrders; -- removes ALL rows instantly, minimally logged, no WHERE clause possible
+
+DROP TABLE StagingOrders; -- removes the TABLE ITSELF -- structure, data, indexes, constraints, everything
+```
+`TRUNCATE`'s speed comes from deallocating whole pages rather than logging each row's removal individually — this also means `TRUNCATE` resets any `IDENTITY` column back to its seed value (a `DELETE FROM` of all rows does not), and cannot be used on a table referenced by an active foreign key constraint from another table without first addressing that constraint.
+
+**Common Pitfall:** reaching for `TRUNCATE` on a table that's referenced by a foreign key elsewhere, expecting it to behave like an unconditional `DELETE` — `TRUNCATE` is blocked outright by a referencing foreign key constraint (even if the referencing table currently has zero matching rows), a restriction `DELETE` doesn't share; developers sometimes discover this only when a script that worked fine in one environment fails in another where the referencing relationship happens to exist.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is a SQL Server Computed Column, and how does the distinction between a regular (non-persisted) and a `PERSISTED` computed column affect storage versus computation cost?**
+
+A computed column's value is derived from an expression over other columns in the same row, rather than being explicitly stored input data. By default, a computed column is **not** physically stored — its value is recalculated on every read. Marking it `PERSISTED` tells SQL Server to physically store the computed value on disk, recalculating it only when a dependent column actually changes.
+
+```sql
+CREATE TABLE OrderLines (
+    Quantity INT NOT NULL,
+    UnitPrice DECIMAL(10,2) NOT NULL,
+    LineTotal AS (Quantity * UnitPrice), -- NOT persisted: recomputed on every SELECT
+    LineTotalPersisted AS (Quantity * UnitPrice) PERSISTED -- physically stored, recomputed only on write
+);
+```
+A non-persisted computed column trades storage space for CPU cost on every read (cheap for simple arithmetic like this example, but potentially expensive for a costly expression); a `PERSISTED` computed column trades that recomputation cost for storage space, recalculating only when `Quantity` or `UnitPrice` actually changes on a write.
+
+**Why `PERSISTED` also unlocks something a non-persisted computed column can't do — being indexed:** a non-persisted computed column generally cannot be indexed directly (since its value isn't materialized anywhere to index) — marking it `PERSISTED` makes it eligible for a regular index, letting you build an index on `LineTotalPersisted` to speed up queries filtering or sorting on that computed value, something impossible on the non-persisted version.
+
+**Common Pitfall:** leaving a computed column non-persisted while also wishing to index it or noticing it recomputing an expensive expression repeatedly on every query touching the row — if the computed value is queried/filtered/sorted-on frequently, or the expression itself is non-trivial, marking it `PERSISTED` (and then indexing it, if needed) is usually the right trade, provided the deterministic-expression requirement `PERSISTED` imposes (no calls to non-deterministic functions like `GETDATE()`) is actually satisfiable by the expression in question.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is SQL Server's Read Committed Snapshot Isolation (RCSI), and how does enabling it change readers from BLOCKING behind writers to reading a consistent, slightly-stale row version instead?**
+
+Under the default `READ COMMITTED` isolation level (pessimistic locking), a reader attempting to read a row currently locked by an uncommitted writer transaction **blocks**, waiting for that writer to commit or roll back. RCSI changes this: readers instead see the last-committed version of the row *before* the writer's transaction began, from a row-versioning store — no blocking occurs at all.
+
+```sql
+ALTER DATABASE MyAppDb SET READ_COMMITTED_SNAPSHOT ON;
+```
+```sql
+-- Session A (a writer, mid-transaction, not yet committed):
+BEGIN TRAN;
+UPDATE Products SET Price = 39.99 WHERE Id = 5; -- row now locked, transaction NOT yet committed
+
+-- Session B (a reader), under DEFAULT locking read committed:
+SELECT Price FROM Products WHERE Id = 5; -- BLOCKS until Session A commits or rolls back
+
+-- Session B, with RCSI enabled instead:
+SELECT Price FROM Products WHERE Id = 5; -- returns the PRE-update price immediately, NO blocking
+```
+Under RCSI, SQL Server maintains row versions in `tempdb`'s version store — a reader queries the version of the row as it existed at the *start* of its own statement/transaction, entirely independent of any in-progress, uncommitted write happening concurrently, eliminating reader/writer blocking almost entirely.
+
+**The trade-off — this isn't free:** row versioning imposes real overhead on `tempdb` (storing the version chain for modified rows) and on every write (maintaining that version store), and readers may see data that's already slightly stale by the time they read it (the value as of statement/transaction start, not necessarily the absolute latest committed value) — RCSI trades a *specific* kind of consistency guarantee for a dramatic reduction in blocking-related contention, which is usually the right trade for read-heavy OLTP workloads suffering badly from reader/writer blocking.
+
+**Common Pitfall:** enabling RCSI purely because "our app has blocking issues" without accounting for the additional `tempdb` I/O and space pressure row versioning introduces — for a system whose `tempdb` is already under-provisioned or already a contention point, RCSI's version-store overhead can shift the bottleneck rather than eliminate it; the trade should be evaluated with actual `tempdb` capacity/monitoring in mind, not applied as a reflexive fix for any blocking complaint.
+
+---

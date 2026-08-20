@@ -658,3 +658,103 @@ Rather than mocking a timeout in a unit test, this genuinely introduces network 
 **Common Pitfall:** running chaos experiments without first having the basic resilience mechanisms (timeouts, circuit breakers, retries — all covered earlier) in place at all — Chaos Engineering is meant to *validate and stress-test* resilience mechanisms that are believed to already exist, not to be the *first* place a team discovers "we have no timeout configured at all"; running chaos experiments against a system with no baseline resilience design is more likely to just cause an unplanned outage than to produce a useful, actionable finding.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is a "Flaky Test," and what are the two most common ROOT CAUSES behind a test that passes most of the time but occasionally fails without any actual code change?**
+
+A flaky test is one whose outcome (pass or fail) is inconsistent across repeated runs against the exact same, unchanged code — it isn't testing a genuine, deterministic behavior reliably, which erodes trust in the entire test suite over time (a team that sees "test X failed again, just re-run it" stops trusting failures as meaningful signals at all).
+
+**Root Cause 1 — Shared, uncleaned state between test runs:**
+```csharp
+private static List<Order> _orders = new(); // STATIC -- shared across every test in the class
+
+[Fact]
+public void Test_A_AddsOrder()
+{
+    _orders.Add(new Order()); // mutates SHARED state
+    Assert.Single(_orders); // passes IF this test runs first/alone
+}
+
+[Fact]
+public void Test_B_ChecksEmptyList()
+{
+    Assert.Empty(_orders); // FAILS if Test_A happened to run first and left an order behind
+}
+```
+Whether this fails depends entirely on test execution *order* — if the test runner happens to run tests in a different order (parallelization, a different test framework version, alphabetical vs. declaration order), the outcome flips, despite zero actual code change.
+
+**Root Cause 2 — Timing-dependent assertions against asynchronous or concurrent code:**
+```csharp
+_ = Task.Run(() => backgroundJob.Process());
+await Task.Delay(100); // ASSUMES the background job finishes within 100ms
+Assert.True(backgroundJob.IsComplete); // flaky: fails whenever the job happens to take slightly longer
+```
+A fixed `Task.Delay` "hoping" a concurrent operation finished in time is inherently timing-dependent — under normal load it usually passes, but under CI runner contention, a slower machine, or simple bad luck, the delay isn't long enough, and the test fails despite no actual bug.
+
+**Common Pitfall:** "fixing" a flaky test by simply re-running it until it passes, or increasing a `Task.Delay`'s duration as a band-aid — both mask the underlying root cause (shared state, or a genuine race condition) without eliminating it; the durable fix is either full test isolation (fresh state per test, no static shared fields) or replacing arbitrary delays with a proper synchronization primitive/polling-with-timeout that waits for the actual condition rather than guessing at a duration.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is "Test Data Builder" pattern, and how does it solve the specific readability problem of a test's Arrange section being cluttered with irrelevant setup detail?**
+
+A Test Data Builder provides sensible defaults for every field of a complex object under test, letting each individual test override *only* the specific field(s) that matter to what it's actually verifying — keeping each test's Arrange section short and focused on what's relevant to that specific test's assertion.
+
+```csharp
+public class OrderBuilder
+{
+    private string _status = "Pending";
+    private decimal _total = 100m;
+    private DateTime _placedAt = new(2026, 1, 1);
+
+    public OrderBuilder WithStatus(string status) { _status = status; return this; }
+    public OrderBuilder WithTotal(decimal total) { _total = total; return this; }
+    public Order Build() => new() { Status = _status, Total = _total, PlacedAt = _placedAt };
+}
+
+[Fact]
+public void CancelledOrder_CannotBeShipped()
+{
+    // ARRANGE -- only the ONE field relevant to this test (Status) is overridden; everything
+    // else uses the builder's sensible defaults, keeping this test's setup laser-focused
+    var order = new OrderBuilder().WithStatus("Cancelled").Build();
+
+    var result = _shippingService.TryShip(order);
+
+    Assert.False(result.Success);
+}
+```
+Without the builder, this same test would need to construct a full `Order` object inline, specifying every field explicitly (`Total`, `PlacedAt`, and whatever else `Order` requires) even though only `Status` is actually relevant to what's being tested — cluttering the Arrange section with irrelevant detail that obscures what the test is genuinely checking.
+
+**Why this matters more as domain objects grow larger over time:** as an entity accumulates more required fields over a codebase's lifetime, every test constructing that entity inline needs updating whenever a new required field is added — a builder centralizes those sensible defaults in one place, so adding a new required field to `Order` means updating the builder once, rather than touching every test that constructs an `Order`.
+
+**Common Pitfall:** giving a Test Data Builder's default values that are *themselves* edge cases (an empty string, a zero total) rather than realistic, "happy path" defaults — tests that don't explicitly override a field should be testing against a normal, valid object by default, with only the specific field(s) relevant to that test deliberately varied; edge-case defaults make every other test implicitly (and often unintentionally) exercise that edge case too.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is Snapshot Testing, and what specific category of regression (an unintended change to a large, structured output) does it catch that traditional field-by-field assertions tend to miss or make tedious to write?**
+
+Snapshot Testing captures a piece of output (often a large object, a rendered UI component, or a serialized API response) once, saves it as a reference "snapshot," and on every subsequent test run, compares the current output against that saved snapshot — flagging *any* difference, however small, rather than requiring the test author to hand-write an assertion for every individual field.
+
+```csharp
+[Fact]
+public async Task GetOrderDetails_MatchesSnapshot()
+{
+    var response = await _client.GetAsync("/api/orders/123");
+    var json = await response.Content.ReadAsStringAsync();
+
+    await Verify(json); // compares against a saved "GetOrderDetails_MatchesSnapshot.verified.json" file
+    // if the ENTIRE response shape changes -- a field renamed, removed, or reordered -- this FAILS
+}
+```
+Rather than hand-writing dozens of individual `Assert.Equal` calls for every field in a large response object (tedious to write, and easy to forget updating when the shape legitimately changes), the snapshot approach captures the whole structure at once and flags *any* deviation — including changes the test author might not have thought to explicitly assert on, like an extra field silently appearing in the response, or a field's data type subtly changing.
+
+**Why this is specifically good at catching regressions in large, structured outputs:** a hand-written assertion only checks what the test author explicitly thought to check — a snapshot catches genuinely *any* structural change, including ones nobody anticipated when the test was originally written, which is exactly the failure mode traditional assertions are the weakest at (regressions in fields nobody remembered to specifically assert on).
+
+**Common Pitfall:** blindly accepting/updating a snapshot whenever a test fails ("just re-approve it") without actually reviewing *what* changed and whether that change was intentional — a snapshot test's entire value depends on a human genuinely reviewing each diff before approving a new snapshot; reflexively re-approving failing snapshots without review defeats the pattern's purpose entirely, turning it into a test that can never meaningfully fail regardless of what regression occurs.
+
+---

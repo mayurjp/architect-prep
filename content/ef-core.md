@@ -644,3 +644,83 @@ The interceptor hooks into EF Core's own query/save pipeline (using the Intercep
 **Common Pitfall:** assuming a second-level cache extension provides the exact same invalidation precision as hand-written cache-key-specific invalidation — most implementations invalidate at the *table* level (any write to `Products` invalidates *every* cached query touching `Products`, even ones logically unrelated to the specific row that changed), which is coarser-grained than a hand-rolled cache keyed and invalidated with full knowledge of exactly which specific query results are actually affected by a given write.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between EF Core's `Add`, `Attach`, and `Update` methods for an entity, and when would you use each?**
+
+All three put an entity under EF Core's change tracking, but with different starting states. `Add` marks the entity `Added` (will `INSERT` on `SaveChanges`). `Attach` marks it `Unchanged` (assumes it already exists unmodified in the database — no SQL runs on `SaveChanges` unless you explicitly change a property afterward). `Update` marks it `Modified` (will `UPDATE` **every** property on `SaveChanges`, regardless of what actually changed).
+
+```csharp
+var newProduct = new Product { Name = "Keyboard", Price = 29.99m };
+context.Products.Add(newProduct); // will INSERT
+await context.SaveChangesAsync();
+
+var existingProduct = new Product { Id = 5, Name = "Mouse", Price = 19.99m }; // came from an API request, NOT tracked
+context.Products.Update(existingProduct); // marks EVERY property Modified -- will UPDATE the whole row
+await context.SaveChangesAsync();
+
+var toReattach = new Product { Id = 7 };
+context.Products.Attach(toReattach); // marks Unchanged -- no SQL runs unless a property is changed next
+toReattach.Price = 24.99m; // NOW this specific property becomes Modified
+await context.SaveChangesAsync(); // UPDATEs only the Price column
+```
+`Update` is convenient specifically for detached entities (received from an API, deserialized from JSON) whose exact prior database state EF Core has no tracked knowledge of — since EF Core can't know which properties actually changed, it conservatively marks *all* of them Modified, guaranteeing correctness at the cost of an `UPDATE` statement writing every column, not just the ones that logically changed.
+
+**Common Pitfall:** calling `Update()` on a detached entity assuming EF Core will intelligently detect only the fields that changed — it can't, since it has no baseline to diff against; if minimizing the `UPDATE` statement's column list matters (auditing, avoiding unnecessary trigger firings), you need to either re-query the existing entity first and apply changes onto the tracked instance, or use `Attach` plus explicit per-property assignment as shown above.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is EF Core's Global Query Filter (`HasQueryFilter`), and how does it let a condition like "exclude soft-deleted rows" apply AUTOMATICALLY to every query against an entity, without repeating a `.Where()` clause everywhere?**
+
+`HasQueryFilter`, configured once in `OnModelCreating`, attaches a filter predicate to an entity type that EF Core automatically applies to **every** LINQ query against that entity, everywhere in the codebase — without any individual query needing to remember to add the filter condition itself.
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<Product>().HasQueryFilter(p => !p.IsDeleted); // applied to EVERY query, automatically
+}
+
+// Anywhere else in the codebase:
+var products = await context.Products.ToListAsync(); // automatically excludes IsDeleted == true rows
+```
+Every developer querying `Products` anywhere in the application automatically benefits from the soft-delete filter, without needing to know the filter exists or remember to add `.Where(p => !p.IsDeleted)` themselves — a query written by someone unfamiliar with the soft-delete convention still behaves correctly, since the filter is baked into the model itself rather than relying on every call site remembering to apply it.
+
+**Deliberately bypassing the filter for the rare case that legitimately needs it (an admin "view deleted items" screen):**
+```csharp
+var allProducts = await context.Products.IgnoreQueryFilters().ToListAsync(); // includes soft-deleted rows too
+```
+
+**Common Pitfall:** forgetting that a Global Query Filter applies even to queries reached via *navigation properties* (`order.Products` where `Products` is filtered) — a developer querying through a relationship might be surprised when expected related rows are silently missing, not realizing a global filter defined elsewhere in the model is silently excluding them; this is usually the desired behavior for soft-delete, but it's easy to forget the filter exists when debugging an "why is this related data missing" issue months after the filter was configured.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is EF Core's `ExecuteUpdate`/`ExecuteDelete` (introduced in EF Core 7), and how does it let you perform a bulk update/delete directly in the DATABASE, without loading entities into memory and change-tracking them first?**
+
+Normally, updating or deleting rows via EF Core means: query the entities into memory, modify tracked properties (or call `Remove()`), then call `SaveChangesAsync()` — for a bulk operation touching many rows, this means materializing every affected entity into memory first, purely to then issue individual (or batched) `UPDATE`/`DELETE` statements per tracked change. `ExecuteUpdate`/`ExecuteDelete` skip all of that, translating directly to a single bulk SQL statement.
+
+```csharp
+// The OLD way -- loads every matching row into memory as tracked entities first
+var staleProducts = await context.Products.Where(p => p.LastSold < cutoffDate).ToListAsync();
+foreach (var p in staleProducts) p.IsArchived = true;
+await context.SaveChangesAsync(); // one UPDATE per tracked entity (or a batched multi-statement round trip)
+
+// The NEW way -- translates DIRECTLY to a single SQL UPDATE statement, no entities loaded into memory at all
+await context.Products
+    .Where(p => p.LastSold < cutoffDate)
+    .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.IsArchived, true));
+```
+```sql
+UPDATE [Products] SET [IsArchived] = 1 WHERE [LastSold] < @cutoffDate
+```
+For a query matching thousands of rows, the old approach must materialize every one of those rows into memory as tracked `Product` instances (real memory and query cost) purely to flip one boolean — `ExecuteUpdateAsync` instead translates the entire operation into one SQL statement that runs entirely inside the database, touching zero application memory for the affected rows.
+
+**Why this matters specifically for bulk operations, not typical single-entity updates:** for updating one specific, already-loaded entity, normal change tracking remains simpler and perfectly adequate — `ExecuteUpdate`/`ExecuteDelete` earn their complexity specifically for bulk operations across many rows, where materializing every affected entity purely to apply an identical change to all of them is wasted memory and query cost.
+
+**Common Pitfall:** using `ExecuteUpdate`/`ExecuteDelete` on entities that have important `SaveChanges`-time behavior configured (like an interceptor recording an audit log entry per change, or domain events raised from entity setters) — because these bulk operations bypass EF Core's normal change-tracking and `SaveChanges` pipeline entirely, any custom `SaveChanges` interceptor, audit logging, or domain-event-raising logic tied to that pipeline simply won't run for rows updated this way, which can introduce a subtle audit/consistency gap in the affected rows' history.
+
+---

@@ -539,3 +539,86 @@ Console.WriteLine(intView[5]); // reads bytes 20-23 directly AS an int32, no Bit
 **Common Pitfall:** using type reinterpretation across platforms/systems with different byte-order (endianness) without accounting for it — unlike `BitConverter.ToInt32()`, which has well-understood (if easy to get wrong) endianness behavior, a raw memory reinterpretation via `MemoryMarshal.Cast` simply views the bytes AS the target type using the *current machine's* native byte order; data received from a system with different endianness (or a file format specifying a fixed byte order different from the current machine's native one) will be silently misinterpreted unless the endianness is explicitly accounted for before or after the cast.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the N+1 Query Problem, and why is it one of the most common, easy-to-accidentally-introduce performance bugs in applications using an ORM?**
+
+The N+1 problem occurs when code fetches a list of N parent entities with one query, then executes a *separate* query for each of those N entities' related data — resulting in 1 + N total database round trips instead of a small, fixed number, regardless of how large N grows.
+
+```csharp
+var orders = await context.Orders.ToListAsync(); // Query #1: fetches N orders
+
+foreach (var order in orders)
+{
+    var customer = await context.Customers.FindAsync(order.CustomerId); // one MORE query, PER order!
+    Console.WriteLine($"{order.Id}: {customer.Name}");
+}
+// Total: 1 + N queries -- for 1,000 orders, that's 1,001 round trips to the database
+```
+**The fix — eagerly load the related data in the SAME query, via a join:**
+```csharp
+var orders = await context.Orders.Include(o => o.Customer).ToListAsync(); // ONE query, with a SQL JOIN
+foreach (var order in orders)
+{
+    Console.WriteLine($"{order.Id}: {order.Customer.Name}"); // no additional query -- already loaded
+}
+// Total: 1 query, regardless of how many orders there are
+```
+The performance impact scales directly with the number of parent rows — for a small list this bug is invisible in local testing (maybe 10 extra queries, unnoticeable), but the exact same code against production data volumes (thousands of orders) turns into thousands of extra round trips, each carrying its own network latency, making N+1 a classic bug that passes code review and local testing cleanly but causes serious production performance problems.
+
+**Common Pitfall:** not noticing an N+1 pattern because each individual query is fast in isolation — the problem isn't any single query's cost, it's the multiplicative *round-trip* cost accumulating across N iterations; profiling tools that count total queries per request (or simply reviewing generated SQL logs) are usually how N+1 issues are actually caught, since the symptom (a slow endpoint) doesn't obviously point to "too many queries" without directly inspecting what's actually being executed.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is Object Pooling (`ObjectPool<T>` in .NET), and what specific cost does it avoid for objects that are expensive to allocate/initialize but safe to reuse across requests?**
+
+Object Pooling maintains a pre-allocated set of reusable objects, handing one out on request and returning it to the pool when the caller is done, rather than allocating a brand-new instance (and letting the garbage collector eventually reclaim it) every single time one is needed — worthwhile specifically for objects whose construction is expensive relative to how often they're needed.
+
+```csharp
+public class ExpensiveBuffer
+{
+    public byte[] Data { get; } = new byte[1024 * 1024]; // a 1 MB buffer -- costly to allocate repeatedly
+}
+
+var pool = new DefaultObjectPool<ExpensiveBuffer>(new DefaultPooledObjectPolicy<ExpensiveBuffer>());
+
+var buffer = pool.Get(); // reuses an EXISTING buffer if one is available, avoiding a fresh 1MB allocation
+// ... use buffer.Data ...
+pool.Return(buffer); // returns it to the pool for the NEXT caller to reuse, instead of letting GC collect it
+```
+Without pooling, each request needing a buffer like this triggers a full new 1MB allocation, and shortly after, that same 1MB becomes garbage for the GC to eventually collect — under sustained load, this creates constant allocation/collection churn; pooling instead reuses the same small set of buffers repeatedly, keeping both allocation cost and GC pressure dramatically lower.
+
+**Why pooling is reserved for specifically expensive-to-construct, safely-reusable objects — not applied universally:** pooling every object type indiscriminately adds real complexity (must remember to `Return()`, must ensure returned objects are reset to a clean state before reuse, thread-safety of the pool itself) for objects cheap enough to allocate that pooling's overhead isn't worth it — .NET's own `ArrayPool<T>` and connection pooling for database connections are the classic, well-justified examples; pooling a small, cheap `Order` DTO would add complexity for negligible benefit.
+
+**Common Pitfall:** forgetting to reset a pooled object's state before returning it to the pool, or before using one just retrieved from it — a pooled object that isn't properly reset can leak stale data from a *previous* caller into a new caller's usage, a subtle bug class that plain per-request allocation (where each object starts genuinely fresh) simply cannot produce.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is the .NET `ArrayPool<T>.Shared` pool specifically, and how does its RENTAL model (`Rent`/`Return`) differ from ordinary object pooling in terms of the SIZE guarantee it provides?**
+
+`ArrayPool<T>.Shared` is a built-in, thread-safe pool specifically for arrays, optimized for the extremely common "I need a temporary buffer" pattern — but critically, `Rent(minimumLength)` guarantees an array **at least** as large as requested, not necessarily *exactly* that size, meaning callers must always track and use the logically-relevant length separately from the rented array's actual `.Length`.
+
+```csharp
+byte[] buffer = ArrayPool<byte>.Shared.Rent(1024); // may return an array LARGER than 1024 (e.g., 1024 exactly, or 2048)
+try
+{
+    int bytesRead = await stream.ReadAsync(buffer, 0, 1024);
+    ProcessData(buffer, bytesRead); // MUST use bytesRead, NOT buffer.Length, as the logical data length
+}
+finally
+{
+    ArrayPool<byte>.Shared.Return(buffer); // return it for reuse -- doesn't zero the contents by default!
+}
+```
+Because `Rent` may hand back a larger array than requested (to maximize reuse across differently-sized requests by rounding up to convenient bucket sizes internally), code must always track the *actual* logical data length separately (`bytesRead` above) rather than assuming `buffer.Length` reflects how much valid data is present — using `buffer.Length` directly would process uninitialized or stale trailing bytes from the array's actual (larger) capacity.
+
+**The `clearArray` parameter on `Return` — a security-relevant trade-off:** `Return(buffer, clearArray: true)` zeroes the array's contents before it re-enters the pool, at some extra cost — worth enabling specifically when the buffer may have held sensitive data (decrypted secrets, personal information) that must not leak into whatever the *next* renter of that same array happens to read from its leftover, un-cleared bytes.
+
+**Common Pitfall:** treating a rented array's `.Length` as the amount of valid data it contains — since `Rent` may return an oversized array, code that iterates `for (int i = 0; i < buffer.Length; i++)` instead of the actual known-valid length can process garbage/stale bytes left over from a previous renter (or simply uninitialized memory), a bug that's easy to overlook since it doesn't throw an exception, it just silently processes incorrect data.
+
+---

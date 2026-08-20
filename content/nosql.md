@@ -498,3 +498,93 @@ This is the key philosophical difference from Last-Write-Wins: rather than the *
 **Common Pitfall:** assuming Vector Clocks eliminate the *need* for conflict resolution entirely — they only provide better *detection* of genuine concurrency; the application still needs domain-specific merge logic to actually reconcile detected conflicts, which is real, non-trivial engineering work that Last-Write-Wins avoids entirely (at the cost of sometimes silently discarding legitimate concurrent writes) — Vector Clocks trade "simple but sometimes silently loses data" for "correctly detects conflicts, but requires you to write the merge logic yourself."
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is a "Document" in a Document Database (like MongoDB), and how does its self-describing, nested structure differ from a relational database's flat row-and-column model?**
+
+A document is a single, self-contained unit of data (typically JSON or a JSON-like binary format such as MongoDB's BSON) that can nest arrays and sub-objects directly within it — unlike a relational row, which is flat (each column holds one scalar value) and represents related nested data via separate, foreign-key-linked tables instead.
+
+```json
+{
+  "_id": "order123",
+  "customerName": "Alice",
+  "orderDate": "2026-01-15",
+  "items": [
+    { "product": "Keyboard", "quantity": 1, "price": 29.99 },
+    { "product": "Mouse", "quantity": 2, "price": 19.99 }
+  ],
+  "shippingAddress": { "street": "123 Main St", "city": "Springfield" }
+}
+```
+This single document represents an order, its line items, and its shipping address all together, nested within one self-contained record — the relational equivalent would normally split this across an `Orders` table, an `OrderItems` table (linked via a foreign key), and possibly a separate `Addresses` table, requiring a `JOIN` across all three to reconstitute the full order.
+
+**Why this matters for read performance on a common access pattern:** if the application's dominant access pattern is "fetch one order and everything about it" (exactly the shape shown above), a document database can satisfy that with a single lookup by `_id` — no joins required — whereas the relational equivalent needs to join across multiple tables to assemble the same logical unit, which is more query planning and I/O work per request.
+
+**Common Pitfall:** modeling data as deeply nested documents purely because "NoSQL supports nesting," even when the actual access patterns frequently need to query or update the *nested* sub-structures independently (find all orders containing a specific product, update just one line item's quantity) — document databases generally handle whole-document reads/writes efficiently, but querying or partially updating deeply nested sub-structures can be considerably more awkward than the equivalent operation against normalized relational tables designed for exactly that kind of independent access.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is a Wide-Column Store's (like Apache Cassandra) "Partition Key" versus "Clustering Key," and how does this two-part key design directly shape which queries can run efficiently?**
+
+In a Wide-Column Store, the Partition Key determines *which physical node* in the cluster stores a given row (all rows sharing the same partition key value live together on the same set of nodes) — the Clustering Key then determines the *sort order* of rows *within* that partition. Together, they form the table's full primary key, and critically, **the query patterns a table can efficiently support are decided at table-design time by this key choice**, not flexibly at query time.
+
+```sql
+CREATE TABLE sensor_readings (
+    sensor_id UUID,
+    reading_time TIMESTAMP,
+    temperature DOUBLE,
+    PRIMARY KEY (sensor_id, reading_time) -- sensor_id: partition key, reading_time: clustering key
+);
+
+-- EFFICIENT: reads from exactly ONE partition, rows already sorted by reading_time on disk
+SELECT * FROM sensor_readings WHERE sensor_id = ? AND reading_time > ?;
+
+-- INEFFICIENT / often DISALLOWED: no partition key specified -- would require scanning EVERY partition
+SELECT * FROM sensor_readings WHERE temperature > 100;
+```
+Because `reading_time` is the clustering key, rows for a given `sensor_id` are physically stored on disk already sorted by time — a range query on `reading_time` *within* one sensor's partition is extremely efficient, reading a contiguous disk range. A query filtering on `temperature` (not part of the key at all) has no such locality guarantee and would require scanning across potentially every partition in the cluster — many wide-column stores disallow such queries outright unless an additional secondary index is built.
+
+**Why this differs fundamentally from a relational database's query flexibility:** a relational database's query optimizer can construct a reasonable (if not always fast) execution plan for nearly *any* `WHERE` clause combination, using whatever indexes exist — a wide-column store's efficient query shapes are decided structurally at table-design time by the partition/clustering key choice, meaning **the application's actual query patterns must be known in advance**, before the table schema is even designed, a markedly different design discipline than "model the data first, add indexes to your queries later."
+
+**Common Pitfall:** designing a wide-column store's table schema the way one would design a relational schema first (normalized, generic, "flexible for future queries") and only later discovering the actual query patterns the application needs aren't efficiently supported by the chosen partition/clustering key — in wide-column stores, the query patterns should drive the schema design from the very start, not the other way around.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is Redis's "Cache-Aside" pattern combined with a "Stampede Lock," and what specific failure mode (the "Thundering Herd" / "Cache Stampede") does the lock prevent?**
+
+Cache-Aside means the application checks the cache first, and on a miss, queries the source database and populates the cache for next time. Without additional protection, if the cached value expires under **heavy concurrent traffic**, many requests can simultaneously experience a cache miss at the same moment and all hit the database simultaneously to recompute the same value — the "Thundering Herd" or "Cache Stampede" problem. A Stampede Lock prevents this by letting only ONE of those simultaneous requests actually query the database, while the rest wait briefly for that one request's result.
+
+```csharp
+public async Task<Product> GetProductAsync(int id)
+{
+    var cached = await _cache.GetAsync($"product:{id}");
+    if (cached is not null) return Deserialize(cached);
+
+    // Cache miss -- try to acquire a short-lived DISTRIBUTED LOCK before hitting the database
+    var lockAcquired = await _cache.SetAsync($"lock:product:{id}", "1",
+        when: When.NotExists, expiry: TimeSpan.FromSeconds(5));
+
+    if (lockAcquired)
+    {
+        var product = await _database.GetProductAsync(id); // ONLY this one request hits the DB
+        await _cache.SetAsync($"product:{id}", Serialize(product), expiry: TimeSpan.FromMinutes(10));
+        await _cache.DeleteAsync($"lock:product:{id}");
+        return product;
+    }
+    else
+    {
+        await Task.Delay(50); // brief wait, then retry -- the LOCK HOLDER will likely have populated the cache by now
+        return await GetProductAsync(id);
+    }
+}
+```
+Without the lock, a popular product's cache entry expiring during heavy traffic could cause hundreds or thousands of concurrent requests to simultaneously query the database for the *exact same* row — with the lock, only the single request that successfully acquires it queries the database, while every other concurrent request briefly waits and then finds the now-freshly-populated cache entry instead.
+
+**Common Pitfall:** implementing the lock-acquisition/release logic non-atomically (checking existence, then separately setting the lock as two distinct operations) — this reintroduces a race condition where multiple requests could both believe they acquired the lock; correct implementations rely on the cache's own atomic "set if not exists" primitive (as shown above) specifically to guarantee only one concurrent request ever successfully acquires the lock.
+
+---
