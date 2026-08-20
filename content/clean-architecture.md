@@ -695,3 +695,98 @@ This is the precise modeling-level reason the Saga pattern (covered so extensive
 **Common Pitfall:** treating Aggregate boundaries as a purely technical/performance decision (how big can one object graph reasonably be) rather than recognizing they directly determine transactional consistency requirements — a boundary drawn without considering "what actually needs atomic consistency together, versus what can tolerate eventual consistency" tends to produce either overly-large Aggregates causing contention, or overly-fragmented ones requiring Sagas for operations that didn't actually need cross-Aggregate coordination in the first place.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the "Dependency Rule" at the heart of Clean Architecture, stated in its simplest form — and why does it specifically govern the direction source code dependencies point, rather than the direction data or control flow moves?**
+
+The Dependency Rule states: source code dependencies can only point *inward*, toward higher-level policy — an inner layer (like business logic/entities) must never reference anything defined in an outer layer (like a database or a web framework). This is specifically about which layer's *code* is allowed to `import`/`reference` which other layer's code — not about which direction requests or data physically flow at runtime.
+
+```csharp
+// Inner layer (Domain/Entities) -- must NEVER reference anything from an outer layer
+public class Order
+{
+    public void ConfirmOrder() { /* pure business logic, ZERO reference to EF Core, ASP.NET, etc. */ }
+}
+
+// Outer layer (Infrastructure) -- ALLOWED to reference the inner layer
+public class EfOrderRepository : IOrderRepository // IOrderRepository is defined in the inner layer
+{
+    public async Task SaveAsync(Order order) { /* uses EF Core -- an OUTER-layer concern */ }
+}
+```
+Even though a runtime request flows *outside-in* (an HTTP request from the web layer eventually reaches domain logic), the *code dependency* (which class references which) points the opposite way: the outer `EfOrderRepository` depends on (references) the inner `Order`/`IOrderRepository`, but `Order` has zero knowledge that EF Core, or any database, exists at all.
+
+**Why this specific asymmetry (data can flow outward-in, but code dependencies must point inward) is the actual point of the whole architecture:** it lets the business logic — the most valuable, most expensive-to-get-right part of a system — remain completely ignorant of which specific database, web framework, or UI technology surrounds it; changing the database technology (or replacing ASP.NET with a console app) means only changing outer-layer code, never touching the inner business logic at all, since it never referenced any outer-layer detail in the first place.
+
+**Common Pitfall:** conflating "data flows through the system in this direction" with "dependencies must point in this direction" — a request genuinely does travel from the outside (a controller) inward (to domain logic) and back outward (to a response), but this data-flow direction has no bearing on which layer's source code is allowed to `using`/`import` which other layer's types; the Dependency Rule governs the latter, not the former.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is a Clean Architecture "Use Case" (or "Interactor"), and how does its single, narrow responsibility differ from a typical MVC controller action that both handles HTTP concerns AND orchestrates business logic together?**
+
+A Use Case represents one specific application operation (e.g., "Place An Order") as its own dedicated class, containing ONLY the orchestration logic for that operation — completely unaware of HTTP, JSON serialization, or any other outer-layer concern; a typical MVC controller action, by contrast, often mixes HTTP-specific concerns (parsing the request, returning the right status code) together with the actual business orchestration in the same method.
+
+```csharp
+// A Use Case -- pure orchestration logic, ZERO knowledge of HTTP/JSON/status codes
+public class PlaceOrderUseCase
+{
+    private readonly IOrderRepository _orders;
+    private readonly IPaymentGateway _payments;
+
+    public async Task<Order> ExecuteAsync(PlaceOrderRequest request)
+    {
+        var order = new Order(request.CustomerId, request.Items);
+        await _payments.ChargeAsync(order.Total);
+        await _orders.SaveAsync(order);
+        return order;
+    }
+}
+
+// The Controller -- ONLY handles HTTP concerns, delegates ALL orchestration to the Use Case
+[HttpPost]
+public async Task<IActionResult> PlaceOrder(PlaceOrderRequest request)
+{
+    var order = await _placeOrderUseCase.ExecuteAsync(request); // controller doesn't orchestrate anything itself
+    return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, order); // ONLY HTTP-specific translation
+}
+```
+Because `PlaceOrderUseCase` contains zero references to `IActionResult`, HTTP status codes, or any web-framework type, the exact same Use Case could be invoked from a console application, a message-queue consumer, or a completely different web framework, without any change to the Use Case itself — only a thin, framework-specific adapter (the controller, or a queue message handler) needs to change per entry point.
+
+**Why this differs meaningfully from a "fat controller":** a controller action that both parses the request AND directly orchestrates business logic inline mixes two genuinely different responsibilities (HTTP translation, and business orchestration) into one method — testing the business logic then requires spinning up (or mocking) the entire HTTP pipeline, whereas a Use Case can be unit tested directly, with no HTTP infrastructure involved at all.
+
+**Common Pitfall:** creating a "Use Case" class that's really just a thin pass-through wrapper calling a single repository method, adding a layer of indirection without any actual orchestration logic to justify it — Use Cases earn their keep specifically when there's genuine multi-step orchestration (calling several services/repositories in sequence, as shown above); for a truly trivial single-repository-call operation, the extra Use Case class may just be needless ceremony.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is the "Humble Object" pattern, and how does it let Clean Architecture's inner layers remain UNIT-testable even when they must eventually interact with something genuinely hard to test in isolation (like a UI framework or hardware)?**
+
+The Humble Object pattern splits behavior that's hard to test (rendering to a screen, talking to hardware) away from logic that's easy to test (decisions, calculations, formatting) — by extracting all the *meaningful* logic into a separate, plain object with no dependency on the hard-to-test framework, leaving only a deliberately "humble" (trivial, logic-free) wrapper that directly touches the hard-to-test part.
+
+```csharp
+// The "Humble" part -- deliberately trivial, contains almost NO logic worth testing
+public partial class OrderSummaryPage : Page
+{
+    private readonly OrderSummaryPresenter _presenter;
+    public void OnLoad() => _presenter.Load(); // just delegates -- nothing here worth unit testing directly
+    public void ShowTotal(string formattedTotal) => TotalLabel.Text = formattedTotal; // trivial UI update
+}
+
+// The "Presenter" -- ALL the actual logic lives here, fully unit-testable, ZERO reference to the UI framework
+public class OrderSummaryPresenter
+{
+    public string FormatTotalForDisplay(decimal total) =>
+        total >= 1000 ? $"{total:C0}" : $"{total:C2}"; // real logic worth testing, entirely UI-framework-free
+}
+```
+`OrderSummaryPresenter.FormatTotalForDisplay` can be unit tested directly and exhaustively (many total values, formatting edge cases) with zero UI framework involved at all — `OrderSummaryPage` itself is left so trivial (just wiring calls through) that it barely needs testing, and what little logic it does contain is nearly impossible to get wrong, precisely because virtually all meaningful logic was deliberately extracted out of it.
+
+**Why this matters for Clean Architecture specifically at its outermost boundary:** the outermost layers (UI, hardware drivers, certain legacy framework integrations) are sometimes genuinely difficult or impractical to unit test directly — Humble Object accepts that reality rather than fighting it, by ensuring as little logic as possible actually lives in that hard-to-test outer shell, pushing everything meaningful inward to layers that remain fully testable.
+
+**Common Pitfall:** letting "just a little bit" of real logic creep into the humble/UI layer over time (a conditional here, a calculation there, "it's just one small thing") — each such addition is untested and untestable by the same means as the rest of the logic, and these small additions accumulate; the discipline of Humble Object requires actively resisting even small amounts of logic creeping into the deliberately "dumb" outer shell, not just applying the pattern once and assuming it stays that way.
+
+---

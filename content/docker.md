@@ -558,3 +558,68 @@ The underlying shared layer is never actually modified — a copy-on-write opera
 **Common Pitfall:** writing large amounts of data to a container's writable layer during normal operation (treating it as general-purpose persistent storage) rather than using a proper volume mount (covered earlier) — the writable layer is deliberately optimized for small, container-lifecycle-scoped changes; using it for substantial data volumes both performs worse than a dedicated volume and, critically, is lost entirely when the container is removed, unlike data in a properly-mounted volume.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is the difference between `docker stop` and `docker kill`, in terms of what signal each sends and how much time a container's process gets to shut down gracefully?**
+
+`docker stop` sends `SIGTERM` first, then waits a configurable grace period (default 10 seconds) for the container's main process to exit on its own, and only sends `SIGKILL` (an unconditional, immediate termination) if the process hasn't exited by then. `docker kill` sends `SIGKILL` immediately by default, with no grace period at all.
+
+```bash
+docker stop my-container          # SIGTERM, wait up to 10s, THEN SIGKILL if still running
+docker stop -t 30 my-container    # SIGTERM, wait up to 30s -- more time for graceful cleanup
+docker kill my-container          # SIGKILL immediately -- no grace period, no chance to clean up
+```
+A process that handles `SIGTERM` (closing database connections, finishing in-flight requests, flushing buffers) gets the opportunity to do so under `docker stop`, but has no such opportunity under `docker kill`, which terminates it instantly regardless of what it was doing.
+
+**Common Pitfall:** reaching for `docker kill` as a default "make it stop now" habit during development, without realizing that a process performing meaningful cleanup work (writing buffered data, finishing a database transaction) gets no chance to do so — `docker stop` (with an appropriately generous grace period for the specific workload) should be the default choice, reserving `docker kill` for genuinely stuck containers that `docker stop`'s grace period already failed to terminate gracefully.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is Docker's `HEALTHCHECK` instruction, and how does a container reporting itself as "unhealthy" differ from simply crashing (exiting) in terms of what orchestration tooling can observe and act on?**
+
+`HEALTHCHECK` lets a container run a periodic command inside itself to determine whether it's actually functioning correctly, beyond merely "the process is still running" — Docker (and orchestrators built on top of it, like Kubernetes with its own separate liveness/readiness probes) can observe this health status and take action, without the container process needing to crash/exit for the problem to become visible externally.
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+```
+```bash
+docker ps
+# STATUS column shows: "Up 5 minutes (healthy)" or "Up 5 minutes (unhealthy)"
+```
+A container can be "unhealthy" (its process is still running, technically alive) while genuinely unable to serve traffic correctly — a database connection pool that's exhausted, or a dependency the application needs that's become unreachable, might leave the process running but functionally broken; without `HEALTHCHECK`, this state is invisible to Docker/orchestration tooling, which only sees "the process hasn't exited."
+
+**Why this distinction matters for orchestrators:** a process that's alive-but-broken and a process that's genuinely crashed require different remediation — Kubernetes' liveness probe (covered under the Kubernetes topic) can restart a container found unhealthy via its own probe mechanism, catching exactly this "technically running but functionally broken" state that a simple process-exit-based restart policy would never detect on its own.
+
+**Common Pitfall:** writing a `HEALTHCHECK` command that only verifies the process is listening on its port, without actually checking whether it can reach ITS OWN critical dependencies (its database, a required downstream service) — a health check this shallow reports "healthy" even when the application is functionally unable to serve real requests correctly, defeating the whole purpose of having a health check that's meant to reflect genuine operational readiness, not merely process liveness.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is a Docker BuildKit "Cache Mount" (`--mount=type=cache`), and how does it let a build step's cache (like a package manager's download cache) persist ACROSS separate builds, without that cache being baked into any image layer at all?**
+
+A regular Docker layer cache is invalidated whenever any earlier instruction or file changes — a Cache Mount is different: it's a *persistent* directory available during a `RUN` instruction's execution, surviving across many separate, otherwise-unrelated builds, without ever becoming part of the final image itself.
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM node:20 AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci   # npm's download cache persists in /root/.npm ACROSS BUILDS, even after this image is discarded
+
+COPY . .
+RUN npm run build
+```
+Without the cache mount, if `package-lock.json` changes even slightly (invalidating the normal Docker layer cache for this step), `npm ci` re-downloads every single package from scratch — with the cache mount, npm's own download cache directory (`/root/.npm`) persists independently of Docker's layer caching entirely, so even a full re-run of `npm ci` reuses already-downloaded packages from a previous, unrelated build.
+
+**Why this cache never ends up in the final image:** the mounted cache directory only exists for the duration of that specific `RUN` instruction's execution — it's explicitly excluded from the resulting layer, meaning the final image stays exactly as small as it would without any cache mount at all, while the *build process itself* still benefits from cached downloads across runs.
+
+**Common Pitfall:** assuming a Cache Mount behaves like a regular Docker layer cache (invalidated by earlier changes) — it doesn't; a Cache Mount persists regardless of what else changed earlier in the Dockerfile, which is exactly the point (a package manager's download cache should remain valid even when application source code changes), but this also means stale or corrupted cache contents can persist silently across many builds unless explicitly cleared (`docker builder prune`), a debugging wrinkle unique to this caching mechanism.
+
+---

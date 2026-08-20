@@ -1182,3 +1182,79 @@ If services can't genuinely be deployed independently — if deploying one *requ
 **Common Pitfall:** measuring "microservices success" purely by counting the number of separately-deployable-looking services that exist, without actually verifying whether any of them can be deployed genuinely independently in practice — the actual test of whether a system has achieved microservices' core benefit isn't "how many services do we have," it's "can Team X deploy their service on Tuesday afternoon without needing Team Y or Team Z to coordinate anything at all."
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is a "Service Registry," and how does it let one microservice discover the current network location of another WITHOUT hardcoding IP addresses anywhere?**
+
+A Service Registry is a directory that tracks the current, live network location (IP + port) of every running instance of every service — services register themselves with it on startup (and deregister on shutdown), and other services query it to discover where to actually send a request, rather than any service ever hardcoding another's address.
+
+```text
+1. OrderService instance starts up -> registers itself: "OrderService is at 10.0.1.15:8080"
+2. PaymentService needs to call OrderService -> queries the registry: "where is OrderService right now?"
+3. Registry responds: "10.0.1.15:8080, 10.0.1.22:8080" (TWO currently-running instances)
+4. PaymentService picks one (often via a load-balancing strategy) and sends its request there
+```
+Because instances register/deregister dynamically, the registry always reflects the *current* reality — if an instance crashes, scales down, or a new one is added, the registry's contents change automatically, and every other service querying it sees the updated set of available locations, without any service's own configuration needing to be manually updated.
+
+**Why this matters specifically in containerized/cloud environments:** a container's IP address is essentially unpredictable and constantly changing (scaling events, deployments, node rescheduling) — hardcoding IPs anywhere would break the moment any instance restarts at a new address; a Service Registry (Kubernetes' own built-in Service/DNS mechanism, or a dedicated tool like Consul/Eureka) is what makes dynamic, elastic infrastructure workable at all for inter-service communication.
+
+**Common Pitfall:** treating a Service Registry as something application code must explicitly query via its own API calls in every codebase — in most modern setups (particularly Kubernetes), service discovery is handled transparently via DNS (calling `http://payment-service` resolves automatically to the current instances) rather than requiring explicit registry-lookup code scattered throughout the application; understanding that a registry exists underneath is valuable, but application code rarely needs to interact with it directly in a Kubernetes-based deployment.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is the "Strangler Fig Pattern" for incrementally migrating a monolith to microservices, and why is it favored over a "big bang" full rewrite?**
+
+The Strangler Fig Pattern (named after the strangler fig vine, which gradually grows around and eventually replaces its host tree) incrementally routes specific pieces of functionality away from an existing monolith to new microservices, one capability at a time, while the monolith continues handling everything not yet migrated — rather than attempting a complete, all-at-once rewrite.
+
+```text
+Phase 1: A routing layer (reverse proxy/API gateway) sits in front of the monolith,
+         initially routing 100% of traffic to it, unchanged.
+
+Phase 2: The "Inventory" capability is extracted into a new InventoryService.
+         The routing layer now sends /api/inventory/* requests to InventoryService,
+         and everything else still goes to the monolith.
+
+Phase 3: "Orders" gets extracted next. Routing updated again.
+         ... repeat, one capability at a time ...
+
+Eventually: the monolith has been "strangled" down to nothing (or a small remaining core),
+            having been gradually replaced piece by piece, with the system remaining
+            fully functional and deployable at every single intermediate step.
+```
+At every phase, the overall system remains fully working and independently deployable — unlike a big-bang rewrite (build the entire new system in parallel, then cut over all at once), the Strangler Fig approach never has a long period where neither the old nor the new system is fully functional, and each individual extraction can be validated in production before moving to the next.
+
+**Why big-bang rewrites are specifically risky, and why this pattern avoids that risk:** a full parallel rewrite typically takes far longer than estimated, accumulates its own new bugs the old system doesn't have, and requires a single, high-stakes cutover moment where everything switches at once — if that cutover reveals a serious problem, there's often no easy way back, since the old system has been neglected (no bug fixes, no feature parity) throughout the rewrite. The Strangler Fig Pattern's incremental extractions each carry much lower individual risk, with the monolith remaining a safe fallback for everything not yet migrated.
+
+**Common Pitfall:** starting a Strangler Fig migration with the *hardest*, most deeply-coupled capability first (attempting to prove the approach on the riskiest possible piece) — the pattern's actual risk-reduction benefit comes from validating the approach (routing layer, new service's operational maturity, team's unfamiliarity with the new stack) on a lower-risk, more isolated capability first, building confidence and infrastructure before tackling the monolith's most deeply entangled, highest-risk pieces.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is the "Backends for Frontends" (BFF) pattern's relationship to API Gateway "sprawl," and how does having ONE gateway per client type (rather than one shared gateway for all clients) avoid a specific coordination bottleneck?**
+
+A single, shared API Gateway serving every client type (web, mobile, third-party partners) inevitably accumulates client-specific logic for each of them, all mixed together in one codebase — every client team needing a gateway change must coordinate through whichever team owns the shared gateway, which becomes an organizational bottleneck as the number of distinct client types grows. The BFF pattern instead gives each client type its *own*, dedicated gateway/aggregation layer, owned by (or closely aligned with) that client's own team.
+
+```text
+WITHOUT BFF -- one shared gateway, serving every client type:
+  Mobile team needs endpoint change -> must coordinate with the Gateway team
+  Web team needs different response shaping -> ALSO must coordinate with the Gateway team
+  Partner API team needs their own versioning scheme -> ALSO the Gateway team
+  -> the shared Gateway team becomes a bottleneck every other team must funnel through
+
+WITH BFF -- one gateway PER client type, owned closer to that client's own team:
+  Mobile-BFF (owned by/aligned with the mobile team) -- changes independently
+  Web-BFF (owned by/aligned with the web team) -- changes independently
+  Partner-BFF (owned by/aligned with the partner integrations team) -- changes independently
+  -> each client type's team can evolve ITS OWN gateway without coordinating with the others
+```
+Because each BFF is scoped to exactly one client type's specific needs, a mobile-specific optimization (the aggregation example covered under the Web API topic) lives entirely within Mobile-BFF's codebase, changeable by the mobile team without needing sign-off from whoever owns the web-facing BFF — this mirrors microservices' core promise of independent team ownership, applied specifically to the gateway/aggregation layer rather than just the backend services themselves.
+
+**The trade-off this pattern accepts:** multiple BFFs mean more services to operate, deploy, and monitor than a single shared gateway would require — genuinely worthwhile specifically when different client types have meaningfully divergent needs (a mobile app's aggressive response-shaping/bandwidth needs are legitimately different from a partner API's versioning and stability requirements); for an organization with only one client type, or clients with near-identical needs, a single shared gateway avoids this multiplication of operational surface without losing much.
+
+**Common Pitfall:** adopting BFFs merely because "it's a recognized pattern," in an organization where client needs are actually quite similar across client types — this multiplies the number of deployable services and operational surface area for a coordination problem that, in that specific context, wasn't actually severe enough to justify the added complexity; BFF earns its keep specifically when a single shared gateway has become a demonstrated, real coordination bottleneck, not as a default architectural choice applied preemptively.
+
+---

@@ -1068,3 +1068,76 @@ Adding or removing a node only affects the small arc of the ring immediately adj
 **Common Pitfall:** implementing a "simple" `hash(key) % nodeCount` sharding scheme for a system expected to scale its node count dynamically over time, without realizing the node-count-change remapping cost until the first time a scaling event actually happens in production — the naive approach works identically to consistent hashing as long as the node count *never* changes, making the flaw easy to miss during initial development and testing against a fixed-size cluster, only surfacing once real elastic scaling is attempted.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is a "Content Delivery Network" (CDN), and how does serving content from a geographically nearby "edge" location reduce latency compared to every request reaching the origin server directly?**
+
+A CDN is a globally distributed network of servers ("edge" nodes) that cache and serve content from locations physically close to end users, rather than every single request traveling all the way to one origin server, however far away that origin happens to be from a given user.
+
+```text
+WITHOUT a CDN:
+  User in Sydney requests an image -> travels all the way to the origin server in Virginia, USA
+  -> round trip latency dominated by the physical distance the request/response must travel
+
+WITH a CDN:
+  User in Sydney requests the SAME image -> served from a CDN edge node in Sydney itself
+  (which had already cached a copy, fetched from the origin once, earlier)
+  -> round trip is now local, dramatically lower latency
+```
+The physical speed of light imposes a hard floor on how fast a round trip across a long physical distance can possibly be — no amount of origin-server optimization changes that a Sydney-to-Virginia round trip has a meaningfully higher minimum latency than a Sydney-to-Sydney one; a CDN sidesteps this entirely by serving the response from a location physically near the requester instead.
+
+**Why this matters most for static, cacheable content:** a CDN's benefit is largest for content that's identical for many users and doesn't change on every request (images, CSS/JS bundles, video) — content that's genuinely unique per-request (a personalized, dynamically-computed API response) can't simply be cached at the edge the same way, though modern CDNs increasingly support edge computing capabilities that extend benefits to some dynamic scenarios too.
+
+**Common Pitfall:** assuming a CDN automatically helps *every* type of traffic equally — for highly dynamic, non-cacheable, personalized responses, a CDN provides comparatively little latency benefit (there's nothing useful to cache at the edge), and the actual latency reduction is concentrated specifically in static/cacheable-content scenarios, which is worth clarifying before assuming a CDN will meaningfully solve a latency problem rooted in dynamic content generation.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is a "Bloom Filter," and how does its probabilistic "definitely not present, or maybe present" guarantee let a system avoid expensive lookups (like disk reads) for keys that definitely don't exist?**
+
+A Bloom Filter is a compact, probabilistic data structure that can answer "is this element possibly in the set?" using far less memory than storing the actual set — critically, it can produce **false positives** (says "maybe present" for something not actually there) but **never false negatives** (if it says "definitely not present," that's always correct), making it ideal as a cheap pre-check before an expensive lookup.
+
+```text
+A large database has millions of keys. Before doing an expensive disk read to check
+if a specific key exists, first check an in-memory Bloom Filter representing the same key set:
+
+Bloom Filter says "definitely NOT present" -> skip the expensive disk read entirely, key doesn't exist
+Bloom Filter says "MAYBE present" -> proceed with the expensive disk read to find out for certain
+```
+Because a "definitely not present" answer is always reliable, a huge fraction of lookups for keys that truly don't exist can be resolved instantly from a small, memory-resident Bloom Filter, entirely avoiding the disk I/O that would otherwise be needed to determine the same negative result — only the (comparatively rare) "maybe present" answers require the actual, expensive lookup.
+
+**Why the false-positive-but-never-false-negative guarantee is exactly the right shape for this use case:** a false positive merely costs one wasted expensive lookup (which would have been needed to check anyway) — a false *negative* would be catastrophic (silently reporting "doesn't exist" for a key that actually does), which is precisely the failure mode a Bloom Filter's design mathematically guarantees can never happen.
+
+**Real-world usage:** Cassandra and other wide-column stores use Bloom Filters to avoid unnecessary disk reads across SSTables that don't contain a queried key at all; many CDNs and caching layers use them to avoid caching content that's likely to never be requested a second time ("cache admission" via a Bloom Filter tracking previously-seen keys).
+
+**Common Pitfall:** sizing a Bloom Filter too small relative to the number of elements it needs to represent — an undersized filter's false-positive rate climbs sharply as more elements are added beyond its designed capacity, degrading the "avoid expensive lookups" benefit specifically as the false-positive rate rises (more "maybe present" answers means more expensive lookups actually get triggered, eroding the very benefit the filter was meant to provide).
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is the "Saga Pattern's" Orchestration-based variant SPECIFICALLY (as distinct from Choreography, covered elsewhere), and what single-point-of-coordination trade-off does introducing an explicit Orchestrator accept?**
+
+In Saga Orchestration, one dedicated Orchestrator component explicitly tells each participating service what to do next, in sequence, and explicitly triggers each compensating action if a step fails — as opposed to Choreography, where each service reacts independently to events without any central coordinator.
+
+```text
+Orchestrator-driven saga for "Place Order":
+1. Orchestrator -> tells OrderService: "create the order"
+2. Orchestrator -> tells PaymentService: "charge the customer"
+3. Orchestrator -> tells InventoryService: "reserve the stock"
+
+If step 3 fails:
+4. Orchestrator EXPLICITLY tells PaymentService: "refund the charge" (compensating action)
+5. Orchestrator EXPLICITLY tells OrderService: "cancel the order" (compensating action)
+
+-- The Orchestrator holds the ENTIRE workflow's logic and current state in ONE place --
+```
+Unlike Choreography (where the overall workflow logic is implicitly scattered across every service's own event handlers, with no single place showing "the whole picture"), an Orchestrator centralizes the entire saga's sequence and compensation logic in one component — anyone wanting to understand "what happens when an order is placed, step by step" can read the Orchestrator's code directly, rather than needing to trace event handlers scattered across many separate services.
+
+**The trade-off this specifically accepts:** the Orchestrator itself becomes a new, explicit dependency every participating service must communicate through, and a form of centralization the Choreography approach specifically avoids — this reintroduces a single component with outsized knowledge of (and coupling to) the entire workflow, somewhat working against microservices' general preference for avoiding centralized coordinators, in exchange for the very real benefit of having the whole workflow's logic visible and traceable in one place rather than scattered.
+
+**Common Pitfall:** choosing Choreography for a saga with many steps and complex, conditional compensation logic, purely to "avoid centralization on principle" — for workflows with many participants and non-trivial branching/compensation logic, Choreography's scattered-across-many-services event handlers can become genuinely difficult to reason about as a whole ("what's the complete sequence of events when X happens?" requires tracing through many separate services' code) — Orchestration's centralization, despite its coupling trade-off, is often the more maintainable choice specifically once a saga's complexity crosses a certain threshold.
+
+---

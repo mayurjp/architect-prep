@@ -585,3 +585,91 @@ Once this policy is applied, the `payments-db` Pod only accepts incoming connect
 **Common Pitfall:** assuming a `NetworkPolicy` is enforced automatically by "Kubernetes itself" — the actual enforcement depends on the cluster's CNI (Container Network Interface) plugin supporting NetworkPolicy at all (not every CNI plugin does), meaning a `NetworkPolicy` object can be created and appear to exist correctly in the cluster's API, while providing **zero** actual traffic restriction if the underlying CNI plugin doesn't implement policy enforcement — always verifying the cluster's specific CNI plugin actually supports and is configured to enforce NetworkPolicies is a prerequisite, not an assumption to skip.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is a Kubernetes `Namespace`, and how does it provide a scope for both resource naming AND resource quotas within a single, shared cluster?**
+
+A `Namespace` is a way to divide a single Kubernetes cluster into multiple virtual sub-clusters — resources (Pods, Services, ConfigMaps) are scoped to a namespace, meaning two resources with the *same name* can coexist in the cluster as long as they're in different namespaces, and administrators can apply resource quotas and access controls per-namespace.
+
+```bash
+kubectl create namespace team-payments
+kubectl create namespace team-shipping
+```
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: api-pod         # this exact name can ALSO exist in team-shipping's namespace, no conflict
+  namespace: team-payments
+```
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: payments-quota
+  namespace: team-payments
+spec:
+  hard:
+    requests.cpu: "10"      # team-payments' Pods, COMBINED, can request at most 10 CPU cores
+    requests.memory: 20Gi
+```
+Two different teams sharing one physical cluster can each have their own `api-pod`, `database-service`, and so on, without any naming collision, because Kubernetes' internal resource identity always includes the namespace as part of the key — and a `ResourceQuota` object scoped to a namespace prevents one team's workloads from consuming so much of the shared cluster's capacity that it starves other namespaces.
+
+**Common Pitfall:** forgetting to specify a namespace on a `kubectl` command (defaults silently to the `default` namespace) and being confused when a resource "doesn't exist," when it's actually sitting in a different namespace entirely — always being explicit about `-n <namespace>` (or using `kubectl config set-context --current --namespace=<namespace>` to change the default) avoids this class of "where did my resource go" confusion.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is a Kubernetes `Job` (as distinct from a `Deployment`), and how does its "run to completion" semantics differ from a Deployment's "keep N replicas running indefinitely" model?**
+
+A `Deployment` is designed for long-running workloads — if a Pod exits, the Deployment's controller replaces it, aiming to keep a steady number of replicas running *indefinitely*. A `Job` is designed for finite, run-to-completion work — it creates one or more Pods, waits for them to successfully finish (exit code 0), and considers the Job "done" once the specified number of successful completions is reached, with no expectation the Pod runs forever.
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: monthly-report-generator
+spec:
+  completions: 1        # needs exactly ONE successful completion
+  backoffLimit: 3        # retry up to 3 times if the Pod fails before giving up
+  template:
+    spec:
+      containers:
+        - name: report-gen
+          image: report-generator:latest
+          command: ["python", "generate_report.py"]
+      restartPolicy: Never   # Jobs use Never/OnFailure, NOT Always (which Deployments implicitly use)
+```
+Once `generate_report.py` exits successfully, the Job is marked `Completed` — Kubernetes does **not** restart the Pod afterward the way a Deployment would treat any Pod exit as something to immediately replace; a Job's entire model is built around "this work has a defined end," unlike a Deployment's "this should run forever."
+
+**Why `CronJob` builds directly on `Job`:** a `CronJob` is simply a scheduler that creates a new `Job` object on a cron schedule — each scheduled run is its own independent `Job`, inheriting all of the `Job` semantics (retry via `backoffLimit`, completion tracking) covered here, rather than being a separate mechanism from scratch.
+
+**Common Pitfall:** using a `Deployment` for genuinely finite, batch-style work (like a one-time data migration script) — a Deployment's controller would repeatedly restart the Pod every time the migration script exits (since exiting looks like a "crash" to a Deployment expecting the process to run forever), producing a confusing restart loop for work that was only ever meant to run once; `Job` is the structurally correct primitive for exactly this "runs once, then finishes" shape of workload.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is a Kubernetes `PodDisruptionBudget` (PDB), and how does it protect availability specifically during VOLUNTARY disruptions (node drains, cluster upgrades) as opposed to involuntary ones (a node crashing unexpectedly)?**
+
+A `PodDisruptionBudget` tells Kubernetes the minimum number (or percentage) of a workload's Pods that must remain available at all times, specifically constraining *voluntary* disruptions — actions the cluster operator or Kubernetes itself deliberately initiates (draining a node for maintenance, a cluster autoscaler scaling down, a rolling cluster upgrade) — it has no bearing on *involuntary* disruptions like a node crashing unexpectedly, which nothing can meaningfully "budget" against.
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payments-api-pdb
+spec:
+  minAvailable: 2        # at least 2 Pods must remain available during any VOLUNTARY disruption
+  selector:
+    matchLabels: { app: payments-api }
+```
+When an administrator runs `kubectl drain` on a node hosting some of `payments-api`'s Pods, Kubernetes checks this PDB before evicting any of them — if evicting a Pod would drop the available count below `minAvailable: 2`, the eviction is **blocked** (or delayed) until it's safe to proceed without violating the budget, potentially forcing the drain operation to wait or requiring the operator to address the constraint some other way.
+
+**Why this distinction (voluntary vs. involuntary) matters:** a PDB cannot prevent a node from crashing unexpectedly (an involuntary disruption) — no policy object can stop hardware failure — but it *can* prevent Kubernetes' own deliberate, voluntary maintenance actions (which are entirely within the cluster's control) from taking down more replicas than the workload can tolerate simultaneously, which is exactly the class of disruption a PDB is designed to constrain.
+
+**Common Pitfall:** setting `minAvailable` equal to the Deployment's total replica count (e.g., `minAvailable: 3` for exactly 3 replicas) — this makes it *impossible* for the cluster to ever voluntarily evict even one Pod, which can block legitimate node drains and cluster upgrades indefinitely; a PDB's `minAvailable`/`maxUnavailable` should be set to genuinely reflect the minimum the workload can tolerate, not simply "all of them," or routine cluster maintenance operations become unexpectedly stuck.
+
+---
