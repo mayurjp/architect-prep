@@ -1037,4 +1037,98 @@ Because the hedge is triggered purely by *slowness* (not a confirmed failure), i
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is a gRPC "Server-Streaming" RPC, and how does it let a server send a SEQUENCE of responses over time for a SINGLE client request — the counterpart to the Client-Streaming RPC covered earlier?**
+
+Server-Streaming lets a server respond to one single client request with a *stream* of multiple messages over time, rather than a single response — useful whenever a client asks for something that naturally produces an ongoing series of results (live price updates, a long list delivered incrementally) rather than one complete answer all at once.
+
+```protobuf
+service PriceService {
+    rpc StreamPrices (PriceRequest) returns (stream PriceUpdate); // ONE request -- MANY streamed responses
+}
+```
+```csharp
+// Server implementation -- sends MULTIPLE responses over time, for the ONE incoming request
+public override async Task StreamPrices(
+    PriceRequest request, IServerStreamWriter<PriceUpdate> responseStream, ServerCallContext context)
+{
+    await foreach (var price in GetLivePriceFeedAsync(request.Symbol, context.CancellationToken))
+    {
+        await responseStream.WriteAsync(new PriceUpdate { Price = price }); // sends ANOTHER update, over TIME
+    }
+}
+
+// Client -- sends ONE request, then reads a STREAM of responses as they arrive
+using var call = client.StreamPrices(new PriceRequest { Symbol = "AAPL" });
+await foreach (var update in call.ResponseStream.ReadAllAsync())
+    Console.WriteLine($"New price: {update.Price}");
+```
+The client sends exactly one `PriceRequest`, but the server keeps the connection open and pushes a new `PriceUpdate` message every time the price actually changes — the client's `await foreach` loop simply keeps receiving updates as they arrive, for as long as the server keeps the stream open, rather than the client needing to repeatedly poll with a new request each time.
+
+**Common Pitfall:** using repeated unary (single request/response) polling calls to simulate a live feed (calling `GetCurrentPrice()` every second) instead of a genuine Server-Streaming RPC — polling wastes resources on repeated connection/request overhead for data that hasn't changed, and introduces up-to-polling-interval latency for updates that have; Server-Streaming lets the server push new data the *instant* it's available, over one connection, rather than the client needing to guess how frequently to ask again.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the difference between a Unary Interceptor and a Streaming Interceptor in gRPC, and why does a streaming RPC require overriding a DIFFERENT interceptor method than a unary call does?**
+
+A gRPC Interceptor (covered earlier for unary calls) has separate override points for each of gRPC's four call types (unary, client-streaming, server-streaming, bidirectional-streaming) — because a streaming call's actual data flows continuously *during* the call (not just once, before and after, like a unary call), a streaming interceptor needs to observe the stream itself, not just wrap a single request/response pair.
+
+```csharp
+public class LoggingInterceptor : Interceptor
+{
+    // UNARY -- wraps a SINGLE request/response pair -- straightforward "before/after" wrapping
+    public override async Task<TResponse> UnaryServerHandler<TRequest, TResponse>(
+        TRequest request, ServerCallContext context, UnaryServerMethod<TRequest, TResponse> continuation)
+    {
+        _logger.LogInformation("Unary call: {Method}", context.Method);
+        return await continuation(request, context);
+    }
+
+    // SERVER-STREAMING -- wraps the ENTIRE STREAM's lifetime, not just ONE request/response
+    public override async Task ServerStreamingServerHandler<TRequest, TResponse>(
+        TRequest request, IServerStreamWriter<TResponse> responseStream,
+        ServerCallContext context, ServerStreamingServerMethod<TRequest, TResponse> continuation)
+    {
+        _logger.LogInformation("Streaming call STARTED: {Method}", context.Method);
+        await continuation(request, responseStream, context); // the ENTIRE stream's duration happens HERE
+        _logger.LogInformation("Streaming call ENDED: {Method}", context.Method); // only AFTER the WHOLE stream finishes
+    }
+}
+```
+The unary override wraps a single, quick request/response exchange — the streaming override instead wraps the *entire* duration of a potentially long-lived stream (which could remain open for minutes, sending many individual messages) — logging "call started"/"call ended" around a streaming call therefore measures the whole stream's lifetime, not one message's round trip, a meaningfully different thing to actually measure.
+
+**Common Pitfall:** implementing only `UnaryServerHandler` on an interceptor and assuming it automatically applies to streaming RPCs too — each call type has its own distinct interceptor method, and a streaming RPC that only has a unary override implemented (with the streaming-specific ones left as their default, no-op base implementation) will simply bypass the intended cross-cutting logic entirely for any streaming calls, a gap that's easy to miss if a service only initially had unary methods and streaming ones were added later.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is gRPC's client-side load-balancing policy choice between `pick_first` and `round_robin`, and why does the DEFAULT `pick_first` policy send ALL traffic to just ONE resolved backend address unless `round_robin` is explicitly configured?**
+
+When a gRPC client resolves multiple backend addresses (via DNS or another resolver), it must decide *which* address(es) to actually send traffic to — `pick_first` (the gRPC client library's default) simply picks the *first* address from the resolved list and sends *all* traffic there, only failing over to another address if the first becomes unavailable; `round_robin` actively distributes traffic *across* every resolved address.
+
+```csharp
+// DEFAULT behavior -- 'pick_first' -- ALL traffic goes to ONE address, even though MULTIPLE were resolved
+var channel = GrpcChannel.ForAddress("dns:///order-service"); // DNS resolves 3 backend IPs
+// -- gRPC picks the FIRST one and sends 100% of traffic THERE -- the OTHER TWO resolved addresses
+//    sit COMPLETELY IDLE unless the FIRST one becomes UNREACHABLE --
+
+// EXPLICITLY configuring round_robin -- REQUIRED to actually DISTRIBUTE traffic across ALL resolved addresses
+var channel = GrpcChannel.ForAddress("dns:///order-service", new GrpcChannelOptions
+{
+    ServiceConfig = new ServiceConfig { LoadBalancingConfigs = { new RoundRobinConfig() } }
+});
+// -- NOW traffic is genuinely DISTRIBUTED across ALL 3 resolved backend addresses --
+```
+Because `pick_first` is specifically designed for scenarios where the resolved addresses represent *redundant* endpoints for the *same* logical destination (failover, not load distribution — think multiple IPs for one highly-available service, where you want a *stable*, *sticky* connection to just one at a time) rather than a pool meant to share load, a gRPC client talking to a horizontally-scaled backend fleet (covered earlier under client-side load balancing) must *explicitly* opt into `round_robin` — otherwise every single client instance ends up sending its entire traffic load to whichever one address happened to resolve first, leaving every other backend instance completely idle despite being perfectly healthy and available.
+
+**Why this default catches teams by surprise specifically when scaling out a backend fleet:** a team adding more backend instances behind DNS, expecting gRPC's client-side load balancing (covered earlier as a solution to the L4-load-balancer connection-pinning problem) to automatically distribute load across them, can be genuinely confused to find all traffic still concentrated on just one instance — the earlier "client-side load balancing" discussion assumed `round_robin` was configured, but gRPC's actual *default* policy is `pick_first`, which must be explicitly overridden to get the distribution behavior most teams actually intend when resolving multiple backend addresses.
+
+**Common Pitfall:** assuming that simply resolving multiple backend addresses (via `dns:///` or `xds:///`) is sufficient for gRPC to automatically load-balance across them — resolving multiple addresses only makes them *available* to be chosen from; the actual choice of *how* to distribute traffic across them is governed entirely by the separately-configured load-balancing policy, and `pick_first`'s default "stick to just one" behavior is easy to overlook until a fleet's uneven load distribution is actually observed and investigated.
+
+---
+
 ---

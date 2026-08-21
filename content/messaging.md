@@ -908,4 +908,87 @@ The duplicate isn't a bug in Kafka's rebalancing logic itself — it's the direc
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is Message Priority in a queue, and how does letting some messages jump ahead of others change a queue's default first-in-first-out processing order?**
+
+An ordinary queue processes messages in the order they arrived — Message Priority lets specific messages be marked as more urgent, so a consumer processes them *before* older, lower-priority messages still waiting, rather than strictly respecting arrival order for every single message.
+
+```csharp
+// Azure Service Bus -- setting a message's priority level
+var urgentMessage = new ServiceBusMessage(fraudAlertPayload) { ApplicationProperties = { ["Priority"] = 10 } };
+var routineMessage = new ServiceBusMessage(weeklyReportPayload) { ApplicationProperties = { ["Priority"] = 1 } };
+// even though 'routineMessage' was ENQUEUED first, a PRIORITY-AWARE queue/subscription filter
+// can ensure the HIGH-priority fraud alert is delivered to a consumer FIRST
+```
+```text
+Queue (FIFO, no priority):        [routine] [routine] [URGENT] [routine]  -- URGENT waits its TURN
+Queue (WITH priority ordering):   [URGENT] [routine] [routine] [routine]  -- URGENT jumps AHEAD, processed FIRST
+```
+A fraud-detection alert genuinely needs faster attention than a routine weekly report, even if the report happened to be enqueued earlier — priority-aware queuing lets the broker (or a set of separate priority-tiered queues a consumer polls in priority order) ensure the urgent message doesn't sit waiting behind a backlog of less time-sensitive ones.
+
+**Common Pitfall:** overusing high-priority markings until most messages in a system are marked "urgent" — once everything is flagged as high priority, the mechanism provides no actual differentiation at all (mirroring the same governance problem covered for Kubernetes Pod Priority), and the queue effectively degrades back to ordinary FIFO behavior in practice, just with extra bookkeeping overhead.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the concrete mechanism behind an "Idempotent Consumer" (referenced in earlier scenarios but not detailed as its own topic), and how does a deduplication table let a consumer safely process the same message twice without a duplicate side effect occurring?**
+
+An Idempotent Consumer recognizes and safely ignores a message it has already processed — the standard concrete mechanism is a deduplication table: before acting on a message, the consumer checks whether that message's unique ID has already been recorded as processed, and if so, skips the actual side-effect logic entirely (while still acknowledging the message normally).
+
+```csharp
+public async Task ProcessOrderCreated(OrderCreatedMessage message)
+{
+    // CHECK first -- has this EXACT message ID ALREADY been processed before?
+    bool alreadyProcessed = await _db.ProcessedMessages.AnyAsync(m => m.MessageId == message.Id);
+    if (alreadyProcessed)
+    {
+        return; // SKIP the side effect entirely -- but STILL acknowledge the message normally
+    }
+
+    using var transaction = await _db.Database.BeginTransactionAsync();
+    await _emailService.SendConfirmationAsync(message.OrderId);       // the ACTUAL side effect
+    _db.ProcessedMessages.Add(new ProcessedMessage { MessageId = message.Id }); // RECORD it, in the SAME transaction
+    await _db.SaveChangesAsync();
+    await transaction.CommitAsync();
+}
+```
+Recording the processed message ID in the *same* database transaction as the actual side effect (rather than as a separate step afterward) is critical — if both the side effect and the "mark as processed" record commit together atomically, there's no window where the side effect happened but the dedup record wasn't saved (which would otherwise let a redelivered message trigger the side effect a second time anyway).
+
+**Why this specific mechanism is what makes At-Least-Once delivery (covered earlier) safe to rely on in practice:** rather than trying to prevent redelivery entirely (which At-Least-Once semantics don't guarantee), the deduplication table makes redelivery *harmless* — a message reappearing due to a crash before acknowledgment, or a producer's retried publish, simply gets recognized and skipped the second time, achieving an effectively exactly-once *outcome* without requiring the broker itself to provide a true exactly-once guarantee.
+
+**Common Pitfall:** recording the "processed" marker in a *separate* transaction or a different data store than the one the side effect itself modifies — if the side effect commits successfully but the app crashes before the separate dedup-record write also commits, a redelivered message would see no dedup record and incorrectly re-trigger the side effect a second time; keeping both writes in one atomic transaction (as shown above) is what actually closes this gap.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is Kafka Consumer Lag, and how does monitoring the gap between the latest produced offset and a consumer group's committed offset reveal whether a consumer is genuinely keeping up with incoming messages?**
+
+Consumer Lag is the numeric difference between the *latest* offset a partition has actually received (how far the producer has gotten) and the *committed* offset a specific consumer group has processed up to (how far that consumer has actually gotten) — a growing lag means the consumer is falling behind the rate messages are arriving, a critical early-warning signal before a backlog becomes severe.
+
+```text
+Partition 0: latest offset = 1,000,000 (the producer has written a MILLION messages so far)
+Consumer Group "email-service": committed offset = 999,950
+LAG = 1,000,000 - 999,950 = 50   -- this consumer is only 50 messages BEHIND -- essentially KEEPING UP
+
+LATER, under a SUDDEN traffic SPIKE (or the consumer itself SLOWING DOWN):
+Partition 0: latest offset = 1,500,000
+Consumer Group "email-service": committed offset = 1,000,100
+LAG = 1,500,000 - 1,000,100 = 499,900   -- GROWING lag -- this consumer is FALLING BEHIND, NOT keeping up
+```
+```bash
+kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group email-service
+# shows the LAG per PARTITION -- directly surfacing WHICH partitions (and therefore WHICH consumer
+# instances) are STRUGGLING to keep up with the INCOMING message RATE
+```
+A single snapshot of lag being non-zero isn't itself alarming (some lag is completely normal, momentarily) — what matters is whether lag is *growing over time* (the consumer group is falling further and further behind, indicating it needs more consumer instances, covered under Competing Consumers, or the individual processing logic itself needs to be faster) versus staying roughly flat or shrinking (the consumer is keeping pace).
+
+**Why this specific metric is the primary operational signal for scaling a consumer group, rather than CPU/memory alone:** a consumer might show low CPU/memory utilization while still falling significantly behind — perhaps its processing involves waiting on a slow downstream dependency (an external API call per message) rather than being CPU-bound at all; Consumer Lag directly measures the thing that actually matters (is the backlog of unprocessed messages growing), independent of *why* the consumer might be slow, making it the standard metric alerting/autoscaling systems watch for consumer-group health.
+
+**Common Pitfall:** monitoring only broker-level health metrics (CPU, disk, memory on the Kafka cluster itself) while neglecting Consumer Lag specifically — a perfectly healthy Kafka cluster can still have a badly lagging, struggling consumer group (the bottleneck living entirely on the consumer side, not the broker), and without explicitly tracking lag per consumer group, this kind of backlog can grow silently for a long time before anyone notices, often only surfacing once users start complaining about severely delayed processing (a late order confirmation email, a stale notification) well after the underlying lag began accumulating.
+
+---
+
 ---

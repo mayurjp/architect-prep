@@ -1076,4 +1076,89 @@ Because the type name is embedded directly inside the (base64-encoded, but not e
 
 ---
 
+## Beginner — Question 10
+
+**Q10: Why does a GraphQL Mutation conventionally return the modified object itself (rather than just a success boolean), and how does this let a client update its local cache without a separate follow-up query?**
+
+A well-designed GraphQL Mutation returns the actual object it just created/modified — not merely `{ "success": true }` — so the client that just performed the mutation receives, in the same response, everything it needs to reflect the change in its own UI/cache immediately, without a separate round trip to re-fetch the object it just changed.
+
+```graphql
+mutation {
+  updateProductPrice(id: "5", newPrice: 39.99) {
+    id
+    name
+    price       # the UPDATED price, returned DIRECTLY in the mutation's OWN response
+  }
+}
+```
+```json
+{ "data": { "updateProductPrice": { "id": "5", "name": "Keyboard", "price": 39.99 } } }
+```
+Because the mutation's response already contains the product's new `price`, a client library like Apollo Client or Relay can automatically update its local cache entry for this exact object (matched by its `id`, tying back to the Global Object Identification convention covered elsewhere) — the UI reflects the change immediately, without the client needing to issue a *second*, separate query just to re-fetch the same object it already just modified.
+
+**Common Pitfall:** designing a mutation to return only a bare success/failure flag, forcing the client to issue a completely separate follow-up query to learn the object's new state — this doubles the number of round trips needed for what conceptually should be a single logical operation, and defeats the client-cache-update convenience that returning the modified object directly provides essentially for free.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What are GraphQL's `@skip` and `@include` directives, and how do they let a client conditionally include or exclude a specific field from a query's response at runtime, based on a variable?**
+
+`@skip` and `@include` let a query's *structure itself* vary based on a boolean variable supplied at request time — rather than a client needing to construct an entirely different query string depending on some runtime condition, the same query document can conditionally include or omit specific fields just by changing the variable's value.
+
+```graphql
+query GetProduct($id: ID!, $includeReviews: Boolean!) {
+  product(id: $id) {
+    name
+    price
+    reviews @include(if: $includeReviews) {   # ONLY included in the response if $includeReviews is TRUE
+      rating
+      comment
+    }
+  }
+}
+```
+```json
+// Variables: { "id": "5", "includeReviews": false }
+// Response SIMPLY OMITS the "reviews" field entirely -- as if it had never been in the query AT ALL
+{ "data": { "product": { "name": "Keyboard", "price": 29.99 } } }
+```
+Because the *same* query document works whether `$includeReviews` is `true` or `false`, a single client-side query (perhaps generated once at build time, matching the Persisted Queries pattern covered earlier) can serve both a "quick summary" screen and a "full detail" screen simply by varying the boolean variable passed at request time — rather than needing two entirely separate, hand-maintained query documents for what's conceptually the same underlying data fetch with one optional section.
+
+**Common Pitfall:** maintaining two nearly-identical, separately hand-written query documents (one with a field, one without) purely to handle a single conditionally-needed field — `@skip`/`@include` let one single query document handle both cases directly, reducing duplication and the risk of the two near-duplicate queries drifting out of sync as the schema evolves.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is Query Planning in GraphQL Federation, and how does the Gateway decompose one client query across multiple subgraphs into an execution plan of sub-queries, then stitch the results back together into a single response?**
+
+When a client sends one query spanning fields owned by different subgraphs (covered earlier under Federation's `@key`/Entity mechanism), the Gateway can't simply forward the query as-is to any single subgraph — it must first build a Query Plan: a sequence of sub-queries against the specific subgraphs that actually own each requested field, executed in the correct order (respecting cross-subgraph dependencies), with the Gateway assembling their individual results into the one unified response the client expects.
+
+```graphql
+# The CLIENT's single query -- spans fields owned by TWO different subgraphs
+query {
+  product(id: "5") {
+    name          # owned by the PRODUCTS subgraph
+    price         # owned by the PRODUCTS subgraph
+    reviews { rating }   # owned by a SEPARATE REVIEWS subgraph
+  }
+}
+```
+```text
+The GATEWAY's QUERY PLAN, built BEFORE executing anything:
+  STEP 1: query the PRODUCTS subgraph for { name, price } AND the entity's "@key" (id) -- needed for STEP 2
+  STEP 2: using that SAME id, query the REVIEWS subgraph for { reviews { rating } } for THIS product
+  STEP 3: STITCH steps 1 and 2's results TOGETHER into ONE combined response object, matching the
+          CLIENT's ORIGINAL query shape -- the CLIENT never sees that TWO separate subgraph
+          queries actually happened BEHIND the scenes
+```
+Because Reviews' contribution to `Product` depends on already knowing the product's `id` (the `@key` field), the Gateway's Query Plan must execute the Products subgraph query *first*, then use its result to query Reviews — the Gateway's planning step is precisely what determines this correct ordering and dependency chain automatically, from the subgraphs' own `@key`/`@requires` declarations, without either subgraph needing to know about the other's existence at all.
+
+**Why this planning step is what makes Federation scale to many subgraphs without exploding client-perceived complexity:** as more subgraphs and cross-subgraph field ownership relationships accumulate, the number of possible query shapes a client might send grows combinatorially — the Gateway's query-planning logic handles decomposing *any* valid query shape into the correct sequence of subgraph calls automatically, rather than requiring hand-written integration code for every possible combination of cross-subgraph field access a client might request.
+
+**Common Pitfall:** assuming Federation's Gateway simply "forwards" a client's query to whichever subgraphs are involved without any real coordination logic — the actual query-planning step (determining execution order, handling cross-subgraph dependencies via `@key`/`@requires`, and stitching partial results back together into one coherent response) is genuinely substantial work the Gateway performs on every incoming query; treating it as a "dumb pass-through" undersells the actual complexity Federation's Gateway is handling on the client's behalf, and underestimates why a Gateway's own performance/latency contribution to a federated query is a real, measurable factor worth monitoring.
+
+---
+
 ---
