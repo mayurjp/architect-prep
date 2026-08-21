@@ -852,4 +852,87 @@ Because the Private Endpoint gives the PaaS service a private IP address that's 
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is Azure Virtual Network (VNet) Peering, and how does it let two separate VNets communicate using private IP addresses, without traffic ever traversing the public internet?**
+
+VNet Peering connects two Azure Virtual Networks so that resources in each can communicate directly using their private IP addresses — Azure routes the traffic across its own private backbone network, meaning it never touches the public internet at all, unlike two networks that would otherwise need to communicate over public endpoints.
+
+```text
+VNet A (10.0.0.0/16, e.g., the "Production" environment)
+   │
+   ├─ PEERED with ─►  VNet B (10.1.0.0/16, e.g., the "Shared Services" environment, hosting a shared database)
+   │
+   -- a VM in VNet A can reach a VM in VNet B DIRECTLY via its PRIVATE IP (10.1.0.5), as if
+      BOTH VNets were ONE single network -- traffic stays ENTIRELY on Azure's OWN private backbone
+```
+```bash
+az network vnet peering create --name AtoB --vnet-name VNetA --remote-vnet VNetB --allow-vnet-access-only
+# peering must be configured on BOTH sides (VNet A -> VNet B, AND VNet B -> VNet A) to be fully usable
+```
+Because peered traffic travels over Azure's private backbone rather than the public internet, it avoids the latency, security exposure, and potential cost of routing through public endpoints — a common pattern for connecting an application's VNet to a separate VNet hosting shared resources (a central database, a shared Key Vault's private endpoint) without exposing either network publicly.
+
+**Common Pitfall:** assuming VNet Peering automatically grants full network reachability between the two VNets by default — peering must be explicitly established in *both* directions, and even once peered, Network Security Groups (NSGs) on either side can still restrict which specific traffic is actually allowed to flow between the peered networks; peering enables the possibility of private connectivity, but doesn't override any NSG rules still restricting it.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is Azure API Management (APIM), and how does placing it in front of one or more backend APIs let you add throttling, request/response transformation, and a unified developer portal without modifying the backend APIs themselves?**
+
+Azure API Management sits as a facade in front of one or more backend APIs (which could be Azure Functions, App Services, or even APIs hosted entirely outside Azure) — it lets you apply cross-cutting policies (rate limiting, authentication, response caching, request transformation) at the gateway layer, uniformly, without needing to implement that same logic inside every individual backend API.
+
+```xml
+<!-- An APIM "policy" -- applied at the GATEWAY, NOT inside the backend API's own code at all -->
+<policies>
+  <inbound>
+    <rate-limit calls="100" renewal-period="60" /> <!-- throttle to 100 calls/minute, PER caller -->
+    <set-header name="X-Forwarded-For" exists-action="override">
+      <value>@(context.Request.IpAddress)</value>
+    </set-header>
+  </inbound>
+</policies>
+```
+Because this rate-limiting policy lives in APIM's own configuration rather than inside the backend API's code, the *same* backend can be fronted differently for different consumers (a public developer-portal tier with strict throttling, an internal tier with looser limits) — and a backend team never needs to implement rate-limiting logic themselves at all, since APIM enforces it before a request even reaches their API.
+
+**Why the Developer Portal matters beyond just the gateway/throttling function:** APIM automatically generates interactive API documentation (from an imported OpenAPI/Swagger definition, covered under the WebAPI topic) and lets external developers self-service register for API keys and try out calls directly from a browser — turning what would otherwise require a separately-built developer-facing documentation site into something APIM provides largely out of the box, directly from the API definitions it's already managing.
+
+**Common Pitfall:** implementing cross-cutting concerns like rate-limiting or authentication redundantly inside *every* individual backend API, rather than centralizing them at the APIM layer — this duplicates the same logic across many backend services (each potentially implementing it slightly inconsistently) instead of applying it uniformly, once, at the single gateway layer every request already passes through.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What are Azure Durable Functions, and how does an Orchestrator Function let a serverless workflow maintain state and coordinate multiple steps over time, despite ordinary Azure Functions themselves being stateless?**
+
+An ordinary Azure Function is stateless — each invocation starts fresh, with no memory of any previous invocation. Durable Functions extend the Functions programming model with an Orchestrator Function that *can* maintain state across multiple steps (calling several other functions in sequence, waiting for external events, pausing for a duration) — the Durable Functions extension transparently persists and replays the orchestrator's execution state behind the scenes, so it *appears* to hold state across steps despite the underlying compute being just as stateless as ever.
+
+```csharp
+[Function(nameof(OrderProcessingOrchestrator))]
+public static async Task<string> RunOrchestrator(
+    [OrchestrationTrigger] TaskOrchestrationContext context)
+{
+    var order = context.GetInput<Order>();
+    var stockReserved = await context.CallActivityAsync<bool>("ReserveStock", order);   // step 1
+    if (!stockReserved) return "Failed: out of stock";
+
+    var paymentResult = await context.CallActivityAsync<bool>("ChargePayment", order);   // step 2
+    if (!paymentResult)
+    {
+        await context.CallActivityAsync("ReleaseStock", order); // COMPENSATION -- a Saga, covered under microservices
+        return "Failed: payment declined";
+    }
+
+    await context.CallActivityAsync("SendConfirmationEmail", order);                     // step 3
+    return "Order completed";
+}
+```
+Behind the scenes, every `await context.CallActivityAsync(...)` call and its result is durably logged — if the orchestrator's underlying compute instance is recycled or crashes mid-workflow (entirely possible in a serverless environment), the Durable Functions runtime *replays* the orchestrator function from the beginning, but each previously-completed activity call returns its already-recorded result instantly rather than re-executing, letting execution resume exactly where it left off without the orchestrator function itself needing to be a genuinely long-running process at all.
+
+**Why this specifically solves the "Saga orchestration in a serverless world" problem (Saga pattern covered under microservices):** implementing a multi-step Saga's orchestration logic in an ordinary stateless Function would require manually persisting "which step are we on" to an external store after every single step — Durable Functions' orchestrator handles this state-persistence-and-replay mechanism transparently, letting the orchestration logic be written as ordinary, sequential-looking C# code (`await` one activity, then the next), while the underlying infrastructure remains genuinely serverless and stateless.
+
+**Common Pitfall:** writing non-deterministic code directly inside an Orchestrator Function (calling `DateTime.Now`, generating a random GUID, or making a direct HTTP call) — because the orchestrator's code is *replayed* from the start after every crash/recycle, any such non-deterministic operation would produce a *different* result on replay than it did originally, corrupting the orchestration's consistency; all genuinely non-deterministic or I/O-bound work must happen inside a separate Activity Function instead, which the orchestrator calls and whose *result* (not the operation itself) gets replayed consistently.
+
+---
+
 ---

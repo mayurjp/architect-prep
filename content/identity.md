@@ -921,3 +921,78 @@ Rather than merely rejecting the specific reuse attempt (which would let the att
 **Common Pitfall:** implementing Refresh Token Rotation without also implementing Reuse Detection's active response to a detected reuse attempt — plain rotation alone still prevents the stolen token from being reused successfully, but a security team gets no actual signal that a theft attempt occurred at all, missing the opportunity to proactively revoke the entire potentially-compromised token family and force a clean re-authentication, rather than merely and silently blocking the one specific reuse attempt without treating it as the meaningful security event it actually represents.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: What is Single Sign-On (SSO), and how does authenticating once with an Identity Provider let a user access multiple, separate applications without re-entering credentials for each one?**
+
+Single Sign-On lets a user authenticate once with a central Identity Provider (IdP), then access several *separate* applications without logging in again for each — each application trusts the IdP's assertion that the user is already authenticated, rather than each maintaining its own independent login process the user must repeat.
+
+```text
+1. User visits App A -> not yet authenticated -> REDIRECTED to the central Identity Provider (IdP) to log in
+2. User enters credentials ONCE, at the IdP -- the IdP establishes its OWN session (a cookie) for the USER
+3. IdP redirects the user BACK to App A, WITH a token/assertion proving "this user IS authenticated"
+4. LATER, the SAME user visits App B (a COMPLETELY DIFFERENT application, ALSO trusting the SAME IdP)
+   -> App B ALSO redirects to the IdP -- but the IdP sees its OWN session cookie is STILL VALID
+   -> the IdP IMMEDIATELY issues a token for App B, WITHOUT asking the user to log in AGAIN AT ALL
+```
+Because the IdP recognizes its own still-valid session from step 2, the user's second application (App B) gets an authentication token without the user ever seeing a login prompt again — the "single" in Single Sign-On refers to the *user only entering credentials once*, with every subsequently-visited, IdP-trusting application benefiting from that one authentication event.
+
+**Common Pitfall:** confusing SSO with simply "using the same password across multiple applications" — SSO specifically means authenticating with ONE central IdP that every application *trusts and redirects to*, never re-collecting or re-verifying the user's actual credentials itself; a user reusing the same password manually across several independently-implemented login forms provides none of SSO's actual benefits (no reduced login friction, and no centralized point for enforcing MFA/revocation across every application at once).
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the OAuth 2.0 "Client Credentials" grant flow, and how does it differ fundamentally from the Authorization Code flow (covered earlier) in authenticating a machine/service rather than an actual end user?**
+
+The Authorization Code flow (covered earlier) is designed around a *human user* authenticating and granting consent — the Client Credentials flow is designed for machine-to-machine authentication, where there's no human user involved at all; a service authenticates directly using its own client ID and secret, obtaining an access token representing *itself*, not any particular user.
+
+```text
+AUTHORIZATION CODE flow (a HUMAN user is involved):
+  User -> redirected to log in -> GRANTS CONSENT -> Authorization Server issues a token representing THAT USER
+
+CLIENT CREDENTIALS flow (NO human user at all -- a SERVICE authenticating as ITSELF):
+  Service A -> directly POSTS its OWN client_id + client_secret to the Authorization Server's token endpoint
+  -> Authorization Server issues an access token representing SERVICE A ITSELF (not any user)
+```
+```http
+POST /oauth/token
+grant_type=client_credentials&client_id=service-a&client_secret=***&scope=orders.read
+```
+Because there's no user to redirect, consent to, or log in — the entire flow is a single, direct request from Service A to the Authorization Server's token endpoint, authenticating with its own credentials — this is the correct grant type for background jobs, scheduled tasks, and service-to-service API calls where "on behalf of which user" simply doesn't apply, as opposed to any flow built around a human's interactive consent.
+
+**Common Pitfall:** using the Authorization Code flow (or worse, the deprecated Resource Owner Password Credentials flow) for a genuinely machine-to-machine scenario, awkwardly needing to invent a "service account user" to authenticate as — Client Credentials is the grant type specifically designed for this exact scenario, issuing a token that represents the *service itself* as the subject, rather than forcing an artificial "pretend user" into a flow designed around real human consent.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is OAuth 2.0 Token Introspection (RFC 7662), and how does it let a Resource Server validate an opaque (non-JWT) access token by querying the Authorization Server directly, rather than validating the token's contents locally?**
+
+A JWT access token can typically be validated locally (checking its signature against a known public key, covered extensively elsewhere) — but not every access token is a JWT; some Authorization Servers issue *opaque* tokens (a random string with no embedded, verifiable claims at all). Token Introspection is the standardized endpoint a Resource Server calls to ask the Authorization Server directly: "is this specific token still valid, and what does it represent?"
+
+```http
+POST /oauth/introspect
+token=8xLOxBtZp8
+
+Authorization Server's response:
+{ "active": true, "scope": "orders.read orders.write", "sub": "user-42", "exp": 1735689600 }
+```
+```csharp
+// Resource Server -- for an OPAQUE token, it CANNOT verify anything LOCALLY -- it MUST ask the Authorization Server
+public async Task<bool> ValidateToken(string token)
+{
+    var response = await _httpClient.PostAsync("/oauth/introspect", new FormUrlEncodedContent(
+        new Dictionary<string, string> { ["token"] = token }));
+    var result = await response.Content.ReadFromJsonAsync<IntrospectionResponse>();
+    return result.Active; // the Authorization Server is the ONLY authority that can answer this, for an OPAQUE token
+}
+```
+Because an opaque token carries no self-contained, verifiable information at all, the Resource Server has no choice but to ask the Authorization Server directly on every validation — this is the fundamental trade-off against JWTs (which a Resource Server can validate locally, without a network round-trip): opaque tokens can be instantly revoked (the Authorization Server simply stops reporting them as `active`) since validation always consults the source of truth directly, whereas a self-contained JWT remains valid until its own expiry regardless of server-side revocation, unless additional mechanisms (Continuous Access Evaluation, covered earlier) are layered on top.
+
+**Why this trade-off (network round-trip vs. instant revocability) mirrors a broader pattern seen elsewhere in this topic:** this is structurally the same fundamental trade-off as stateless JWTs versus server-side session lookups — a self-contained token (JWT) trades instant revocability for validation speed (no network call needed); an opaque token, validated via introspection, trades a mandatory network round-trip on every validation for the ability to revoke access immediately and unconditionally, at the cost of the Resource Server now depending on the Authorization Server's availability for every single request.
+
+**Common Pitfall:** calling the introspection endpoint on *every single request* for high-traffic APIs without any caching — since introspection requires a network round-trip to the Authorization Server for every validation, this can turn the Authorization Server into a bottleneck/single point of failure for the entire system's request throughput; a short-lived, in-memory cache of introspection results (bounded by the token's own remaining lifetime) is a common mitigation, trading a small window of potential revocation delay for meaningfully reduced load on the Authorization Server.
+
+---

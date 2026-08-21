@@ -841,4 +841,80 @@ A VM deliberately configured with no external IP address (for security reasons �
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is a GCP Service Account, and how does it differ from a regular IAM user account in terms of who (or what) actually uses it?**
+
+A Service Account is an identity meant for a *workload* (an application, a VM, a Cloud Function) to authenticate as, rather than for a human — where a regular IAM user account represents a specific person logging in, a Service Account represents "this specific application/service," letting IAM permissions be granted to the workload itself rather than needing a human's own credentials embedded inside application code.
+
+```bash
+gcloud iam service-accounts create order-service-sa --display-name "Order Service"
+gcloud projects add-iam-policy-binding my-project \
+  --member "serviceAccount:order-service-sa@my-project.iam.gserviceaccount.com" \
+  --role "roles/pubsub.publisher"
+```
+```yaml
+# A Cloud Run service running AS this specific Service Account -- NOT as any human user at all
+service:
+  serviceAccountName: order-service-sa@my-project.iam.gserviceaccount.com
+```
+The `order-service-sa` identity is granted exactly the permissions the Order Service needs (publishing to Pub/Sub, in this example) — no human user's own broader permissions are ever embedded in the running application, and if the application's code is compromised, the resulting access is scoped exactly to what this one Service Account was granted, not to whatever a human developer's own account happens to be able to do.
+
+**Common Pitfall:** running an application using a human developer's own personal credentials (or the broadly-permissioned default compute Service Account) rather than creating a purpose-specific Service Account scoped to exactly what that one application needs — this violates the Principle of Least Privilege (covered under App Security), since a compromised application would then carry far more access than it actually requires for its own specific job.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is Google BigQuery, and how does its separation of storage and compute let it run a massive analytical query over petabytes of data without requiring you to provision or manage any servers at all?**
+
+BigQuery is a fully-managed, serverless data warehouse specifically built for large-scale analytical (OLAP-style) queries — unlike a traditional database where you provision a fixed-size server to hold both the data and the query-processing engine together, BigQuery separates storage (data sits in Google's own distributed storage) from compute (a query dynamically allocates however much processing power it needs, only for the duration of that specific query).
+
+```sql
+-- a query scanning BILLIONS of rows -- NO server was ever provisioned or sized in advance for THIS query
+SELECT category, SUM(revenue) AS total_revenue
+FROM `my-project.sales.transactions`
+WHERE transaction_date >= '2026-01-01'
+GROUP BY category
+ORDER BY total_revenue DESC;
+```
+```text
+BigQuery, BEHIND the scenes: dynamically allocates however MANY compute "slots" this SPECIFIC
+query needs, runs it in a MASSIVELY PARALLEL fashion across GOOGLE'S OWN INFRASTRUCTURE, then
+RELEASES those slots the MOMENT the query completes -- you NEVER provisioned OR SIZED any server
+```
+Because compute capacity is allocated dynamically per query rather than as a fixed, pre-provisioned server, a BigQuery user never needs to guess in advance how large a server they'll need — a query scanning a small table and a query scanning petabytes both simply run, with BigQuery's infrastructure scaling the actual compute behind the scenes to match each specific query's needs, and you pay based on data scanned/processed rather than for a server sitting idle between queries.
+
+**Common Pitfall:** treating BigQuery like a traditional transactional (OLTP) database, running many small, frequent, single-row lookups/updates against it — BigQuery is specifically optimized for large-scale analytical scans and aggregations (its per-query overhead and pricing model reflect this), not for the high-frequency, low-latency, single-row read/write pattern a transactional workload needs; that kind of workload belongs on Cloud SQL or Spanner (both covered elsewhere) instead.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What are GCP Shielded VMs, and how do their Secure Boot, virtual Trusted Platform Module (vTPM), and Integrity Monitoring features protect against a fundamentally different threat than Confidential VMs (covered earlier)?**
+
+Confidential VMs (covered earlier) protect data *in use* — encrypting memory so even Google's own infrastructure operators can't inspect it during computation. Shielded VMs protect against a different threat entirely: verifying the VM's *boot process and software stack* haven't been tampered with, defending against rootkits and bootkits that would compromise the VM at a level beneath the operating system itself.
+
+```text
+SECURE BOOT -- verifies EVERY component in the boot chain is CRYPTOGRAPHICALLY SIGNED and TRUSTED:
+  Firmware -> Bootloader -> Kernel -> Kernel modules
+  -- EACH step verifies the NEXT step's signature BEFORE executing it --
+  -- an UNSIGNED or TAMPERED bootloader/kernel/driver (a ROOTKIT) is REFUSED, the VM WON'T BOOT with it
+
+VIRTUAL TPM (vTPM) -- a VIRTUALIZED Trusted Platform Module, providing CRYPTOGRAPHIC ATTESTATION:
+  -- generates and PROTECTS cryptographic keys, and can ATTEST to what SOFTWARE actually booted --
+  -- lets OTHER systems VERIFY "this VM genuinely booted the EXPECTED, untampered software stack"
+
+INTEGRITY MONITORING -- CONTINUOUSLY compares the VM's boot measurements against a KNOWN-GOOD baseline:
+  -- if a LATER measurement DIFFERS from the baseline (a rootkit installed AFTER initial boot,
+     for instance) -- an ALERT is raised, flagging the DISCREPANCY for INVESTIGATION
+```
+Whereas Confidential VMs assume the guest OS itself is trustworthy but protect its memory from external inspection (even by the cloud provider), Shielded VMs assume a *different* attacker model entirely — one attempting to compromise the VM's boot chain or kernel itself (a rootkit, a bootkit) — and specifically defend against that, verifying and continuously monitoring the integrity of the software stack from the very first instruction executed onward.
+
+**Why these two features are complementary rather than redundant:** a VM could have its memory protected from external inspection (Confidential Computing) while still being vulnerable to a rootkit that compromised its boot process before the workload ever started running — Shielded VMs and Confidential VMs can be (and often are) enabled together, since one protects the integrity of what's running, and the other protects the confidentiality of its data while it runs, addressing genuinely different points in the overall threat model.
+
+**Common Pitfall:** enabling Confidential VMs and assuming this alone provides comprehensive protection against a compromised guest OS or boot process — Confidential Computing's threat model specifically concerns protecting data from the infrastructure operator/hypervisor, not from a rootkit that infected the guest OS itself before the workload started; Shielded VMs' boot-integrity verification addresses that separate, equally real threat, and the two features should be evaluated (and typically enabled) independently based on which specific threats matter for a given workload.
+
+---
+
 ---

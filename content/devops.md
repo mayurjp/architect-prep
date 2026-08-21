@@ -906,4 +906,81 @@ By deliberately injecting a failure into a staging deployment on a regular, sche
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is a CI pipeline's "Job" dependency graph, and how does running independent jobs in PARALLEL (rather than one strict sequential chain) speed up an overall pipeline run?**
+
+A CI pipeline is composed of multiple jobs (build, unit tests, lint, integration tests, deploy) — jobs with no dependency on each other's output can run in parallel, on separate runners simultaneously, rather than being forced through one single, sequential chain where each job waits for the previous one to fully finish before starting.
+
+```yaml
+# A pipeline where UNRELATED jobs run IN PARALLEL, only jobs with a REAL dependency wait for each other
+jobs:
+  build:
+    steps: [restore, compile]
+
+  unit-tests:
+    needs: [build]      # WAITS for build -- genuinely depends on its output
+    steps: [run unit tests]
+
+  lint:
+    needs: [build]       # ALSO waits for build -- but runs IN PARALLEL with unit-tests, NOT after it
+    steps: [run linter]
+
+  deploy:
+    needs: [unit-tests, lint]  # waits for BOTH -- the FIRST point where a genuine, combined dependency exists
+    steps: [deploy to staging]
+```
+Because `unit-tests` and `lint` don't depend on each other's output (only on `build`'s), a well-configured pipeline runs them concurrently on separate runners the moment `build` finishes — rather than an unnecessarily sequential pipeline running `build` → `unit-tests` → `lint` → `deploy` one after another, wasting time waiting for jobs that had no actual reason to wait on each other.
+
+**Common Pitfall:** defining every pipeline job as a single, strictly sequential chain purely because that's the simplest mental model to write, without examining which jobs genuinely depend on which others' output — this needlessly serializes independent jobs (linting waiting for unit tests to finish, for instance, despite neither depending on the other), extending the pipeline's total wall-clock time far beyond what the actual dependency graph between jobs would require.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is Semantic Versioning (SemVer), and how does a version number's three parts (MAJOR.MINOR.PATCH) communicate the specific nature of a release to anyone consuming that package or API?**
+
+Semantic Versioning is a convention for version numbers where each of the three parts carries a specific, agreed-upon meaning — incrementing MAJOR signals a breaking change, MINOR signals a backward-compatible new feature, and PATCH signals a backward-compatible bug fix — letting a consumer decide how cautiously to upgrade purely by reading the version number itself, without needing to read a changelog in detail first.
+
+```text
+MyLibrary 2.4.1  ->  2.4.2   (PATCH bump) -- a BUG FIX -- SAFE to upgrade, NOTHING should break
+MyLibrary 2.4.1  ->  2.5.0   (MINOR bump) -- a NEW FEATURE, backward-COMPATIBLE -- SAFE, existing code still works
+MyLibrary 2.4.1  ->  3.0.0   (MAJOR bump) -- a BREAKING CHANGE -- existing code MAY need MODIFICATION to upgrade
+```
+```json
+// package.json / .csproj -- a caret RANGE, EXPLICITLY trusting SemVer's CONTRACT
+"MyLibrary": "^2.4.1"  // automatically accepts ANY 2.x.x update (MINOR/PATCH) -- but NEVER auto-upgrades to 3.0.0
+```
+A dependency manager's version-range syntax (`^2.4.1`, accepting any `2.x.x`) is only *safe* to use automatically because SemVer's contract promises that MINOR/PATCH bumps within the same MAJOR version never break existing code — this entire automatic-update convenience depends on package authors actually honoring the SemVer contract correctly when choosing their own version bumps.
+
+**Common Pitfall:** publishing a genuinely breaking change (removing a public method, changing a parameter's type) as a MINOR or PATCH version bump, rather than a MAJOR one — this breaks the trust every downstream consumer's automatic version-range tooling (`^2.4.1`) is built on, since they'll auto-update into what SemVer promised would be a safe, backward-compatible release, only to have their own code break unexpectedly; correctly classifying a release's SemVer bump is a real commitment to consumers, not just an arbitrary number to increment.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is "Immutable Infrastructure," and how does replacing a server WHOLESALE (rather than patching/modifying it in place) eliminate the configuration drift problem that gradually accumulates on long-lived, repeatedly-modified servers?**
+
+Immutable Infrastructure means a running server/container is never modified after it's deployed — instead of SSHing in to apply a patch or update a configuration file on an existing server, you build an entirely new image/instance with the change baked in, and replace the old one wholesale, rather than mutating it in place.
+
+```text
+MUTABLE infrastructure -- servers are REPEATEDLY PATCHED/MODIFIED in place, OVER TIME:
+  Server deployed (config A) -> SSH in, apply patch #1 -> SSH in, apply patch #2 -> SSH in, tweak config...
+  -- AFTER MONTHS of ACCUMULATED manual changes, NO ONE is fully certain EXACTLY what state this
+     SPECIFIC server is ACTUALLY in anymore -- it has DRIFTED from its ORIGINAL, documented configuration --
+  -- a DIFFERENT server, deployed from the SAME original image but PATCHED DIFFERENTLY, might behave
+     SUBTLY DIFFERENTLY -- "WORKS ON THIS SERVER, FAILS ON THAT ONE" -- CONFIGURATION DRIFT
+
+IMMUTABLE infrastructure -- a server is NEVER modified in place -- ONLY ever REPLACED, WHOLESALE:
+  Server deployed (image v1) -> NEED a change? -> BUILD image v2 (WITH the change baked in) -> REPLACE the
+  ENTIRE server with a FRESH instance of image v2 -- the OLD instance is DESTROYED, NEVER patched directly
+```
+Because a server is always either running a specific, known image version or has been entirely replaced by a newer one, there's no possibility of accumulated, undocumented manual changes drifting a specific server's actual state away from what its image definition says it should be — every server running "image v2" is, by construction, genuinely identical to every other server running "image v2," since none of them were ever individually hand-modified after deployment.
+
+**Why this specifically connects to and enables GitOps (covered earlier):** GitOps' promise (Git as the single source of truth for desired state) only holds meaningfully if the actual running infrastructure genuinely reflects what's declared in Git — mutable infrastructure that's been hand-patched outside the deployment pipeline breaks this guarantee (the *real* server no longer matches what Git says it should be); Immutable Infrastructure is the practical discipline that makes GitOps' "actual state matches declared state" promise actually hold true in practice, rather than gradually drifting apart from it over time.
+
+**Common Pitfall:** treating "Immutable Infrastructure" as purely a container/Docker-specific concept, missing that the underlying discipline (never hand-modify a running instance; always rebuild and replace) applies just as much to traditional VMs, and that occasionally SSHing into a "supposedly immutable" production container/VM to apply an urgent hotfix directly undermines the entire guarantee — even one such manual exception reintroduces exactly the configuration-drift risk the practice exists specifically to eliminate, for that one instance, going forward.
+
+---
+
 ---

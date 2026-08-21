@@ -1019,4 +1019,80 @@ By explicitly restricting `ValidAlgorithms` to the one specific algorithm the se
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is "Broken Access Control" as a general vulnerability category (OWASP's own top-ranked risk), and how does it differ from an Authentication failure — given that IDOR, Mass Assignment, and CSRF (all covered earlier) are each specific instances of it?**
+
+Authentication answers "who are you?" — Access Control answers "are you allowed to do *this specific thing*, to *this specific resource*?" Broken Access Control is the umbrella category covering any failure of that second check: a user who is genuinely, correctly authenticated, but who is nonetheless able to perform an action or access data they should not be authorized for.
+
+```csharp
+[Authorize] // AUTHENTICATION passes -- the user IS a genuinely logged-in, valid user
+[HttpGet("{id}")]
+public IActionResult GetInvoice(int id)
+{
+    var invoice = _db.Invoices.Find(id); // ACCESS CONTROL is MISSING -- no check that THIS user OWNS invoice #id
+    return Ok(invoice); // a logged-in user can view ANY invoice, not just THEIR OWN -- BROKEN ACCESS CONTROL
+}
+```
+This code has *correct* Authentication (`[Authorize]` genuinely requires a valid, logged-in user) but *broken* Access Control (nothing checks whether this specific, authenticated user is actually authorized to view *this specific* invoice) — the earlier IDOR vulnerability, Mass Assignment vulnerability, and CSRF are all, at a conceptual level, specific *instances* of Broken Access Control: each one lets an authenticated user perform an action or reach data beyond what they should actually be permitted.
+
+**Why OWASP ranks this as the single most common and impactful web vulnerability category overall:** unlike a specific technical flaw (a missing input sanitization step), Broken Access Control is fundamentally a *design and enforcement* problem — every single endpoint touching sensitive data or state-changing actions needs its own correct, deliberate authorization check, and missing even one (in a large application with hundreds of endpoints) reintroduces the category; there's no single library or framework setting that "solves" access control the way, say, EF Core's parameterized queries structurally solve SQL Injection.
+
+**Common Pitfall:** treating `[Authorize]` (or any authentication check) as sufficient protection on its own, without a *separate*, explicit authorization check verifying the specific action against the specific resource — `[Authorize]` only confirms "a valid, logged-in user is making this request," never "this specific user is permitted to do this specific thing to this specific resource," which is precisely the gap Broken Access Control describes and precisely why IDOR, Mass Assignment, and similar vulnerabilities remain so common despite widespread, correctly-implemented authentication.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is "Security Misconfiguration," and how does a verbose error page leaking a full stack trace (or a service left running with default credentials) hand an attacker information or access that a properly-hardened configuration would never expose?**
+
+Security Misconfiguration covers a broad category of vulnerabilities that aren't a *code* flaw at all, but a deployment/configuration one — a development-mode error page left enabled in production, a database or admin panel still using its default, unchanged password, unnecessary services or ports left open — each one hands an attacker something a correctly-hardened configuration simply wouldn't expose.
+
+```csharp
+// Program.cs -- LEAVING the developer exception page enabled UNCONDITIONALLY, EVEN in production
+app.UseDeveloperExceptionPage(); // reveals FULL STACK TRACES, FILE PATHS, and even SOURCE CODE snippets
+```
+```text
+An unhandled exception in PRODUCTION, with the developer exception page STILL enabled, reveals:
+  -- the EXACT file path and LINE NUMBER where the exception occurred (internal folder structure)
+  -- the FULL .NET stack trace, INCLUDING third-party library internals
+  -- potentially even a QUERY STRING or CONNECTION STRING fragment, if it appears in a LOGGED exception
+-- an ATTACKER probing FOR vulnerabilities gets a DETAILED MAP of the application's INTERNAL structure,
+   technology stack, and library VERSIONS (useful for looking up KNOWN CVEs in those SPECIFIC versions) --
+```
+Beyond stack traces, the same category covers a database or admin console left running with its installation-default username/password (`admin`/`admin`), verbose server banners revealing exact software versions (`Server: Apache/2.4.29`, letting an attacker look up known vulnerabilities for that exact version), or directory listing left enabled on a web server, exposing files never meant to be browsable — each is a *configuration* choice (or the absence of one), not a coding bug, that a hardened, production-appropriate configuration would close off entirely.
+
+**Why this category is specifically dangerous precisely because it's easy to overlook:** unlike a vulnerability that requires an attacker to find a specific flawed line of code, a misconfiguration is often the *default* state of a freshly-installed piece of software or a hastily-deployed environment — an attacker doesn't need to discover anything clever; they simply need to check whether the *obvious*, default, unhardened state was ever actually changed at all.
+
+**Common Pitfall:** relying on `ASPNETCORE_ENVIRONMENT=Development` being set correctly in every deployment pipeline to gate the developer exception page, without an explicit, defense-in-depth check — a misconfigured deployment pipeline that accidentally deploys with the wrong environment variable (or omits it entirely, defaulting differently than expected) can silently expose the developer exception page in production; explicitly checking `app.Environment.IsDevelopment()` in code, rather than trusting an environment variable alone to always be set correctly everywhere, adds a layer of protection against exactly this kind of configuration mistake.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is HTTP Response Splitting (CRLF Injection), and how does injecting a carriage-return-line-feed sequence into a header value that echoes untrusted user input let an attacker inject entirely additional HTTP headers — or even split the response into two?**
+
+HTTP headers are terminated by a carriage-return-line-feed (`\r\n`) sequence — if an application takes untrusted user input and places it directly into a response header's value without sanitizing it, an attacker can embed their own `\r\n` sequence inside that value, effectively "ending" the intended header early and injecting arbitrary additional headers (or even a second, fully attacker-controlled HTTP response) into what the server intended to send back.
+
+```csharp
+// VULNERABLE -- untrusted user input placed DIRECTLY into a response header, with NO sanitization
+string redirectUrl = Request.Query["returnUrl"]; // attacker-controlled
+Response.Headers.Add("Location", redirectUrl);
+```
+```text
+Attacker supplies: returnUrl = "/home%0d%0aSet-Cookie: session=attacker-controlled-value"
+-- %0d%0a decodes to \r\n -- the CARRIAGE-RETURN-LINE-FEED sequence that TERMINATES an HTTP header --
+
+The resulting RAW response headers become:
+  Location: /home
+  Set-Cookie: session=attacker-controlled-value    <-- an ENTIRELY NEW header the developer NEVER intended!
+```
+Because the raw `\r\n` sequence is what the HTTP protocol itself uses to separate one header from the next, an attacker who can inject it into an echoed value effectively gets to write arbitrary *additional* header lines into the response — depending on what the target does with those injected headers (a `Set-Cookie` to fixate a session, a cache-poisoning header, or in severe legacy cases, splitting the connection into two full responses that confuse an intermediate proxy/cache), the impact ranges from response manipulation to session-related attacks.
+
+**Why modern frameworks largely closed this off, and where it can still resurface:** ASP.NET Core's own header-setting APIs (`Response.Headers.Add`) validate and reject raw `\r\n` characters in header values by default, closing off the classic form of this attack for standard framework usage — but the underlying risk can still resurface in custom, low-level code that manually constructs raw HTTP responses/headers (a hand-rolled proxy, a custom log-forwarding tool that embeds request data into headers) without the same built-in validation, or when a downstream system further along the chain doesn't perform equivalent validation on data it received already partially trusted.
+
+**Common Pitfall:** assuming that because "my web framework already prevents this," CRLF injection is entirely a solved, historical problem not worth considering — the underlying vulnerability class re-emerges anywhere raw, untrusted string data is concatenated directly into any newline-delimited protocol format (not just HTTP headers — think custom log formats, or other line-based protocols) without that specific boundary character being explicitly stripped or rejected, meaning the *general lesson* (never let untrusted input straddle a protocol's own structural delimiter unsanitized) remains broadly applicable well beyond just HTTP headers specifically.
+
+---
+
 ---
