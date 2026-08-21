@@ -762,3 +762,73 @@ An attacker can repeatedly send requests varying `query` (trying different guess
 **Common Pitfall:** enabling response compression globally across an entire API without auditing which specific endpoints return both a secret and any attacker-reflectable content in the same response — the fix isn't "never use compression," it's identifying and selectively excluding the specific narrow set of endpoints where this dangerous combination actually occurs.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is API Versioning via URL segment (`/api/v1/products`) versus via a custom header (`Api-Version: 1.0`), and what's the main practical trade-off between the two approaches?**
+
+URL-segment versioning embeds the version directly in the path, making it visible and explicit in every request URL — header-based versioning keeps the URL itself version-agnostic, communicating the desired version through a separate HTTP header instead.
+
+```http
+GET /api/v1/products/5           <-- URL segment versioning: version is PART of the path
+
+GET /api/products/5              <-- header versioning: URL stays the SAME across versions
+Api-Version: 1.0                  <-- version communicated SEPARATELY, via a header
+```
+```csharp
+[ApiVersion("1.0")]
+[Route("api/v{version:apiVersion}/products")] // URL-segment style
+public class ProductsV1Controller : ControllerBase { ... }
+```
+With URL-segment versioning, a request to a specific version is immediately visible just from the URL itself (easy to bookmark, share, debug from raw logs) — with header-based versioning, the same URL can return entirely different response shapes depending on an easily-overlooked header, which can be less obvious when reading logs or sharing a URL, but keeps the "resource identity" (the URL) stable across versions, arguably more aligned with REST's principle that a URL identifies one resource, not one resource-per-API-version.
+
+**Common Pitfall:** mixing both versioning schemes inconsistently across different endpoints of the same API (some versioned via URL, others via header) — this creates a confusing, inconsistent API surface where clients must remember which specific mechanism applies to which endpoint; picking one versioning scheme and applying it uniformly across the entire API is important for a coherent, predictable developer experience regardless of which specific scheme is chosen.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is ASP.NET Core Web API's Model Binding Custom `IModelBinder`, and when would you write one instead of relying on the framework's default binding behavior?**
+
+A custom `IModelBinder` lets you take full control over how a specific parameter type is populated from the incoming request, for cases the default binding conventions can't handle — commonly needed for binding a value from a non-standard source, or applying custom parsing/transformation logic during the binding process itself.
+
+```csharp
+public class CommaSeparatedIntsBinder : IModelBinder
+{
+    public Task BindModelAsync(ModelBindingContext bindingContext)
+    {
+        var value = bindingContext.ValueProvider.GetValue(bindingContext.ModelName).FirstValue;
+        var ints = value?.Split(',').Select(int.Parse).ToList() ?? new List<int>();
+        bindingContext.Result = ModelBindingResult.Success(ints);
+        return Task.CompletedTask;
+    }
+}
+
+[HttpGet]
+public IActionResult Search([ModelBinder(BinderType = typeof(CommaSeparatedIntsBinder))] List<int> ids) { ... }
+// A request like GET /search?ids=1,2,3 is parsed into List<int> { 1, 2, 3 } via the CUSTOM binder
+```
+Default model binding handles most common cases (simple types, complex objects from JSON bodies, route/query values matched by name) — a custom `IModelBinder` is warranted specifically when the incoming data's shape doesn't map cleanly onto any of those default conventions, as with this comma-separated query string example, which the default binder has no built-in support for.
+
+**Common Pitfall:** reaching for a custom `IModelBinder` for a transformation that would be simpler to express as ordinary code inside the action method itself (parsing a raw `string` parameter manually within the action body) — custom binders add a layer of indirection that's genuinely worthwhile when the same custom parsing logic needs to be reused across many actions/parameters, but for a one-off, single-use transformation, doing the parsing inline inside the action method is often simpler and easier for a future reader to follow.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is HTTP/2 Server Push's relationship to ASP.NET Core Web APIs, and why was it ultimately deprecated across major browsers despite initially seeming like a promising performance optimization?**
+
+HTTP/2 Server Push allowed a server to proactively send resources to a client *before* the client explicitly requested them, anticipating what the client would need next — theoretically eliminating a round trip for predictably-needed resources; however, major browsers have since removed support for it, since in practice its actual benefits rarely outweighed its costs.
+
+```csharp
+// HTTP/2 Server Push (LARGELY DEPRECATED -- shown for historical/conceptual understanding)
+context.Response.HttpContext.Features.Get<IHttpResponsePushFeature>()
+    ?.PushResource("/api/related-data"); // proactively sends this BEFORE the client asks for it
+```
+**Why it was deprecated despite the seemingly sound theory:** in practice, servers frequently pushed resources the client already had cached (wasting bandwidth pushing something unnecessary), and browsers couldn't easily cancel an in-flight push once server-side logic decided to send it — the actual, measured real-world performance benefit turned out to be inconsistent and often negative once these practical costs were accounted for, leading Chrome and other major browsers to remove support entirely in favor of alternative optimization techniques (like `103 Early Hints`, which lets a server hint at resources the client should *start* fetching itself, without forcing an unwanted push).
+
+**Why this matters as a lesson beyond just "don't use Server Push":** a theoretically sound optimization (eliminate a round trip by proactively sending what will likely be needed) can still fail in practice due to real-world complications (cache-awareness, cancellation difficulty) that weren't fully accounted for in the original design — this is a useful case study in why an architecture/performance decision should be validated against real-world measured behavior, not purely theoretical reasoning about what "should" be faster.
+
+**Common Pitfall:** implementing or relying on HTTP/2 Server Push in new API development, unaware that major browser vendors have already removed client-side support for it — code attempting to use `IHttpResponsePushFeature` today would find no browser actually honoring the pushed resource, since the client-side half of the mechanism no longer exists in any major browser; `103 Early Hints` is the modern, actually-supported alternative for a related, but not identical, class of optimization.
+
+---

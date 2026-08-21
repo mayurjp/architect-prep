@@ -815,3 +815,97 @@ Because the cached response lives on the server, Output Caching can meaningfully
 **Common Pitfall:** enabling Output Caching on an endpoint whose response varies per authenticated user (returning one user's data cached and then served to a *different* user) without correctly configuring cache key variation (`policy.SetVaryByHeader("Authorization")` or similar) — since Output Caching serves the exact same stored response to any request matching the cache key, an endpoint returning per-user data cached under too coarse a key can leak one user's data to another entirely.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is ASP.NET Core's `IOptions<T>` pattern, and how does binding a strongly-typed settings class to a section of `appsettings.json` avoid scattering raw string-keyed configuration lookups throughout the codebase?**
+
+`IOptions<T>` binds a section of configuration (from `appsettings.json`, environment variables, or any other configuration source) directly onto a strongly-typed C# class, injected via DI — rather than every consumer performing its own raw, string-keyed `Configuration["Some:Nested:Key"]` lookup scattered throughout the codebase.
+
+```json
+// appsettings.json
+{ "EmailSettings": { "SmtpHost": "smtp.example.com", "Port": 587 } }
+```
+```csharp
+public class EmailSettings
+{
+    public string SmtpHost { get; set; } = "";
+    public int Port { get; set; }
+}
+
+// Program.cs
+builder.Services.Configure<EmailSettings>(builder.Configuration.GetSection("EmailSettings"));
+
+// Anywhere needing these settings, injected via DI -- fully typed, no string keys anywhere:
+public class EmailSender
+{
+    private readonly EmailSettings _settings;
+    public EmailSender(IOptions<EmailSettings> options) => _settings = options.Value;
+    public void Send() => Console.WriteLine($"Connecting to {_settings.SmtpHost}:{_settings.Port}");
+}
+```
+Because `EmailSettings` is a real, compiler-checked C# class, a typo in `_settings.SmtpHost` is caught immediately at compile time — a raw string-keyed lookup like `Configuration["EmailSettings:SmtpHos"]` (note the typo) would compile fine and simply return `null` at runtime, a bug only discoverable by actually running the code and noticing the missing value.
+
+**Common Pitfall:** scattering raw `IConfiguration["Some:Key"]` string-keyed lookups directly throughout business logic classes, rather than binding related settings to a dedicated, strongly-typed options class once — beyond losing compile-time typo-checking, this also means the same configuration key's exact string path needs to be remembered and re-typed correctly at every single place it's used, rather than being centralized into one class other code can reference by property name.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is ASP.NET Core's `IMiddleware` (a middleware implemented as an injectable class rather than an inline lambda), and how does implementing it as a proper DI-managed class differ from the simpler inline `app.Use(...)` lambda approach in terms of dependency lifetime?**
+
+Simple middleware can be written inline as a lambda passed to `app.Use(...)` — but middleware needing genuine constructor-injected dependencies with a *scoped* (per-request) lifetime is better expressed as a full class implementing `IMiddleware`, letting the DI container properly manage its lifetime per request rather than the middleware instance being effectively a singleton (which inline `app.Use` lambdas implicitly are, since they're only constructed once at pipeline-build time).
+
+```csharp
+public class RequestTimingMiddleware : IMiddleware
+{
+    private readonly IScopedRequestContext _context; // a SCOPED, per-request dependency
+
+    public RequestTimingMiddleware(IScopedRequestContext context) => _context = context;
+
+    public async Task InvokeAsync(HttpContext httpContext, RequestDelegate next)
+    {
+        var sw = Stopwatch.StartNew();
+        await next(httpContext);
+        _context.RecordTiming(sw.ElapsedMilliseconds); // uses its OWN scoped dependency, correctly per-request
+    }
+}
+
+// Registration:
+builder.Services.AddScoped<RequestTimingMiddleware>(); // registered with DI, SCOPED lifetime respected
+builder.Services.AddScoped<IScopedRequestContext, ScopedRequestContext>();
+app.UseMiddleware<RequestTimingMiddleware>();
+```
+Because `IMiddleware`-based middleware is instantiated by the DI container per request (respecting the registered lifetime), it can safely take a constructor-injected *scoped* dependency — an inline `app.Use` lambda, by contrast, captures its dependencies once at pipeline-construction time (effectively singleton-scoped), making it unsafe to directly inject a scoped service into the lambda's closure without manually resolving it from `HttpContext.RequestServices` inside the lambda body instead.
+
+**Common Pitfall:** injecting a scoped service directly into an inline middleware lambda's captured closure (rather than resolving it fresh per request from `HttpContext.RequestServices`) — since the lambda itself is only constructed once, at pipeline build time, a captured scoped dependency would incorrectly behave like a singleton, potentially causing subtle bugs from a scoped service (like a per-request `DbContext`) being inadvertently shared and reused across multiple, unrelated requests.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is ASP.NET Core's `EndpointDataSource`, and how does it let a THIRD-PARTY LIBRARY dynamically contribute its own routable endpoints to an application's routing table, without the application needing to explicitly register each one?**
+
+`EndpointDataSource` is the underlying abstraction that supplies the actual set of routable endpoints (controllers, Minimal API routes, Razor Pages) to ASP.NET Core's routing system — a library can implement its own custom `EndpointDataSource` to dynamically contribute endpoints (computed at runtime, or based on some external configuration) directly into the application's routing table, without the application author needing to write an explicit `MapGet`/`MapPost` call for each one.
+
+```csharp
+public class PluginEndpointDataSource : EndpointDataSource
+{
+    public override IReadOnlyList<Endpoint> Endpoints =>
+        _pluginRegistry.GetActivePlugins() // dynamically discovers endpoints from a plugin system
+            .Select(plugin => plugin.CreateEndpoint())
+            .ToList();
+
+    public override IChangeToken GetChangeToken() => _pluginRegistry.ChangeToken; // routes update if plugins change
+}
+
+// Registration:
+builder.Services.AddSingleton<EndpointDataSource, PluginEndpointDataSource>();
+```
+Because routing consults every registered `EndpointDataSource` (not just the built-in one populated by `MapControllers`/`MapGet`), an application that installs a plugin exposing new HTTP endpoints could have those endpoints become routable automatically, purely from the plugin's own `EndpointDataSource` contribution — no application code needs to explicitly call `MapGet` for each endpoint the plugin happens to define.
+
+**Why the `GetChangeToken()` override matters specifically:** returning a change token that fires when the underlying endpoint set changes (a plugin being added/removed at runtime) lets ASP.NET Core's routing system know it needs to recompute its routing table — without a correctly-implemented change token, dynamically added/removed endpoints might not actually take effect until the application restarts, since routing wouldn't otherwise know to re-query the data source.
+
+**Common Pitfall:** implementing a custom `EndpointDataSource` without correctly implementing `GetChangeToken()` to fire when the underlying endpoint set actually changes — this leaves dynamically added or removed endpoints invisible to the routing system until an application restart, defeating the entire purpose of using a dynamic data source in the first place, since the routing table would only ever reflect whatever endpoints existed at the moment the application first started.
+
+---

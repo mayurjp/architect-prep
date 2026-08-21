@@ -619,3 +619,87 @@ The `Trailer` header (sent upfront) announces which header(s) will follow *after
 **Common Pitfall:** assuming trailer header support is universal across all HTTP clients, proxies, and load balancers — many intermediaries strip or simply don't forward trailer headers, historically making them unreliable for anything beyond client/server pairs known to support them explicitly (gRPC, built on HTTP/2, is one of the more common real-world users of trailers, specifically for sending a call's final status code after the response body has streamed); building critical application logic around trailers reaching an arbitrary client through an arbitrary chain of intermediaries is risky without confirming the specific infrastructure involved actually preserves them.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is the `Referer` request header (note the historical misspelling), and what specific privacy/security concern led to the introduction of the `Referrer-Policy` header to control what it actually reveals?**
+
+The `Referer` header tells a server which page a request originated from (a link the user clicked) — while useful for legitimate purposes (analytics, understanding traffic sources), it can also leak potentially sensitive URL information from the referring page (a search query embedded in the URL, an internal document ID) to the destination site, which the destination site never should have needed to know.
+
+```http
+GET /external-resource HTTP/1.1
+Referer: https://intranet.company.com/employee-records?id=4521&reason=disciplinary
+```
+The destination site now knows the exact internal URL (including query parameters that might contain sensitive context) the user was viewing right before clicking through — `Referrer-Policy` lets the referring site control exactly how much of this information is actually sent.
+
+```http
+Referrer-Policy: strict-origin-when-cross-origin
+```
+```text
+Same-origin navigation: full URL sent (safe, staying within the same trusted site)
+Cross-origin navigation: ONLY the origin (https://intranet.company.com) is sent, NOT the full path/query --
+                          "id=4521&reason=disciplinary" is NEVER revealed to the external destination
+```
+This specific policy value (a common, sensible default) sends the full referring URL only for same-origin navigation, while cross-origin navigation reveals only the origin itself, stripping away the path and query string that might contain sensitive details — balancing legitimate analytics/traffic-source use cases against the privacy risk of leaking a URL's full, potentially sensitive contents to an entirely different, external site.
+
+**Common Pitfall:** embedding sensitive data (session tokens, personal information, internal identifiers) directly in a URL's query string, assuming it stays contained to the application itself — if a user then navigates from that page to any external site, the `Referer` header (unless a strict `Referrer-Policy` is configured) can leak that sensitive URL, including its query string, to the external destination; sensitive data belongs in a request body or a header, not a URL's query string, precisely because URLs propagate via mechanisms like `Referer` that request bodies don't.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is HTTP's `Vary` response header, and how does it tell a CACHE (browser or intermediate proxy) that the SAME URL can have MULTIPLE, DIFFERENT valid cached responses depending on a specific request header's value?**
+
+`Vary` tells any cache that a response's content depends not just on the URL, but also on the value of one or more specific *request* headers — instructing the cache to store and serve separate cached copies keyed by both the URL AND the specified header's value, rather than treating all requests to the same URL as interchangeable.
+
+```http
+GET /api/products/5
+Accept: application/json
+
+HTTP/1.1 200 OK
+Vary: Accept
+Content-Type: application/json
+{ "id": 5, "name": "Keyboard" }
+```
+```http
+GET /api/products/5
+Accept: application/xml
+
+HTTP/1.1 200 OK
+Vary: Accept
+Content-Type: application/xml
+<product><id>5</id><name>Keyboard</name></product>
+```
+Because both responses declare `Vary: Accept`, a compliant cache understands these are two legitimately *different* cached responses for the *same* URL, correctly keyed by the differing `Accept` header value — without `Vary`, a cache might incorrectly serve the cached JSON response to a client that actually requested XML (or vice versa), since by default a cache typically keys only on the URL itself.
+
+**Why this matters specifically for APIs using Content Negotiation (covered earlier):** an API supporting multiple response formats via the `Accept` header absolutely needs `Vary: Accept` on its responses if caching (browser or CDN/proxy) is involved at all — without it, a cache serving both JSON and XML clients from the same URL risks serving the wrong format to the wrong client, a subtle caching bug that's easy to overlook since it only manifests once an intermediate cache is actually involved in the request path.
+
+**Common Pitfall:** implementing Content Negotiation (varying the response based on `Accept`) without also setting the corresponding `Vary: Accept` header — this works correctly with no caching involved at all, but silently breaks the moment any HTTP cache (a CDN, a browser's own cache, an intermediate proxy) sits between the client and server, since the cache has no way of knowing the response actually depends on a header it wasn't told to key on.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is HTTP/3's use of QUIC over UDP (rather than TCP), and how does this specifically solve "TCP Head-of-Line Blocking" that persists even in HTTP/2 despite its stream multiplexing?**
+
+HTTP/2 multiplexes many logical streams over a *single* TCP connection — but TCP itself guarantees strictly in-order byte delivery at the transport layer, meaning if even one TCP packet is lost, **every** HTTP/2 stream sharing that connection stalls until the lost packet is retransmitted and received, even though the lost packet may have belonged to just one specific stream. This is "TCP Head-of-Line Blocking," and it persists in HTTP/2 despite its application-layer multiplexing, precisely because the underlying transport (TCP) doesn't understand the concept of independent streams at all. HTTP/3, built on QUIC (running over UDP instead), solves this by implementing multiplexing and independent stream delivery *within* QUIC itself, at the transport layer.
+
+```text
+HTTP/2 over TCP:
+  Stream A packet, Stream B packet, Stream C packet -- ALL flow over ONE TCP connection
+  Stream B's packet is LOST -> TCP's strict in-order delivery BLOCKS Streams A and C too,
+  even though THEIR packets arrived fine, because TCP doesn't know about "streams" at all,
+  only a single ordered byte sequence
+
+HTTP/3 over QUIC (UDP):
+  Stream A packet, Stream B packet, Stream C packet -- QUIC tracks these as GENUINELY INDEPENDENT
+  Stream B's packet is LOST -> ONLY Stream B stalls waiting for retransmission;
+  Streams A and C continue delivering data to the application WITHOUT WAITING for Stream B at all
+```
+Because QUIC itself (not the application layer) natively understands and tracks independent streams, a lost packet belonging to one stream only blocks *that* stream's data from being delivered to the application — other streams' data, having arrived successfully, is delivered immediately rather than waiting behind the lost packet's retransmission, which is precisely the head-of-line blocking problem TCP's single ordered byte-stream model cannot avoid.
+
+**Why this required abandoning TCP entirely, rather than just patching it:** TCP's in-order, single-byte-stream guarantee is fundamental to its design and extremely deeply embedded in decades of existing network infrastructure (middleboxes, firewalls, operating system kernels) — building genuinely independent stream multiplexing with per-stream loss recovery required a new transport protocol (QUIC, running over UDP specifically because UDP has no such ordering guarantee to begin with, giving QUIC a blank slate to implement its own stream-aware reliability logic).
+
+**Common Pitfall:** assuming HTTP/2's stream multiplexing alone fully solved head-of-line blocking, without realizing the underlying TCP transport still imposes strict, connection-wide in-order delivery beneath it — HTTP/2 successfully solved *application-layer* head-of-line blocking (from HTTP/1.1's strict request-response ordering), but the *transport-layer* head-of-line blocking inherent to TCP itself remained unaddressed until HTTP/3's shift to QUIC specifically targeted that deeper, transport-level limitation.
+
+---

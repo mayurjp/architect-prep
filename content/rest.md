@@ -1547,3 +1547,88 @@ public IActionResult Create(CreateProductRequest request) // rejects ANYTHING no
 **Common Pitfall:** building "helpful" liberal-acceptance logic (case-insensitive field matching, silently ignoring unrecognized fields, guessing at intent from multiple possible field names) believing it improves compatibility — in practice, this class of leniency frequently masks real client bugs, delays their discovery, and makes the API's actual contract far less clear than simply rejecting anything not matching the documented shape exactly.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is the `Location` response header, and what specific role does it play in a `201 Created` response's contract with the client?**
+
+When a `POST` request successfully creates a new resource, a `201 Created` response is expected to include a `Location` header pointing to the URL of the newly-created resource — telling the client exactly where to find (or subsequently interact with) the thing it just created, without needing to construct that URL itself.
+
+```http
+POST /api/products
+{ "name": "Keyboard", "price": 29.99 }
+
+HTTP/1.1 201 Created
+Location: /api/products/42
+{ "id": 42, "name": "Keyboard", "price": 29.99 }
+```
+The client now knows the newly-created product's URL is `/api/products/42` directly from the response header, without needing to guess it, parse it out of the response body, or make a separate follow-up request to discover it — a subsequent `GET`, `PUT`, or `DELETE` targeting this specific resource can go directly to that URL.
+
+**Why omitting `Location` on a `201` response is a commonly-missed REST convention:** many APIs return `201 Created` with the new resource's data in the body but forget the `Location` header entirely — this technically still communicates "something was created" via the status code, but leaves the client to construct the new resource's URL manually (often by concatenating the base path with an `id` field from the response body), which works but isn't as directly self-describing as a proper `Location` header pointing exactly where the client should go next.
+
+**Common Pitfall:** returning `200 OK` instead of `201 Created` for a successful creation `POST`, or returning `201` without the accompanying `Location` header — both are common, easy-to-overlook deviations from the expected REST convention for resource creation; the combination of the correct status code AND the `Location` header together is what fully communicates "a new resource was created, and here's exactly where to find it."
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is "Hypermedia as the Engine of Application State" (HATEOAS) failing to achieve widespread real-world adoption despite being part of Roy Fielding's ORIGINAL REST dissertation — what specific practical friction explains this gap between theory and practice?**
+
+HATEOAS (covered at a conceptual level elsewhere) envisions API responses including links describing available next actions, letting a client navigate an API dynamically without hardcoding URL structures — despite being arguably the most "purely RESTful" idea in Fielding's original dissertation, the overwhelming majority of real-world "REST APIs" never implement it, exposing fixed, documented URL structures that clients hardcode directly instead.
+
+```json
+// A HATEOAS response -- includes LINKS describing what the client can do NEXT
+{
+  "id": 42, "status": "pending",
+  "_links": {
+    "self": { "href": "/orders/42" },
+    "cancel": { "href": "/orders/42/cancel" },   // only present because status IS currently "pending"
+    "payment": { "href": "/orders/42/payment" }
+  }
+}
+```
+```json
+// The FAR more common real-world approach -- NO links, client just KNOWS the URL structure from documentation
+{ "id": 42, "status": "pending" }
+```
+The theoretical benefit is real: a HATEOAS client could discover that "cancel" is currently possible (because the link is present) without hardcoding "orders can be cancelled while pending" business logic client-side — but building genuinely dynamic, link-following client code is substantially more complex than simply hardcoding known URL paths from API documentation, and most real-world API consumers (internal teams, well-documented partner integrations) find hardcoded paths perfectly adequate and far simpler to implement.
+
+**Why the practical friction outweighs the theoretical benefit for most real APIs:** HATEOAS's value is largest for APIs whose URL structure and available actions genuinely change unpredictably over time, consumed by generic, adaptive clients that need to discover capabilities dynamically — for the much more common case of a well-documented API with a known, versioned contract, consumed by clients built specifically against that documented contract, hardcoding URLs is simpler, and the dynamic-discovery benefit HATEOAS provides largely goes unused in practice.
+
+**Common Pitfall:** treating "true REST requires HATEOAS" as a strict, universal requirement any pragmatic engineering team must implement — while technically accurate to Fielding's original definition, the overwhelming majority of production "REST APIs" (including extremely widely-used ones) never implement HATEOAS and are still broadly, colloquially, and usefully described as "RESTful" in everyday industry usage; understanding HATEOAS's theoretical value without treating its absence as disqualifying is the more practical stance for most real-world API design decisions.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is the `If-Match`/`If-None-Match` conditional request pattern combined with `ETag`, and how does it let a client perform an OPTIMISTIC CONCURRENCY check as part of an update request?**
+
+An `ETag` is an opaque identifier representing a specific version of a resource's current state — a client can submit an update conditioned on `If-Match: <etag>`, meaning "only apply this update if the resource's current ETag still matches the one I last saw"; if another client modified the resource in the meantime (changing its ETag), the conditional update fails instead of silently overwriting the intervening change.
+
+```http
+GET /api/products/5
+HTTP/1.1 200 OK
+ETag: "abc123"
+{ "id": 5, "name": "Keyboard", "price": 29.99 }
+```
+```http
+PUT /api/products/5
+If-Match: "abc123"
+{ "name": "Keyboard", "price": 24.99 }
+
+HTTP/1.1 200 OK   <-- succeeds, because the CURRENT ETag still matched "abc123"
+```
+```http
+PUT /api/products/5      (a SECOND client, using the SAME stale ETag it fetched earlier)
+If-Match: "abc123"
+{ "name": "Keyboard", "price": 19.99 }
+
+HTTP/1.1 412 Precondition Failed   <-- FAILS -- the resource's ETag has ALREADY changed since this client last read it
+```
+Because the second client's `If-Match` value no longer matches the resource's current (already-updated) ETag, the server rejects the update with `412 Precondition Failed` rather than silently overwriting the first client's change — this is the classic "lost update" problem prevented via optimistic concurrency, entirely through standard HTTP headers, without any application-specific version-number scheme needing to be invented.
+
+**Why this is "optimistic" rather than "pessimistic" concurrency:** no lock is held on the resource between the initial `GET` and the subsequent `PUT` — both clients are free to read and attempt to update concurrently; the conflict is only detected (optimistically assuming it usually won't happen) at the moment of the actual write, via the ETag comparison, rather than preventing concurrent access upfront the way a pessimistic lock would.
+
+**Common Pitfall:** implementing update endpoints without any conditional-request/ETag support at all — this leaves the API vulnerable to the classic "lost update" problem, where two clients reading the same resource and both submitting updates result in the second write silently overwriting the first, with neither client ever informed that a conflicting concurrent change occurred.
+
+---

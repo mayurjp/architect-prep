@@ -713,4 +713,75 @@ Because this convention inspects `application.Controllers` once at startup, it c
 
 ---
 
+## Beginner — Question 7
+
+**Q7: What is MVC's `[Bind]` attribute, and how does explicitly whitelisting which properties can be model-bound from incoming request data protect against Mass Assignment / Over-Posting vulnerabilities?**
+
+`[Bind]` restricts model binding to only the specific properties named, ignoring any other fields present in the incoming request — without it, model binding populates every matching property it finds by name, including ones a malicious client might add to the request body that the developer never intended to be settable this way.
+
+```csharp
+public class User
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public bool IsAdmin { get; set; } // NOT meant to be settable via a normal profile-update form!
+}
+
+// VULNERABLE -- binds EVERY matching property, including IsAdmin, if the attacker includes it in the POST body
+[HttpPost]
+public IActionResult UpdateProfile(User user) { ... }
+
+// PROTECTED -- only Id and Name are ever bound, regardless of what else the request body contains
+[HttpPost]
+public IActionResult UpdateProfile([Bind(nameof(User.Id), nameof(User.Name))] User user) { ... }
+```
+An attacker submitting a form with an extra, unexpected `isAdmin=true` field alongside the legitimate `name` field would have `IsAdmin` silently set to `true` in the vulnerable version, since model binding doesn't inherently know which fields "should" be settable from this particular endpoint — `[Bind]`'s explicit whitelist ensures only the named properties are ever populated, regardless of what additional fields an attacker includes in the request.
+
+**Why a dedicated request DTO is generally the more robust modern alternative to `[Bind]`:** rather than binding directly to the full `User` entity (with `[Bind]` restricting which of its properties are settable), defining a separate `UpdateProfileRequest` DTO containing *only* `Name` structurally makes it impossible for `IsAdmin` to ever be bound at all, since the DTO itself simply doesn't have that property — this avoids relying on remembering to correctly configure `[Bind]` on every sensitive action.
+
+**Common Pitfall:** binding directly to a full domain entity (rather than a purpose-built request DTO) without either `[Bind]` or equivalent protection, especially on any entity containing sensitive or privileged properties — this is the classic root cause of the Mass Assignment / Over-Posting vulnerability class, silently allowing attacker-supplied extra fields to set properties the developer never intended a given endpoint to expose for modification at all.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is MVC's `IViewComponentResult`/View Component invocation via Tag Helper syntax (`<vc:recent-orders>`), and how does it differ from the `@await Component.InvokeAsync(...)` syntax covered earlier?**
+
+Both syntaxes invoke the same underlying View Component — the Tag Helper form (`<vc:component-name>`) is simply a more HTML-like, declarative alternative to the C#-expression-style `@await Component.InvokeAsync(...)` call, with parameters passed as HTML attributes rather than an anonymous object.
+
+```razor
+@* The awaitable-expression syntax (covered earlier): *@
+@await Component.InvokeAsync("RecentOrders", new { customerId = Model.Id })
+
+@* The Tag Helper syntax -- reads more like ordinary HTML, parameters as ATTRIBUTES *@
+<vc:recent-orders customer-id="@Model.Id"></vc:recent-orders>
+```
+Both ultimately invoke the exact same `RecentOrdersViewComponent.InvokeAsync(int customerId)` method — the Tag Helper syntax translates the kebab-case `customer-id` attribute into the `customerId` parameter automatically, following the same naming convention ASP.NET Core Tag Helpers generally use elsewhere, and requires the View Components Tag Helper to be registered via `@addTagHelper` in `_ViewImports.cshtml`.
+
+**Why the Tag Helper syntax is often preferred for readability in markup-heavy views:** a view containing many View Component invocations alongside substantial surrounding HTML tends to read more consistently when View Components are expressed as HTML-like tags rather than C# expression syntax interspersed throughout the markup — this is purely a stylistic/readability preference, since both forms are functionally identical and invoke the exact same underlying component.
+
+**Common Pitfall:** forgetting to register the View Components Tag Helper (`@addTagHelper *, Microsoft.AspNetCore.Mvc.ViewFeatures` typically already covers this, but a custom-named component library may need its own explicit registration) in `_ViewImports.cshtml` — without it, the `<vc:...>` tag syntax simply renders as literal, unprocessed HTML text in the output rather than invoking the intended View Component, a confusing failure mode for someone unfamiliar with the registration requirement.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is MVC's `IApiDescriptionProvider`, and how does it let tooling (like Swagger/OpenAPI generation) automatically discover a controller's routes, parameters, and response shapes WITHOUT the developer maintaining a separate, hand-written API specification?**
+
+`IApiDescriptionProvider` is the underlying abstraction MVC uses to build a machine-readable description of every action's route, HTTP verb, parameters, and (when annotated) response types — tools like Swashbuckle/NSwag consume this description to automatically generate an OpenAPI/Swagger specification, without a developer needing to hand-author and separately maintain a specification document describing the same API.
+
+```csharp
+[HttpGet("{id}")]
+[ProducesResponseType(typeof(Product), StatusCodes.Status200OK)]
+[ProducesResponseType(StatusCodes.Status404NotFound)]
+public async Task<IActionResult> GetById(int id) { ... }
+```
+The combination of the route template (`{id}`), the HTTP verb (`HttpGet`), and the `[ProducesResponseType]` annotations gives `IApiDescriptionProvider` everything it needs to describe this action's contract in detail — Swagger UI/OpenAPI generation tooling then queries this description automatically, producing an always-up-to-date specification derived directly from the actual controller code, rather than a separately hand-maintained document that could silently drift out of sync with what the API actually does.
+
+**Why this differs meaningfully from hand-writing an OpenAPI YAML/JSON specification separately:** a hand-written specification requires manual updates every time the actual API changes — forgetting to update it produces a specification describing behavior the API no longer actually has; a specification derived automatically from `IApiDescriptionProvider`, reflecting the controllers' actual current attributes and route definitions, is structurally guaranteed to match the real, currently-deployed API's actual shape.
+
+**Common Pitfall:** omitting `[ProducesResponseType]` annotations (or the equivalent, inferred from XML doc comments) on action methods, resulting in an auto-generated OpenAPI specification that's technically present but describes response shapes/status codes incompletely or inaccurately — automatic API description generation is only as complete and accurate as the annotations/conventions the underlying action methods actually provide; omitting them doesn't cause a failure, it just produces a less useful, less complete generated specification than the tooling is actually capable of producing.
+
+---
+
 ---
