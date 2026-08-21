@@ -847,4 +847,103 @@ Because quorum is defined as "more than half," moving from 3 to 4 members doesn'
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What is a Kubernetes `LimitRange`, and how does it let a namespace enforce SENSIBLE DEFAULT resource requests/limits on Pods that don't explicitly specify their own, preventing an accidentally-unconstrained Pod from consuming unbounded cluster resources?**
+
+A `LimitRange` sets default CPU/memory requests and limits automatically applied to any Pod in a namespace that doesn't explicitly specify its own — this prevents a developer who simply forgets to set resource requests/limits from accidentally deploying a Pod with no resource constraints at all, which could consume unbounded cluster resources.
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: team-payments
+spec:
+  limits:
+    - default: { cpu: "500m", memory: "256Mi" }        # applied AUTOMATICALLY if a Pod doesn't specify its OWN
+      defaultRequest: { cpu: "250m", memory: "128Mi" }  # ALSO applied automatically, if not specified
+      type: Container
+```
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      image: myapp:latest
+      # NO resources SPECIFIED here at all -- the LimitRange AUTOMATICALLY applies its DEFAULTS
+```
+A developer who forgets (or doesn't know) to specify CPU/memory requests and limits still gets a reasonable, bounded default automatically applied — rather than the Pod running with genuinely no resource constraints at all, which could let a single misbehaving Pod consume far more of the node's/cluster's shared resources than intended, at the expense of every other workload sharing that same node.
+
+**Why this matters as a namespace-level safety net, complementing (not replacing) explicit resource specifications:** developers SHOULD ideally specify resource requests/limits explicitly and deliberately for their own workloads — `LimitRange` exists specifically as a safety net for cases where this is forgotten, ensuring even an unconfigured Pod still receives *some* sensible, bounded default rather than running entirely unconstrained.
+
+**Common Pitfall:** relying on `LimitRange`'s defaults as a permanent substitute for deliberately, explicitly specifying appropriate resource requests/limits for each specific workload's actual needs — a namespace-wide default is necessarily a rough, one-size-fits-all approximation; workloads with genuinely different resource needs (a memory-intensive batch job versus a lightweight API) should have their own deliberately-chosen values, with `LimitRange`'s defaults serving specifically as a safety net for accidentally-unconfigured Pods, not a substitute for thoughtful, workload-specific configuration.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is a Kubernetes `StatefulSet` (as distinct from a `Deployment`), and how does its guarantee of STABLE, PREDICTABLE Pod NAMES and PERSISTENT, PER-REPLICA storage make it specifically suited for stateful workloads like databases?**
+
+A `Deployment`'s Pods are treated as interchangeable — any replica can be replaced by any other identical replica, with no stable identity or dedicated per-replica storage. A `StatefulSet` instead guarantees each replica a stable, predictable name (`myapp-0`, `myapp-1`, `myapp-2`) that persists across restarts/rescheduling, along with its own dedicated, persistent storage volume that follows that specific replica wherever it's rescheduled.
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: postgres }
+spec:
+  serviceName: postgres
+  replicas: 3
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "10Gi" } } }
+```
+```text
+Pod names: postgres-0, postgres-1, postgres-2  -- STABLE, PREDICTABLE, PERSIST across restarts
+Each Pod gets its OWN dedicated PersistentVolumeClaim: data-postgres-0, data-postgres-1, data-postgres-2
+-- if postgres-1 is RESCHEDULED to a DIFFERENT node, it comes back as "postgres-1" AGAIN,
+   REATTACHED to its SAME dedicated storage volume (data-postgres-1), NOT some OTHER replica's data --
+```
+For a database cluster where each replica has its own distinct role/data (a primary and specific replicas, or sharded data unique to each instance), this stable identity and dedicated storage is essential — a `Deployment`'s interchangeable-Pod model would have no way to guarantee "this specific replica" always comes back with "this specific replica's own data," which is precisely why databases and similar genuinely stateful workloads use `StatefulSet` rather than `Deployment`.
+
+**Why this differs so fundamentally from a `Deployment`'s design philosophy:** `Deployment` is built around the assumption that Pods are fungible/interchangeable (any replica can replace any other) — `StatefulSet` is built around the opposite assumption, that each replica has its own distinct identity and potentially its own distinct data that must not be confused with any other replica's; this fundamental difference in assumption is exactly why stateful workloads (databases, distributed coordination services) need `StatefulSet`'s specific guarantees rather than `Deployment`'s simpler, interchangeable-replica model.
+
+**Common Pitfall:** using a `Deployment` for a genuinely stateful workload needing stable per-replica identity and dedicated storage (a database cluster) — a `Deployment`'s Pods have no guaranteed stable naming or dedicated per-replica storage, meaning a rescheduled Pod could effectively lose its association with "its own" data, a serious problem for stateful workloads that `StatefulSet` is specifically designed to prevent.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is Kubernetes' "Pod Priority and Preemption," and how does a HIGHER-priority Pod being able to EVICT a LOWER-priority Pod (to free up capacity) create a deliberate trade-off between guaranteed scheduling for critical workloads and disruption risk for less-critical ones?**
+
+`PriorityClass` assigns a numeric priority to Pods — when the scheduler cannot find enough free capacity for a new, higher-priority Pod, it can *preempt* (evict) one or more lower-priority Pods running on a node, freeing up capacity specifically to let the higher-priority Pod be scheduled, even though this means forcibly disrupting an already-running, lower-priority workload.
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: critical-priority }
+value: 1000000    # a HIGH priority value
+
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: low-priority }
+value: 100         # a LOW priority value
+```
+```text
+Cluster is FULL -- no free capacity anywhere
+A NEW Pod with "critical-priority" needs to be scheduled
+-> the scheduler EVICTS an ALREADY-RUNNING Pod with "low-priority" to FREE UP capacity
+-> the CRITICAL Pod is scheduled onto the FREED capacity
+-> the EVICTED low-priority Pod is TERMINATED (and, if managed by a Deployment/ReplicaSet, RESCHEDULED elsewhere,
+   IF capacity becomes available AGAIN later)
+```
+This guarantees that genuinely critical workloads (system-level infrastructure Pods, a payment-processing service) can always obtain the capacity they need, even under genuine cluster-wide resource pressure — at the deliberate cost of potentially disrupting already-running, lower-priority workloads, which is an explicit, accepted trade-off rather than an accidental side effect.
+
+**Why this trade-off requires careful, deliberate priority assignment across an entire cluster, not an ad-hoc, per-team choice:** if every team assigns their own workloads the highest possible priority (assuming their own work is always "critical"), the entire priority system collapses into meaninglessness, since preemption would then be essentially random rather than reflecting genuine, agreed-upon relative importance — meaningful use of Pod Priority requires organization-wide agreement and governance over what priority levels actually mean and who is authorized to use which levels, not each team independently deciding their own workloads deserve the highest priority.
+
+**Common Pitfall:** allowing every team/workload to freely choose an arbitrarily high priority level without any organizational governance over what those levels actually mean — this defeats the entire purpose of priority-based preemption, since if everything is "critical priority," the mechanism provides no actual differentiation and preemption decisions become effectively arbitrary rather than reflecting genuine, agreed-upon relative importance across the cluster's actual workloads.
+
+---
+
 ---

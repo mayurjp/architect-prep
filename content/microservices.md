@@ -1435,3 +1435,90 @@ The service's internal business logic operates exclusively on the clean `Custome
 **Common Pitfall:** integrating directly with an external/legacy system's awkward data model throughout a service's own business logic, without a dedicated translation layer — this spreads the external system's poorly-designed concepts (cryptic flags, undocumented codes) throughout the service's own codebase, making the internal domain logic itself harder to understand and more tightly coupled to the external system's specific quirks than necessary; an Anti-Corruption Layer specifically isolates and contains this awkwardness at one well-defined boundary instead.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: What is a "Service Registry Client-Side" versus "Server-Side" Load Balancing distinction, and how does the CLIENT itself choosing which service instance to call (rather than a centralized load balancer) shift where that decision-making logic actually lives?**
+
+In Server-Side load balancing, a centralized load balancer sits between the client and the pool of service instances, itself deciding which instance handles each request — in Client-Side load balancing, the calling service queries the service registry directly for the list of available instances and makes the instance-selection decision itself, with no centralized load balancer involved in that specific decision at all.
+
+```text
+SERVER-SIDE load balancing:
+  OrderService -> [Load Balancer] -> decides which PaymentService instance -> Instance A, B, or C
+  -- the LOAD BALANCER makes the decision -- OrderService just sends to ONE address (the load balancer's) --
+
+CLIENT-SIDE load balancing:
+  OrderService queries the Service Registry directly: "which PaymentService instances are CURRENTLY available?"
+  -> Registry responds: Instance A, B, C
+  -> OrderService ITSELF applies a load-balancing algorithm (round-robin, least-connections) and picks ONE
+  -- OrderService talks DIRECTLY to the CHOSEN instance -- NO centralized load balancer sits in between AT ALL --
+```
+With Client-Side load balancing, the calling service (`OrderService`) itself holds and applies the load-balancing logic, communicating directly with whichever instance it selects — Server-Side load balancing instead centralizes this decision in a dedicated component that every caller routes through, with callers never directly aware of or connected to the individual backend instances at all.
+
+**Why this distinction matters for where the "single point" in the request path actually lives:** Server-Side load balancing introduces the load balancer itself as a component every request must pass through (a potential bottleneck or single point of failure if not itself made highly available) — Client-Side load balancing avoids this specific intermediary, at the cost of each individual client needing its own load-balancing logic and its own up-to-date view of available instances, which is a meaningfully different architectural trade-off than centralizing that responsibility in one shared component.
+
+**Common Pitfall:** assuming one of these two approaches is universally "better" without considering the specific trade-offs each introduces — Server-Side load balancing centralizes complexity into one well-tested component but introduces a potential bottleneck/dependency every request passes through; Client-Side load balancing avoids that central dependency but requires every individual client to correctly implement its own load-balancing and service-discovery logic, a real trade-off worth deliberately choosing between rather than defaulting to one without considering the specific context.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is the "Database View Pattern" (a lightweight alternative to a full API-based integration) for cross-service data sharing, and what SPECIFIC coupling risk does it reintroduce that fully violates microservices' Database-per-Service principle, despite seeming convenient?**
+
+The Database View Pattern lets one service directly query a read-only database view exposing (a subset of) another service's underlying database tables — while operationally convenient (avoiding the latency and complexity of a genuine API call), this directly violates the Database-per-Service principle (covered as one of microservices' foundational tenets) by creating a direct, schema-level coupling between two services' databases.
+
+```sql
+-- OrderService's database creates a VIEW directly exposing InventoryService's OWN underlying tables:
+CREATE VIEW OrderService.InventorySnapshot AS
+SELECT ProductId, AvailableQuantity FROM InventoryService.Products;
+-- OrderService can now QUERY this view DIRECTLY, WITHOUT ever calling InventoryService's actual API
+```
+```text
+-- The HIDDEN coupling this creates: --
+InventoryService's team later renames "AvailableQuantity" to "StockLevel", or restructures the underlying table
+-> OrderService's VIEW (and everything querying it) SILENTLY BREAKS, with InventoryService's team having
+   NO VISIBILITY into the fact that OrderService even DEPENDS on this specific column name at all
+```
+Because the view queries `InventoryService`'s own internal database tables directly, any internal schema change `InventoryService`'s team makes (a column rename, a table restructuring) silently breaks `OrderService`, without `InventoryService`'s team having any visibility into this dependency at all — this is precisely the tight, hidden coupling the Database-per-Service principle is meant to prevent, since a service's own internal database schema is supposed to be a private implementation detail, not a de facto public contract other services depend on directly.
+
+**Why this pattern remains tempting despite the risk, and when (if ever) it might be cautiously acceptable:** avoiding a real API call's latency/complexity is genuinely appealing, especially for read-heavy, performance-sensitive scenarios — some organizations cautiously accept this pattern specifically for internal, same-team-owned services with tight coordination (effectively treating the "two services" as one team's shared concern), but it's broadly recognized as a significant anti-pattern for services owned by genuinely independent teams, precisely because of the hidden, schema-level coupling it reintroduces.
+
+**Common Pitfall:** adopting the Database View Pattern for convenience across services owned by genuinely independent teams, without recognizing the significant hidden coupling being introduced — this directly undermines microservices' core promise of independent deployability (covered as this topic's very first principle), since a database schema change in one service can now silently break another service with no visibility into that dependency at all, precisely the kind of tight coupling microservices architecture is specifically meant to avoid.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is the "Aggregator Microservice" pattern's relationship to the N+1 problem (covered under EF Core) at a SERVICE-CALL level, and how does a naive aggregator making ONE downstream call PER item in a list reproduce the exact same anti-pattern across a network instead of a database?**
+
+An Aggregator Microservice combines data from multiple downstream services into one unified response — a naive implementation that loops over a list of items, making one separate downstream service call per item, reproduces the N+1 query problem (covered under EF Core, where N+1 database queries replace what should be one efficient query) at the network/service-call level instead, with N+1 *network calls* replacing what should be a small, fixed number of batched calls.
+
+```csharp
+// NAIVE aggregator -- makes ONE SEPARATE network call PER item -- the N+1 problem, at the SERVICE-CALL level
+public async Task<List<OrderSummary>> GetOrderSummaries(List<int> orderIds)
+{
+    var summaries = new List<OrderSummary>();
+    foreach (var id in orderIds) // for 100 order IDs, this makes 100 SEPARATE network calls!
+    {
+        var customer = await _customerServiceClient.GetCustomerForOrderAsync(id); // ONE network call, PER item
+        summaries.Add(new OrderSummary { OrderId = id, CustomerName = customer.Name });
+    }
+    return summaries;
+}
+
+// FIXED -- ONE BATCHED call, requesting ALL needed data AT ONCE, regardless of how many order IDs there are
+public async Task<List<OrderSummary>> GetOrderSummariesBatched(List<int> orderIds)
+{
+    var customers = await _customerServiceClient.GetCustomersForOrdersBatchAsync(orderIds); // ONE call, for ALL of them
+    return orderIds.Select(id => new OrderSummary { OrderId = id, CustomerName = customers[id].Name }).ToList();
+}
+```
+The naive version makes a separate network round trip for every single order ID in the list — for 100 orders, that's 100 separate network calls, each carrying its own latency overhead, exactly mirroring the N+1 database query anti-pattern but at the network/service-call level instead; the batched version makes exactly one call regardless of how many order IDs are requested, assuming the downstream service exposes a genuinely batched API supporting this.
+
+**Why this specifically requires the DOWNSTREAM service to expose a proper batch endpoint, not just discipline on the caller's side:** the aggregator can only avoid the N+1-at-the-network-level problem if the downstream service it's calling actually provides a batch-capable API (`GetCustomersForOrdersBatchAsync`, accepting a list) — if the downstream service only exposes a single-item lookup endpoint, the aggregator has no way to avoid making one call per item regardless of how carefully it's written, meaning avoiding this anti-pattern requires deliberate API design on BOTH sides (the aggregator calling efficiently, AND the downstream service exposing a genuine batch capability to call efficiently in the first place).
+
+**Common Pitfall:** designing a downstream service's API with only single-item lookup endpoints, without ever providing a batch-capable alternative — this structurally forces every caller needing data for multiple items into the N+1-network-calls anti-pattern, regardless of how carefully those callers are written; API design specifically for services expected to be called by aggregators should proactively include batch endpoints, rather than leaving every calling aggregator to work around a fundamentally single-item-only API surface.
+
+---
+
+---

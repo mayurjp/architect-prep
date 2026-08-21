@@ -1288,3 +1288,79 @@ Even though the vast majority of the parallel sub-requests completed quickly, th
 **Common Pitfall:** naively assuming that parallelizing (fanning out) a request across many backend calls always improves overall latency compared to doing them sequentially — while fan-out does improve the *typical*, average case, the straggler problem means the *tail* latency (the worst case, which matters greatly for user-facing systems) can remain stubbornly high, dominated entirely by whichever single branch happens to be slow on that particular request, a risk that specifically grows with wider fan-out and isn't solved merely by "doing things in parallel."
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is a "Message Queue" at the system-design level (as a general concept, distinct from any specific product like Kafka/RabbitMQ), and how does DECOUPLING a producer from a consumer in TIME let each one operate at its OWN pace, independently?**
+
+A Message Queue sits between a producer (something generating work/data) and a consumer (something processing it), holding messages until the consumer is ready to process them — this decouples the two not just structurally (they don't call each other directly) but specifically in *time*: the producer can generate messages faster than the consumer processes them, with the queue absorbing that difference, rather than the producer being forced to wait on the consumer's own pace.
+
+```text
+WITHOUT a queue -- producer and consumer are DIRECTLY, SYNCHRONOUSLY coupled:
+  Producer generates work -> MUST wait for consumer to finish processing THIS item -> THEN generates the NEXT
+  -- producer's OWN throughput is LIMITED by the consumer's processing speed --
+
+WITH a queue -- producer and consumer operate INDEPENDENTLY, at THEIR OWN respective paces:
+  Producer generates work -> ENQUEUES it -> IMMEDIATELY continues generating MORE work, WITHOUT waiting
+  Consumer processes messages FROM the queue AT ITS OWN PACE, whenever it's ready
+  -- a TEMPORARY BURST of production is ABSORBED by the queue, rather than BLOCKING the producer --
+```
+During a burst of activity (a sudden spike in incoming work), the producer can continue generating and enqueuing messages without being blocked waiting for the consumer to keep up in real time — the queue absorbs this temporary mismatch, letting the consumer catch up at its own sustainable pace afterward, rather than the mismatch propagating back and slowing down the producer itself.
+
+**Why this specifically matters for smoothing out BURSTY load patterns:** many real-world systems experience bursty, uneven load (a sudden spike in orders during a sale) — without a queue, this burst would need to be handled entirely synchronously, in real time, by whatever's actually processing it; with a queue, the burst is absorbed and processed at a sustainable pace, trading immediate processing for eventual, reliable processing at a rate the consumer can actually sustain.
+
+**Common Pitfall:** building a system with tightly-coupled, synchronous producer-consumer interaction for a workload with genuinely bursty, uneven load, then being surprised when a burst of activity causes cascading slowdowns or failures throughout the system — recognizing "this workload is bursty, and the producer shouldn't need to wait for the consumer in real time" is exactly the signal to introduce a message queue, decoupling the two in time rather than forcing synchronous, real-time coordination between components with genuinely different processing rates.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is "Backpressure" in a streaming/pipeline system, and how does a downstream consumer signaling "slow down" back to an upstream producer prevent the downstream from being overwhelmed by data arriving faster than it can process it?**
+
+Backpressure is a signaling mechanism letting a downstream consumer communicate back to an upstream producer that it's currently unable to keep up with the incoming rate, prompting the producer to slow down (or pause) sending more data — rather than the downstream consumer being overwhelmed and forced to either drop data or exhaust its own memory buffering an ever-growing backlog.
+
+```text
+WITHOUT backpressure -- producer sends data as fast as it can, REGARDLESS of consumer's actual capacity:
+  Producer -> sends data at 10,000 items/second
+  Consumer -> can only PROCESS 1,000 items/second
+  -- the GAP (9,000 items/second) must be BUFFERED somewhere -- consumer's memory grows UNBOUNDED,
+     EVENTUALLY exhausting available memory, or data is simply DROPPED --
+
+WITH backpressure -- consumer SIGNALS its actual capacity BACK to the producer:
+  Consumer -> signals: "I can only handle 1,000 items/second right now"
+  Producer -> THROTTLES ITSELF to 1,000 items/second, MATCHING the consumer's actual, current capacity
+  -- NO unbounded buffering, NO dropped data -- producer and consumer STAY IN SYNC, at a SUSTAINABLE rate --
+```
+Rather than the producer blindly sending data as fast as it can generate it, backpressure lets the actual bottleneck (the consumer's real processing capacity) directly govern the producer's sending rate — preventing the specific failure mode of unbounded memory growth (buffering an ever-increasing backlog) or silent data loss (dropping data the consumer couldn't keep up with) that would otherwise occur without any feedback loop between the two.
+
+**Why this specifically differs from (and often complements) a Message Queue's time-decoupling, covered in the prior question:** a Message Queue absorbs a temporary burst by buffering it — but a queue's buffer is itself finite; Backpressure adds an active feedback signal specifically preventing that buffer from growing unboundedly in the first place, by having the producer itself slow down when the consumer (and therefore the queue feeding it) genuinely cannot keep up, rather than relying purely on buffering to absorb an indefinitely sustained rate mismatch.
+
+**Common Pitfall:** building a streaming pipeline with unbounded buffering and no backpressure signaling mechanism at all, assuming "the queue will just absorb whatever rate mismatch occurs" — for a genuinely sustained (not just temporary/bursty) rate mismatch between producer and consumer, unbounded buffering alone eventually exhausts available memory regardless of buffer size; genuine backpressure (an active signal causing the producer to actually slow down) is necessary specifically for sustained mismatches that buffering alone cannot indefinitely absorb.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is the "Cell-Based Architecture" pattern, and how does partitioning an ENTIRE system into fully-independent, self-contained "cells" (each serving a subset of users, with NO cross-cell dependencies) limit the BLAST RADIUS of a failure to just ONE cell rather than the whole system?**
+
+Cell-Based Architecture partitions an entire system (not just data, but the full application stack — compute, storage, and all dependencies) into multiple, fully independent "cells," each capable of serving a subset of users completely self-sufficiently, with zero cross-cell dependencies — a failure within one cell (a bug, an overload, a bad deployment) is structurally confined to only the users served by that one cell, leaving every other cell (and the users it serves) completely unaffected.
+
+```text
+Traditional architecture: ONE shared set of services serves ALL users
+  -- a bug/overload in ANY part of the system can potentially affect EVERY user --
+
+Cell-Based Architecture: the ENTIRE system is replicated into MULTIPLE independent "cells"
+  Cell 1: serves users A-F (its OWN complete stack: compute, database, queue -- FULLY self-contained)
+  Cell 2: serves users G-M (an ENTIRELY SEPARATE, INDEPENDENT complete stack)
+  Cell 3: serves users N-Z (ALSO entirely separate and independent)
+  -- a CATASTROPHIC failure in Cell 2 affects ONLY users G-M -- Cells 1 and 3 remain COMPLETELY UNAFFECTED --
+```
+Because each cell is a fully self-contained, independent replica of the entire system's stack (not just a data partition, but genuinely independent compute and infrastructure with zero cross-cell calls), a failure's blast radius is structurally limited to exactly the users assigned to that one affected cell — this is a meaningfully stronger isolation guarantee than typical horizontal scaling (which usually still shares a common, single set of backend services across all instances), since Cell-Based Architecture eliminates shared-fate risk at the level of the entire application stack, not just individual service instances.
+
+**Why this specifically differs from ordinary horizontal scaling/sharding, which typically still shares SOME common infrastructure:** ordinary horizontal scaling might run many instances of a service, but those instances frequently still share a common database, a common message queue, or other shared infrastructure — a genuine bug or overload in that SHARED component still affects every instance/user, regardless of how many separate service instances exist; Cell-Based Architecture specifically eliminates this remaining shared-fate risk by making each cell's ENTIRE stack (including its own database, its own queue) fully independent, with literally nothing shared across cells at all.
+
+**Common Pitfall:** partitioning a system's *compute* layer into independent cells while still sharing a common database or other critical shared infrastructure across all of them — this leaves exactly the shared-fate risk Cell-Based Architecture is specifically designed to eliminate; genuine cell isolation requires the ENTIRE stack (not just compute instances) to be independent per cell, since a failure in any shared component still creates a system-wide blast radius regardless of how well-isolated the compute layer itself happens to be.
+
+---
+
+---

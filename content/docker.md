@@ -766,4 +766,78 @@ Even if an attacker achieves code execution inside a Distroless container (throu
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What is the Docker `HEALTHCHECK`'s interaction with `docker-compose`'s `depends_on: condition: service_healthy`, and how does it let a dependent container wait for a dependency to be GENUINELY READY, rather than merely STARTED?**
+
+`depends_on` alone only waits for a dependency's container to *start* (its process begins running) — it says nothing about whether that dependency is actually ready to serve requests (a database might take several seconds to finish initializing after its process starts). Combining a `HEALTHCHECK` with `condition: service_healthy` lets a dependent container wait specifically for the dependency to report itself as genuinely healthy, not merely started.
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    image: myapp:latest
+    depends_on:
+      db:
+        condition: service_healthy  # WAITS for db's HEALTHCHECK to report healthy, NOT just "started"
+```
+Without `condition: service_healthy` (using plain `depends_on: [db]` instead), `app` would start as soon as `db`'s container process begins running — but Postgres itself might still be several seconds away from actually accepting connections at that point, causing `app` to fail its very first database connection attempts; `condition: service_healthy` specifically waits for the `HEALTHCHECK` to report success first.
+
+**Common Pitfall:** using plain `depends_on` (without a health condition) for a dependency that takes meaningful time to become genuinely ready after its process starts — this produces exactly the "app started before its dependency was truly ready" race condition, requiring the dependent application to implement its own retry/wait logic to compensate for what `condition: service_healthy` would have handled declaratively, at the orchestration level, without any application-code changes needed at all.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is a Docker "Named Volume" (as distinct from a Bind Mount), and how does letting Docker itself manage the volume's actual storage location provide better portability across different host environments?**
+
+A Named Volume is managed entirely by Docker itself (Docker chooses and controls the actual storage location on the host) — a Bind Mount instead references a specific, explicit path on the host filesystem, directly tying the container's configuration to that host's particular directory structure.
+
+```bash
+# Named Volume -- Docker manages WHERE this actually lives on the host; portable ACROSS different hosts
+docker run -v mydata:/var/lib/data myapp
+
+# Bind Mount -- references a SPECIFIC, EXPLICIT host path; TIED to THIS particular host's directory structure
+docker run -v /home/user/specific-path:/var/lib/data myapp
+```
+A Compose file (or a deployment script) using a Named Volume works identically across different developer machines and environments, since Docker itself handles the platform-specific details of where volume data actually lives — a Bind Mount referencing `/home/user/specific-path` would fail (or silently use the wrong directory) on any machine without that exact path, or with a different user's home directory structure.
+
+**Why this specifically matters for genuine portability across development/CI/production environments:** a `docker-compose.yml` intended to run identically across a developer's laptop, a CI runner, and a production server needs volume configuration that doesn't hardcode any one specific environment's particular filesystem layout — Named Volumes achieve this portability by letting Docker abstract away the actual storage location, while Bind Mounts remain most appropriate specifically for cases genuinely needing to reference a particular, known host path (mounting source code for live-reload during local development, for instance).
+
+**Common Pitfall:** using Bind Mounts with hardcoded, environment-specific host paths in a Compose file intended to be shared and run across multiple different environments/machines — this breaks the moment the file is used on a machine with a different directory structure; Named Volumes are generally the more portable default for genuine data persistence needs, reserving Bind Mounts specifically for cases where referencing a particular, known host path is actually the deliberate intent (like local development source-code mounting).
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is a Docker container's `--pids-limit` flag, and how does capping the maximum number of processes a container can spawn defend against a "fork bomb" (or a resource-exhaustion bug) from consuming the ENTIRE host's process table?**
+
+Without a PID limit, a runaway process inside a container (a fork bomb, either malicious or an accidental infinite-recursion bug) can spawn processes without bound, potentially exhausting the entire host machine's process table — since the host's process table is a shared, finite resource, one misbehaving container could starve every other container (and the host's own processes) of the ability to create new processes at all. `--pids-limit` caps how many processes a single container is permitted to spawn, containing this failure to just that one container.
+
+```bash
+docker run --pids-limit 100 myapp
+# this container can NEVER spawn MORE than 100 total processes, no matter what runs inside it
+```
+```text
+A bug (or malicious code) inside the container attempts a FORK BOMB:
+  WITHOUT --pids-limit: processes multiply UNBOUNDED, potentially exhausting the HOST's ENTIRE process table,
+                         starving EVERY OTHER container (and the HOST ITSELF) of the ability to create ANY new process
+  WITH --pids-limit 100: the FORK BOMB hits the LIMIT quickly, additional fork attempts FAIL,
+                          the HOST and OTHER containers remain COMPLETELY UNAFFECTED
+```
+Because the host's process table (a fixed-size kernel data structure) is shared across every container running on that host, an unbounded fork bomb in just one container can genuinely take down the entire host, affecting every other container and the host's own processes — `--pids-limit` contains this failure mode to just the one misbehaving container, protecting the shared host resource from being exhausted by any single container's runaway process creation.
+
+**Why this specific resource-limiting mechanism is easy to overlook compared to more commonly-discussed CPU/memory limits:** CPU and memory limits (`--cpus`, `--memory`) are widely known and commonly configured — the process-table/PID exhaustion risk is a comparatively less well-known attack/failure vector that `--pids-limit` specifically addresses, meaning it's often simply forgotten in container resource-limiting configurations that otherwise carefully constrain CPU and memory.
+
+**Common Pitfall:** carefully configuring CPU and memory limits for containers while overlooking `--pids-limit` entirely — a fork bomb or a runaway process-spawning bug bypasses CPU/memory limits' protection (a fork bomb can exhaust the process table while using comparatively little CPU or memory per individual process) — comprehensive container resource-limiting requires considering the process table as its own distinct, limitable resource, not just CPU and memory.
+
+---
+
 ---
