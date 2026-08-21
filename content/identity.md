@@ -846,4 +846,78 @@ Ordinary, low-risk actions (browsing, viewing account details) proceed with just
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What is "Passwordless Authentication" (via Passkeys/WebAuthn), and how does replacing a knowledge-based secret (a password) with a cryptographic key pair BOUND to a specific device eliminate the entire category of password-related attacks (phishing, credential stuffing, weak passwords)?**
+
+Passwordless Authentication (via the WebAuthn/Passkey standard) replaces a shared secret (a password, something a server must store and a user must remember) with a public/private key pair generated and stored on the user's own device — the private key never leaves that device, and authentication involves proving possession of it via a cryptographic signature, rather than transmitting any shared secret to the server at all.
+
+```text
+Traditional password authentication:
+  User TYPES a password -> it's SENT to the server -> server compares against its STORED (hashed) version
+  -- VULNERABLE to: phishing (tricking user into typing it on a fake site), credential stuffing
+     (reusing a password leaked from ANOTHER breach), weak/guessable passwords --
+
+Passwordless (Passkey/WebAuthn):
+  User's DEVICE generates a key pair; the PRIVATE key NEVER leaves the device (often hardware-protected)
+  Authentication: device SIGNS a challenge with the PRIVATE key -> server verifies using the PUBLIC key
+  -- NOTHING SECRET is ever TRANSMITTED or TYPED -- there's NO PASSWORD to phish, reuse, or guess AT ALL --
+```
+Because there's no shared secret transmitted or typed at all, an attacker cannot phish a password that doesn't exist, cannot reuse a leaked password from an unrelated breach (since each Passkey is unique to its specific device/account pairing), and cannot exploit a weak, guessable password, since guessing offers no path to compromising a cryptographic key pair the way it does a memorized password.
+
+**Why this specifically eliminates an entire CATEGORY of attacks, rather than merely making them harder:** phishing, credential stuffing, and weak-password attacks all fundamentally rely on the existence of a transmittable, guessable, or reusable secret — Passkeys structurally remove that secret from the equation entirely, meaning these entire categories of attack simply have no applicable target to attack at all, rather than being merely mitigated or made statistically less likely.
+
+**Common Pitfall:** treating Passkeys as "just a more convenient MFA" rather than recognizing they eliminate an entire category of attack vectors that MFA alone (layered on top of a still-existing password) doesn't fully close — even with MFA, a password can still be phished as the FIRST factor; Passkeys remove the password itself from the picture entirely, a structurally different and stronger security posture than simply adding a second factor on top of a traditional password.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is "Account Enumeration" as a vulnerability, and how does a LOGIN or PASSWORD-RESET endpoint's DIFFERING response (based on whether an email/username actually EXISTS) let an attacker discover which accounts are REGISTERED, even without ever obtaining a valid password?**
+
+Account Enumeration occurs when an application's response to a login or password-reset attempt differs depending on whether the submitted email/username actually corresponds to a real, registered account — letting an attacker systematically probe many email addresses and learn which ones are registered users, without ever needing to guess or obtain an actual valid password at all.
+
+```text
+VULNERABLE -- login error messages REVEAL whether the account EXISTS:
+  Login attempt with "alice@example.com" (a REGISTERED account) + wrong password:
+    -> "Incorrect password" -- REVEALS that this EMAIL IS registered
+  Login attempt with "randomguess@example.com" (NOT registered) + any password:
+    -> "No account found with this email" -- REVEALS that this EMAIL is NOT registered
+  -- an ATTACKER can PROBE MANY email addresses, learning EXACTLY which ones are REGISTERED USERS --
+
+SAFE -- IDENTICAL response REGARDLESS of whether the account exists:
+  BOTH cases -> "Invalid email or password" -- reveals NOTHING about whether the email is actually registered
+```
+By returning the exact same, generic error message regardless of whether the submitted email actually corresponds to a registered account, the application gives an attacker no way to distinguish "wrong password for a real account" from "this account doesn't exist at all" — closing off the ability to systematically enumerate which email addresses correspond to actual registered users.
+
+**Why knowing which accounts exist is valuable to an attacker EVEN WITHOUT a valid password:** knowing a specific email is a registered user narrows a subsequent attack (credential stuffing, targeted phishing) to only the confirmed-valid accounts, rather than wasting effort on emails that aren't even registered at all — account enumeration is a genuine, meaningful information leak on its own, valuable as reconnaissance for a subsequent, more targeted attack, even without directly compromising any account itself.
+
+**Common Pitfall:** returning helpfully-specific error messages ("this email isn't registered" versus "incorrect password") intended purely to improve legitimate user experience, without recognizing this same specificity is exactly what enables account enumeration — the seemingly minor UX improvement of a more specific error message directly trades away meaningful security by revealing exactly the information an attacker needs to enumerate registered accounts.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is "Refresh Token Reuse Detection" (as a stronger complement to plain Refresh Token Rotation, covered earlier), and how does the Authorization Server treating a REUSED, already-rotated-away refresh token as a SIGNAL of theft let it PROACTIVELY revoke the ENTIRE token family, not just the one compromised token?**
+
+Building on Refresh Token Rotation (covered earlier, where each use issues a new token and invalidates the old one) — Reuse Detection specifically treats an attempt to use an already-rotated-away (previously-used, now-invalid) refresh token as strong evidence of theft, and responds by revoking the *entire chain* of tokens descended from that one, not merely rejecting the single reuse attempt.
+
+```text
+Legitimate flow, WITH rotation: Token A used -> Token B issued (A now invalid) -> Token B used -> Token C issued
+-- each token is used EXACTLY ONCE, then immediately superseded --
+
+An ATTACKER steals Token B (via some leak) and separately tries to use it, AFTER the legitimate client
+has ALREADY moved on to Token C:
+
+Attacker attempts to use Token B (ALREADY ROTATED AWAY, no longer the "current" token)
+-> Authorization Server detects: "Token B was ALREADY used/rotated once before -- this is a REUSE!"
+-> TREATS this as A SIGNAL OF THEFT -> REVOKES THE ENTIRE TOKEN FAMILY (A, B, C -- EVERYTHING)
+-> BOTH the attacker AND the legitimate client are now LOGGED OUT, forced to RE-AUTHENTICATE from scratch
+```
+Rather than merely rejecting the specific reuse attempt (which would let the attacker simply try again, or let a compromise go otherwise undetected), Reuse Detection treats the *reuse itself* as a reliable signal that the token chain has been compromised somewhere along the way, proactively revoking every token in that entire chain — forcing both the legitimate user and the attacker to re-authenticate, at the cost of some inconvenience to the legitimate user, in exchange for actively detecting and shutting down an in-progress token theft.
+
+**Why this specifically improves on plain rotation alone, which merely prevents FUTURE reuse without actively detecting that theft OCCURRED:** plain rotation (covered earlier) prevents an attacker's stolen, already-superseded token from being reused successfully — but it doesn't necessarily alert anyone that a theft actually happened; Reuse Detection adds the additional step of actively treating a detected reuse attempt as a genuine security signal, triggering an active response (full family revocation, forcing re-authentication) rather than simply and silently rejecting the one specific invalid request.
+
+**Common Pitfall:** implementing Refresh Token Rotation without also implementing Reuse Detection's active response to a detected reuse attempt — plain rotation alone still prevents the stolen token from being reused successfully, but a security team gets no actual signal that a theft attempt occurred at all, missing the opportunity to proactively revoke the entire potentially-compromised token family and force a clean re-authentication, rather than merely and silently blocking the one specific reuse attempt without treating it as the meaningful security event it actually represents.
+
 ---

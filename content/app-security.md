@@ -893,4 +893,130 @@ An attacker sending 100 simultaneous requests to redeem a coupon with only 1 rem
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What is an "Open Redirect" vulnerability, and how does a login page's `returnUrl` parameter let an attacker disguise a phishing link as a trusted domain?**
+
+An Open Redirect occurs when an application accepts a URL as user input and redirects the browser to it without validating that the destination is actually one of the application's own, trusted pages — letting an attacker craft a link that starts on a genuinely trusted domain (making it look safe) but ends up sending the victim somewhere entirely different.
+
+**The vulnerable pattern — a login page that redirects back to wherever `returnUrl` says, unchecked:**
+```csharp
+[HttpGet("login")]
+public IActionResult Login(string returnUrl)
+{
+    // ... after successful authentication ...
+    return Redirect(returnUrl); // redirects WHEREVER the query string says, no validation at all
+}
+```
+An attacker sends a victim this link: `https://yourbank.com/login?returnUrl=https://evil-lookalike.com/phishing`. The link's *domain* is genuinely `yourbank.com` — a cautious user hovering over it, or a spam filter checking the domain, sees the trusted site and feels safe clicking it. After the user logs in (a real, legitimate login on the real site), the application then redirects them to `evil-lookalike.com`, which presents a fake "session expired, please re-enter your password" page to harvest credentials the victim now believes they're re-entering on a trusted flow.
+
+**The fix — only allow redirects to a relative, local path (or an explicit allowlist of trusted external domains):**
+```csharp
+[HttpGet("login")]
+public IActionResult Login(string returnUrl)
+{
+    if (Url.IsLocalUrl(returnUrl)) // ASP.NET Core built-in: true ONLY for a same-site relative path
+        return Redirect(returnUrl);
+
+    return Redirect("/"); // anything else (a full external URL) falls back to a safe default
+}
+```
+`Url.IsLocalUrl` specifically rejects any URL that isn't a genuinely relative, same-site path — an attacker-supplied absolute URL pointing at an external domain fails this check and the application redirects to a safe default instead, closing off the ability to use the trusted domain as a launching point for an external redirect.
+
+**Common Pitfall:** attempting to validate the redirect target by checking whether the supplied URL *string* merely "contains" the expected domain name — a value like `https://yourbank.com.evil.com/phishing` or `https://evil.com/?yourbank.com` can pass a naive substring check while still pointing at a completely different, attacker-controlled domain; `IsLocalUrl` (or a proper `Uri`-based host comparison) is the correct way to validate a redirect target, not string matching.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is a "Mass Assignment" (over-posting) vulnerability, and how does binding a request body directly onto a full domain entity — rather than a purpose-built DTO — let an attacker set fields they were never meant to control?**
+
+Mass Assignment occurs when a framework's model binder automatically populates *every* matching property on a target object from the incoming request body — if that target is a full domain entity with sensitive fields (`IsAdmin`, `AccountBalance`) rather than a narrow DTO exposing only the fields a client should legitimately be able to set, an attacker can simply add extra JSON properties to the request and have them silently bound too.
+
+**The vulnerable pattern — binding directly onto the full entity:**
+```csharp
+public class User
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public string Email { get; set; }
+    public bool IsAdmin { get; set; } // NOT meant to be client-settable
+}
+
+[HttpPut("profile")]
+public IActionResult UpdateProfile([FromBody] User user) // binds the FULL entity, every property
+{
+    _db.Users.Update(user);
+    _db.SaveChanges();
+    return Ok();
+}
+```
+A legitimate client only ever sends `{ "name": "Alice", "email": "alice@example.com" }` — but nothing stops an attacker from sending `{ "name": "Alice", "email": "alice@example.com", "isAdmin": true }` instead. The model binder populates `IsAdmin` on the bound `User` object exactly like any other property, since it has no concept of "which fields the client is *allowed* to set" — it just maps whatever JSON keys happen to match property names.
+
+**The fix — bind onto a narrow DTO that only exposes the fields a client should legitimately control:**
+```csharp
+public class UpdateProfileRequest // deliberately does NOT include IsAdmin at all
+{
+    public string Name { get; set; }
+    public string Email { get; set; }
+}
+
+[HttpPut("profile")]
+public IActionResult UpdateProfile([FromBody] UpdateProfileRequest request)
+{
+    var user = _db.Users.Find(CurrentUserId);
+    user.Name = request.Name;       // explicitly map ONLY the allowed fields
+    user.Email = request.Email;
+    _db.SaveChanges();
+    return Ok();
+}
+```
+Because `UpdateProfileRequest` has no `IsAdmin` property at all, there's structurally no property for an attacker's extra `isAdmin` JSON field to bind onto — it's simply ignored by the model binder, and the explicit field-by-field mapping onto the tracked `user` entity ensures only `Name` and `Email` are ever actually written, regardless of what additional fields the attacker includes in the request body.
+
+**Common Pitfall:** believing that `[FromBody]` binding directly onto an entity is fine as long as the sensitive property "isn't shown in the UI form" — client-side form fields are entirely irrelevant to this vulnerability, since an attacker crafts the raw HTTP request directly (via a tool like Postman or curl), bypassing any UI entirely; the only real protection is ensuring the *server-side bound type itself* has no sensitive, non-client-settable properties for the attacker's extra fields to land on.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is a "JWT `alg: none`" (algorithm confusion) attack, and how can a naive JWT verification library be tricked into accepting a completely UNSIGNED token as if it were validly signed?**
+
+The JWT specification allows the token's header to declare `"alg": "none"`, meaning the token is explicitly *unsigned* — intended for niche cases where a signature genuinely isn't needed. If a server's JWT verification code blindly trusts the `alg` field the *token itself* declares (rather than restricting verification to the one specific algorithm the server actually expects), an attacker can take a legitimate token, strip its signature, set the header to `alg: none`, and have a naive verifier accept it as valid — without knowing the server's actual signing secret at all.
+
+**The attack — forging a token with an attacker-chosen payload, no secret required:**
+```text
+Original, legitimately-signed token: { "alg": "HS256" }.{ "sub": "alice", "isAdmin": false }.SIGNATURE
+
+Attacker's forged token:
+  Header:  { "alg": "none" }          <- attacker CHANGES the declared algorithm
+  Payload: { "sub": "alice", "isAdmin": true }   <- attacker MODIFIES the claims freely
+  Signature: (EMPTY -- "none" means NO signature is expected AT ALL)
+```
+```csharp
+// VULNERABLE -- a naive verifier that TRUSTS whatever algorithm the TOKEN ITSELF claims to use
+var handler = new JwtSecurityTokenHandler();
+var validationParameters = new TokenValidationParameters
+{
+    ValidateIssuerSigningKey = false, // or a misconfiguration that effectively skips signature checking for "none"
+};
+```
+If the server's validation logic ever branches on the token's *own* declared `alg` value to decide *how* to verify it (rather than fixing the expected algorithm as a server-side constant, entirely independent of what the token claims), an attacker who can set `alg: none` bypasses signature verification entirely — the forged token, with `isAdmin: true` freely injected, is accepted as if it had been legitimately signed by the server's actual secret key, which the attacker never needed to know at all.
+
+**The fix — explicitly pin the expected algorithm(s) on the server side, ignoring whatever the token itself declares:**
+```csharp
+var validationParameters = new TokenValidationParameters
+{
+    ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 }, // the server DICTATES this -- NOT the token
+    IssuerSigningKey = new SymmetricSecurityKey(secretKeyBytes),
+    ValidateIssuerSigningKey = true,
+};
+// The library verifies the token was signed with HS256 SPECIFICALLY, using the server's OWN key --
+// a token declaring "alg: none" (or ANY algorithm other than the one explicitly pinned here) is REJECTED
+```
+By explicitly restricting `ValidAlgorithms` to the one specific algorithm the server actually issues tokens with, the verification logic never lets the *token's own header* dictate how it should be checked — a forged token declaring `alg: none` (or even a different, legitimately-supported algorithm like switching `RS256` to `HS256` in a related variant of this attack) simply fails validation outright, since it doesn't match the one algorithm the server was explicitly configured to accept.
+
+**Common Pitfall:** using a JWT library in a permissive default mode that auto-detects and honors whatever algorithm the incoming token declares, rather than explicitly configuring an allowed-algorithms allowlist — nearly every real-world "JWT algorithm confusion" vulnerability (including the closely related attack where a token signed with a public RSA key gets re-submitted claiming `alg: HS256`, tricking a server into treating the *public* key as an HMAC *secret*) stems from this same root cause: trusting the token's self-declared algorithm instead of the server dictating, as a fixed configuration value, exactly which algorithm(s) it will ever accept.
+
+---
+
 ---
