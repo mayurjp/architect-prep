@@ -792,4 +792,84 @@ If "Pending" orders represent only 2% of the total table, a filtered index cover
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What is the SQL Server `CHECK` constraint, and how does enforcing a value-validity rule directly at the DATABASE level protect data integrity even against a bug in APPLICATION code?**
+
+A `CHECK` constraint enforces a validation rule directly at the database level — any `INSERT`/`UPDATE` violating the constraint is rejected by the database itself, providing a safety net that holds regardless of whether the application code enforcing the same rule has a bug, is bypassed, or simply doesn't exist for a particular code path.
+
+```sql
+CREATE TABLE Products (
+    Id INT PRIMARY KEY,
+    Price DECIMAL(10,2) NOT NULL,
+    CONSTRAINT CK_Products_PositivePrice CHECK (Price > 0)  -- ENFORCED by the DATABASE ITSELF
+);
+
+INSERT INTO Products (Id, Price) VALUES (1, -10.00);
+-- ERROR: The INSERT statement conflicted with the CHECK constraint "CK_Products_PositivePrice"
+```
+Even if application code has a bug that fails to validate `Price` before attempting an insert (or if a completely different application, script, or direct database access bypasses the application layer entirely), the database itself refuses to store an invalid, negative price — this provides a genuine, structural guarantee that no amount of application-level bugs or bypassed validation logic can circumvent, since the constraint is enforced at the data layer itself, the final gatekeeper before data is actually persisted.
+
+**Why this matters specifically as defense-in-depth, not a replacement for application-level validation:** application-level validation (returning a friendly `400 Bad Request` with a helpful error message) provides a better user experience than a raw database constraint violation — but the database-level `CHECK` constraint remains valuable as a last-resort safety net, catching cases the application validation might have missed (a bug, a bypassed code path, direct database access from another tool) that would otherwise silently corrupt data with no protection at all.
+
+**Common Pitfall:** relying solely on application-level validation for genuinely critical data-integrity rules, assuming "the application always validates this before it reaches the database" — any bug, bypassed code path, or direct database access from outside the application entirely defeats application-only validation; genuinely critical invariants (a price can never be negative, a quantity can never be negative) deserve a database-level `CHECK` constraint as a structural, un-bypassable safety net, not just application-level validation alone.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is SQL Server's `OUTPUT` clause, and how does it let an `INSERT`/`UPDATE`/`DELETE` statement RETURN the affected rows' data directly, in ONE round trip, without a SEPARATE follow-up `SELECT` query?**
+
+The `OUTPUT` clause lets a data-modification statement (`INSERT`, `UPDATE`, `DELETE`) return information about the rows it just affected, directly as part of that same statement — avoiding the need for a separate, subsequent `SELECT` query (and its accompanying extra round trip) purely to retrieve information about what was just modified.
+
+```sql
+-- WITHOUT OUTPUT -- requires a SEPARATE round trip to retrieve the newly-generated Id
+INSERT INTO Products (Name, Price) VALUES ('Keyboard', 29.99);
+SELECT SCOPE_IDENTITY(); -- a SECOND, SEPARATE round trip, purely to get the newly-generated Id back
+
+-- WITH OUTPUT -- retrieves the newly-generated Id in the SAME statement, ONE round trip
+INSERT INTO Products (Name, Price)
+OUTPUT INSERTED.Id, INSERTED.Name
+VALUES ('Keyboard', 29.99);
+-- returns: Id=42, Name='Keyboard' -- IMMEDIATELY, as part of the SAME INSERT statement
+```
+```sql
+-- OUTPUT also works for UPDATE/DELETE -- returning BOTH the OLD ("DELETED") and NEW ("INSERTED") values:
+UPDATE Products SET Price = 24.99
+OUTPUT DELETED.Price AS OldPrice, INSERTED.Price AS NewPrice
+WHERE Id = 42;
+-- returns: OldPrice=29.99, NewPrice=24.99 -- BOTH values, from ONE single UPDATE statement
+```
+Because `OUTPUT` returns the affected rows' data as part of the same statement that modified them, an application avoids the extra network round trip a separate follow-up `SELECT` would otherwise require — for a high-frequency operation (inserting many rows and needing each one's generated Id back), this round-trip savings can add up to a meaningful performance improvement.
+
+**Common Pitfall:** issuing a separate `SELECT` (or a second query like `SCOPE_IDENTITY()`) purely to retrieve information about a row that was JUST inserted/updated/deleted, when `OUTPUT` could return that same information directly as part of the original statement — this pattern (a data-modification statement immediately followed by a separate read to retrieve information about what was just changed) is exactly what `OUTPUT` is designed to eliminate, saving an entirely avoidable extra round trip.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is SQL Server's `sys.dm_exec_query_stats` Dynamic Management View, and how does querying it let a DBA identify the most EXPENSIVE queries actually running against a database, WITHOUT needing to guess which queries might be slow?**
+
+`sys.dm_exec_query_stats` is a Dynamic Management View exposing aggregated execution statistics (total/average CPU time, total/average logical reads, execution count) for every query plan currently cached by SQL Server — querying it directly reveals which specific queries are actually consuming the most resources in aggregate, without requiring any guesswork about which queries might be problematic.
+
+```sql
+SELECT TOP 10
+    qs.total_worker_time / qs.execution_count AS avg_cpu_time,
+    qs.execution_count,
+    qs.total_logical_reads / qs.execution_count AS avg_logical_reads,
+    SUBSTRING(st.text, (qs.statement_start_offset/2)+1,
+        ((CASE qs.statement_end_offset WHEN -1 THEN DATALENGTH(st.text) ELSE qs.statement_end_offset END
+          - qs.statement_start_offset)/2)+1) AS query_text
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+ORDER BY qs.total_worker_time DESC;  -- the TOP CPU-consuming queries, RANKED, with their ACTUAL query text
+```
+Rather than guessing which queries might be slow based on intuition or anecdotal reports, this query directly surfaces the actual top resource-consumers, ranked by real, measured aggregate CPU time (or logical reads, or execution count, depending on what's ordered by) — providing concrete, data-driven evidence of exactly where optimization effort would have the most measurable impact, rather than relying on guesswork about which part of the application "feels slow."
+
+**Why ordering by TOTAL (not average) resource consumption often reveals different, equally important culprits:** a query with a very high *average* cost but executed rarely might matter less overall than a query with a modest *average* cost but executed millions of times — ordering by *total* aggregate consumption (rather than per-execution average) surfaces queries whose overall impact comes from sheer execution frequency rather than individual expense, a genuinely different (and easy to overlook) category of optimization target than "the single slowest query."
+
+**Common Pitfall:** focusing exclusively on the query with the highest *average* execution time, while overlooking a comparatively "fast" query that's actually consuming far more *total* database resources purely due to being executed an enormous number of times — genuinely effective query optimization prioritization requires considering both average cost per execution AND total aggregate consumption across all executions, since the biggest overall win is sometimes an unglamorous-looking, individually-fast query that simply runs an enormous number of times.
+
+---
+
 ---

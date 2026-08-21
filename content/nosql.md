@@ -734,4 +734,81 @@ Because achieving a quorum read already requires querying multiple replicas (to 
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What is a Document Database's automatic "Secondary Index," and how does creating one for a frequently-queried, non-primary-key field avoid a FULL COLLECTION SCAN for every query filtering on that field?**
+
+Without an index on a specific field, querying by that field requires the database to examine every single document in the collection, checking each one individually — a full collection scan. Creating a secondary index on that field lets the database instead look up matching documents directly, without inspecting every document in the entire collection.
+
+```javascript
+// WITHOUT an index on "email" -- EVERY document in the collection is examined, one by one
+db.users.find({ email: "alice@example.com" })  // SLOW for a large collection -- FULL COLLECTION SCAN
+
+// Creating a secondary index:
+db.users.createIndex({ email: 1 })
+
+// The SAME query, NOW served via the INDEX -- directly locates matching documents, WITHOUT scanning everything
+db.users.find({ email: "alice@example.com" })  // FAST -- INDEX lookup, not a full scan
+```
+For a collection with millions of documents, a query filtering on an un-indexed field requires examining every single one to check whether it matches — with an index on that field, the database can instead directly navigate to the matching documents via the index's own internal structure (typically a B-tree), touching only the relevant subset rather than the entire collection.
+
+**Why this mirrors relational database indexing concepts directly, despite the different underlying data model:** even though document databases have a fundamentally different data model than relational databases, the underlying indexing concept (and its performance trade-off — faster reads on the indexed field, at the cost of additional storage and slightly slower writes to maintain the index) is essentially identical; understanding relational indexing concepts (covered under SQL Server) transfers directly to understanding document database indexing.
+
+**Common Pitfall:** querying frequently on a field with no supporting index, only discovering the resulting full-collection-scan performance problem once the collection has grown large enough for the scan to become genuinely slow — the problem is often invisible during early development with a small test dataset, only manifesting once the collection reaches production-scale size, making it easy to overlook until it becomes a real, noticeable performance issue.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is a Distributed Database's "Hinted Handoff" mechanism, and how does temporarily storing a write intended for a currently-unavailable replica on a DIFFERENT, available node let the write succeed WITHOUT waiting for the unavailable replica to recover?**
+
+Hinted Handoff lets a write intended for a currently-unreachable replica be temporarily stored on a different, available node instead — along with a "hint" indicating which replica the data actually belongs to — once the originally-intended replica recovers, the hint is used to forward the stored data to it, completing the delayed replication without having required the original write to wait for that replica's recovery.
+
+```text
+Write for "product:5" targets Replica A, Replica B, Replica C (per the replication factor)
+-- Replica C is CURRENTLY DOWN (a temporary network partition or crash) --
+
+WITH Hinted Handoff:
+  Write succeeds on Replica A and B NORMALLY
+  A "HINT" (containing the write, tagged "this ACTUALLY belongs to Replica C") is stored on a DIFFERENT,
+  AVAILABLE node (perhaps Replica D, or any other available node in the cluster) TEMPORARILY
+
+WHEN Replica C recovers:
+  The node holding the HINT forwards the stored write to Replica C, WHICH THEN CATCHES UP
+  -- Replica C is now consistent, WITHOUT the ORIGINAL write ever having had to WAIT for Replica C's recovery --
+```
+The original write operation completes successfully using only the currently-available replicas, without blocking on the unavailable one's recovery — the "hint" ensures the temporarily-unavailable replica eventually catches up once it recovers, achieving eventual consistency without sacrificing the original write's availability during the outage window.
+
+**Why this specifically improves AVAILABILITY during a temporary, partial outage, directly connecting to the CAP theorem trade-offs covered elsewhere:** a system requiring ALL replicas to acknowledge a write before it succeeds would be unavailable for writes the moment even one replica becomes unreachable — Hinted Handoff lets writes continue succeeding using whichever replicas ARE currently available, deferring the unavailable replica's catch-up until it recovers, which is a concrete mechanism embodying the availability-favoring side of the consistency/availability trade-off during a network partition.
+
+**Common Pitfall:** assuming Hinted Handoff alone provides a complete consistency guarantee without also running periodic anti-entropy repair (covered under Read Repair) — if the node holding a hint also fails before ever successfully forwarding it to the originally-intended replica, that specific hint could be lost entirely; Hinted Handoff reduces (but doesn't entirely eliminate) the window of inconsistency, and is typically used alongside other consistency-repair mechanisms (Read Repair, anti-entropy) for genuinely comprehensive eventual consistency guarantees.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is a Wide-Column Store's "Tombstone" (for representing a DELETE in an eventually-consistent, replicated system), and why can't a delete simply remove data immediately the way it would in a single-node relational database?**
+
+In a single-node relational database, deleting a row immediately and permanently removes it — in a distributed, eventually-consistent, replicated system, an immediate physical delete on just one replica creates a dangerous ambiguity: did this replica never receive the write in the first place, or did it receive the write and then delete it? A Tombstone resolves this by marking data as deleted (a special marker, replicated just like any other write) rather than immediately, physically removing it.
+
+```text
+WITHOUT tombstones -- deleting a row IMMEDIATELY and PHYSICALLY on Replica A:
+  Replica A: row is GONE entirely
+  Replica B (hasn't yet received ANY version of this row, due to replication lag): has NO row either
+  -- Read Repair (covered earlier) comparing A and B sees IDENTICAL "no row" state on BOTH --
+  -- but CANNOT tell if this means "never written" OR "written, then DELETED" -- AMBIGUOUS! --
+
+WITH tombstones -- a DELETE creates a TOMBSTONE MARKER, replicated JUST LIKE a normal write:
+  Replica A: has a TOMBSTONE marker for this row (explicitly "THIS WAS DELETED")
+  Replica B: eventually receives the TOMBSTONE via normal replication, same as any other write
+  -- Read Repair sees the TOMBSTONE explicitly -- UNAMBIGUOUSLY knows this data was DELETED, not just absent --
+```
+The tombstone is itself a piece of replicated data (just like a normal write), explicitly recording "this key was deleted at this point in time" — rather than an ambiguous "absence" that could equally mean "never existed" or "existed, then was removed," which would be indistinguishable and could cause exactly the wrong resolution during Read Repair or anti-entropy reconciliation between replicas that haven't yet converged.
+
+**Why tombstones themselves must EVENTUALLY be permanently removed (via "compaction"), and the operational risk this creates:** tombstones can't be kept forever (they'd accumulate indefinitely, consuming ever-growing storage) — after enough time has passed for the delete to have definitely propagated to every replica, a compaction process permanently removes the tombstone; but if a replica that was down for an extended period (longer than the tombstone retention window) comes back online AFTER its tombstones have already been compacted away elsewhere, a previously-deleted row can seem to "resurrect," reappearing as if it were never deleted at all.
+
+**Common Pitfall:** configuring a Wide-Column Store's tombstone retention window shorter than the maximum time a replica might realistically be offline before rejoining the cluster — if a node returns after an outage longer than the tombstone grace period, deleted data can reappear ("zombie" data resurrection), a genuinely well-documented operational hazard in Dynamo-style databases (Cassandra explicitly documents this exact risk) that requires deliberately setting tombstone retention comfortably longer than any realistically expected node-downtime window.
+
+---
+
 ---

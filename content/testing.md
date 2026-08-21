@@ -936,4 +936,87 @@ Because every consumer's contract is centrally published to and tracked by the B
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What is "Arrange-Act-Assert" (AAA), and how does structuring every test into these three clearly-separated sections make a test's intent immediately legible to a future reader?**
+
+Arrange-Act-Assert structures every test into three distinct phases: Arrange (set up the preconditions/inputs needed), Act (perform the single action actually being tested), Assert (verify the expected outcome) — consistently structuring every test this way makes any test's intent immediately scannable, regardless of who wrote it or how complex the underlying logic is.
+
+```csharp
+[Fact]
+public void ApplyDiscount_ReducesTotalByPercentage()
+{
+    // ARRANGE -- set up the preconditions
+    var cart = new ShoppingCart();
+    cart.AddItem(new Item { Price = 100m });
+
+    // ACT -- perform the ONE action actually being tested
+    cart.ApplyDiscount(0.20m);
+
+    // ASSERT -- verify the expected outcome
+    Assert.Equal(80m, cart.Total);
+}
+```
+A reader scanning this test immediately sees, without needing to trace through unfamiliar business logic, exactly what's being set up, what single action is under test, and what the expected result is — this consistent three-part structure makes even an unfamiliar codebase's tests quickly legible, since every test follows the identical, predictable shape regardless of what specific behavior it happens to verify.
+
+**Why deviating from this structure (mixing arrange/act/assert together, or testing multiple unrelated actions in one test) makes tests harder to understand and maintain:** a test that intermixes setup, action, and verification throughout its body (rather than cleanly separating them) requires a reader to carefully trace through the entire test to understand what's actually being verified — the AAA structure's value comes specifically from its consistency and predictability, letting any reader quickly locate "what's being tested" without needing to fully parse every line.
+
+**Common Pitfall:** writing a single test that performs multiple, unrelated "Act" steps testing several different behaviors within one test method — this violates AAA's implicit "one test, one thing being verified" discipline, producing a test that's harder to name meaningfully, harder to diagnose when it fails (which of the several actions actually caused the failure?), and harder for a future reader to understand at a glance compared to several smaller, single-purpose AAA-structured tests.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is "Test Isolation via Fresh State Per Test" (as distinct from a shared Test Fixture, covered earlier), and how does choosing between these two approaches trade off SETUP COST against RISK of cross-test interference?**
+
+Fresh State Per Test creates entirely new, isolated state for every single individual test (rather than sharing one fixture's state across many tests, covered earlier) — this trades off higher setup cost (repeating potentially-expensive setup for every test) against a stronger, structural guarantee that no test can ever accidentally affect another, since each test starts from completely fresh, independent state.
+
+```csharp
+public class OrderTests
+{
+    [Fact]
+    public void Test1()
+    {
+        var context = new TestDbContext(); // FRESH, independent state -- for THIS test ONLY
+        // ... test logic using this fresh context ...
+    }
+
+    [Fact]
+    public void Test2()
+    {
+        var context = new TestDbContext(); // ANOTHER fresh, independent context -- NO shared state with Test1 AT ALL
+        // ... test logic, completely isolated from whatever Test1 did ...
+    }
+}
+```
+Because each test constructs its own entirely fresh state, there's structurally no possibility of one test's actions leaking into or affecting another test at all — this trades off the setup cost savings a shared fixture (covered earlier) provides in exchange for a stronger, simpler-to-reason-about isolation guarantee that eliminates an entire category of flaky, order-dependent test failures by construction.
+
+**Why the right choice between Fresh-State-Per-Test and a Shared Fixture depends specifically on the setup's actual cost:** for genuinely expensive setup (spinning up a real database container), a shared fixture's cost savings become significant enough to justify the added care needed to avoid cross-test interference — for cheap, fast setup, Fresh-State-Per-Test's stronger isolation guarantee is essentially free, making it the safer default whenever setup cost doesn't meaningfully justify sharing state across tests.
+
+**Common Pitfall:** defaulting to a shared fixture purely out of habit, even when the underlying setup is actually cheap and fast — sharing state introduces real risk of cross-test interference (the flaky-test root cause covered earlier) for a setup-cost savings that, if the setup was genuinely cheap to begin with, wasn't actually significant enough to justify accepting that risk; Fresh-State-Per-Test should be the default unless setup cost is demonstrably expensive enough to justify the added care a shared fixture requires.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is "Approval Testing" (Golden Master Testing), and how does it differ from Snapshot Testing (covered earlier) specifically in terms of the SCALE and NATURE of output it's typically applied to?**
+
+Approval Testing (also called Golden Master Testing) captures a large, complex output (potentially spanning many pages, an entire generated report, or a complex object graph) as an approved "golden master" reference — subsequent test runs compare current output against this golden master, flagging any deviation for human review, conceptually similar to Snapshot Testing but typically applied to much larger, more complex outputs where hand-writing traditional assertions would be entirely impractical.
+
+```csharp
+[Fact]
+public void GenerateAnnualReport_MatchesApprovedGoldenMaster()
+{
+    var report = _reportGenerator.GenerateAnnualReport(2025);
+    Approvals.Verify(report); // compares against a PREVIOUSLY-APPROVED, LARGE, COMPLEX reference document
+    // if the generated report'S FULL, MULTI-PAGE STRUCTURE has changed AT ALL, this test FAILS,
+    // requiring a human to REVIEW the diff and explicitly RE-APPROVE the new version if the change is intentional
+}
+```
+For an output this large and structurally complex (a multi-page report, a large generated configuration file), writing traditional field-by-field assertions covering every meaningful aspect would be extraordinarily tedious and likely incomplete — Approval Testing instead captures the entire output as a reference and flags ANY deviation, relying on human review to distinguish an intentional change from a genuine regression, rather than attempting to enumerate every individual assertion by hand.
+
+**Why this specifically extends Snapshot Testing's underlying philosophy to an even LARGER scale of output:** Snapshot Testing (covered earlier) is often applied to moderately-sized structured data (an API response) — Approval Testing applies the identical underlying philosophy (capture a reference, flag any deviation, require human review before accepting a new reference) to much larger and more complex outputs (entire documents, reports, generated files) where the sheer scale makes traditional field-by-field assertions entirely impractical to write and maintain by hand.
+
+**Common Pitfall:** applying Approval Testing to output that changes cosmetically very frequently for entirely legitimate, non-regression reasons (a report including today's date, or randomly-ordered data) without first normalizing away that expected variability — an approval test comparing against a golden master that includes constantly-changing, legitimately-variable content (timestamps, random IDs) will fail on every single run regardless of whether an actual regression occurred, requiring the test to first normalize away known, legitimate sources of variation before the comparison against the golden master becomes meaningful.
+
 ---

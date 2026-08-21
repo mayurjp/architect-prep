@@ -877,3 +877,90 @@ Without compilation, EF Core's query pipeline re-translates the same LINQ expres
 **Common Pitfall:** applying `EF.CompileAsyncQuery` broadly across an entire codebase as a blanket "performance optimization," including queries that are executed rarely or run only a handful of times per request — this adds code complexity and a static field to maintain for queries where the translation-caching benefit is negligible; compiled queries are best reserved specifically for query paths verified (via actual profiling) to be genuinely hot and frequently executed enough for the translation-caching savings to be meaningful.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is EF Core's `Ignore()` (in `OnModelCreating`) and the `[NotMapped]` attribute, and how do they let a property/class exist in the domain model WITHOUT EF Core attempting to map it to any database column at all?**
+
+By default, EF Core attempts to map every public property of an entity class to a corresponding database column — `[NotMapped]` (or the fluent `.Ignore()` equivalent) explicitly excludes a specific property (or an entire class) from this mapping, letting it exist purely as an in-memory, computed, or convenience property with no database representation at all.
+
+```csharp
+public class Order
+{
+    public int Id { get; set; }
+    public decimal Subtotal { get; set; }
+    public decimal TaxRate { get; set; }
+
+    [NotMapped]
+    public decimal Total => Subtotal + (Subtotal * TaxRate); // COMPUTED in memory -- NO database column at all
+}
+```
+```sql
+-- The generated Orders table has ONLY: Id, Subtotal, TaxRate -- NO "Total" column exists in the database at all
+```
+`Total` is computed purely in application memory from the two actual, mapped properties — without `[NotMapped]`, EF Core would attempt to create a database column for `Total` too (or throw a mapping exception if it couldn't determine an appropriate column type), even though it's really just a derived, in-memory convenience property with no independent, persisted meaning of its own.
+
+**Common Pitfall:** forgetting to mark a genuinely computed, in-memory-only property with `[NotMapped]`, only discovering the mapping issue when EF Core throws an exception (or, worse, silently creates an unintended database column) during migration generation — being deliberate about which properties represent genuine persisted state versus derived, in-memory-only convenience values avoids this class of mapping confusion, especially as an entity class accumulates more properties over time.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is EF Core's `HasConversion` (Value Converters), and how does it let a .NET type that doesn't have a NATURAL database column type (like an `enum` stored as a readable STRING, rather than an opaque integer) be mapped with custom, bidirectional translation logic?**
+
+A Value Converter defines custom, bidirectional translation logic between a .NET property's type and its actual stored database representation — useful when the natural .NET type doesn't map cleanly onto an obvious database column type, or when a different storage representation is specifically preferred (a readable string instead of an opaque integer for an enum, for instance).
+
+```csharp
+public enum OrderStatus { Pending, Shipped, Delivered }
+
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<Order>()
+        .Property(o => o.Status)
+        .HasConversion(
+            status => status.ToString(),                          // .NET -> DATABASE: enum becomes a STRING
+            dbValue => Enum.Parse<OrderStatus>(dbValue));           // DATABASE -> .NET: string becomes the ENUM
+}
+```
+```sql
+-- WITHOUT the conversion: Status column stores an OPAQUE INTEGER (0, 1, 2) -- meaningless without the enum definition
+-- WITH the conversion:    Status column stores a READABLE STRING ("Pending", "Shipped", "Delivered")
+```
+Without this conversion, EF Core's default enum mapping stores the underlying integer value directly, which is opaque and meaningless to anyone querying the database directly (via SQL tooling, for instance) without also knowing the enum's exact integer-to-name mapping — the Value Converter makes the stored data self-describing and directly readable, at a small serialization/deserialization cost applied automatically on every read/write.
+
+**Why this matters for direct database inspection/tooling, not just application code:** a database administrator or analyst running ad-hoc SQL queries directly against the database (without any knowledge of the application's own enum definitions) can immediately understand a string-valued `Status` column ("Shipped") — an opaque integer value (`1`) conveys nothing without separately consulting the application's enum source code, a genuine practical benefit for anyone interacting with the raw data outside the application itself.
+
+**Common Pitfall:** applying a Value Converter to a property purely for aesthetic/readability reasons in cases where doing so significantly complicates *querying* that property directly in SQL (converting a numeric range into a formatted string, for instance, making numeric range queries against the raw column awkward) — Value Converters are most valuable when the converted representation remains easy to query directly (a string enum value is still simple to filter on), and less appropriate when the conversion would make direct SQL querying against the raw stored value meaningfully harder.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is EF Core's `IInterceptor`-based Query/Command Interception (`DbCommandInterceptor`), and how does it let an application inspect or MODIFY the actual SQL command JUST BEFORE it's sent to the database, useful for cross-cutting concerns like automatically applying multi-tenancy filtering?**
+
+`DbCommandInterceptor` lets application code hook directly into EF Core's own command pipeline, inspecting (or even modifying) the actual generated SQL command immediately before it's executed against the database — useful for cross-cutting concerns needing to apply uniformly across every single query/command EF Core issues, without touching the LINQ code of every individual query.
+
+```csharp
+public class TenantFilterInterceptor : DbCommandInterceptor
+{
+    public override InterceptionResult<DbDataReader> ReaderExecuting(
+        DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
+    {
+        Console.WriteLine($"About to execute: {command.CommandText}"); // INSPECT the actual SQL, right before execution
+        // Could also MODIFY command.CommandText here, or inspect/adjust command.Parameters
+        return result;
+    }
+}
+
+// Registration:
+optionsBuilder.AddInterceptors(new TenantFilterInterceptor());
+```
+Because this interceptor runs for *every* command EF Core issues, cross-cutting concerns (logging every generated SQL statement, auditing, or even injecting additional `WHERE` conditions) can be applied uniformly across the entire application's data access, without needing to modify every individual LINQ query throughout the codebase to include that same cross-cutting logic manually and repeatedly.
+
+**Why this specifically complements (rather than replaces) EF Core's Global Query Filters (covered earlier) for certain cross-cutting needs:** Global Query Filters operate at the LINQ/model level, automatically appending a `WHERE` condition to queries against a specific entity type — `DbCommandInterceptor` operates one level lower, directly at the actual SQL command text/parameters, useful for cross-cutting concerns that need to inspect or modify the literal SQL itself (logging every statement verbatim, for instance) rather than expressing a filter condition at the LINQ/entity level.
+
+**Common Pitfall:** using `DbCommandInterceptor` to implement logic that would be more naturally and safely expressed via EF Core's higher-level, purpose-built mechanisms (Global Query Filters for row-level filtering, `SaveChanges` interceptors for entity lifecycle hooks) — directly manipulating raw SQL command text at this low level is powerful but riskier and more error-prone (string-manipulating a SQL command directly risks introducing subtle bugs or even SQL injection if done carelessly) than using EF Core's higher-level, purpose-built mechanisms designed specifically for the more common cross-cutting scenarios.
+
+---
+
+---
