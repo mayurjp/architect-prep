@@ -858,3 +858,82 @@ If `LibraryA.dll` is later updated (`MaxRetries` changed to `5`) and deployed **
 **Common Pitfall:** exposing a `public const` field on a publicly-versioned library, particularly one whose value might reasonably change in a future release — `static readonly` is almost always the safer choice for any publicly-exposed value that isn't truly, permanently fixed forever (like a genuinely immutable mathematical or physical constant), specifically because it avoids this "stale baked-in value surviving a library update without recompilation" hazard entirely.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is .NET's `System.Text.Json` source generator mode (`[JsonSerializable]`), and how does generating serialization code at COMPILE TIME rather than using runtime reflection improve both startup performance and Native AOT compatibility?**
+
+By default, `System.Text.Json` uses runtime reflection to discover a type's properties and figure out how to serialize/deserialize it — the source generator mode instead generates the actual serialization code at *compile time*, producing a dedicated, reflection-free serializer class specific to the exact types declared, avoiding reflection's runtime discovery cost entirely.
+
+```csharp
+[JsonSerializable(typeof(Order))]
+public partial class OrderJsonContext : JsonSerializerContext { }
+// The COMPILER generates the ACTUAL serialization logic for Order INTO this partial class
+
+var json = JsonSerializer.Serialize(order, OrderJsonContext.Default.Order);
+// Uses the GENERATED, reflection-free code path -- NOT runtime reflection discovery
+```
+Because the serialization logic is generated at compile time (via a Roslyn source generator, the same underlying mechanism covered under the C# topic's partial-method discussion), there's no runtime reflection needed to discover `Order`'s properties at all — the generated code already knows exactly which properties exist and how to read/write them, resulting in measurably faster startup and serialization performance compared to the reflection-based default.
+
+**Why this specifically matters for Native AOT compilation:** Native AOT compiles an application to a single, fully native executable ahead of time, with no JIT and severely restricted runtime reflection support — reflection-based serialization (which needs to inspect types at runtime) is fundamentally incompatible with Native AOT's constraints, while source-generated serialization (with all the necessary code already generated at compile time) works correctly under Native AOT, since it needs no runtime type inspection at all.
+
+**Common Pitfall:** attempting to publish an application as Native AOT while still relying on `System.Text.Json`'s default reflection-based serialization for types not covered by a source-generated context — this either fails at runtime or requires falling back to slower, reflection-based paths that may not be fully supported under Native AOT's constraints; genuinely Native-AOT-compatible applications need to use the source generator mode for their JSON serialization needs specifically because of this reflection incompatibility.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is .NET's `IHttpClientFactory`, and how does it solve the specific socket-exhaustion problem caused by creating a NEW `HttpClient` instance per request, versus the DNS-staleness problem caused by reusing ONE `HttpClient` instance forever?**
+
+Creating a new `HttpClient` instance for every outgoing request eventually exhausts available sockets (each `HttpClient` disposal doesn't immediately release its underlying socket, due to the TCP `TIME_WAIT` state) — but the "just reuse one single, static `HttpClient` forever" fix introduces a different problem: it never picks up DNS changes, since the underlying connection is kept alive indefinitely. `IHttpClientFactory` solves both simultaneously by managing a pool of `HttpClient` instances with periodically-recycled underlying handlers.
+
+```csharp
+// WRONG -- creates a NEW HttpClient PER REQUEST -- eventually EXHAUSTS available sockets
+public async Task<string> GetDataAsync() { using var client = new HttpClient(); return await client.GetStringAsync(url); }
+
+// ALSO WRONG -- ONE static HttpClient FOREVER -- never picks up DNS changes (the target IP might change)
+private static readonly HttpClient _client = new(); // reused forever, NEVER refreshed
+
+// CORRECT -- IHttpClientFactory manages a POOL, periodically recycling underlying handlers
+builder.Services.AddHttpClient("OrdersApi", client => client.BaseAddress = new Uri("https://orders.example.com"));
+
+public class OrderService
+{
+    private readonly HttpClient _client;
+    public OrderService(IHttpClientFactory factory) => _client = factory.CreateClient("OrdersApi");
+}
+```
+`IHttpClientFactory` manages the underlying `HttpMessageHandler` (which owns the actual socket/connection pool) separately from the lightweight `HttpClient` instances handed out — handlers are periodically recycled (by default, every 2 minutes) to pick up DNS changes, while `HttpClient` instances themselves can be created cheaply and frequently without each one establishing an entirely new, separate connection pool, avoiding both the socket-exhaustion problem of "new client per request" and the DNS-staleness problem of "one client forever."
+
+**Why this specific combination of problems required a dedicated factory abstraction rather than a simple coding convention:** the "right" way to use `HttpClient` isn't obvious from its API surface alone (it implements `IDisposable`, suggesting short-lived usage, which is exactly the wrong pattern) — `IHttpClientFactory` encodes the actually-correct usage pattern (pooled, periodically-recycled handlers) into a dedicated abstraction, removing the need for every developer to independently rediscover and correctly implement this non-obvious trade-off themselves.
+
+**Common Pitfall:** disposing an `HttpClient` obtained from `IHttpClientFactory.CreateClient()` after each use (following a mistaken generalization from `HttpClient`'s `IDisposable` interface, or from older guidance predating `IHttpClientFactory`) — clients obtained from the factory are specifically designed to be used and discarded without explicit `Dispose()` calls interfering with the factory's own underlying handler-pooling and recycling logic; the factory handles the underlying resource lifecycle correctly on its own.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is .NET's Native AOT (Ahead-of-Time) compilation, and how does eliminating the JIT compiler's runtime code-generation step trade away certain runtime flexibility (dynamic loading, some reflection scenarios) for dramatically faster startup and a smaller memory footprint?**
+
+Native AOT compiles a .NET application directly to native machine code at build time, producing a single, self-contained executable with no separate .NET runtime/JIT compiler needed at all to run it — this eliminates the JIT's runtime "compile IL to machine code just before first use" step entirely, since all code is already compiled to native machine code ahead of time, but this also means certain dynamic capabilities the JIT-based runtime normally supports are no longer available.
+
+```bash
+dotnet publish -r linux-x64 -p:PublishAot=true
+# Produces a SINGLE, NATIVE executable -- no separate .NET runtime installation needed to run it,
+# and STARTUP is dramatically faster since there's NO JIT compilation happening at process start
+```
+```text
+What's LOST under Native AOT (compared to the normal, JIT-based runtime):
+  - Runtime code generation (System.Reflection.Emit, dynamically building and executing NEW code at runtime)
+  - Loading arbitrary, NOT-KNOWN-AT-BUILD-TIME assemblies dynamically (Assembly.LoadFrom on an unknown path)
+  - SOME reflection scenarios that rely on discovering types not statically knowable at compile time
+```
+Because Native AOT needs to know, at build time, exactly what code could ever possibly run (to compile all of it ahead of time into the final native executable), any mechanism that would introduce genuinely new code or types at runtime that weren't knowable during the build (dynamically emitting IL, loading an arbitrary plugin assembly whose types weren't known in advance) is fundamentally incompatible with this ahead-of-time model — there's no JIT present at runtime to compile such newly-introduced code even if it could somehow be loaded.
+
+**Why the startup and memory-footprint benefits are so significant, especially for specific deployment scenarios:** eliminating JIT compilation at startup removes a genuinely significant chunk of a typical .NET application's cold-start time, and a Native AOT executable's memory footprint tends to be smaller since it doesn't need to load the full JIT compiler and associated runtime machinery at all — this specifically benefits scenarios sensitive to cold-start latency (serverless functions, command-line tools invoked very frequently, containers that scale up rapidly and need to start serving traffic almost immediately).
+
+**Common Pitfall:** attempting to Native-AOT-publish an existing application that relies heavily on runtime reflection, dynamic assembly loading, or `System.Reflection.Emit`-based code generation, without first auditing and adapting those specific dependencies — many popular libraries (older serialization libraries, certain plugin/dependency-injection frameworks relying heavily on reflection) may not be Native-AOT-compatible out of the box, requiring either library updates supporting AOT explicitly, or architectural changes avoiding the incompatible dynamic patterns entirely, before a genuinely full Native AOT publish succeeds without runtime failures.
+
+---
+
+---

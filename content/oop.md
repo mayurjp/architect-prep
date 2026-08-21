@@ -933,3 +933,97 @@ Both `Order` and `User` gain identical `LogAction` behavior despite having no in
 **Common Pitfall:** overusing default interface methods to smuggle substantial, stateful business logic into interfaces, rather than reserving them for small, genuinely stateless, cross-cutting behaviors (like the logging example) — interfaces still cannot hold instance fields, so any default method relying on meaningful internal state quickly runs into awkward workarounds; default interface methods work best for small, focused, mixin-style behaviors, not as a wholesale replacement for genuine base-class-based inheritance where substantial shared state is actually needed.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is "Method Overriding," and how does the `virtual`/`override` keyword pair let a derived class provide a genuinely DIFFERENT implementation for a method, resolved at RUNTIME based on the object's actual type?**
+
+Method Overriding lets a derived class replace a base class's implementation of a specific method — marking the base method `virtual` signals it CAN be overridden, and marking the derived version `override` provides the replacement; which implementation actually runs is decided at *runtime*, based on the object's actual, concrete type, not its declared/compile-time type.
+
+```csharp
+public class Animal
+{
+    public virtual string MakeSound() => "Some generic sound";
+}
+
+public class Dog : Animal
+{
+    public override string MakeSound() => "Woof!"; // REPLACES the base implementation
+}
+
+Animal a = new Dog(); // declared TYPE is Animal, ACTUAL type is Dog
+Console.WriteLine(a.MakeSound()); // prints "Woof!" -- RUNTIME dispatch uses the ACTUAL type, not the declared one
+```
+Even though the variable `a` is declared as `Animal`, calling `MakeSound()` invokes `Dog`'s overridden implementation, because virtual dispatch resolves the actual method to call based on the object's real, runtime type — this is what allows polymorphic code (a method accepting an `Animal` parameter) to correctly invoke whatever specific behavior each individual subclass actually provides, without needing to know at compile time which concrete subclass it's dealing with.
+
+**Common Pitfall:** forgetting to mark the base method `virtual` (or the derived method `override`), instead accidentally using `new` to "hide" the base method rather than genuinely overriding it — method hiding (via `new`) resolves based on the variable's *declared* type at compile time rather than the object's actual runtime type, producing confusingly different behavior depending on whether the object is accessed through a base-typed or derived-typed reference, unlike genuine `virtual`/`override` polymorphism which always resolves consistently based on the actual object.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is the "Null Object Pattern," and how does providing a "do-nothing" implementation of an interface eliminate scattered `if (x != null)` checks throughout calling code?**
+
+The Null Object Pattern provides a special implementation of an interface that does nothing (or provides a sensible, harmless default) instead of using `null` to represent "absence" — calling code can then invoke methods on the object unconditionally, without needing a null-check before every single usage, since the null object's methods are always safe to call.
+
+```csharp
+public interface ILogger { void Log(string message); }
+
+public class ConsoleLogger : ILogger
+{
+    public void Log(string message) => Console.WriteLine(message);
+}
+
+public class NullLogger : ILogger // the "NULL OBJECT" -- does NOTHING, but is SAFE to call
+{
+    public void Log(string message) { /* intentionally does nothing */ }
+}
+
+public class OrderService
+{
+    private readonly ILogger _logger;
+    public OrderService(ILogger? logger) => _logger = logger ?? new NullLogger(); // NEVER actually null
+
+    public void ProcessOrder()
+    {
+        _logger.Log("Processing order"); // ALWAYS safe -- NO null-check needed here, EVER
+    }
+}
+```
+Without the Null Object Pattern, `OrderService` would need `_logger?.Log("...")` (or an explicit `if (_logger != null)` check) at every single call site using `_logger` — with `NullLogger` guaranteed to always be a valid, non-null object, every call site can invoke `_logger.Log(...)` directly and unconditionally, since `NullLogger`'s implementation simply does nothing when there's genuinely no logging destination configured.
+
+**Why this specifically reduces defensive-programming clutter throughout a codebase:** scattered null-checks before every optional-dependency usage add visual noise and a repeated, easy-to-forget defensive pattern at every call site — centralizing "what happens when there's no real logger" into one dedicated `NullLogger` class means every other piece of code calling `_logger.Log(...)` can simply assume a valid object always exists, entirely eliminating the need for repeated null-checking logic scattered throughout.
+
+**Common Pitfall:** using the Null Object Pattern for a scenario where "no value present" is actually meaningful business information the caller genuinely needs to detect and branch on (not just an optional, safely-skippable behavior) — Null Object works well for optional side-effect-style dependencies (logging, a no-op cache) where "doing nothing" is a legitimate, harmless default; it's the wrong fit when the caller genuinely needs to distinguish "value present" from "value absent" as meaningful information, rather than simply wanting to avoid a null-check.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is "Structural Typing" (as approximated in C# via `dynamic` and duck typing) versus C#'s normal NOMINAL typing, and what specific compile-time safety does nominal typing provide that structural typing gives up?**
+
+C# is primarily a nominally-typed language — type compatibility is determined by explicit type names/declared relationships (a class must explicitly implement an interface by name to be considered compatible with it) — Structural Typing (duck typing) instead considers two types compatible if they simply happen to have the same shape (the same method signatures), regardless of any explicit, named relationship between them.
+
+```csharp
+// NOMINAL typing (C#'s normal, default behavior) -- MUST explicitly declare the relationship
+public interface IFlyable { void Fly(); }
+public class Bird : IFlyable { public void Fly() => Console.WriteLine("Flying"); } // EXPLICITLY implements it
+
+// A method requiring IFlyable can ONLY accept types that EXPLICITLY declared implementing it:
+void MakeItFly(IFlyable flyable) => flyable.Fly();
+MakeItFly(new Bird()); // WORKS -- Bird explicitly implements IFlyable
+
+// STRUCTURAL typing approximation via 'dynamic' -- NO explicit interface relationship needed AT ALL
+public class Airplane { public void Fly() => Console.WriteLine("Flying (airplane)"); } // does NOT implement IFlyable
+dynamic anything = new Airplane();
+anything.Fly(); // WORKS -- 'dynamic' just checks AT RUNTIME whether a Fly() method happens to exist
+```
+`Airplane` never declared implementing `IFlyable` at all — under nominal typing (the `MakeItFly(IFlyable)` method), it would be rejected at compile time, since it lacks the explicit, named relationship; using `dynamic` instead, C# skips compile-time type checking entirely, simply attempting the method call at runtime and succeeding purely because `Airplane` happens to have a compatible `Fly()` method, regardless of any declared interface relationship.
+
+**Why nominal typing's explicit relationship requirement provides real compile-time safety that structural/dynamic typing gives up:** with nominal typing, the compiler verifies at compile time that every type passed to `MakeItFly` genuinely implements the full `IFlyable` contract as declared — with `dynamic`, that verification is deferred entirely to runtime, meaning a typo in the method name, or a type that's missing the expected method entirely, only surfaces as a `RuntimeBinderException` when that specific code path actually executes, rather than being caught immediately by the compiler for every code path, tested or not.
+
+**Common Pitfall:** reaching for `dynamic` to avoid the friction of properly implementing an interface, when the actual need is genuine polymorphism across explicitly related types — this discards compile-time type-checking for the affected code paths entirely, trading a one-time interface-implementation cost for an ongoing, permanent loss of compile-time safety and IDE tooling support (IntelliSense, refactoring, "find all usages") for every use of the `dynamic`-typed value going forward.
+
+---
+
+---

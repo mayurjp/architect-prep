@@ -1045,3 +1045,114 @@ Each middleware component (like each `Handler` in the abstract pattern) decides 
 **Common Pitfall:** learning ASP.NET Core's middleware pipeline as an isolated, framework-specific mechanism without recognizing its structural identity with the general Chain of Responsibility pattern — this misses an opportunity to transfer general pattern knowledge (much of it covered throughout this very topic) directly onto a very concrete, everyday framework mechanism, understanding both more deeply than treating them as two entirely separate, unrelated things to memorize independently.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is the Adapter pattern, and how does it let two otherwise-incompatible interfaces work together WITHOUT modifying either the client's expected interface or the existing, incompatible class's own code?**
+
+The Adapter pattern wraps an existing class with an incompatible interface inside a new class that translates calls into whatever shape the client code actually expects — neither the client's expected interface nor the existing (incompatible) class needs to change at all; the Adapter sits between them, translating.
+
+```csharp
+// The client EXPECTS this interface:
+public interface IPaymentProcessor { void ProcessPayment(decimal amount); }
+
+// An EXISTING, third-party class with an INCOMPATIBLE interface -- CANNOT be modified (external library)
+public class LegacyPaymentGateway
+{
+    public void MakeTransaction(int amountInCents) { /* different method name, different unit! */ }
+}
+
+// The ADAPTER -- translates between the two INCOMPATIBLE shapes
+public class LegacyPaymentAdapter : IPaymentProcessor
+{
+    private readonly LegacyPaymentGateway _legacy;
+    public LegacyPaymentAdapter(LegacyPaymentGateway legacy) => _legacy = legacy;
+
+    public void ProcessPayment(decimal amount) => _legacy.MakeTransaction((int)(amount * 100)); // translates!
+}
+
+// Client code uses the FAMILIAR interface, NEVER directly touching the incompatible legacy class:
+IPaymentProcessor processor = new LegacyPaymentAdapter(new LegacyPaymentGateway());
+processor.ProcessPayment(29.99m); // translated internally to MakeTransaction(2999)
+```
+The client code only ever interacts with `IPaymentProcessor`, completely unaware that underneath, `LegacyPaymentAdapter` is translating each call into `LegacyPaymentGateway`'s differently-named, differently-unit'd method — neither `IPaymentProcessor` (the client's expected shape) nor `LegacyPaymentGateway` (the existing, unmodifiable third-party class) needed any changes at all.
+
+**Why this specifically matters for integrating with third-party/legacy code that genuinely CANNOT be modified:** when the incompatible class comes from an external library or a legacy codebase that can't be directly edited, the Adapter pattern is often the *only* clean way to make it work with code expecting a different interface — without an Adapter, client code would need to be rewritten to work directly with the legacy class's awkward shape, spreading that awkwardness throughout the codebase instead of isolating it to one dedicated Adapter class.
+
+**Common Pitfall:** letting Adapter classes accumulate substantial additional logic beyond pure translation (validation, business rules) — an Adapter's job is specifically to translate between two shapes; if it starts making meaningful business decisions rather than simply reshaping a call, that logic is better placed elsewhere (a dedicated service), keeping the Adapter itself thin and focused purely on its translation responsibility.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is the Mediator pattern, and how does routing ALL communication between a set of objects through ONE central Mediator avoid those objects needing DIRECT references to each other at all?**
+
+The Mediator pattern centralizes communication between a group of related objects — rather than each object holding direct references to every other object it needs to communicate with (an increasingly tangled web of references as the group grows), every object communicates only with the Mediator, which coordinates interactions between them.
+
+```csharp
+public interface IChatMediator { void SendMessage(string message, User sender); }
+
+public class ChatRoomMediator : IChatMediator
+{
+    private readonly List<User> _users = new();
+    public void Register(User user) => _users.Add(user);
+    public void SendMessage(string message, User sender)
+    {
+        foreach (var user in _users.Where(u => u != sender))
+            user.Receive(message); // the MEDIATOR routes the message -- users have NO direct references to each other
+    }
+}
+
+public class User
+{
+    private readonly IChatMediator _mediator;
+    public User(IChatMediator mediator) => _mediator = mediator;
+    public void Send(string message) => _mediator.SendMessage(message, this); // talks ONLY to the mediator
+    public void Receive(string message) => Console.WriteLine($"Received: {message}");
+}
+```
+No individual `User` object holds a direct reference to any other `User` — every interaction is routed through `ChatRoomMediator`, meaning adding a new `User`, or changing how messages are routed/filtered, only requires modifying the Mediator itself, never touching the `User` class or any existing user's code at all.
+
+**Why this specifically avoids the "N-squared" reference explosion a fully-connected group of objects would otherwise require:** without a Mediator, N objects each needing to communicate directly with every other object would require each one holding up to N-1 direct references — as N grows, this becomes an increasingly tangled, hard-to-modify web of interconnections; the Mediator pattern collapses this down to each object needing just ONE reference (to the Mediator itself), with the Mediator internally managing the actual routing complexity in one centralized place.
+
+**Common Pitfall:** allowing the Mediator itself to accumulate so much routing/coordination logic that it becomes an unwieldy "God Object" holding excessive knowledge of every participant's behavior — the Mediator pattern trades distributed, tangled coupling for centralized coupling; if the Mediator's own internal complexity grows large enough, it may need to be decomposed into multiple, more focused mediators rather than becoming one single, overloaded coordination point.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is the Visitor pattern, and how does "Double Dispatch" let a NEW operation be added over an existing class hierarchy WITHOUT modifying any of those existing classes at all?**
+
+The Visitor pattern lets you define a new operation over a set of existing classes (a class hierarchy) without modifying those classes' own source code — achieved through "Double Dispatch," where the actual method that runs is determined by BOTH the concrete type of the element being visited AND the concrete type of the visitor performing the operation, resolved through two separate virtual dispatch calls.
+
+```csharp
+public interface IShapeVisitor { void Visit(Circle circle); void Visit(Square square); }
+
+public interface IShape { void Accept(IShapeVisitor visitor); } // the ONLY change needed to EXISTING classes
+
+public class Circle : IShape
+{
+    public double Radius { get; set; }
+    public void Accept(IShapeVisitor visitor) => visitor.Visit(this); // DISPATCH #1: which Shape?
+}
+public class Square : IShape
+{
+    public double Side { get; set; }
+    public void Accept(IShapeVisitor visitor) => visitor.Visit(this); // DISPATCH #1: which Shape?
+}
+
+// A NEW operation, added WITHOUT touching Circle or Square's own logic AGAIN:
+public class AreaCalculatorVisitor : IShapeVisitor
+{
+    public double TotalArea;
+    public void Visit(Circle circle) => TotalArea += Math.PI * circle.Radius * circle.Radius; // DISPATCH #2
+    public void Visit(Square square) => TotalArea += square.Side * square.Side;                 // DISPATCH #2
+}
+```
+The first dispatch (`shape.Accept(visitor)`) resolves to the correct `Accept` override based on the shape's actual runtime type (`Circle` vs `Square`) — the second dispatch (`visitor.Visit(this)`, called FROM inside that resolved `Accept` method) resolves to the correct overload based on the STATICALLY-KNOWN type of `this` at that specific call site — together, these two separate dispatches let `AreaCalculatorVisitor.Visit(Circle)` run for a `Circle` and `.Visit(Square)` run for a `Square`, entirely correctly, purely through this "double dispatch" mechanism.
+
+**Why a NEW visitor (a new operation) can be added without touching `Circle` or `Square` again, but adding a NEW shape requires touching EVERY existing visitor:** the Visitor pattern makes adding new *operations* easy (just write a new `IShapeVisitor` implementation) but makes adding new *shape types* comparatively hard (every existing `IShapeVisitor` implementation needs a new `Visit(NewShape)` method added) — this is the Visitor pattern's defining trade-off, exactly the inverse of what a simple `if/switch`-based approach would provide (easy to add new shapes, hard to add new operations without touching every shape's code).
+
+**Common Pitfall:** reaching for the Visitor pattern for a class hierarchy expected to grow frequently with NEW shape/element types over time — since adding a new element type requires updating every existing Visitor implementation, Visitor is best suited for hierarchies that are relatively stable in their set of types but need frequent NEW operations added; for hierarchies expected to grow with new types frequently, Visitor's core trade-off works against that specific evolution pattern.
+
+---

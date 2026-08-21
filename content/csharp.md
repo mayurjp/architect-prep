@@ -836,3 +836,85 @@ Each of these restricted operations would risk the `ref struct`'s underlying dat
 **Common Pitfall:** attempting to use a `ref struct` (like `Span<T>`) as a field in an async state machine (any type implicitly holding local state across an `await`) — the C# compiler specifically disallows this, since an async method's local state may need to be moved to the heap to survive across asynchronous suspension points, which is exactly the kind of "escape to the heap" a `ref struct`'s restrictions are designed to prevent; code needing a `Span<T>`-like abstraction across `await` boundaries generally needs `Memory<T>` instead, which is NOT a `ref struct` and can safely live on the heap.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: What is the C# `nameof` operator, and how does it produce a string containing a symbol's NAME while remaining automatically correct if that symbol is later renamed via a refactoring tool?**
+
+`nameof` produces a string literal containing the exact name of the variable, type, or member passed to it, evaluated at *compile time* — critically, since it's checked and resolved by the compiler like any other code reference, renaming the referenced symbol via an IDE's rename-refactoring tool automatically updates every `nameof` usage referencing it too, unlike a hardcoded string.
+
+```csharp
+public void ProcessOrder(Order order)
+{
+    if (order is null)
+        throw new ArgumentNullException(nameof(order)); // produces the STRING "order"
+}
+```
+```csharp
+// HARDCODED string -- looks equivalent, but is NOT automatically kept in sync:
+throw new ArgumentNullException("order"); // if the PARAMETER is later renamed to "customerOrder",
+                                            // this STRING silently becomes WRONG -- still says "order"
+```
+If the `order` parameter is later renamed to `customerOrder` via an IDE rename-refactoring, `nameof(order)` automatically becomes `nameof(customerOrder)` (the compiler wouldn't even compile otherwise, since `order` no longer exists) — the hardcoded string version, by contrast, silently continues saying `"order"` even though the actual parameter is now named something else entirely, since a plain string literal has no connection to the actual symbol at all.
+
+**Common Pitfall:** hardcoding a member/parameter's name as a plain string literal (for exception messages, logging, or reflection-adjacent scenarios) rather than using `nameof` — this creates a silent, easy-to-miss maintenance hazard: renaming the actual symbol doesn't produce a compile error, so the hardcoded string simply becomes incorrect without any warning, whereas `nameof` usages would either update automatically (via IDE rename-refactoring) or fail to compile if the referenced symbol no longer exists.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the C# `init` accessor (introduced in C# 9), and how does it let a property be set only during object initialization, while remaining effectively immutable afterward — a middle ground between `get`-only and a full mutable `set`?**
+
+An `init` accessor allows a property to be assigned only within an object initializer or a constructor — once construction completes, the property becomes effectively read-only, with any later assignment attempt failing to compile, providing immutability guarantees without needing to route every property through a constructor parameter.
+
+```csharp
+public class Order
+{
+    public int Id { get; init; }
+    public string CustomerName { get; init; } = "";
+}
+
+var order = new Order { Id = 5, CustomerName = "Alice" }; // ALLOWED -- this is object initialization
+
+order.Id = 10; // COMPILE ERROR -- init-only properties cannot be assigned after construction completes
+```
+Unlike a full mutable `set`, which would allow `order.Id = 10` to compile and silently mutate the object at any later point, `init` restricts assignment specifically to the initialization phase — the object initializer syntax (`new Order { Id = 5, ... }`) is preserved for readability, while the resulting object remains effectively immutable for its entire subsequent lifetime, matching what a full constructor-parameter-based approach would guarantee, but with the more readable named-property initializer syntax.
+
+**Why this specifically bridges a gap `get`-only properties (requiring constructor parameters) and mutable `set` properties (allowing unlimited later mutation) didn't cleanly fill:** before `init`, achieving true immutability meant using `get`-only properties set exclusively through constructor parameters, losing the readable named-initializer syntax — `init` provides the readability of object-initializer syntax *and* the immutability guarantee, addressing a gap that neither previous approach fully solved on its own.
+
+**Common Pitfall:** using ordinary mutable `set` properties on a type intended to be immutable after construction, relying purely on developer discipline ("just don't mutate it after creating it") rather than the compiler enforcing that guarantee — `init` makes the immutability structurally guaranteed rather than merely a convention that could be violated (accidentally or otherwise) anywhere in the codebase without the compiler ever flagging it.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is C#'s `unsafe` code and pointer arithmetic, and what specific SAFETY GUARANTEES does the runtime forfeit in exchange for the direct memory access it provides?**
+
+`unsafe` code blocks let C# use raw pointers and pointer arithmetic directly, similar to C/C++ — in exchange for the low-level control and potential performance benefit this provides, the runtime's normal memory-safety guarantees (bounds checking, type safety, guaranteed-valid references) are explicitly forfeited within that `unsafe` context, placing the burden of correctness entirely on the developer.
+
+```csharp
+unsafe
+{
+    int[] numbers = { 1, 2, 3, 4, 5 };
+    fixed (int* ptr = numbers) // PINS the array in memory, preventing the GC from moving it
+    {
+        int* current = ptr;
+        for (int i = 0; i < 5; i++)
+        {
+            Console.WriteLine(*current); // DIRECT pointer dereference -- NO automatic bounds checking at all
+            current++; // manual pointer arithmetic -- advances to the NEXT int in memory
+        }
+        // NOTHING stops code from advancing 'current' PAST the array's actual bounds --
+        // doing so would read/write ARBITRARY, UNRELATED memory, with NO exception thrown
+    }
+}
+```
+Ordinary managed C# array access (`numbers[i]`) includes an automatic bounds check, throwing `IndexOutOfRangeException` for an invalid index — raw pointer arithmetic inside `unsafe` code has no such check at all; advancing a pointer past an array's actual bounds and dereferencing it reads or writes whatever memory happens to be at that address, with no exception, no warning, and potentially serious memory-corruption consequences depending on what's actually there.
+
+**Why `fixed` is specifically required alongside pointer usage in managed code:** the .NET garbage collector can move managed objects in memory during a collection (to compact the heap) — a raw pointer into managed memory would become invalid the instant the GC moved the object it pointed to; `fixed` "pins" the object, telling the GC not to move it for the duration of the `fixed` block, which is specifically why pointer usage against managed memory requires this additional safeguard that C/C++ (working with unmanaged memory that never moves) doesn't need.
+
+**Common Pitfall:** using `unsafe` code and pointer arithmetic for performance reasons without genuinely verifying (via profiling) that it produces a meaningful improvement over safe, bounds-checked code — modern .NET's JIT compiler is often able to eliminate bounds-checking overhead entirely for safe code in patterns it can prove are always in-bounds (a for loop bounded by `array.Length`, for instance); reaching for `unsafe` code preemptively, without confirming an actual, measured performance benefit, sacrifices memory safety for a performance gain that may not even materialize in practice.
+
+---
+
+---

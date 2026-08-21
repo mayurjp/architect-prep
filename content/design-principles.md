@@ -869,3 +869,95 @@ With the CQS-compliant version, a caller can call `HasSufficientBalance` purely 
 **Common Pitfall:** treating CQS as an absolute, universal rule requiring literally every single method to be strictly one or the other, and treating any exception (like the widely-used `TryXxx` idiom) as evidence the principle itself is invalid — CQS is a valuable *default discipline* specifically aimed at avoiding methods that hide a genuine, meaningful state mutation behind what looks like an innocuous query; well-understood, side-effect-free idioms like `TryParse` are a deliberate, narrow, widely-accepted exception, not a refutation of the principle's actual underlying concern.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is "Tell, Don't Ask," and how does asking an object for its internal state and then acting on it from OUTSIDE differ from telling the object what to do and letting it act on its OWN state internally?**
+
+"Tell, Don't Ask" advises: rather than querying an object's internal state and making a decision about it externally, tell the object what you want done and let it inspect and act on its own state internally — this keeps behavior and the state it operates on located together, rather than scattering decisions about an object's state throughout other, external code.
+
+```csharp
+// ASKS then acts EXTERNALLY -- decision logic lives OUTSIDE the object, inspecting its internal state
+if (order.Status == "Pending" && order.Items.Count > 0)
+{
+    order.Status = "Confirmed"; // external code REACHES IN and mutates the object's state directly
+}
+
+// TELLS the object what to do -- the object itself decides, based on ITS OWN internal state
+order.Confirm(); // internally: checks its OWN Status/Items, THEN mutates ITS OWN state if valid
+```
+```csharp
+public class Order
+{
+    public void Confirm()
+    {
+        if (Status != "Pending" || Items.Count == 0) throw new InvalidOperationException("Cannot confirm");
+        Status = "Confirmed"; // the OBJECT itself manages this transition, not external code reaching in
+    }
+}
+```
+With "Tell," the rule "an order can only be confirmed if pending and non-empty" lives in exactly one place — inside `Order.Confirm()` — every caller anywhere in the codebase automatically gets this rule enforced correctly; with "Ask," that same rule would need to be correctly re-implemented (or, more likely, forgotten/implemented inconsistently) at every single external call site that wants to confirm an order.
+
+**Common Pitfall:** scattering an object's business rules across external calling code that reaches in, inspects the object's properties, and makes decisions based on them — this duplicates (or, more dangerously, inconsistently re-implements) the same business rule at every call site needing to perform that operation, whereas "Tell, Don't Ask" keeps behavior co-located with the state it depends on, guaranteeing every caller gets the exact same, correctly-enforced rule automatically.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is the "Hollywood Principle" ("Don't call us, we'll call you"), and how does it describe the INVERTED control flow found in both the Template Method pattern and Dependency Injection frameworks?**
+
+The Hollywood Principle describes a specific inversion of control: rather than your code actively calling into a framework/library to request services, the framework calls into YOUR code at points it determines — this is the conceptual thread connecting seemingly different mechanisms (Template Method's base-class-calls-derived-hooks, and a DI container's construction-and-wiring of your classes) as instances of the same underlying idea.
+
+```csharp
+// Template Method (covered under design patterns) -- the BASE CLASS calls INTO your derived hook, not the reverse
+public abstract class ReportGenerator
+{
+    public void Generate() // the FRAMEWORK'S/base class's OWN method calls the sequence
+    {
+        FetchData();
+        FormatData();  // "Don't call us" -- YOUR derived class doesn't call THIS
+    }
+    protected abstract void FormatData(); // "we'll call YOU" -- the BASE class calls YOUR override
+}
+```
+```csharp
+// Dependency Injection -- the CONTAINER constructs and wires YOUR classes; you never call "new" yourself
+public class OrderService
+{
+    public OrderService(IOrderRepository repository) { } // the DI CONTAINER calls THIS constructor for you
+}
+// Your code NEVER does: new OrderService(new SqlOrderRepository()) -- the CONTAINER does that, and calls INTO you
+```
+In both cases, control flow is inverted from what might seem like the "natural" direction — rather than your code being in charge, actively calling out to services/dependencies it needs, the framework/container is in charge, constructing and invoking your code at the points and in the sequence *it* determines, which is precisely the "Don't call us, we'll call you" relationship the Hollywood Principle names.
+
+**Why recognizing this as ONE underlying idea (rather than two unrelated concepts) is valuable:** Template Method and Dependency Injection can seem like entirely separate, unrelated mechanisms when learned independently — recognizing both as expressions of the same "Inversion of Control" idea (the Hollywood Principle being a memorable, informal name for it) helps a developer transfer intuition from one to the other, recognizing the same underlying control-flow inversion wherever it appears in new, unfamiliar frameworks.
+
+**Common Pitfall:** learning "Inversion of Control" and "Dependency Injection" as if they were synonyms rather than recognizing DI as merely ONE common, specific application of the broader IoC/Hollywood Principle idea — Template Method, event-driven programming (a UI framework calling your event handler), and plugin architectures (a host application calling into a plugin's well-known entry points) are all separate, additional applications of the exact same underlying "don't call us, we'll call you" inversion, not unrelated concepts to memorize independently of each other.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is "Connascence" (a term from software design theory), and how does distinguishing "Connascence of Name" (weak) from "Connascence of Position/Algorithm" (strong) give a more precise vocabulary for reasoning about coupling than "coupling" alone?**
+
+Connascence describes the different specific WAYS two pieces of code can be coupled together (must change in sync) — rather than treating "coupling" as one single, undifferentiated concept, Connascence identifies multiple distinct forms, some meaningfully weaker (easier to tolerate) than others, giving a more precise vocabulary for reasoning about exactly how risky a given form of coupling actually is.
+
+```csharp
+// Connascence of NAME (WEAK) -- both sides must agree on a NAME, but a rename tool catches every reference
+public void ProcessOrder(Order order) { ... }
+// caller: ProcessOrder(myOrder); -- coupled to the METHOD NAME "ProcessOrder" -- IDE rename-refactoring
+// updates BOTH sides automatically and SAFELY
+
+// Connascence of POSITION (STRONGER) -- both sides must agree on PARAMETER ORDER, NOT enforced by naming at all
+public void CreateUser(string name, int age, bool isActive) { ... }
+// caller: CreateUser("Alice", 30, true); -- if the PARAMETER ORDER is later changed (age, name, isActive),
+// EVERY CALL SITE breaks SILENTLY -- values now map to the WRONG parameters, NO compiler error at all
+// if the types happen to still "fit" (e.g., swapping two INT parameters) -- the WRONG values are used
+```
+Connascence of Name is comparatively low-risk: an IDE's rename-refactoring tool safely updates every reference simultaneously, and a genuine mismatch (calling a since-renamed/removed method) is caught immediately as a compile error — Connascence of Position, by contrast, can silently produce *wrong* behavior without any compile error at all if parameter types happen to align coincidentally after a reordering, since the compiler has no way to know that a caller intended arguments in a different order than what the signature now expects.
+
+**Why this more granular vocabulary is useful beyond just "coupling exists, coupling is bad":** simply calling two pieces of code "coupled" doesn't distinguish between a form of coupling an automated tool safely manages (Connascence of Name, fixed instantly by an IDE-wide rename) and a form that can silently produce incorrect behavior with no compiler warning at all (Connascence of Position) — recognizing this distinction helps prioritize which specific instances of coupling in a codebase are genuinely risky and worth actively refactoring away, versus which are perfectly tolerable as-is.
+
+**Common Pitfall:** treating all forms of coupling as equally concerning (or equally unconcerning), missing the specific insight Connascence provides — that some forms of coupling are safely tool-assisted (Name) while others can silently produce wrong behavior with zero compiler warning (Position, especially with same-typed parameters) — the specific, more dangerous forms of connascence (especially ones spanning module/service boundaries, where no single IDE rename-refactoring can safely fix both sides at once) deserve disproportionately more attention and active refactoring effort than the comparatively low-risk, tool-assisted forms.
+
+---
