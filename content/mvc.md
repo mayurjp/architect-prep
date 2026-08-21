@@ -955,4 +955,99 @@ Both actions share the identical route template (`products/{id}`) and HTTP verb 
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What are Data Annotations, and how does decorating a model's properties with attributes like `[Required]` and `[StringLength]` let MVC automatically validate incoming form data before a controller action even runs its own logic?**
+
+Data Annotations are attributes applied directly to a model's properties, declaring validation rules right where the property is defined — the framework's model binder automatically checks these rules against incoming request data, populating `ModelState` with any violations, before the controller action's own body ever executes.
+
+```csharp
+public class RegisterViewModel
+{
+    [Required(ErrorMessage = "Email is required")]
+    [EmailAddress]
+    public string Email { get; set; }
+
+    [Required]
+    [StringLength(100, MinimumLength = 8, ErrorMessage = "Password must be at least 8 characters")]
+    public string Password { get; set; }
+}
+
+[HttpPost]
+public IActionResult Register(RegisterViewModel model)
+{
+    if (!ModelState.IsValid) return View(model); // validation ALREADY ran -- just check the RESULT
+    // ... proceed knowing Email/Password are guaranteed valid ...
+}
+```
+Because the validation rules live directly on the model as attributes, the exact same `RegisterViewModel` class enforces its own rules consistently everywhere it's used, and Razor's Tag Helpers (`asp-validation-for`) can read those same attributes to render matching client-side validation messages, without duplicating the rules in a second place.
+
+**Common Pitfall:** re-checking individual field values manually inside the action method (`if (string.IsNullOrEmpty(model.Email)) ...`) alongside Data Annotations already declared on the model — this duplicates validation logic in two places that can drift out of sync; once a rule is expressed as a Data Annotation, checking `ModelState.IsValid` is normally sufficient, reserving manual checks specifically for validation the attributes genuinely can't express (like cross-property rules, covered via `IValidatableObject` elsewhere in this topic).
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is the execution ORDER of MVC's filter pipeline (`IActionFilter`, `IResultFilter`, `IExceptionFilter`), and how does each filter type's own "before/after" hook let cross-cutting logic run at a SPECIFIC point relative to the action method itself?**
+
+MVC filters run at well-defined points around an action's execution, each type suited to a different concern: `IActionFilter` wraps the action method call itself, `IResultFilter` wraps the *result's* execution (writing the actual HTTP response), and `IExceptionFilter` runs specifically when something throws — understanding this ordering is what lets you pick the *right* filter type for a given cross-cutting concern.
+
+```csharp
+public class TimingFilter : IActionFilter
+{
+    public void OnActionExecuting(ActionExecutingContext context) => _sw = Stopwatch.StartNew(); // BEFORE the action
+    public void OnActionExecuted(ActionExecutedContext context) => _logger.Log($"Action took {_sw.ElapsedMilliseconds}ms"); // AFTER
+}
+```
+```text
+Request arrives
+  -> IActionFilter.OnActionExecuting   (BEFORE the action method runs)
+  -> the ACTION METHOD itself executes
+  -> IActionFilter.OnActionExecuted    (AFTER the action method returns, but BEFORE the result is written)
+  -> IResultFilter.OnResultExecuting   (BEFORE the IActionResult writes the response)
+  -> the RESULT actually writes the HTTP response (e.g., renders the view, serializes JSON)
+  -> IResultFilter.OnResultExecuted    (AFTER the response has been written)
+
+-- IF an exception is thrown ANYWHERE in this chain --
+  -> IExceptionFilter.OnException      (catches it, can produce an alternate result INSTEAD of propagating it)
+```
+A logging filter measuring "how long did the action's own logic take" belongs in `IActionFilter` (wrapping just the action call) — a filter that needs to modify or inspect the actual rendered *response* (adding a response header based on the result type) belongs in `IResultFilter`, since it runs around result execution specifically, not the action method itself.
+
+**Common Pitfall:** implementing exception-handling logic inside an `IActionFilter`'s `OnActionExecuted` by checking `context.Exception` manually, rather than using the purpose-built `IExceptionFilter` — while technically possible, `IExceptionFilter` is specifically designed for this concern and interacts correctly with the exception-handling pipeline's short-circuiting behavior, avoiding subtle bugs from trying to replicate that behavior manually inside a filter type not designed for it.
+
+---
+
+## Advanced — Question 11
+
+**Q11: How does ASP.NET Core's Anti-Forgery Token mechanism (covered under App Security's CSRF discussion) integrate with an AJAX/`fetch`-based form submission, given that the token is normally embedded as a hidden form field rather than sent via a JavaScript request automatically?**
+
+A traditional server-rendered form automatically includes the anti-forgery token as a hidden input, submitted along with the rest of the form's fields — an AJAX request built with `fetch`/`XMLHttpRequest` doesn't submit an HTML form at all, so the token must be explicitly retrieved from the page and attached to the request manually, typically as a custom header.
+
+```html
+<!-- Razor renders the token into a hidden input, but ALSO makes it accessible to JavaScript -->
+@Html.AntiForgeryToken()
+<script>
+    const token = document.querySelector('input[name="__RequestVerificationToken"]').value;
+
+    fetch('/api/orders/5/cancel', {
+        method: 'POST',
+        headers: { 'RequestVerificationToken': token }, // ATTACHED MANUALLY -- fetch does NOT do this automatically
+        body: JSON.stringify({ reason: 'Changed my mind' })
+    });
+</script>
+```
+```csharp
+// Program.cs -- configure the anti-forgery system to ALSO accept the token via this HEADER, not just the form field
+builder.Services.AddAntiforgery(options => options.HeaderName = "RequestVerificationToken");
+
+[HttpPost("cancel")]
+[ValidateAntiForgeryToken] // checks the HEADER (per the configuration above), since this is a JSON/AJAX request
+public IActionResult Cancel(int id, CancelRequest request) { /* ... */ }
+```
+Because the anti-forgery system is explicitly configured to also read the token from a custom header (not just the default hidden form field), the `[ValidateAntiForgeryToken]` attribute validates the JavaScript-attached header exactly the same way it would validate a traditional form submission's hidden field — the underlying CSRF protection mechanism (covered in depth under App Security) works identically either way, just retrieved and attached differently depending on how the request is actually being made.
+
+**Common Pitfall:** building an AJAX-driven feature and disabling anti-forgery validation entirely for its endpoints "because it's an API call, not a form submission" — if the endpoint relies on cookie-based authentication (rather than a bearer token in an `Authorization` header, covered under App Security's CSRF discussion), it remains just as vulnerable to CSRF as a traditional form-based endpoint would be; the fix is to properly wire the token through a header (as shown above), not to remove CSRF protection because the request happens to be made via JavaScript.
+
+---
+
 ---

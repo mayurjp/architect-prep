@@ -1770,3 +1770,89 @@ Both requests target the *exact same URL* (`/api/products/5`) — the specific v
 **Common Pitfall:** dismissing URL-path versioning as "not truly RESTful" while ignoring the genuine practical trade-offs that make it the far more commonly adopted approach in real-world APIs — Media-Type versioning's philosophical purity doesn't automatically make it the better *practical* choice for every team; the decision should weigh genuine practical considerations (debuggability, client tooling convenience) against philosophical alignment with REST's resource-identity principle, rather than treating philosophical purity as automatically decisive.
 
 ---
+
+## Beginner — Question 12
+
+**Q12: What is the difference between a Path Parameter (`/products/5`) and a Query Parameter (`/products?category=shoes`), and what convention governs when a piece of data belongs in one versus the other?**
+
+A Path Parameter identifies *which specific resource* a URL refers to — it's part of the resource's identity, and the URL is genuinely a different resource without it. A Query Parameter modifies *how* a resource (typically a collection) is retrieved — filtering, sorting, or paginating it — without changing what resource is fundamentally being addressed.
+
+```text
+Path Parameter -- identifies WHICH resource:
+  GET /products/5           -- product NUMBER 5, specifically -- a DIFFERENT id is a DIFFERENT resource entirely
+
+Query Parameter -- modifies HOW a resource (here, a COLLECTION) is retrieved:
+  GET /products?category=shoes&sort=price&page=2
+  -- still fundamentally "the products collection" -- the query params just FILTER/SORT/PAGINATE it
+```
+`/products/5` and `/products/6` are conceptually two entirely different resources (two different products) — `/products?category=shoes` and `/products?category=hats` are still fundamentally "the same collection resource," just viewed through different filters; this is precisely the distinction covered earlier between a REST resource's path structure (identity) and its query string (view/retrieval options on that identity).
+
+**Common Pitfall:** encoding filter/sort/pagination options directly into the URL *path* instead of query parameters (`/products/category/shoes/page/2`) — this conflates "which resource" with "how to retrieve/view it," making the URL structure ambiguous about what's actually resource identity versus retrieval option, and is precisely the anti-pattern covered under the earlier discussion of why query parameters (not path segments) are the REST convention for filtering/sorting/pagination.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the "Chattiness" problem in a strictly resource-per-endpoint REST API, and how does it lead teams toward either GraphQL (covered separately) or REST-specific compromises like embedding/expansion (`?expand=`) to reduce round-trips?**
+
+A strictly resource-per-endpoint REST design (one URL per resource type, no aggregation) can force a client needing related data across several resource types to make many separate round-trips — each individually RESTful, but collectively "chatty," adding cumulative latency, especially over a high-latency mobile connection.
+
+```text
+A client needs an Order, its Customer, and its LineItems' Product details:
+  GET /orders/5              -- round trip 1
+  GET /customers/42          -- round trip 2 (customer ID FROM the order response)
+  GET /products/7            -- round trip 3 (for EACH line item's product...)
+  GET /products/9            -- round trip 4
+-- FOUR separate round trips for what CONCEPTUALLY feels like "one order's full detail" --
+```
+
+**A REST-specific mitigation — embedding/expansion via a query parameter:**
+```text
+GET /orders/5?expand=customer,lineItems.product
+-- returns the Order, WITH the Customer and LineItems' Product data EMBEDDED directly in ONE response --
+```
+```json
+{
+  "id": 5, "total": 99.99,
+  "customer": { "id": 42, "name": "Alice" },
+  "lineItems": [{ "product": { "id": 7, "name": "Keyboard" } }]
+}
+```
+The `expand` parameter lets a client opt into embedding specifically the related data it needs for a given screen, collapsing what would otherwise be several round-trips into one — at the cost of the server needing to implement this expansion logic itself, and the response shape becoming somewhat variable depending on what was requested (a a much more constrained version of what GraphQL, covered in its own topic, solves more generally and flexibly).
+
+**Common Pitfall:** treating chattiness purely as "the client's problem to work around with more requests" rather than recognizing it as a real, addressable API design cost — for genuinely mobile/high-latency-sensitive clients, an unmitigated chatty REST API can meaningfully hurt perceived performance; `expand`-style embedding (or, for more severe cases, considering GraphQL or a Backend-for-Frontend aggregation layer, covered elsewhere) are the standard mitigations once chattiness becomes a real, measured problem rather than a merely theoretical one.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is the Richardson Maturity Model, and how does its four levels (0 through 3) provide a concrete way to assess HOW "RESTful" a given HTTP API actually is, beyond a binary "is it REST or not" judgment?**
+
+The Richardson Maturity Model (named after Leonard Richardson) breaks "how RESTful is this API" into four increasing levels of maturity — most real-world APIs calling themselves "REST" actually sit at Level 2, with genuine Level 3 (full HATEOAS, covered earlier) being comparatively rare in practice.
+
+```text
+LEVEL 0 -- "The Swamp of POX": ONE single endpoint, ONE HTTP verb (usually POST), everything
+           tunneled through it -- essentially RPC-over-HTTP with NO resource concept at all
+           POST /api  { "action": "getOrder", "id": 5 }
+
+LEVEL 1 -- Resources: MULTIPLE distinct URLs now exist per resource -- but STILL typically
+           uses ONE HTTP verb (often POST) for everything, regardless of the actual operation
+           POST /orders/5/get
+           POST /orders/5/cancel
+
+LEVEL 2 -- HTTP Verbs: resources PLUS genuinely using GET/POST/PUT/DELETE according to their
+           actual REST semantics (covered throughout THIS topic) -- status codes ALSO used
+           meaningfully (200, 201, 404, etc.) -- THIS is where the VAST MAJORITY of real-world
+           "REST" APIs actually sit
+           GET /orders/5        POST /orders        DELETE /orders/5
+
+LEVEL 3 -- HATEOAS: responses ALSO include hypermedia links describing available NEXT actions,
+           letting a client discover what it can do NEXT from the response itself, rather than
+           needing that knowledge hardcoded in advance (covered in depth earlier in this topic)
+           { "id": 5, "status": "pending", "_links": { "cancel": { "href": "/orders/5/cancel" } } }
+```
+Because most production APIs stop at Level 2 (genuinely useful HTTP verb/status-code semantics, but no hypermedia-driven discoverability), the Richardson Maturity Model gives a precise, shared vocabulary for what's actually true of a given API — "our API is Level 2" is a meaningfully more useful, specific claim than a vague "yes, it's RESTful," especially when discussing why a team hasn't implemented full HATEOAS (covered earlier as facing real, practical adoption friction) despite the API otherwise following REST conventions well.
+
+**Common Pitfall:** treating "RESTful" as a single, binary yes/no property of an API, leading to unproductive debates about whether a Level 2 API (extremely common, and often perfectly fit-for-purpose) "really counts" as REST — the Maturity Model's actual value is replacing that binary framing with a precise, gradated one, letting a team make an explicit, deliberate choice about which level of maturity is actually worth investing in for their specific API's real consumers, rather than treating Level 3 as an unstated, ill-defined bar every "true" REST API must clear.
+
+---

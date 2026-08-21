@@ -991,4 +991,96 @@ Without `[JsonDerivedType]`, serializing a `Payment`-typed reference (even one t
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is a DTO (Data Transfer Object), and why do most Web APIs return a DTO rather than returning an Entity Framework entity directly from an endpoint?**
+
+A DTO is a plain object shaped specifically for what an API's client needs to receive — distinct from the entity classes EF Core maps to database tables, which typically carry additional properties (navigation properties, internal fields) never meant to be exposed externally.
+
+```csharp
+// The EF Core ENTITY -- shaped for the DATABASE, not for a client response
+public class User
+{
+    public int Id { get; set; }
+    public string Email { get; set; }
+    public string PasswordHash { get; set; }         // absolutely should NEVER be serialized to a client!
+    public List<Order> Orders { get; set; }           // a navigation property -- potentially HUGE if serialized
+}
+
+// A DTO -- shaped SPECIFICALLY for what the CLIENT actually needs
+public class UserDto
+{
+    public int Id { get; set; }
+    public string Email { get; set; }
+}
+
+[HttpGet("{id}")]
+public async Task<UserDto> GetUser(int id)
+{
+    var user = await _db.Users.FindAsync(id);
+    return new UserDto { Id = user.Id, Email = user.Email }; // explicitly SHAPES the response, excludes PasswordHash
+}
+```
+Returning the `User` entity directly risks accidentally serializing `PasswordHash` (a serious security leak, directly connecting to the Mass Assignment discussion under App Security) or triggering unexpected lazy-loading of the entire `Orders` navigation property — a DTO makes explicit exactly which fields a client receives, decoupling the API's public response shape from the database schema's own internal structure, which can then evolve independently.
+
+**Common Pitfall:** returning EF entities directly from an API "to save time," relying on `System.Text.Json`'s default serialization to simply include whatever properties happen to exist on the entity — this couples the API's public contract directly to internal database schema details, and risks accidentally exposing sensitive fields that were never meant to leave the server, exactly the class of problem DTOs exist specifically to prevent.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the `[Produces]` attribute in ASP.NET Core Web API, and how does explicitly declaring an action's response Content-Type differ from relying purely on Content Negotiation's default behavior?**
+
+`[Produces]` explicitly restricts which response Content-Types an action is willing to produce, overriding the framework's normal content-negotiation behavior (which otherwise honors whatever the client's `Accept` header requests, among the formatters configured globally) — useful when an action should always respond in one specific format regardless of what a client's `Accept` header happens to ask for.
+
+```csharp
+[HttpGet("{id}")]
+[Produces("application/json")] // this action ALWAYS returns JSON, regardless of the client's Accept header
+public async Task<ActionResult<Product>> GetProduct(int id)
+{
+    var product = await _repository.FindAsync(id);
+    return product is null ? NotFound() : Ok(product);
+}
+```
+```text
+Client sends: Accept: application/xml
+WITHOUT [Produces]: the framework would normally try to honor this and return XML (if an XML formatter is configured)
+WITH [Produces("application/json")]: the action IGNORES the client's XML preference, ALWAYS returns JSON
+```
+This is useful for an action whose response genuinely only makes sense in one specific format (perhaps because downstream tooling specifically expects JSON), letting the developer opt a specific action out of the framework's otherwise-default content-negotiation behavior entirely, rather than needing every client to know to always request JSON explicitly.
+
+**Common Pitfall:** applying `[Produces("application/json")]` globally to every controller "just to be safe," without recognizing this disables genuine content negotiation for clients that might legitimately want a different, equally-supported format (XML, for a client genuinely built around consuming it) — `[Produces]` is a deliberate override for actions that specifically should never honor a client's format preference, not a blanket default that should be applied indiscriminately across an entire API surface.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What are Swashbuckle's `IOperationFilter`/`ISchemaFilter` (as distinct from `IApiDescriptionProvider`, covered earlier), and how do they let you customize the GENERATED OpenAPI/Swagger document's details for a specific operation or schema, beyond what the framework infers automatically?**
+
+`IApiDescriptionProvider` (covered earlier) determines *which* routes/actions get included in the generated API description at all — `IOperationFilter` and `ISchemaFilter` run *after* that, letting you modify the fine-grained details of an already-discovered operation or type's generated OpenAPI representation (adding an example value, documenting a custom header, marking a field as deprecated) that the framework's automatic inference alone wouldn't produce.
+
+```csharp
+public class AddApiKeyHeaderFilter : IOperationFilter
+{
+    public void Apply(OpenApiOperation operation, OperationFilterContext context)
+    {
+        operation.Parameters.Add(new OpenApiParameter
+        {
+            Name = "X-Api-Key",
+            In = ParameterLocation.Header,
+            Required = true,
+            Description = "A valid API key, issued via the developer portal" // documents something the FRAMEWORK can't infer
+        });
+    }
+}
+
+// Program.cs
+builder.Services.AddSwaggerGen(options => options.OperationFilter<AddApiKeyHeaderFilter>());
+```
+Because `X-Api-Key` is checked by middleware rather than declared as an explicit action parameter, Swashbuckle's automatic inference has no way to know this header is actually required — the `IOperationFilter` explicitly injects that documentation into every generated operation, so the published Swagger UI accurately reflects a real requirement the framework's automatic discovery alone couldn't see.
+
+**Common Pitfall:** trying to document requirements that live entirely in middleware (custom headers, cross-cutting authentication schemes) by editing the generated `swagger.json` output file by hand after the fact — this documentation drifts out of sync the moment the API changes again, since it's disconnected from the actual code; an `IOperationFilter`/`ISchemaFilter` applied at generation time keeps the documentation automatically regenerated and up to date alongside the API itself, the same "single source of truth" benefit `IApiDescriptionProvider`-based generation provides more generally.
+
+---
+
 ---

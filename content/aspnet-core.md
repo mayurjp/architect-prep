@@ -1076,4 +1076,83 @@ Because the Developer Exception Page middleware can only wrap (and therefore cat
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is `app.UseWhen()`, and how does it let a specific branch of the middleware pipeline run ONLY when a given condition is true, without splitting the entire pipeline into separately-hosted applications?**
+
+`app.UseWhen()` lets you conditionally branch the middleware pipeline based on the current request — the branch runs a separate mini-pipeline of middleware only for requests matching the condition, then rejoins the main pipeline afterward, rather than requiring an entirely separate application or a scattered set of `if` checks inside every individual middleware.
+
+```csharp
+app.UseWhen(
+    context => context.Request.Path.StartsWithSegments("/admin"),
+    adminBranch =>
+    {
+        adminBranch.UseMiddleware<AdminAuditLoggingMiddleware>(); // ONLY runs for /admin requests
+    });
+
+app.UseRouting(); // the MAIN pipeline continues normally for EVERY request, admin or not
+```
+Requests to `/admin/users` pass through `AdminAuditLoggingMiddleware` before continuing on to routing — a request to `/products` skips that branch entirely and goes straight to the main pipeline, without `AdminAuditLoggingMiddleware` needing its own internal `if (path starts with /admin)` check.
+
+**Common Pitfall:** implementing the same conditional behavior by writing an `if` check *inside* a single, unconditionally-registered middleware instead of using `UseWhen()` — this works, but scatters routing-like conditional logic across individual middleware components rather than expressing it declaratively at the point the pipeline itself is composed, making the overall pipeline's actual behavior harder to see at a glance from `Program.cs`.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is ASP.NET Core's Health Checks middleware (`AddHealthChecks`/`MapHealthChecks`), and how does it let orchestration tooling (Kubernetes, a load balancer) determine whether an instance is actually able to do its job, not just whether the process is running?**
+
+Health Checks provide a standardized way for an ASP.NET Core application to report its own operational health — whether it can genuinely reach its database, a required downstream service, or other critical dependencies — through a dedicated HTTP endpoint that infrastructure can poll, mirroring the gRPC Health Checking Protocol covered under the gRPC topic, but for HTTP-based services.
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddSqlServer(connectionString, name: "database")
+    .AddCheck("payment-gateway", () =>
+        IsPaymentGatewayReachable() ? HealthCheckResult.Healthy() : HealthCheckResult.Unhealthy());
+
+var app = builder.Build();
+app.MapHealthChecks("/health"); // GET /health -- returns 200 Healthy, or 503 Unhealthy
+```
+```yaml
+# Kubernetes liveness/readiness probe -- POLLS this endpoint to decide whether to route traffic HERE
+livenessProbe:
+  httpGet: { path: /health, port: 80 }
+  periodSeconds: 10
+```
+Kubernetes (or any load balancer) polling `/health` learns not just "is the process alive" but "can this instance genuinely reach its database and payment gateway right now" — an instance whose database connection has silently degraded reports `Unhealthy`, letting Kubernetes stop routing new traffic to it (or restart it) well before users start experiencing failed requests against it directly.
+
+**Common Pitfall:** implementing a health check that unconditionally returns `Healthy` without actually verifying any real dependency — this satisfies "the process is running" but provides no genuine signal about whether the instance can actually serve requests correctly, defeating the entire purpose of having orchestration tooling react to real operational health rather than mere process liveness.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is ASP.NET Core's built-in support for Server-Sent Events (SSE) via a Minimal API endpoint, and how does streaming a `text/event-stream` response let a server push a continuous stream of updates to a browser over a single, long-lived HTTP connection — without the overhead of a full WebSocket handshake?**
+
+Server-Sent Events let a server push a stream of text-based events to a browser client over ordinary HTTP, using the `text/event-stream` content type — unlike WebSockets (a separate, bidirectional protocol requiring its own upgrade handshake), SSE is unidirectional (server-to-client only) and rides entirely on standard HTTP, making it a simpler fit for scenarios that only need server-to-client push (live notifications, a progress feed) without the client ever needing to send anything back over the same connection.
+
+```csharp
+app.MapGet("/notifications/stream", async (HttpContext context, CancellationToken cancellationToken) =>
+{
+    context.Response.Headers.ContentType = "text/event-stream";
+    await foreach (var notification in GetNotificationStreamAsync(cancellationToken))
+    {
+        await context.Response.WriteAsync($"data: {JsonSerializer.Serialize(notification)}\n\n", cancellationToken);
+        await context.Response.Body.FlushAsync(cancellationToken); // pushes THIS chunk to the client IMMEDIATELY
+    }
+});
+```
+```javascript
+// Browser -- the built-in EventSource API, NO extra library needed for the CLIENT side
+const source = new EventSource('/notifications/stream');
+source.onmessage = (event) => console.log('New notification:', JSON.parse(event.data));
+```
+Because the response body is written and flushed incrementally rather than all at once, the browser's `EventSource` receives each `data:` chunk as it's flushed — over the SAME single, long-lived HTTP connection — with the browser automatically handling reconnection if the connection drops, a convenience built directly into the `EventSource` API without any custom reconnection logic needed on either side.
+
+**Why SSE is specifically preferable to WebSockets for genuinely one-directional server-push scenarios:** WebSockets require an explicit protocol upgrade handshake and a persistent bidirectional channel, which is unnecessary overhead and complexity for a scenario that never needs the client to push data back over the same connection — SSE rides on plain HTTP semantics (including working through standard HTTP proxies/load balancers more transparently than WebSocket upgrades sometimes do) while still providing genuine server-to-client streaming.
+
+**Common Pitfall:** reaching for a full WebSocket connection (and the SignalR library, covered elsewhere, built around it) for a scenario that's genuinely only ever server-to-client, where the added complexity of a bidirectional protocol and its own connection-management concerns isn't actually needed — SSE's simpler, HTTP-native model is often the better-fitting, lower-complexity tool specifically for one-directional push scenarios.
+
+---
+
 ---

@@ -851,3 +851,79 @@ Because the current request/response already completed successfully over the exi
 **Common Pitfall:** assuming a server advertising `Alt-Svc: h3=...` means the CURRENT request/response used HTTP/3 — `Alt-Svc` only advertises availability for *future* requests; the current exchange already completed over whatever protocol was already established, and the actual switch to the advertised alternative only takes effect on a subsequent connection attempt, not retroactively applied to the request that carried the advertisement itself.
 
 ---
+
+## Beginner — Question 11
+
+**Q11: What is a Query String, and why must special characters within it be URL-encoded (percent-encoded) rather than included literally?**
+
+A Query String is the portion of a URL after the `?`, holding key-value pairs — but because certain characters (`&`, `=`, `?`, spaces) already have special structural meaning within a URL, any *value* that happens to contain one of them must be percent-encoded, replacing it with a `%` followed by its hex byte value, so it's treated as literal data rather than accidentally being parsed as URL syntax.
+
+```text
+Intended search value: "shoes & bags"
+
+WITHOUT encoding -- the LITERAL "&" gets parsed as a QUERY PARAMETER SEPARATOR, not part of the value:
+  GET /search?q=shoes & bags
+  -- the SERVER sees TWO parameters: "q=shoes" AND a stray, MEANINGLESS " bags" -- NOT what was intended at all
+
+WITH percent-encoding -- the "&" is encoded as %26, and the space as %20 (or '+'):
+  GET /search?q=shoes%20%26%20bags
+  -- the SERVER correctly sees ONE parameter: q = "shoes & bags" -- EXACTLY as intended
+```
+Percent-encoding a reserved character (`&` becomes `%26`) removes any ambiguity about whether that character is part of the *data* or part of the URL's own *structural syntax* — without it, a value containing an `&` would be silently misinterpreted as starting a brand-new query parameter rather than continuing the current one's value.
+
+**Common Pitfall:** manually concatenating a user-supplied value directly into a URL's query string without encoding it — beyond producing incorrect parsing for values containing reserved characters, this is the same root cause underlying several injection-style vulnerabilities (covered under App Security); using a framework's built-in URL-building/encoding utilities (rather than manual string concatenation) is the correct way to safely construct a query string from dynamic values.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is HTTP Pipelining (an HTTP/1.1 feature), and why did it never see meaningful real-world adoption, despite HTTP/2's later multiplexing (covered earlier) achieving broadly the same underlying goal successfully?**
+
+HTTP/1.1 Pipelining allows a client to send multiple requests over one connection *without waiting* for each prior response before sending the next — conceptually similar to what HTTP/2's multiplexing later achieved, but Pipelining has one crippling restriction that multiplexing doesn't share: responses must still come back in the *exact same order* the requests were sent.
+
+```text
+HTTP/1.1 Pipelining -- requests sent WITHOUT waiting, but RESPONSES must return in the SAME ORDER SENT:
+  Client sends: Request A, Request B, Request C (all WITHOUT waiting for prior responses)
+  Server MUST respond: Response A, THEN Response B, THEN Response C -- in EXACTLY this order
+  -- if Request A happens to be SLOW, Responses B and C are STUCK QUEUED BEHIND it, even
+     though B and C might have been ready to send back MUCH earlier --
+  -- THIS is Head-of-Line blocking, the SAME underlying problem HTTP/2 multiplexing was
+     LATER specifically designed to solve, covered elsewhere in this topic --
+
+HTTP/2 Multiplexing -- genuinely INDEPENDENT streams -- responses can return in ANY order:
+  Response B and C can be sent back the MOMENT they're ready, even if Response A is STILL pending
+```
+Because Pipelining still suffered from head-of-line blocking at the application layer (a slow response blocks everything queued behind it, even though the *requests* themselves were sent without waiting), it provided a much smaller practical benefit than it initially seemed to promise — combined with widespread, inconsistent proxy/intermediary support for pipelined requests (some middleboxes handled it incorrectly, corrupting responses), browser vendors largely never enabled it by default at all.
+
+**Why HTTP/2 Multiplexing succeeded where Pipelining failed at essentially the same goal:** HTTP/2 solved the *actual* underlying problem (responses being unnecessarily serialized) by making each stream genuinely independent, letting responses return in *any* order — Pipelining only removed the request-sending serialization, while leaving the response-ordering constraint fully intact, which turned out to be the more consequential half of the problem.
+
+**Common Pitfall:** assuming HTTP Pipelining and HTTP/2 Multiplexing are essentially "the same feature, just from different protocol versions" — while both aim at reducing the cost of serialized request/response exchanges over one connection, the crucial, practically decisive difference is exactly the response-ordering constraint Pipelining retained and Multiplexing eliminated, which is why one became a largely abandoned historical footnote and the other became foundational to modern HTTP performance.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is HTTP Strict Transport Security (HSTS) "Preloading," and how does submitting a domain to browsers' HARDCODED preload list close the specific gap that an ordinary HSTS header leaves open on a user's VERY FIRST visit?**
+
+An ordinary `Strict-Transport-Security` header (covered under App Security's security-headers discussion) only takes effect *after* a browser has received it at least once — a user's genuinely first-ever visit to a domain, before that header has ever been received, is still vulnerable to an SSL-stripping attack intercepting that one, first plain-HTTP request. HSTS Preloading closes this "first visit" gap by having the domain's HSTS policy baked directly into the browser's own shipped code, before the user ever visits the site at all.
+
+```text
+ORDINARY HSTS -- vulnerable specifically on the user's FIRST-EVER visit to the domain:
+  1. User's FIRST visit: browser has NEVER received an HSTS header for this domain YET
+  2. An attacker on the SAME network (public WiFi) intercepts this FIRST request, silently
+     downgrades it to plain HTTP, BEFORE the browser has ANY HSTS policy for this domain to enforce
+  3. ONLY on the user's SECOND-and-later visits does the browser actually KNOW to enforce HTTPS
+
+HSTS PRELOADING -- closes the FIRST-visit gap entirely:
+  1. Domain owner submits their domain to hstspreload.org (a list Chrome, Firefox, Safari, Edge all ship WITH)
+  2. The domain's "ALWAYS use HTTPS" policy is now HARDCODED directly INTO the BROWSER ITSELF
+  3. EVEN the user's ABSOLUTE FIRST-EVER visit to the domain enforces HTTPS -- NO header
+     needed to have been received FIRST at all, since the policy SHIPPED WITH the browser
+```
+Because the preload list is compiled directly into the browser's own binary/update mechanism (rather than being learned dynamically from a previously-received header), a domain on the preload list is protected from the SSL-stripping first-visit gap for *every* user of that browser, regardless of whether that specific user has ever visited the domain before at all.
+
+**Why joining the preload list is a genuinely weighty, hard-to-reverse decision, not a routine header toggle:** removal from the preload list can take months to propagate across already-shipped browser versions in the wild — a domain owner submitting to preload is committing to serving HTTPS correctly, sitewide, indefinitely, since a mistake (a subdomain that genuinely needs plain HTTP for some legacy reason) can't be quickly walked back the way simply removing a response header could be.
+
+**Common Pitfall:** submitting a domain to the HSTS preload list without first verifying that literally every subdomain (including ones not yet built, or third-party-hosted ones) can genuinely serve valid HTTPS — preload's `includeSubDomains` requirement applies HSTS enforcement sitewide, and an overlooked subdomain lacking valid HTTPS becomes completely unreachable for any browser that has the domain preloaded, a mistake that's especially painful given how slowly preload-list removals actually propagate.
+
+---
