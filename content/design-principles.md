@@ -1046,4 +1046,98 @@ The tax-calculation complexity cannot be engineered away by a better tool or arc
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is "Separation of Concerns" (SoC), and how does dividing a program into distinct sections — each addressing one specific concern — provide the underlying rationale behind many of the other, more specific named principles (SRP, layered architecture)?**
+
+Separation of Concerns is the broad, foundational idea that a program should be divided so that each distinct part addresses one specific concern (a specific piece of functionality, responsibility, or aspect of the problem) — many more specific principles and patterns (the Single Responsibility Principle, layered architecture, Clean Architecture's separate layers) are really specific applications of this one broader idea to a particular kind of structure.
+
+```csharp
+// CONCERNS TANGLED TOGETHER -- validation, business logic, AND data access all mixed into one method
+public void PlaceOrder(Order order)
+{
+    if (order.Items.Count == 0) throw new Exception("Empty order"); // VALIDATION concern
+    order.Total = order.Items.Sum(i => i.Price * i.Quantity);         // BUSINESS LOGIC concern
+    using var conn = new SqlConnection(_connectionString);           // DATA ACCESS concern
+    conn.Execute("INSERT INTO Orders ...", order);
+}
+
+// CONCERNS SEPARATED -- each piece has ONE job, and can be reasoned about, tested, and changed independently
+public void PlaceOrder(Order order)
+{
+    _validator.Validate(order);      // validation is SOMEONE ELSE's concern now
+    _pricingService.Calculate(order); // pricing logic is SOMEONE ELSE's concern
+    _repository.Save(order);          // persistence is SOMEONE ELSE's concern
+}
+```
+Once each concern lives in its own dedicated piece, a change to *how* orders are persisted (switching databases) touches only `_repository`, and a change to *how* pricing is calculated touches only `_pricingService` — neither change risks accidentally breaking the other concern, since they're no longer tangled together in the same block of code.
+
+**Common Pitfall:** treating Separation of Concerns as satisfied merely by splitting code into multiple *methods* within the same class, without those methods' underlying *concerns* actually being independent — true separation means each concern could, in principle, change for its own distinct reason without requiring changes to the others; splitting code into methods that still share tightly-coupled internal state or responsibilities doesn't achieve the actual benefit this principle is meant to provide.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is the "Single Level of Abstraction Principle" (SLAP), and why does mixing high-level orchestration code with low-level implementation detail in the SAME method make that method harder to read at a glance?**
+
+SLAP states that the statements within a single method should all operate at roughly the same level of abstraction — a method should either describe *what* happens, in terms of other well-named methods it calls, or describe *how* something happens, in low-level implementation detail, but generally not both mixed together in the same block of code.
+
+```csharp
+// LEVELS MIXED -- high-level orchestration steps tangled with low-level string/loop details
+public void ProcessOrder(Order order)
+{
+    ValidateOrder(order);                                    // HIGH-level: "what" step
+    decimal total = 0;                                       // LOW-level detail suddenly appears
+    foreach (var item in order.Items) total += item.Price * item.Quantity;
+    order.Total = total;
+    SendConfirmationEmail(order);                             // back to HIGH-level again
+}
+
+// ONE CONSISTENT LEVEL -- every statement reads as a HIGH-level step; low-level detail lives ELSEWHERE
+public void ProcessOrder(Order order)
+{
+    ValidateOrder(order);
+    CalculateTotal(order);       // the LOOP/arithmetic detail now lives INSIDE this method, not here
+    SendConfirmationEmail(order);
+}
+```
+The second version reads almost like a table of contents — a reader scanning `ProcessOrder` sees three clearly-named steps and doesn't need to mentally context-switch between "what is this method orchestrating" and "how exactly does this specific arithmetic work" within the same few lines; anyone who *does* need the arithmetic detail can drill into `CalculateTotal` specifically, without that detail cluttering the orchestration-level view.
+
+**Why this specifically improves readability beyond just "shorter methods":** a method can already be short and still violate SLAP if its few lines mix genuinely different abstraction levels — SLAP isn't primarily about length, but about consistency of abstraction level within whatever length a method happens to be, letting a reader hold one consistent "zoom level" in their head while reading through it, rather than repeatedly zooming in and out.
+
+**Common Pitfall:** extracting a low-level implementation detail into its own well-named method purely to make the calling method "look" high-level, while that extracted method still gets called from several *different* levels of abstraction elsewhere in the codebase inconsistently — SLAP is about the *consistency* of levels within one specific method's body, not merely about how many separate methods a codebase happens to be broken into overall.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is "Encapsulate What Varies," and how does this Gang-of-Four design principle — distinct from, but the direct rationale behind, the Open/Closed Principle and the Strategy pattern — guide WHERE to draw a system's abstraction boundaries in the first place?**
+
+"Encapsulate What Varies" (from the GoF's *Design Patterns* book) advises identifying the specific aspect of a system likely to change, and isolating exactly that aspect behind its own abstraction — separate from the parts of the system that are genuinely stable — so that future change is confined to the isolated, variable part instead of rippling through stable code that had no real reason to change at all.
+
+```csharp
+// The VARYING aspect (HOW shipping cost is calculated) is TANGLED with the STABLE aspect (the overall checkout flow)
+public decimal CalculateShipping(Order order, string country)
+{
+    if (country == "US") return order.Weight * 2.5m;
+    else if (country == "UK") return order.Weight * 3.0m;
+    else if (country == "CA") return 15.00m; // flat rate
+    // every NEW country requires modifying THIS method directly
+}
+
+// "Encapsulate What Varies" -- isolate the VARYING part (the calculation strategy) behind its OWN abstraction
+public interface IShippingStrategy { decimal Calculate(Order order); }
+public class UsShippingStrategy : IShippingStrategy { /* ... */ }
+public class UkShippingStrategy : IShippingStrategy { /* ... */ }
+// the STABLE part (checkout flow) depends only on the ABSTRACTION, never on any specific varying implementation
+public decimal CalculateShipping(Order order, IShippingStrategy strategy) => strategy.Calculate(order);
+```
+The checkout flow itself (a genuinely stable concept — "calculate and apply a shipping cost") never needs to change again once written this way; only the specific, isolated `IShippingStrategy` implementations need to grow as new countries are added — exactly the mechanism the Open/Closed Principle names as a *goal* ("open for extension, closed for modification"), with "Encapsulate What Varies" supplying the actual *reasoning process* for identifying where that extension point should be drawn.
+
+**Why this is the conceptual root behind the Strategy pattern specifically, not just OCP in the abstract:** the Strategy pattern (covered under Design Patterns) is essentially the direct, concrete implementation technique for applying "Encapsulate What Varies" to the specific case of "an algorithm/behavior that varies" — recognizing this connection explains *why* Strategy is structured the way it is (an interface capturing exactly the varying behavior, with client code depending only on that interface) rather than treating the pattern as an arbitrary structural template to memorize.
+
+**Common Pitfall:** applying "Encapsulate What Varies" preemptively to an aspect of a system that hasn't actually shown any signs of varying yet, purely because it seems like it *might* someday — this collides directly with YAGNI (covered earlier); the principle is meant to guide *where* to draw an abstraction boundary once change is genuinely anticipated or already occurring, not to justify speculative abstraction around parts of a system that have given no actual indication of needing to vary.
+
+---
+
 ---

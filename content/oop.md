@@ -1118,4 +1118,93 @@ IComparer<Dog> dogComparer = animalComparer; // ALLOWED -- IComparer<T> is decla
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is Operator Overloading in C#, and how does defining custom behavior for an operator like `+` on a user-defined type let objects be combined using natural, familiar syntax?**
+
+Operator Overloading lets a class or struct define its own behavior for a built-in operator (`+`, `-`, `==`, etc.) — rather than requiring calling code to invoke an explicitly-named method (`money1.Add(money2)`), the type itself defines what `money1 + money2` should mean, letting client code read naturally, the same way arithmetic on built-in numeric types already does.
+
+```csharp
+public struct Money
+{
+    public decimal Amount { get; }
+    public Money(decimal amount) => Amount = amount;
+
+    public static Money operator +(Money a, Money b) => new Money(a.Amount + b.Amount);
+}
+
+var total = new Money(10.50m) + new Money(5.25m); // reads naturally, like adding two numbers
+```
+Because `Money` defines its own `+` behavior, calling code can combine two `Money` values exactly as naturally as adding two `int`s — without operator overloading, the same operation would require an explicitly-named method call (`total = money1.Add(money2)`), which is less immediately readable for a type that conceptually behaves like a number.
+
+**Common Pitfall:** overloading an operator to perform behavior that doesn't genuinely match its conventional mathematical/logical meaning (overloading `+` to mean something unrelated to "combining" two values, like triggering a side effect) — this violates the Principle of Least Astonishment (covered under Design Principles): a reader seeing `a + b` reasonably expects addition-like semantics, and operators should be overloaded only when the resulting behavior would be genuinely unsurprising to someone familiar with what that operator conventionally means.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is the "God Object" (or "God Class") anti-pattern, and how does a single class accumulating far too many unrelated responsibilities over time make a codebase progressively harder to change safely?**
+
+A God Object is a class that has grown to know about and do far too much — orchestrating large portions of an application's logic, holding references to many unrelated subsystems, and accumulating methods and fields far beyond what its name would suggest — the natural, gradual result of the Single Responsibility Principle (covered under Design Principles) being violated repeatedly, over time, one "just one more small addition" at a time.
+
+```csharp
+// A God Object, having accumulated responsibilities over MANY unrelated pull requests, over YEARS
+public class OrderManager
+{
+    public void ValidateOrder(Order o) { /* ... */ }
+    public void CalculateTax(Order o) { /* ... */ }
+    public void ChargePayment(Order o) { /* ... */ }
+    public void SendConfirmationEmail(Order o) { /* ... */ }
+    public void UpdateInventory(Order o) { /* ... */ }
+    public void LogAuditEntry(Order o) { /* ... */ }
+    public void GenerateInvoicePdf(Order o) { /* ... */ }
+    // ... 40 more methods, spanning payment, shipping, tax, notifications, reporting ...
+}
+```
+No single class *started* this way — each individual addition ("just add invoice generation here too, it's convenient") seemed reasonable in isolation; the God Object anti-pattern describes the *cumulative* result of many individually-reasonable-seeming additions, none of which alone looked like a clear violation, gradually producing a class nobody can safely modify without understanding its many, entirely unrelated responsibilities all at once.
+
+**Why this specifically makes CHANGE risky, not just the code "ugly":** a bug fix to the tax-calculation logic requires a developer to load the *entire* class's context into their head, including payment processing and email logic they have no actual need to touch — and a mistake anywhere in this sprawling class risks breaking behavior in a completely unrelated area, since everything lives in one shared, tightly-coupled unit rather than being isolated into independently-testable, independently-changeable pieces.
+
+**Common Pitfall:** recognizing a God Object only once it's enormous (thousands of lines), rather than treating "this class is starting to do things unrelated to its own name" as an early warning sign worth acting on immediately — the Boy Scout Rule (covered under Design Principles) applies directly here: extracting a clearly-unrelated responsibility into its own class the moment it's noticed is far cheaper than untangling a fully-formed God Object months or years later.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is the "Circle-Ellipse Problem," and how does it illustrate a case where inheritance that appears geometrically/mathematically correct ("a Circle IS-A special case of an Ellipse") still violates the Liskov Substitution Principle in code?**
+
+Mathematically, a circle genuinely is a special case of an ellipse (one where both radii are equal) — this makes `Circle : Ellipse` inheritance seem like an obviously correct OOP modeling choice. The problem surfaces once `Ellipse` exposes independent `RadiusX`/`RadiusY` setters: a `Circle` must keep both radii equal to remain a valid circle, but a base-class caller manipulating an `Ellipse` reference has no way to know (or respect) that constraint.
+
+```csharp
+public class Ellipse
+{
+    public virtual double RadiusX { get; set; }
+    public virtual double RadiusY { get; set; }
+}
+
+public class Circle : Ellipse
+{
+    public override double RadiusX
+    {
+        get => base.RadiusX;
+        set { base.RadiusX = value; base.RadiusY = value; } // must keep BOTH radii equal to remain a circle
+    }
+    public override double RadiusY
+    {
+        get => base.RadiusY;
+        set { base.RadiusX = value; base.RadiusY = value; } // setting ONE silently changes the OTHER too
+    }
+}
+
+void ResizeWidth(Ellipse e) { e.RadiusX = 10; } // caller ASSUMES this changes ONLY RadiusX -- reasonable for an Ellipse
+ResizeWidth(new Circle()); // SURPRISE -- RadiusY ALSO silently changed, since a Circle demands it
+```
+A method written against the `Ellipse` base class, expecting `RadiusX = 10` to affect only the horizontal radius (a completely reasonable assumption for a genuine ellipse), gets a silent, unexpected side effect when handed a `Circle` instead — the `Circle` subclass cannot honor the base class's implicit behavioral contract ("setting one radius doesn't affect the other") while *also* remaining a valid circle, making this a textbook LSP violation despite the "is-a" relationship being mathematically completely accurate.
+
+**Why this demonstrates that LSP violations aren't about getting the "is-a" relationship conceptually wrong:** the geometric fact ("a circle is a special ellipse") is entirely correct — the problem is specifically that the *base class's behavioral contract* (independent axis manipulation) is incompatible with a constraint the subclass must maintain to remain valid; this is precisely why Behavioral Subtyping (covered earlier) — checking whether a subtype preserves the base type's actual *behavioral* guarantees, not just whether the real-world "is-a" relationship holds — is the correct lens for evaluating whether an inheritance relationship is actually sound in code, regardless of how intuitively correct it seems conceptually.
+
+**Common Pitfall:** treating "is this conceptually an is-a relationship in the real world" as sufficient justification for an inheritance hierarchy, without separately checking whether the base class's actual behavioral contract (not just its name/concept) can genuinely be honored by every subclass — the Circle-Ellipse problem is the canonical illustration that these are two entirely separate questions, and getting the first one right (correctly identifying a real-world is-a relationship) provides no guarantee at all about the second.
+
+---
+
 ---

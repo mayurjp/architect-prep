@@ -1009,4 +1009,75 @@ Without this explicit pre-warming step, the first genuine call to `ExecuteCritic
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is the difference between `DateTime` and `DateTimeOffset`, and why is `DateTimeOffset` generally the safer choice for representing an absolute, unambiguous point in time?**
+
+`DateTime` stores a date/time value along with a `Kind` (`Local`, `Utc`, or `Unspecified`) — but that `Kind` is easy to lose or get wrong across serialization boundaries. `DateTimeOffset` instead stores the date/time value *together with* its exact offset from UTC, making the value unambiguous no matter where it's later read.
+
+```csharp
+DateTime dt = DateTime.Now; // Kind = Local -- but WHOSE "local"? The server's timezone, whatever that is
+// Serialize dt to JSON, deserialize it on a DIFFERENT server in a DIFFERENT timezone --
+// the RAW value travels, but its "Local" MEANING is now AMBIGUOUS -- local to WHICH machine?
+
+DateTimeOffset dto = DateTimeOffset.Now; // e.g. 2026-08-21T14:30:00+05:30 -- the OFFSET travels WITH the value
+// ANY machine, ANYWHERE, reading THIS value knows EXACTLY what absolute point in time it represents,
+// regardless of ITS OWN local timezone setting
+```
+Because the offset is embedded directly in the value itself, a `DateTimeOffset` read on a server in a different timezone (or a different country entirely) still unambiguously represents the exact same absolute instant — a `DateTime` with `Kind = Local`, once serialized and moved to a different machine, has effectively lost the information needed to know what that instant actually was in absolute terms.
+
+**Common Pitfall:** using `DateTime.Now` (implicitly `Kind = Local`) for values stored in a database or sent across service boundaries — once persisted or transmitted, the "local" meaning becomes ambiguous to any reader in a different timezone; `DateTimeOffset.UtcNow` or `DateTimeOffset.Now` is the generally safer default for any value that needs to represent one specific, unambiguous point in time regardless of where it's later read.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is `ValueTask<T>`, and in which specific scenario does it provide a genuine performance benefit over `Task<T>` — and why is it NOT simply a faster drop-in replacement for `Task<T>` everywhere?**
+
+`Task<T>` is a reference type — every `Task<T>` returned from an `async` method is a heap allocation. `ValueTask<T>` is a struct that can represent either an already-completed result (with zero allocation) or wrap an underlying `Task<T>` for the genuinely asynchronous case — its benefit is narrow and specific: methods that complete synchronously far more often than not.
+
+```csharp
+// A method that USUALLY has the value cached, and only OCCASIONALLY needs to actually await something
+public ValueTask<int> GetValueAsync(int key)
+{
+    if (_cache.TryGetValue(key, out var cached))
+        return new ValueTask<int>(cached); // SYNCHRONOUS completion -- ZERO Task allocation
+
+    return new ValueTask<int>(FetchFromDatabaseAsync(key)); // genuinely ASYNC path -- wraps a real Task
+}
+```
+When the cache hit path is taken (the common case in this example), no `Task<T>` object is ever allocated at all — for a method called millions of times per second where the fast, synchronous-completion path dominates, this avoids a correspondingly large volume of otherwise-unnecessary heap allocations and GC pressure.
+
+**Why `ValueTask<T>` is NOT simply a safe universal replacement for `Task<T>`:** a `ValueTask<T>` carries a much stricter usage contract than `Task<T>` — it must generally be awaited exactly once, must never be awaited twice, and should not have multiple continuations attached to it concurrently; a `Task<T>`, by contrast, can safely be awaited multiple times or from multiple places (cached and reused). Violating `ValueTask<T>`'s stricter contract produces subtle, hard-to-diagnose bugs rather than a clean compiler error.
+
+**Common Pitfall:** reflexively changing every `async Task<T>` method's return type to `ValueTask<T>` in the name of "performance," without the method actually having a common synchronous-completion path — for a method that's *always* genuinely asynchronous, `ValueTask<T>` provides no allocation benefit at all (it still wraps a real `Task` internally) while introducing its stricter, easier-to-misuse usage contract for no corresponding gain; `ValueTask<T>` earns its keep specifically for hot-path methods with a frequent synchronous-completion case, not as a general-purpose default.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is `stackalloc`, and how does allocating a buffer directly on the STACK (rather than the heap) eliminate GC pressure entirely for a small, short-lived array — and why does `Span<T>` exist specifically to make this safe to use?**
+
+`stackalloc` allocates a block of memory directly on the current method's stack frame rather than the managed heap — because stack memory is automatically reclaimed the instant the method returns (no Garbage Collector involvement at all), it's a genuinely zero-GC-pressure way to allocate a small, short-lived buffer, at the cost of much stricter lifetime rules than a heap-allocated array.
+
+```csharp
+public int SumDigits(int number)
+{
+    Span<int> digits = stackalloc int[10]; // allocated on the STACK -- NOT the heap, NO GC involvement at all
+    int count = 0;
+    while (number > 0) { digits[count++] = number % 10; number /= 10; }
+
+    int sum = 0;
+    for (int i = 0; i < count; i++) sum += digits[i];
+    return sum;
+} // 'digits' memory is reclaimed the INSTANT this method returns -- automatically, with the stack frame itself
+```
+Because the buffer never touches the managed heap at all, allocating it produces zero garbage for the GC to ever collect — for a hot path calling this method millions of times, this avoids the corresponding volume of heap allocations and GC pauses that an equivalent `new int[10]` would have generated every single call.
+
+**Why `Span<T>` is what makes `stackalloc` safe to use, rather than a raw, unsafe pointer:** `stackalloc` on its own, in older C#, only produced a raw `int*` pointer, requiring an `unsafe` context and manual bounds-checking discipline from the developer. `Span<T>` wraps that stack-allocated memory with the exact same bounds-checked, safe indexing behavior as an ordinary array — while *also* carrying a compiler-enforced guarantee (via `Span<T>` being a `ref struct`, covered elsewhere) that it can never outlive the stack frame it points into, since a `ref struct` can never be boxed, stored in a heap object's field, or captured by an async method/lambda that might outlive the current call.
+
+**Common Pitfall:** using `stackalloc` for a buffer whose size isn't known to be small and bounded at compile/design time — the stack has a comparatively small, fixed total size (typically ~1MB per thread by default), and allocating too large or too many stack buffers (especially in a deep call chain, or a loop) risks a `StackOverflowException`, an unrecoverable crash unlike an `OutOfMemoryException` from exhausting heap memory; `stackalloc` is appropriate specifically for small, genuinely bounded buffers (a handful of digits, a small fixed-size parsing buffer), never for anything whose size could grow unpredictably large based on input.
+
+---
+
 ---

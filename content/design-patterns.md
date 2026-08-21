@@ -1252,4 +1252,129 @@ var qualifyingCustomers = allCustomers.Where(c => activeHighValueSpec.IsSatisfie
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is the Command pattern, and how does turning a request itself into an OBJECT (rather than a direct method call) let that request be queued, logged, or undone later?**
+
+The Command pattern encapsulates a request — the action to perform, plus whatever data it needs — as a standalone object implementing a common interface (typically a single `Execute()` method), rather than invoking the action as a direct, immediate method call. Because the request is now a genuine object, it can be stored, passed around, queued for later, or reversed, in ways a bare method call never could.
+
+```csharp
+public interface ICommand { void Execute(); void Undo(); }
+
+public class AddTextCommand : ICommand
+{
+    private readonly StringBuilder _document;
+    private readonly string _text;
+    public AddTextCommand(StringBuilder document, string text) { _document = document; _text = text; }
+    public void Execute() => _document.Append(_text);
+    public void Undo() => _document.Remove(_document.Length - _text.Length, _text.Length);
+}
+
+var history = new Stack<ICommand>();
+ICommand cmd = new AddTextCommand(document, "Hello");
+cmd.Execute();
+history.Push(cmd); // the COMMAND ITSELF is stored -- not just the fact that "Append" was called
+
+// LATER -- undo the most recent command, WITHOUT the caller needing to know WHAT it actually did
+history.Pop().Undo();
+```
+Because each `ICommand` instance carries everything needed to both perform and reverse its specific action, an undo stack (or a queue of commands to execute later, or a log of commands for auditing/replay) can be built generically, working with any command uniformly through the same `ICommand` interface — the calling code never needs to know the concrete details of what a particular command actually does.
+
+**Common Pitfall:** implementing "undo" functionality as a set of special-cased `if`/`switch` branches inspecting *what* action was performed, rather than giving each command object its own self-contained `Undo()` method — this couples the undo logic tightly to every specific action type in one central place, exactly the kind of design the Command pattern's object-per-request approach is meant to avoid.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is the State pattern, and how does letting an object change its ENTIRE behavior by swapping out an internal "state" object avoid a large, unwieldy `switch` statement scattered across every method that behaves differently per state?**
+
+The State pattern lets an object alter its behavior when its internal state changes, by delegating state-dependent behavior to a separate "state" object that can be swapped out at runtime — rather than every method on the main object containing its own `switch (state)` branching for how to behave in each possible state.
+
+```csharp
+// WITHOUT State pattern -- EVERY method needs its OWN switch over the current state
+public class Order
+{
+    public OrderState State { get; set; } // an enum: Pending, Shipped, Delivered
+    public void Ship()
+    {
+        if (State == OrderState.Pending) { State = OrderState.Shipped; /* ... */ }
+        else throw new InvalidOperationException($"Cannot ship an order in state {State}");
+    }
+    // ANOTHER method would need its OWN separate switch over the SAME states, all over again
+}
+
+// WITH the State pattern -- behavior LIVES INSIDE each state object, no switch anywhere in Order
+public interface IOrderState { IOrderState Ship(Order order); }
+public class PendingState : IOrderState
+{
+    public IOrderState Ship(Order order) { /* actually ship it */ return new ShippedState(); }
+}
+public class ShippedState : IOrderState
+{
+    public IOrderState Ship(Order order) => throw new InvalidOperationException("Already shipped");
+}
+
+public class Order
+{
+    public IOrderState State { get; set; } = new PendingState();
+    public void Ship() => State = State.Ship(this); // DELEGATES to whichever state object is CURRENT
+}
+```
+Adding a brand-new state (`CancelledState`) means writing one new class implementing `IOrderState` — no existing method on `Order` needs to be found and modified to add a new branch, since each state object is fully responsible for its own behavior and for deciding what the *next* state should be.
+
+**Why this is structurally the SAME pattern as Strategy (covered earlier), but with a different INTENT:** both patterns delegate behavior to an interchangeable object behind a common interface — Strategy's interchangeable objects represent different, client-*chosen* algorithms for the same operation; State's interchangeable objects represent an object's OWN internal state, which the object itself transitions between automatically as a natural consequence of its own behavior, without the client explicitly picking which one applies.
+
+**Common Pitfall:** confusing State with Strategy purely because their class structure looks nearly identical, missing the actual distinction in *who* controls which concrete implementation is active — in Strategy, the *client* explicitly selects and assigns a strategy; in State, the state objects themselves typically decide and perform the transition to the *next* state internally, as shown by `Ship()` returning the next state object above, which the client never explicitly chose.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is the Abstract Factory pattern, and how does it let client code create an entire FAMILY of related objects that are guaranteed to be MUTUALLY COMPATIBLE, without the client ever specifying which CONCRETE family it's actually working with?**
+
+The Abstract Factory pattern provides an interface for creating families of related objects, without specifying their concrete classes — where the Factory Method pattern (covered earlier) creates *one* kind of object, Abstract Factory creates *several related* objects that must all come from the *same* family, ensuring the objects it hands back are guaranteed compatible with each other.
+
+```csharp
+// The FAMILY of related products -- a UI theme needs a MATCHING Button AND Checkbox, never mismatched
+public interface IButton { void Render(); }
+public interface ICheckbox { void Render(); }
+
+public interface IUiFactory // the ABSTRACT FACTORY -- produces an ENTIRE, matching FAMILY
+{
+    IButton CreateButton();
+    ICheckbox CreateCheckbox();
+}
+
+public class DarkThemeFactory : IUiFactory
+{
+    public IButton CreateButton() => new DarkButton();
+    public ICheckbox CreateCheckbox() => new DarkCheckbox(); // GUARANTEED to match DarkButton's styling
+}
+public class LightThemeFactory : IUiFactory
+{
+    public IButton CreateButton() => new LightButton();
+    public ICheckbox CreateCheckbox() => new LightCheckbox(); // GUARANTEED to match LightButton's styling
+}
+
+// Client code depends ONLY on the ABSTRACT factory -- it NEVER knows or cares WHICH concrete family is active
+public class SettingsPanel
+{
+    private readonly IUiFactory _factory;
+    public SettingsPanel(IUiFactory factory) => _factory = factory;
+    public void Render()
+    {
+        var button = _factory.CreateButton();       // whichever family was INJECTED
+        var checkbox = _factory.CreateCheckbox();    // GUARANTEED to be from the SAME family as the button
+        button.Render(); checkbox.Render();
+    }
+}
+```
+Because `SettingsPanel` depends only on the abstract `IUiFactory` interface, swapping the entire application's theme from Dark to Light requires changing only *which concrete factory* gets injected at startup — every single UI component created through that factory automatically comes from the matching family, with no risk of a `LightButton` accidentally being paired with a `DarkCheckbox` anywhere in the codebase, since the factory itself is the single source guaranteeing that consistency.
+
+**Why this differs meaningfully from simply injecting several unrelated Factory Methods (one per product type) separately:** injecting `IButtonFactory` and `ICheckboxFactory` as two entirely separate, independently-swappable dependencies would allow them to be *accidentally* mismatched (a Dark button factory paired with a Light checkbox factory, by configuration mistake) — Abstract Factory's single, unified interface structurally prevents this mismatch from ever being possible, since one factory instance produces the *entire* matching family together.
+
+**Common Pitfall:** reaching for Abstract Factory when there's really only ONE product type that needs to vary, rather than a genuine *family* of several products that must stay mutually consistent — for a single varying product, the simpler Factory Method pattern (covered earlier) is the appropriately-scoped tool; Abstract Factory's added structure (multiple `Create` methods on one factory interface) earns its complexity specifically when multiple related products genuinely need to be created together, guaranteed compatible.
+
+---
+
 ---

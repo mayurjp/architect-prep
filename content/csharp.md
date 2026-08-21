@@ -1000,4 +1000,87 @@ Because Dynamic PGO's optimization decisions are grounded in actually-observed r
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is C#'s `init`-only setter (`init` instead of `set`), and how does it let an object be configured freely via an object initializer while still becoming genuinely immutable afterward?**
+
+An `init` accessor allows a property to be set during object initialization (a constructor call or an object-initializer block) but never again afterward — it closes the gap between a fully read-only property (which can only ever be set inside the constructor's own body) and an ordinary mutable `set` property (which can be changed at any point, by anyone).
+
+```csharp
+public class Order
+{
+    public int Id { get; init; }
+    public string Status { get; init; }
+}
+
+var order = new Order { Id = 1, Status = "Pending" }; // fine -- object initializer, still "during construction"
+order.Status = "Shipped"; // COMPILE ERROR -- init-only properties cannot be set after construction
+```
+Because `init` still permits the convenient object-initializer syntax (`new Order { Id = 1, Status = "Pending" }`) rather than forcing a large constructor parameter list, it keeps construction ergonomic while guaranteeing that no code anywhere else in the program can later mutate `Status` — the object becomes immutable the moment construction finishes, with the compiler itself enforcing that guarantee rather than relying on developer discipline.
+
+**Common Pitfall:** assuming `init` makes a property merely "harder to set" the way a private setter does — a private `set` can still be changed from inside the class's own methods at any time; `init` is stricter still, forbidding assignment anywhere outside the actual construction expression, which is exactly what makes it suitable for genuinely immutable data models (and is what C#'s `record` types use by default for their generated properties).
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What are C# switch expressions and pattern matching's relational/logical patterns (`>`, `<`, `and`, `or`, `not`), and how do they let a switch express a range or combined condition directly, rather than falling back to a chain of `if`/`else if` statements?**
+
+A switch *expression* (as opposed to the older switch *statement*) evaluates to a value directly, and modern C# pattern matching extends what a `case` arm can match against — including relational comparisons and logical combinations of patterns — letting many range/condition-based `if`/`else if` chains be expressed as a single, exhaustive switch instead.
+
+```csharp
+// Before -- a chain of if/else if
+string Categorize(int age)
+{
+    if (age < 0) return "Invalid";
+    else if (age < 13) return "Child";
+    else if (age < 20) return "Teenager";
+    else if (age < 65) return "Adult";
+    else return "Senior";
+}
+
+// With a switch EXPRESSION and RELATIONAL patterns -- the SAME logic, expressed directly
+string CategorizeModern(int age) => age switch
+{
+    < 0 => "Invalid",
+    >= 0 and < 13 => "Child",   // LOGICAL 'and' combining TWO relational patterns
+    >= 13 and < 20 => "Teenager",
+    >= 20 and < 65 => "Adult",
+    _ => "Senior"
+};
+```
+Each arm reads almost like the mathematical range it represents (`>= 0 and < 13`), and because it's an *expression*, the result is assigned directly rather than requiring a separate `return` statement per branch — the compiler also checks the arms for exhaustiveness, warning if no arm (including the `_` discard) could handle every possible input.
+
+**Common Pitfall:** continuing to write a long `if`/`else if` chain for what is fundamentally a "categorize this value into one of several ranges/conditions" problem, missing that a switch expression with relational/logical patterns often expresses the exact same logic more concisely and with compiler-checked exhaustiveness — a real ergonomic improvement, not just a stylistic preference, for genuinely range/condition-based branching.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What are C# 11's "static abstract members in interfaces" (the feature underlying Generic Math), and how do they let a generic method call a STATIC operator (like `+` or `TryParse`) on a type parameter `T` — something ordinary generic constraints couldn't express before?**
+
+Before C# 11, a generic constraint (`where T : IComparable<T>`) could require `T` to support *instance* members, but there was no way to require `T` to support a *static* member (like an operator `+`, or a static factory method) — static abstract interface members close this gap, letting an interface declare a static member that every implementing type must provide, and letting a generic method call it through the type parameter itself.
+
+```csharp
+public interface IAdditionOperators<TSelf> where TSelf : IAdditionOperators<TSelf>
+{
+    static abstract TSelf operator +(TSelf left, TSelf right); // a STATIC member, required by the INTERFACE
+}
+
+// A GENERIC method that sums ANY type supporting '+', constrained via the interface
+public static T SumAll<T>(IEnumerable<T> values) where T : IAdditionOperators<T>
+{
+    T total = default!;
+    foreach (var v in values) total = total! + v; // calls '+' THROUGH the generic type parameter T
+    return total;
+}
+```
+Because the constraint requires `T` to implement `IAdditionOperators<T>`, the compiler knows *any* type substituted for `T` genuinely supports `+` as a static operator — `SumAll<int>`, `SumAll<decimal>`, or `SumAll<MyCustomMoney>` (if `MyCustomMoney` implements the interface) all compile and work correctly, with the actual `+` implementation resolved to whichever concrete type is used, entirely without runtime reflection or boxing.
+
+**Why this specifically enables "Generic Math" as a genuinely new capability, not just syntactic sugar:** before this feature, writing one generic numeric algorithm (a statistical average, a matrix operation) that worked across `int`, `double`, `decimal`, and custom numeric types required either duplicating the algorithm per type or resorting to slow, reflection-based or `dynamic`-based dispatch; static abstract interface members let the .NET BCL define standard numeric interfaces (`INumber<T>`, `IAdditionOperators<T>`, etc.) that built-in numeric types already implement, making one truly generic, statically-typed, allocation-free numeric algorithm possible for the first time.
+
+**Common Pitfall:** confusing a static abstract interface member with a regular `static` method defined directly on a class — a static abstract member specifically requires an *interface* declaring it as a contract every implementing type must fulfill, checkable at compile time through a generic constraint; an ordinary static method on a concrete class provides no such constraint-checkable contract that a *different* generic type could be required to also implement.
+
+---
+
 ---
