@@ -1339,4 +1339,99 @@ The main `app` container simply writes its logs to a local file, exactly as it a
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What is "API Gateway" pattern, and how does it let external clients interact with a SINGLE entry point rather than needing to know the individual network locations of every backend microservice?**
+
+An API Gateway sits between external clients and the internal collection of microservices, providing one single, unified entry point — clients only ever need to know the gateway's address, never the individual internal addresses of the many separate services actually handling requests behind it.
+
+```text
+WITHOUT an API Gateway -- clients must know EVERY individual service's address:
+  Mobile app calls Orders Service DIRECTLY at orders.internal:8081
+  Mobile app calls Inventory Service DIRECTLY at inventory.internal:8082
+  Mobile app calls Payments Service DIRECTLY at payments.internal:8083
+  -- client needs to know THREE separate addresses, and update ALL of them if any service MOVES --
+
+WITH an API Gateway -- ONE single entry point, routing internally:
+  Mobile app calls gateway.example.com/orders -> Gateway ROUTES internally to Orders Service
+  Mobile app calls gateway.example.com/inventory -> Gateway ROUTES internally to Inventory Service
+  Mobile app calls gateway.example.com/payments -> Gateway ROUTES internally to Payments Service
+  -- client only EVER needs to know ONE address: gateway.example.com --
+```
+The Gateway internally routes each incoming request to whichever specific backend service actually handles it — if `Orders Service`'s internal address changes (a redeployment, a service moving to a different cluster), only the Gateway's own internal routing configuration needs updating, with zero changes required to any client application at all.
+
+**Why this also creates a natural, centralized place for genuinely cross-cutting concerns:** beyond routing, an API Gateway is also a natural place to apply concerns that would otherwise need to be duplicated across every individual service (authentication, rate limiting, request logging) — rather than every microservice implementing its own copy of these cross-cutting concerns, the Gateway can apply them once, centrally, for every request passing through it.
+
+**Common Pitfall:** exposing every individual microservice's address directly to external clients, without any Gateway layer at all — this couples clients tightly to the current internal service topology, meaning any internal restructuring (splitting, merging, or relocating services) directly breaks or requires updating every client application, rather than being absorbed transparently by a Gateway's internal routing configuration.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is a "Domain Event" (as distinct from an Integration Event, covered elsewhere), and how does keeping it scoped to WITHIN a single service's own boundary (never published externally) differ from an event meant for OTHER services to consume?**
+
+A Domain Event represents something significant that happened *within* a service's own internal domain logic (an `OrderConfirmed` event raised internally when an order transitions state) — critically, a Domain Event is scoped to that service's own internal boundary, used to trigger internal side effects (updating related internal state, triggering internal workflows) WITHOUT necessarily being published externally for other services to consume at all.
+
+```csharp
+public class Order
+{
+    private readonly List<object> _domainEvents = new();
+    public void Confirm()
+    {
+        Status = "Confirmed";
+        _domainEvents.Add(new OrderConfirmedDomainEvent(Id)); // INTERNAL event -- NOT necessarily published externally
+    }
+}
+
+// Internally, WITHIN this SAME service, other internal handlers react to this DOMAIN event:
+public class UpdateInventoryReservationHandler // an INTERNAL handler, in the SAME service/process
+{
+    public void Handle(OrderConfirmedDomainEvent e) { /* internal side effect, WITHIN this service */ }
+}
+
+// SEPARATELY, an INTEGRATION EVENT (covered elsewhere) is EXPLICITLY published externally,
+// for OTHER services to consume -- a DELIBERATE, SEPARATE decision from the internal Domain Event above:
+await _eventBus.PublishAsync(new OrderConfirmedIntegrationEvent(Id)); // NOW other services CAN see this
+```
+The internal Domain Event and the externally-published Integration Event are deliberately kept as two separate concepts, even though they might represent conceptually the same underlying business occurrence — a service's internal domain events can freely change shape, be added, or removed as its internal implementation evolves, without needing to worry about breaking any external consumer, since domain events were never a promise made to anyone outside the service's own boundary.
+
+**Why conflating these two concepts creates a coupling risk:** if a service's *internal* domain events were directly and automatically published externally without deliberate curation, any change to the service's internal domain model (adding a new internal event, changing an existing one's shape) would risk silently breaking external consumers who happened to be relying on what was only ever meant to be an internal implementation detail — keeping Domain Events and Integration Events as deliberately separate concepts (even when one triggers the creation of the other) preserves the service's freedom to evolve its internal implementation independently of its external, published contract.
+
+**Common Pitfall:** directly publishing a service's internal domain events onto an external message bus without deliberate curation, treating "internal event" and "external contract" as the same thing — this couples the service's internal implementation details directly to external consumers, removing the internal flexibility that keeping these two concepts separate is specifically meant to preserve; a deliberate, curated translation step between "what happened internally" and "what we're willing to promise externally" is what maintains that flexibility.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is the "Anti-Corruption Layer" (ACL) pattern, and how does it protect a service's own clean internal domain model from being CONTAMINATED by an external system's (or legacy system's) awkward, poorly-designed concepts?**
+
+An Anti-Corruption Layer is a deliberate translation boundary between a service's own clean internal domain model and an external system (often legacy, or simply designed with different, incompatible concepts) — the ACL translates between the two, ensuring the external system's awkward or poorly-designed concepts never leak directly into and "corrupt" the service's own internal domain model.
+
+```csharp
+// The EXTERNAL legacy system's awkward, poorly-designed representation:
+public class LegacyCustomerRecord
+{
+    public string CustFlag1 { get; set; }  // "Y"/"N"/"P" -- an ancient, poorly-documented legacy encoding
+    public int CustTypeCode { get; set; }  // a numeric code with meaning ONLY documented in a 15-YEAR-OLD wiki page
+}
+
+// The ANTI-CORRUPTION LAYER -- translates the AWKWARD external shape into a CLEAN internal domain concept
+public class LegacyCustomerAdapter
+{
+    public Customer TranslateToInternalDomain(LegacyCustomerRecord legacy) => new Customer
+    {
+        IsActive = legacy.CustFlag1 == "Y",                     // translates the CRYPTIC flag into a CLEAR bool
+        Tier = legacy.CustTypeCode switch { 1 => "Standard", 2 => "Premium", _ => "Unknown" } // translates the CODE
+    };
+}
+
+// The service's OWN internal domain model NEVER sees "CustFlag1" or "CustTypeCode" AT ALL --
+// it only EVER works with the CLEAN "Customer" model the ACL produces
+```
+The service's internal business logic operates exclusively on the clean `Customer` model, with `IsActive`/`Tier` as clearly-named, self-documenting concepts — none of the legacy system's cryptic flags, numeric codes, or historical quirks ever directly reach the service's own domain logic, since the ACL absorbs and translates all of that awkwardness at the boundary.
+
+**Why this specifically protects long-term maintainability, not just initial code cleanliness:** without an ACL, a service's internal domain logic would need to directly understand and work with the external system's awkward concepts throughout its own codebase — as the service's internal logic grows, this awkwardness spreads and compounds throughout an increasingly large amount of code; an ACL confines this awkwardness to one deliberate, isolated translation boundary, keeping the service's own internal domain model clean and expressive regardless of how awkward the external system it integrates with happens to be.
+
+**Common Pitfall:** integrating directly with an external/legacy system's awkward data model throughout a service's own business logic, without a dedicated translation layer — this spreads the external system's poorly-designed concepts (cryptic flags, undocumented codes) throughout the service's own codebase, making the internal domain logic itself harder to understand and more tightly coupled to the external system's specific quirks than necessary; an Anti-Corruption Layer specifically isolates and contains this awkwardness at one well-defined boundary instead.
+
 ---

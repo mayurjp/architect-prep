@@ -690,4 +690,80 @@ Even if an attacker manages to fully exploit and gain code execution within a co
 
 ---
 
+## Beginner — Question 8
+
+**Q8: What is the Docker `.dockerignore` file, and how does excluding files from the "build context" both speed up builds AND prevent sensitive files from accidentally being copied into an image?**
+
+`.dockerignore` lists files/directories excluded from the "build context" (the set of files sent to the Docker daemon when building an image) — similar in syntax and purpose to `.gitignore`, it prevents unnecessary or sensitive files from being sent to the build process at all, rather than relying on `COPY`/`ADD` instructions to selectively avoid them.
+
+```text
+# .dockerignore
+node_modules/
+.git/
+.env
+*.log
+bin/
+obj/
+```
+```dockerfile
+COPY . .   # copies the ENTIRE build context -- but files listed in .dockerignore were NEVER PART of it at all
+```
+Without `.dockerignore`, the entire project directory (including potentially large `node_modules`, build artifacts, or sensitive `.env` files containing secrets) gets sent to the Docker daemon as part of the build context, even if the Dockerfile's `COPY` instructions don't explicitly reference them by name — a broad `COPY . .` would then copy anything present in that context, including files never intended to end up inside the image at all.
+
+**Why this matters for BOTH build performance AND security, not just one or the other:** a large, unfiltered build context (including a bulky `node_modules` or `.git` history) slows down every build, since that entire context must be transferred to the Docker daemon before the build even starts — separately, a sensitive `.env` file present in the build context could accidentally end up inside a built image via an overly broad `COPY . .`, then potentially be extracted by anyone with access to that image, even if no Dockerfile instruction explicitly intended to include it.
+
+**Common Pitfall:** relying solely on `COPY`'s specific file selection to avoid including sensitive files, without also maintaining a `.dockerignore` — even if `COPY` instructions are carefully scoped, the *entire* build context (potentially still including sensitive files) is still transferred to the Docker daemon during the build process itself, and a later, less careful `COPY . .` change could then inadvertently include something that should never have been part of the image; `.dockerignore` provides a more robust, structural guarantee than carefully-scoped `COPY` instructions alone.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is Docker's `--read-only` container filesystem flag, and how does making a container's root filesystem READ-ONLY at runtime reduce the damage an attacker who gains code execution inside it can actually do?**
+
+`--read-only` mounts a container's entire root filesystem as read-only at runtime — any attempt by a process inside the container to write to the filesystem (outside of explicitly-mounted writable volumes) fails, meaning an attacker who achieves code execution inside the container cannot modify the container's own filesystem, install additional malicious tools, or persist changes to disk at all.
+
+```bash
+docker run --read-only --tmpfs /tmp myapp
+# the container's ENTIRE root filesystem is READ-ONLY -- only /tmp (explicitly mounted as writable tmpfs)
+# can actually be written to
+```
+```text
+An attacker who exploits a vulnerability and gains code execution INSIDE this container:
+  - CANNOT modify any application files (they're on the READ-ONLY filesystem)
+  - CANNOT download and install additional malicious tools onto the container's disk
+  - CANNOT persist any changes across a container restart (the filesystem resets to its ORIGINAL image state)
+```
+Even a successfully-exploited, actively-compromised process running inside the container is significantly constrained in what lasting damage it can do — it cannot rewrite application binaries, drop persistent malware onto the filesystem, or modify configuration files, since the underlying filesystem simply refuses any write attempt outside of explicitly-designated writable locations (like a `tmpfs`-mounted `/tmp`, if genuinely needed).
+
+**Why this specifically pairs well with the principle of least privilege covered elsewhere:** an application that has no legitimate need to write to its own filesystem at runtime (many stateless web services fit this description) loses nothing functionally from `--read-only`, while gaining a meaningful additional constraint against a successfully-exploited attacker — this mirrors the broader security principle of only granting the capabilities a workload genuinely needs, applied specifically to filesystem write access.
+
+**Common Pitfall:** applying `--read-only` to a container that actually needs to write somewhere (application logs, temporary file processing) without providing an explicit writable mount (a `tmpfs` volume, or a specific writable volume mount) for those genuine needs — this causes the application to fail at runtime when it attempts a write it actually requires; `--read-only` should be paired with explicitly-provisioned writable locations for whatever narrow, genuine write needs the application actually has, not applied blindly without addressing those needs.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is a Docker "Distroless" base image, and how does deliberately omitting a shell, package manager, and other OS utilities from the final image reduce the attack surface available to an attacker who gains code execution?**
+
+A Distroless image contains only an application and its direct runtime dependencies — deliberately omitting a shell (`/bin/sh`, `/bin/bash`), a package manager (`apt`, `apk`), and most other general-purpose OS utilities that a typical base image (even a minimal one like `alpine`) would still include, on the theory that an attacker who gains code execution inside the container has dramatically fewer tools available to escalate, explore, or pivot further.
+
+```dockerfile
+FROM gcr.io/distroless/dotnet-runtime:8.0
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "myapp.dll"]
+# NO shell, NO package manager, NO general-purpose utilities exist in THIS image AT ALL
+```
+```bash
+docker exec -it myapp-container /bin/sh
+# ERROR: OCI runtime exec failed: exec failed: unable to start container process:
+# exec: "/bin/sh": stat /bin/sh: no such file or directory  -- THERE IS NO SHELL to even attempt this with
+```
+Even if an attacker achieves code execution inside a Distroless container (through an application-level vulnerability), they have no shell to interactively explore the filesystem, no package manager to install additional tools, and none of the general-purpose utilities (`curl`, `wget`, `nc`) that make post-exploitation activity (downloading additional malware, exfiltrating data via common tools) meaningfully easier — the attacker is confined to whatever narrow capabilities the application's own compiled code happens to provide, a significantly more constrained environment than a typical Linux base image offers.
+
+**Why this specific trade-off (harder debugging) is accepted deliberately, not as an oversight:** the inability to `docker exec` into a shell for interactive debugging is a genuine, deliberate cost of using Distroless images — teams adopting them typically compensate with more comprehensive logging/observability (since interactive shell-based debugging inside the running container is no longer available) and accept this trade-off specifically because the security benefit (dramatically reduced post-exploitation attack surface) is considered worth the debugging convenience given up.
+
+**Common Pitfall:** adopting Distroless images without also investing in the observability/logging practices needed to compensate for losing interactive shell-based debugging — teams that reach for Distroless purely for its security reputation, without adjusting their debugging workflow accordingly, often find themselves unable to effectively diagnose a production issue that would have been trivial to investigate via `docker exec` into a shell on a traditional base image; Distroless's security benefit specifically requires this debugging-workflow trade-off to be deliberately planned for, not discovered painfully during an actual incident.
+
+---
+
 ---

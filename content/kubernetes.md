@@ -756,3 +756,95 @@ A queue-processing service might sit at low CPU utilization even while its messa
 **Common Pitfall:** relying solely on CPU/memory-based autoscaling for a workload whose actual bottleneck is I/O-bound, queue-depth-driven, or otherwise unrelated to CPU/memory utilization — this can leave a genuinely overloaded service under-scaled indefinitely (CPU/memory utilization simply never crosses the configured threshold, even while the service is falling further and further behind on actual work), a mismatch that's only resolved by identifying and scaling on the metric that actually reflects the workload's true bottleneck.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is a Kubernetes `Taint`/`Toleration` pair, and how does it let specific nodes REPEL Pods by default, only accepting Pods that explicitly "tolerate" that specific taint?**
+
+A Taint applied to a node repels Pods from being scheduled there by default — a Pod can only be scheduled onto a tainted node if it carries a matching Toleration, explicitly declaring it's willing to run on a node with that specific taint. This inverts the usual scheduling relationship: instead of Pods choosing where to run, tainted nodes actively reject Pods that don't explicitly tolerate them.
+
+```bash
+kubectl taint nodes gpu-node-1 dedicated=gpu-workloads:NoSchedule
+# THIS node now REPELS any Pod that doesn't explicitly tolerate this specific taint
+```
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "gpu-workloads"
+      effect: "NoSchedule"   # this Pod explicitly TOLERATES the taint -- CAN be scheduled onto gpu-node-1
+  containers:
+    - name: ml-training
+      image: ml-trainer:latest
+```
+A Pod without this specific toleration is never scheduled onto `gpu-node-1` at all, regardless of how much available capacity that node has — this is precisely how Kubernetes clusters reserve expensive, specialized nodes (GPU-equipped machines) for specifically-designated workloads, preventing ordinary Pods from accidentally consuming that specialized (and often expensive) capacity.
+
+**Why this differs from (and complements) Node Affinity, which works in the OPPOSITE direction:** Node Affinity lets a Pod express a *preference or requirement* for which nodes it wants to run on — Taints/Tolerations instead let a *node* actively repel Pods that don't explicitly tolerate it; the two mechanisms are often used together (a taint reserving a node, plus affinity actively directing the intended workload toward it), since a toleration alone only permits scheduling there, it doesn't actually attract or prefer that node the way affinity does.
+
+**Common Pitfall:** relying on a Toleration alone to ensure a workload lands specifically on the intended tainted node — a Toleration only removes the *repulsion*, it doesn't actively attract the Pod to that specific node; without also configuring Node Affinity expressing an actual preference/requirement for that node, a Pod with a matching toleration could still be scheduled onto any other, non-tainted node instead, since tolerating a taint doesn't mean preferring it.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is a Kubernetes `Mutating Admission Webhook` (as distinct from a Validating Admission Webhook), and how does it let a cluster-wide policy AUTOMATICALLY MODIFY a resource's definition before it's persisted, rather than merely accepting or rejecting it?**
+
+A Validating Admission Webhook can only accept or reject an incoming resource definition — a Mutating Admission Webhook goes further, actually *modifying* the resource's definition before it's persisted to the cluster's storage, letting cluster-wide policies inject or adjust configuration automatically, without every Pod author needing to remember to include it themselves.
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: inject-sidecar
+webhooks:
+  - name: sidecar-injector.example.com
+    clientConfig: { service: { name: sidecar-injector-svc, namespace: istio-system } }
+    rules: [{ operations: ["CREATE"], apiGroups: [""], apiVersions: ["v1"], resources: ["pods"] }]
+```
+```text
+A developer submits a Pod definition with NO sidecar container specified at all:
+  kubectl apply -f my-pod.yaml   (Pod definition contains ONLY the application container)
+
+The Mutating Webhook INTERCEPTS this request BEFORE it's persisted, and AUTOMATICALLY
+INJECTS an additional sidecar container (e.g., Istio's Envoy proxy) into the Pod's spec
+-- the ACTUALLY-PERSISTED Pod definition now includes the sidecar, even though the
+   DEVELOPER never explicitly wrote it into their own YAML at all --
+```
+This is precisely the mechanism underlying automatic service-mesh sidecar injection (covered under microservices/system-design) — a developer writes a Pod spec containing only their application container, and a Mutating Webhook transparently injects the service mesh's proxy sidecar automatically, ensuring every Pod in a mesh-enabled namespace gets the sidecar without every developer needing to remember to add it manually to every Pod definition they write.
+
+**Why Mutating Webhooks run BEFORE Validating Webhooks in the admission chain:** since a Mutating Webhook can change the resource's definition, running it before validation ensures the *final*, post-mutation version of the resource is what actually gets validated — validating the pre-mutation version would be validating something that isn't actually what ends up persisted, potentially missing issues introduced (or resolved) by the mutation itself.
+
+**Common Pitfall:** writing a Mutating Webhook with overly broad matching rules (applying to every resource creation cluster-wide) without carefully scoping which resources/namespaces it actually applies to — an overly broad mutating webhook can unexpectedly modify resources its author never intended to affect, and since mutations happen silently and automatically, unexpected side effects from an overly broad webhook can be genuinely difficult to diagnose, since the actually-persisted resource differs from what the resource's own author explicitly wrote.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is Kubernetes' `etcd` (the cluster's own backing datastore), and why does a QUORUM-based consensus requirement mean an etcd cluster of an EVEN number of members provides WORSE fault tolerance than an odd number with fewer total members?**
+
+`etcd` is the distributed, consistent key-value store backing the entire Kubernetes control plane's state (every object definition, effectively the cluster's single source of truth) — it uses the Raft consensus protocol, requiring a strict majority (quorum) of its members to agree before any write is considered committed; this quorum requirement means adding an even-numbered member can paradoxically *reduce* fault tolerance rather than improve it.
+
+```text
+etcd cluster with 3 members: quorum = 2 (a majority of 3)
+  -- can TOLERATE 1 member failing (2 remaining members still form a quorum) --
+
+etcd cluster with 4 members: quorum = 3 (a majority of 4)
+  -- can STILL only tolerate 1 member failing (2 remaining members do NOT form a quorum of 3) --
+  -- adding a 4th member added COST (another node to run/maintain) WITHOUT adding fault tolerance --
+
+etcd cluster with 5 members: quorum = 3 (a majority of 5)
+  -- can tolerate 2 members failing (3 remaining members DO form a quorum) --
+  -- THIS is where fault tolerance actually IMPROVES, going from 3 to 5, NOT from 3 to 4 --
+```
+Because quorum is defined as "more than half," moving from 3 to 4 members doesn't change how many failures can be tolerated (both still only tolerate exactly 1 failure) — it just adds a fourth member without any additional resilience benefit, while genuinely increasing fault tolerance requires jumping to the *next odd* number (5), which raises the quorum requirement from 2 to 3 while also increasing how many failures (2) can be tolerated before quorum is lost.
+
+**Why this specifically matters for etcd cluster sizing decisions in production Kubernetes deployments:** running an etcd cluster with an even number of members provides no fault-tolerance benefit over the next-lower odd number, while incurring the real ongoing cost (more nodes to run, more network chatter for consensus) of the additional member — production etcd clusters are conventionally sized at odd numbers (3, 5, 7) specifically to avoid paying this cost without a corresponding fault-tolerance benefit.
+
+**Common Pitfall:** sizing an etcd cluster (or any Raft/Paxos-based quorum system) at an even number of members, believing "more nodes always means more resilience" — the quorum-based math specifically means an even-numbered cluster tolerates the exact same number of failures as the next-lower odd-numbered one, making the extra member pure overhead with zero fault-tolerance benefit; understanding the specific quorum arithmetic (not just "more nodes = more resilient") is necessary to size these clusters correctly.
+
+---
+
+---
