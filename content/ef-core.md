@@ -963,4 +963,103 @@ Because this interceptor runs for *every* command EF Core issues, cross-cutting 
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is the difference between Data Annotations and the Fluent API for configuring an EF Core model, and why does the Fluent API remain necessary even for a developer who prefers using attributes wherever possible?**
+
+Data Annotations are attributes placed directly on a model class's properties (`[Required]`, `[MaxLength(100)]`) — convenient and visible right where the property is declared. The Fluent API configures the exact same kinds of mapping details, but from a separate, centralized place (`OnModelCreating`), and can express a number of configurations that simply have no attribute equivalent at all.
+
+```csharp
+// Data Annotations -- configuration lives DIRECTLY on the property
+public class Product
+{
+    [Required]
+    [MaxLength(100)]
+    public string Name { get; set; }
+}
+
+// Fluent API -- the SAME kind of configuration, expressed SEPARATELY in OnModelCreating
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<Product>()
+        .Property(p => p.Name)
+        .IsRequired()
+        .HasMaxLength(100);
+
+    // Fluent API can ALSO express things NO Data Annotation covers at all, e.g. a COMPOSITE key:
+    modelBuilder.Entity<OrderLineItem>().HasKey(oli => new { oli.OrderId, oli.ProductId });
+}
+```
+A composite primary key spanning two properties, a many-to-many relationship's join table name, or a table-splitting configuration all have no corresponding Data Annotation at all — they can only be expressed through the Fluent API, which is precisely why even a codebase that prefers attributes for simple, per-property rules still needs `OnModelCreating` for the configurations attributes structurally cannot express.
+
+**Common Pitfall:** trying to force every single piece of model configuration into Data Annotations for the sake of consistency, hitting a wall the moment a genuinely Fluent-API-only configuration (a composite key, a specific delete behavior) is needed — most real EF Core codebases end up using both: Data Annotations for simple, single-property rules that read naturally right on the model, and the Fluent API for anything more structural that attributes simply can't express.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is an EF Core Concurrency Token (`[Timestamp]`/`rowversion`), and how does it let EF Core detect — and reject — a save when the underlying row changed since it was originally read, directly solving the lost-update race condition covered in an earlier scenario?**
+
+A Concurrency Token is a column EF Core includes in the `WHERE` clause of every `UPDATE`/`DELETE` it generates for that entity — if the token's value in the database no longer matches the value that was originally read, zero rows match the `WHERE` clause, and EF Core throws a `DbUpdateConcurrencyException` rather than silently overwriting a change made by someone else in the meantime.
+
+```csharp
+public class BankAccount
+{
+    public int Id { get; set; }
+    public decimal Balance { get; set; }
+
+    [Timestamp] // SQL Server auto-updates this on EVERY row modification -- a "rowversion" column
+    public byte[] RowVersion { get; set; }
+}
+```
+```csharp
+try
+{
+    account.Balance -= 50;
+    await _db.SaveChangesAsync();
+}
+catch (DbUpdateConcurrencyException)
+{
+    // The RowVersion EF Core sent in the WHERE clause no longer matches the CURRENT database row --
+    // SOMEONE ELSE updated this account in the meantime -- reload and let the caller decide how to proceed
+}
+```
+```sql
+-- The ACTUAL SQL EF Core generates -- notice RowVersion is checked in the WHERE clause itself:
+UPDATE BankAccount SET Balance = 50 WHERE Id = 1 AND RowVersion = 0x0000000000000A1B
+-- if ANOTHER transaction already changed RowVersion since it was READ, ZERO rows match -- 0 rows affected
+```
+This directly solves the earlier "two concurrent withdrawals both read Balance=$100" scenario: the second `SaveChanges` call's `WHERE` clause includes the *original*, now-stale `RowVersion` value, so it matches zero rows in the database (since the first save already changed it) — EF Core detects this mismatch and throws, rather than silently executing an `UPDATE` based on data that's no longer current.
+
+**Common Pitfall:** manually managing a "version" or "last modified" integer/timestamp column yourself, incrementing it in application code before every save — this is error-prone and easy to forget in some code path; `[Timestamp]`/`rowversion` (SQL Server auto-manages the column's value on every row modification, entirely outside application code) combined with EF Core's built-in concurrency-token handling removes the need to manually manage this value at all.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What are EF Core's Raw SQL query methods (`FromSqlInterpolated`, `SqlQuery<T>`), and when does dropping down to raw SQL make sense instead of expressing the same query in LINQ?**
+
+While EF Core's LINQ-to-SQL translation covers the overwhelming majority of everyday queries, some queries are either impossible to express in LINQ (a database-specific function, a complex recursive CTE) or translate to meaningfully worse-performing SQL than a hand-written query would — `FromSqlInterpolated` and `SqlQuery<T>` let you drop to raw SQL for exactly those cases, while still safely parameterizing any interpolated values.
+
+```csharp
+// A query using a SQL Server-specific full-text search function LINQ has NO way to express at all
+var products = await _db.Products
+    .FromSqlInterpolated($"SELECT * FROM Products WHERE CONTAINS(Description, {searchTerm})")
+    .ToListAsync();
+// 'searchTerm' is SAFELY parameterized -- FromSqlInterpolated is NOT vulnerable to SQL injection
+// the same way string concatenation (covered under App Security) would be
+
+// SqlQuery<T> (EF Core 8+) -- for a query returning a shape that ISN'T a mapped entity at all
+var report = await _db.Database
+    .SqlQuery<SalesReportRow>($"EXEC GetMonthlySalesReport {year}, {month}")
+    .ToListAsync();
+```
+Because `FromSqlInterpolated`/`SqlQuery<T>` still use C#'s string interpolation syntax internally, EF Core parses the interpolated `{searchTerm}`/`{year}` placeholders and converts them into genuine SQL parameters (exactly like a parameterized query, covered under App Security's SQL Injection discussion) rather than concatenating the value directly into the SQL text — the convenience of interpolation syntax without reintroducing the injection risk plain string concatenation would carry.
+
+**Why this should remain the exception, not the default approach:** raw SQL bypasses LINQ's compile-time checking (a typo in a column name inside a raw SQL string is only caught at runtime, not compile time) and ties the query directly to one specific database provider's SQL dialect, losing EF Core's cross-provider portability — raw SQL earns its place specifically for the narrow set of queries LINQ genuinely can't express or can't express efficiently, not as a general substitute for LINQ throughout a codebase.
+
+**Common Pitfall:** reaching for raw SQL prematurely, before actually confirming the equivalent LINQ query either can't be expressed at all or genuinely performs meaningfully worse — many queries that seem hard to express in LINQ turn out to have a working LINQ equivalent once explored further; raw SQL should be reserved for queries actually verified (via the generated SQL, or genuine unsupported syntax) to need it, not adopted reflexively out of unfamiliarity with a more complex LINQ construct.
+
+---
+
 ---

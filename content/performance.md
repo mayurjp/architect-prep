@@ -859,3 +859,82 @@ Even though Thread 1 and Thread 2 never actually touch each other's variable, th
 **Common Pitfall:** diagnosing unexplained, significant multi-threaded performance degradation by focusing exclusively on lock contention or algorithmic inefficiency, without considering False Sharing as a possible root cause — for code involving multiple threads frequently writing to nearby (but logically unrelated) memory locations, False Sharing is a real, well-documented, and easy-to-overlook possibility specifically worth investigating with cache-line-aware profiling tools when more conventional explanations for the observed slowdown don't seem to account for it.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: Why is opening a new database connection for every single request expensive, and how does Connection Pooling let an application reuse a small set of already-open connections instead?**
+
+Establishing a new database connection involves real, measurable overhead — a TCP handshake, authentication, and session setup on the database server — repeating all of this for every single request would add significant latency to each one. Connection Pooling maintains a set of already-open, ready-to-use connections that requests borrow and return, avoiding that setup cost for the overwhelming majority of requests.
+
+```csharp
+// WITHOUT pooling (conceptually) -- EVERY request pays the FULL connection-establishment cost
+using var connection = new SqlConnection(connectionString);
+connection.Open(); // TCP handshake + auth + session setup -- EVERY SINGLE TIME, expensive
+
+// WITH pooling (the ADO.NET/EF Core DEFAULT behavior) -- the SAME underlying connections are REUSED
+using var connection = new SqlConnection(connectionString);
+connection.Open(); // usually just BORROWS an ALREADY-OPEN connection from the POOL -- fast
+// connection.Dispose() at the end of 'using' RETURNS it to the POOL -- doesn't actually CLOSE the TCP socket
+```
+Because ADO.NET (and EF Core, built on top of it) pools connections by default, calling `Open()`/`Dispose()` on a connection object usually just borrows and returns an already-established underlying connection from a pool, rather than genuinely opening and closing a fresh TCP connection each time — the expensive setup cost is paid once per pooled connection, then amortized across many requests that each borrow and return it.
+
+**Common Pitfall:** manually managing a single, static, application-wide database connection instance to "avoid the overhead of connection pooling," reasoning that reusing one connection is even more efficient than pooling many — a single shared connection cannot safely serve multiple concurrent requests at once (commands would interleave incorrectly), while connection pooling provides the exact same reuse benefit safely, by maintaining *multiple* pooled connections that concurrent requests can each borrow independently.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is Cache Invalidation, and why is deciding WHEN to expire or update a cached value often considered one of the two genuinely hard problems in computer science?**
+
+Cache Invalidation is the problem of knowing exactly when a cached value has become stale (the underlying data changed) and needs to be refreshed or removed — get it wrong in one direction (invalidate too eagerly) and you lose most of the cache's performance benefit; get it wrong in the other direction (invalidate too rarely) and users see stale, incorrect data.
+
+```csharp
+// A cached product price -- invalidation is EASY if ONLY this one code path ever changes the price
+_cache.Set("product:5:price", price, TimeSpan.FromMinutes(10)); // expires after 10 minutes, REGARDLESS
+// -- but WHAT IF the price is updated by an ADMIN PANEL, a BULK IMPORT job, AND a THIRD-PARTY webhook,
+//    all THREE completely SEPARATE code paths? EACH one needs to remember to invalidate the SAME cache key,
+//    or a customer could see a STALE price for up to 10 MINUTES after ANY of them updates it
+```
+The difficulty isn't setting an expiration time (a `TimeSpan.FromMinutes(10)` is trivial to write) — it's ensuring that *every single code path* capable of changing the underlying data correctly and consistently invalidates (or updates) the corresponding cache entry, including code paths added months later by a different developer who may not even know the cache entry exists at all.
+
+**Why "just use a short TTL and don't worry about explicit invalidation" isn't a universal solution:** a short TTL bounds *how stale* data can get, but doesn't eliminate the problem — for data where even a brief staleness window is unacceptable (a real-time inventory count during a flash sale, an account balance), explicit invalidation on every write path is still necessary; TTL-only invalidation is a reasonable compromise specifically for data where brief staleness is genuinely tolerable, not a substitute for explicit invalidation everywhere.
+
+**Common Pitfall:** adding a new code path that legitimately updates a piece of data, without realizing (because there's often no compiler error or obvious signal) that an existing cache entry for that same data now needs explicit invalidation too — this is precisely why cache invalidation is considered genuinely hard: the correctness of a caching strategy depends on every *current and future* code path touching the underlying data remembering to also handle the cache, a distributed, easy-to-violate invariant rather than something enforceable by the type system.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is Data Locality (specifically, "Array of Structs" versus "Struct of Arrays" memory layout), and how does arranging data to match how it's ACTUALLY accessed let the CPU's cache prefetcher work far more effectively?**
+
+Modern CPUs read memory into cache in entire cache-line-sized chunks (64 bytes, typically) and speculatively prefetch *subsequent* cache lines when they detect a sequential access pattern — how your data is physically laid out in memory directly determines whether a loop's actual memory accesses genuinely are sequential (letting the prefetcher help enormously) or effectively scattered (defeating it almost entirely), even though the C# source code looks nearly identical either way.
+
+```csharp
+// ARRAY OF STRUCTS (AoS) -- each element is a FULL struct, ALL its fields packed TOGETHER
+public struct Particle { public float X, Y, Z; public float VelX, VelY, VelZ; public float Mass; }
+Particle[] particles = new Particle[1_000_000];
+
+// A loop that ONLY needs X -- but must STILL read the ENTIRE struct's memory (VelX, VelY, Mass, etc.)
+// into the CACHE for EVERY particle, WASTING cache space on fields THIS loop doesn't even use
+foreach (var p in particles) sum += p.X;
+```
+```csharp
+// STRUCT OF ARRAYS (SoA) -- EACH field gets its OWN separate, tightly-packed array
+public struct ParticleSystem
+{
+    public float[] X, Y, Z;
+    public float[] VelX, VelY, VelZ;
+    public float[] Mass;
+}
+
+// This loop reads ONLY the X array -- EVERY byte pulled into cache is ACTUALLY used --
+// NOTHING wasted on Y, Z, VelX, etc. -- the CPU prefetcher sees a PERFECTLY sequential access pattern
+foreach (var x in particleSystem.X) sum += x;
+```
+In the Array-of-Structs layout, iterating just the `X` field still pulls each particle's *entire* struct (including fields this specific loop never touches) into the cache, wasting cache capacity and bandwidth on data the loop doesn't need — in the Struct-of-Arrays layout, the `X` array is tightly packed with *nothing but* `X` values, so every byte fetched into cache is actually useful data for this loop, and the CPU's sequential-access prefetcher can work at maximum effectiveness since the access pattern truly is a straight, unbroken sequential scan.
+
+**Why this specifically matters more as data volume grows, connecting directly to the False Sharing discussion (covered earlier) about cache-line-level effects:** for a small dataset that fits entirely in cache regardless of layout, this distinction barely matters — for a genuinely large dataset (millions of elements, larger than the CPU's cache), Struct-of-Arrays' improved cache utilization and prefetcher effectiveness can produce a dramatically measurable difference in a hot loop's throughput, exactly the kind of "invisible at the source-code level, but very real at the hardware level" performance characteristic False Sharing also represents.
+
+**Common Pitfall:** restructuring data from Array-of-Structs to Struct-of-Arrays throughout an entire codebase preemptively, before profiling has actually confirmed a specific hot loop's performance is meaningfully limited by cache utilization — this is a genuinely more awkward, less object-oriented way to organize data (harder to pass "one particle" around as a single unit), and its benefit is specifically concentrated in large-data, cache-bound hot loops; applying it broadly without profiling evidence trades real code ergonomics for a performance benefit that may not even apply to most of the codebase's actual data access patterns.
+
+---

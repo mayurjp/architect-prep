@@ -1020,3 +1020,99 @@ For an output this large and structurally complex (a multi-page report, a large 
 **Common Pitfall:** applying Approval Testing to output that changes cosmetically very frequently for entirely legitimate, non-regression reasons (a report including today's date, or randomly-ordered data) without first normalizing away that expected variability — an approval test comparing against a golden master that includes constantly-changing, legitimately-variable content (timestamps, random IDs) will fail on every single run regardless of whether an actual regression occurred, requiring the test to first normalize away known, legitimate sources of variation before the comparison against the golden master becomes meaningful.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: What is the "Test Pyramid," and how does its recommended SHAPE (many unit tests, fewer integration tests, even fewer end-to-end tests) guide where a team should invest most of its testing effort?**
+
+The Test Pyramid is a visual metaphor for how a healthy test suite's tests should be distributed across levels — a large base of fast, cheap Unit Tests, a smaller middle layer of Integration Tests, and a small top layer of slow, expensive End-to-End (E2E) tests exercising the entire system together.
+
+```text
+        /\
+       /E2E\        <- FEW: slow, expensive, brittle, but catch REAL cross-system issues
+      /------\
+     /Integr. \     <- SOME: verify components work TOGETHER (a real database, a real HTTP call)
+    /----------\
+   /   Unit     \   <- MANY: fast, cheap, isolated -- the BULK of the test suite lives here
+  /--------------\
+```
+Unit tests are fast (milliseconds each) and cheap to write/maintain, so a team can afford *many* of them, covering business logic exhaustively — E2E tests are slow (seconds to minutes each), brittle (many moving parts that can each independently break the test for unrelated reasons), and expensive to maintain, so a healthy suite deliberately keeps relatively few of them, reserved for the most critical, whole-system user journeys.
+
+**Why an "inverted pyramid" (many E2E tests, few unit tests) is a well-known anti-pattern:** a test suite dominated by slow, brittle E2E tests takes a long time to run (slowing down the feedback loop every developer relies on) and tends to be fragile (a single unrelated UI change can break dozens of E2E tests simultaneously) — the Test Pyramid's shape exists specifically to keep the fast, reliable, cheap-to-maintain layer (Unit Tests) doing the bulk of the verification work, reserving the slow, expensive layer for what only it can actually verify (genuine cross-system integration).
+
+**Common Pitfall:** relying primarily on E2E tests because they feel like they provide the most "realistic" confidence, while neglecting to build a solid base of fast unit tests — this produces a slow, fragile, expensive-to-maintain test suite (an "inverted pyramid" or "ice cream cone" shape) that actively discourages developers from running tests frequently, undermining the fast feedback loop a healthy test suite is meant to provide.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: How does Dependency Injection (covered under ASP.NET Core) directly enable Unit Testing, and what specifically breaks about testing a class that constructs its own dependencies internally rather than receiving them from outside?**
+
+A class that constructs its own dependencies internally (`new SqlConnection(...)` inside a method) has no way for a test to substitute a fake/mock in its place — Dependency Injection's core discipline (a class receives its dependencies from outside, typically via its constructor, rather than creating them itself) is precisely what makes a class *testable*, since a test can supply a test double in place of whatever the class would otherwise construct internally.
+
+```csharp
+// UNTESTABLE -- constructs its OWN dependency internally -- a test CANNOT substitute anything here
+public class OrderService
+{
+    public void PlaceOrder(Order order)
+    {
+        var gateway = new StripePaymentGateway(); // hardcoded, REAL, ACTUALLY calls Stripe's live API
+        gateway.Charge(order.Total);
+    }
+}
+
+// TESTABLE -- the dependency is INJECTED from OUTSIDE -- a test CAN supply a FAKE in its place
+public class OrderService
+{
+    private readonly IPaymentGateway _gateway;
+    public OrderService(IPaymentGateway gateway) => _gateway = gateway; // INJECTED, not constructed internally
+
+    public void PlaceOrder(Order order) => _gateway.Charge(order.Total);
+}
+
+// The TEST -- supplies a MOCK IPaymentGateway, NEVER touching a real payment processor at all
+var mockGateway = new Mock<IPaymentGateway>();
+var service = new OrderService(mockGateway.Object);
+service.PlaceOrder(new Order { Total = 100 });
+mockGateway.Verify(g => g.Charge(100), Times.Once());
+```
+Because `OrderService` receives `IPaymentGateway` as a constructor parameter rather than instantiating a concrete `StripePaymentGateway` internally, a unit test can substitute a mock implementation that never actually calls Stripe's real API at all — the first version, with `new StripePaymentGateway()` hardcoded inside the method, structurally cannot be unit-tested in isolation, since every test would inevitably invoke the real, live payment gateway.
+
+**Common Pitfall:** designing a class's dependencies around DI purely as an architectural convention, without recognizing that testability is actually the PRIMARY practical payoff for most everyday code — a class that "does DI properly" but still isn't meaningfully easier to unit test hasn't actually gained the main benefit DI is generally adopted for; the concrete, checkable measure of "did I do DI correctly here" is often simply "can I substitute a test double for each dependency without modifying the class itself."
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is Metamorphic Testing, and how does it verify a program's correctness by checking RELATIONSHIPS between multiple outputs, rather than checking any single output against a known expected value — solving the "how do I test something whose correct output I don't actually know" problem?**
+
+Metamorphic Testing addresses situations where you genuinely don't know a specific input's *correct* expected output (a complex machine learning model, a compression algorithm, a search engine's ranking) — instead of asserting the exact output for one specific input, it asserts a *relationship* that should hold between the outputs of two *related* inputs, a property ("metamorphic relation") that can be checked even without ever knowing either individual output's "correct" value in isolation.
+
+```csharp
+// A search engine -- you genuinely DON'T know the "correct" ranked order of results for "laptop" a priori
+// (there's no simple assertion like "the correct output is EXACTLY this list")
+
+// BUT you CAN assert a METAMORPHIC RELATION that MUST hold, regardless of what the ACTUAL results are:
+var resultsUnfiltered = searchEngine.Search("laptop");
+var resultsFiltered = searchEngine.Search("laptop", minPrice: 500);
+
+// METAMORPHIC RELATION: EVERY result in the FILTERED set MUST ALSO appear in the UNFILTERED set,
+// and EVERY result in the filtered set MUST have price >= 500 -- THIS holds regardless of WHAT
+// the actual "correct" ranking/results happen to be for either individual query
+Assert.True(resultsFiltered.All(r => resultsUnfiltered.Contains(r) && r.Price >= 500));
+```
+```csharp
+// A lossless COMPRESSION algorithm -- another classic example
+var compressed = Compress(originalData);
+var decompressed = Decompress(compressed);
+// METAMORPHIC RELATION: decompressing the compressed data MUST reproduce the ORIGINAL exactly --
+// this holds REGARDLESS of what the SPECIFIC compressed bytes actually look like
+Assert.Equal(originalData, decompressed);
+```
+Because the assertion is about a *relationship* between two related inputs/outputs rather than a specific expected value for either individually, Metamorphic Testing can meaningfully verify correctness even for genuinely complex systems where computing "the one correct answer" by hand (to write as a traditional expected-value assertion) would be impractical or outright impossible.
+
+**Why this specifically complements Property-Based Testing (covered earlier), rather than being the same idea restated:** Property-Based Testing generates many random inputs and checks a property holds for *each one independently* — Metamorphic Testing specifically constructs *related pairs* (or groups) of inputs and checks a relationship *between* their outputs; the two techniques are frequently combined (a property-based test generating random inputs, then applying a metamorphic transformation to each to derive the related input to compare against).
+
+**Common Pitfall:** dismissing Metamorphic Testing as inapplicable because "I can't write a metamorphic relation for my code" without searching hard enough for one — many systems that seem to have no checkable correctness property beyond "eyeball the output" actually do have a genuine, checkable metamorphic relation once analyzed carefully (as the search-engine filtering example shows); it typically requires more upfront analytical effort to identify a project's specific metamorphic relations than to write ordinary example-based assertions, which is the main practical reason the technique remains comparatively underused despite its genuine applicability to exactly the class of "no known correct answer" testing problems traditional assertions can't handle.
+
+---

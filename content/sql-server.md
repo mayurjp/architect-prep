@@ -872,4 +872,80 @@ Rather than guessing which queries might be slow based on intuition or anecdotal
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is the difference between a Primary Key and a Unique Constraint in SQL Server, given that both prevent duplicate values in a column?**
+
+Both a Primary Key and a Unique Constraint enforce that no two rows can share the same value in the constrained column(s) — the meaningful differences are that a table can have only *one* Primary Key but *multiple* Unique Constraints, a Primary Key cannot be `NULL` while a Unique Constraint's column generally can, and a Primary Key is (by default) also the table's Clustered Index, physically determining row storage order.
+
+```sql
+CREATE TABLE Users (
+    Id INT PRIMARY KEY IDENTITY,           -- the ONE primary key -- identifies EACH row, NEVER NULL
+    Email NVARCHAR(200) UNIQUE NOT NULL,   -- a UNIQUE constraint -- ALSO no duplicates, but NOT the primary key
+    Ssn CHAR(11) UNIQUE                    -- a SECOND unique constraint -- a table can have SEVERAL of these
+);
+```
+`Id` is the single column that uniquely *identifies* each row (and, by default, physically orders the table's storage as the Clustered Index, covered earlier) — `Email` and `Ssn` are *also* required to be unique, but neither is "the" identity of the row; a table can have as many Unique Constraints as needed, but only ever one Primary Key.
+
+**Common Pitfall:** assuming a Unique Constraint and a Primary Key are functionally interchangeable simply because both prevent duplicates — a Unique Constraint's column can typically still hold a single `NULL` (or, depending on configuration, multiple `NULL`s are sometimes permitted, since `NULL` isn't considered equal to another `NULL` in most comparison contexts), while a Primary Key column can never be `NULL` at all; picking the right one depends on whether the column genuinely serves as the row's core identity or is simply a *separate* value that also happens to need uniqueness enforcement.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is the difference between SQL Server's `OFFSET`/`FETCH` and using `TOP` combined with a subquery for implementing pagination, and why has `OFFSET`/`FETCH` become the more standard modern approach?**
+
+Both approaches let a query return a specific "page" of results rather than the entire result set — `OFFSET`/`FETCH` (added in SQL Server 2012) does this directly and readably as part of the `ORDER BY` clause itself, while achieving the same result with `TOP` alone requires a more awkward subquery-based workaround.
+
+```sql
+-- OFFSET/FETCH -- directly, readably expresses "skip the first N rows, then take the next M"
+SELECT Id, Name, Price FROM Products
+ORDER BY Id
+OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY; -- page 3, assuming 10 rows per page (skip 20, take 10)
+
+-- The OLDER, TOP-based workaround -- needs a SUBQUERY and a REVERSED ordering trick to achieve the SAME result
+SELECT TOP 10 Id, Name, Price FROM (
+    SELECT TOP 30 Id, Name, Price FROM Products ORDER BY Id -- take the FIRST 30 (20 to skip + 10 to take)
+) AS Subquery
+ORDER BY Id DESC; -- then take the LAST 10 of THOSE 30, by reversing the order -- awkward and error-prone
+```
+`OFFSET`/`FETCH` expresses the pagination intent directly and unambiguously ("skip 20, take 10") as part of the query's own `ORDER BY` clause — the older `TOP`-based approach requires nesting a subquery and reversing the sort order to simulate the same "skip N, take M" behavior, which is both harder to read at a glance and easier to get subtly wrong (an off-by-one in the reversed ordering logic, for instance).
+
+**Common Pitfall:** continuing to use the older `TOP`-plus-subquery pagination pattern out of habit or unfamiliarity with `OFFSET`/`FETCH`, missing that modern SQL Server versions provide a direct, clearer, standard-SQL-aligned way (`OFFSET`/`FETCH` is also part of the ANSI SQL standard, unlike `TOP`, which is a SQL Server-specific extension) to express the exact same pagination requirement with less code and less room for a subtle ordering mistake.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What are SQL Server System-Versioned Temporal Tables, and how does the database engine automatically maintaining a complete history of every row's past states let you query "what did this data look like at a specific point in the past" without any custom audit-logging code?**
+
+A Temporal Table is a regular table paired with an automatically-maintained *history table* — every `UPDATE`/`DELETE` against the main table causes SQL Server itself to automatically copy the row's *previous* state into the history table, entirely transparently, letting you later query the data as it existed at any specific past point in time without having written any manual auditing/versioning logic at all.
+
+```sql
+CREATE TABLE Products (
+    Id INT PRIMARY KEY,
+    Price DECIMAL(10,2),
+    ValidFrom DATETIME2 GENERATED ALWAYS AS ROW START,
+    ValidTo DATETIME2 GENERATED ALWAYS AS ROW END,
+    PERIOD FOR SYSTEM_TIME (ValidFrom, ValidTo)
+) WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = dbo.ProductsHistory));
+-- SQL Server AUTOMATICALLY maintains 'ProductsHistory' -- NO application code needed to populate it AT ALL
+
+UPDATE Products SET Price = 39.99 WHERE Id = 5;
+-- SQL Server AUTOMATICALLY: copies the PREVIOUS row version into ProductsHistory, THEN applies the update
+-- to the MAIN table -- this happens ENTIRELY INSIDE the engine, on EVERY UPDATE/DELETE, with ZERO app code
+
+-- Querying what the price WAS at a SPECIFIC point in the PAST -- NO manual joins to a history table needed
+SELECT Price FROM Products
+FOR SYSTEM_TIME AS OF '2026-01-01T00:00:00'
+WHERE Id = 5;
+```
+Because the history-tracking happens entirely inside the database engine itself (rather than via application-level "audit log" tables that a developer must remember to populate on every single modification), it's structurally impossible for a code path to accidentally skip logging a change — every single `UPDATE`/`DELETE`, from any application, any ad-hoc query, any tool, is automatically captured, closing the gap that a manually-maintained, application-level audit trail always risks (a forgotten code path that bypasses the logging logic).
+
+**Why this specifically differs from a hand-rolled "audit table plus trigger" approach (covered earlier as a controversial pattern):** Temporal Tables are a first-class, engine-native feature — no custom trigger code needs to be written or maintained at all, sidestepping the specific risks (recursive trigger chains, hard-to-debug implicit side effects) covered under the earlier Trigger discussion, while achieving a strictly more complete and more query-friendly result (a genuinely time-travel-queryable history, rather than a raw log of changes requiring manual reconstruction).
+
+**Common Pitfall:** enabling System Versioning on a high-write-volume table without considering the history table's own growth and indexing needs — every single row modification adds a new row to the history table indefinitely by default, so a genuinely high-churn table needs an explicit retention policy (`HISTORY_RETENTION_PERIOD`) to periodically purge history data beyond what's actually needed, or the history table can grow unboundedly large over time, mirroring the same unbounded-growth concern covered for other automatically-accumulating data stores elsewhere in this curriculum.
+
+---
+
 ---

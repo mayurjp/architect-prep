@@ -811,4 +811,74 @@ The tombstone is itself a piece of replicated data (just like a normal write), e
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is the difference between Vertical Scaling and Horizontal Scaling, and why do NoSQL databases so consistently favor horizontal scaling as their primary path to handling more data/traffic?**
+
+Vertical Scaling means making a single server more powerful (more CPU, more RAM, a bigger disk) — Horizontal Scaling means adding *more* servers, each handling a portion of the total data/load. Most NoSQL databases are specifically architected around horizontal scaling, distributing data across many commodity machines via sharding/partitioning (covered elsewhere in this topic), rather than relying on ever-bigger single servers.
+
+```text
+VERTICAL SCALING -- ONE server, made MORE POWERFUL over time:
+  Server: 4 CPU, 16GB RAM  -->  UPGRADE  -->  Server: 32 CPU, 256GB RAM
+  -- EVENTUALLY hits a HARD CEILING -- there's a LARGEST machine money can buy, and it's EXPENSIVE
+
+HORIZONTAL SCALING -- MORE servers, each handling a SLICE of the total data:
+  Server A (users 1-1M) + Server B (users 1M-2M) + Server C (users 2M-3M) + ... ADD MORE AS NEEDED
+  -- NO practical ceiling -- keep ADDING commodity machines as load grows
+```
+Because a single machine's maximum capacity is fundamentally bounded (there's a most-powerful server available at any given time, and it's disproportionately expensive), horizontal scaling's "just add another commodity machine" approach provides a more sustainable, cost-effective path to handling ever-larger data volumes and traffic — the specific reason NoSQL databases are typically designed from the ground up around partitioning data across many nodes, rather than assuming one powerful server will always be sufficient.
+
+**Common Pitfall:** assuming a NoSQL database's horizontal scaling model means performance and capacity scale "for free" simply by adding more nodes, without a well-chosen partition key (covered elsewhere in this topic) — poor partition key selection can concentrate load onto a small subset of nodes (a "hot partition," also covered elsewhere) regardless of how many total nodes the cluster has, meaning horizontal scaling's benefit is only fully realized when data is genuinely distributed evenly across the added capacity.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is a Bloom Filter, and how does a storage engine (like Cassandra's) use one to avoid an expensive, unnecessary disk read when checking whether a key MIGHT exist in a given data file?**
+
+A Bloom Filter is a compact, probabilistic data structure that answers "might this key exist here?" with either a definite "no" or a "maybe" — never a false "no," but occasionally a false "maybe" — letting a storage engine skip reading an entire on-disk data file when the Bloom Filter can definitively rule it out, without needing to actually read that file's contents from disk at all.
+
+```text
+A Cassandra table's data is split across MANY on-disk files ("SSTables") over time --
+a READ for a specific key might, in the WORST case, need to check EVERY SSTable to find it
+
+EACH SSTable has an associated, small, in-MEMORY Bloom Filter:
+  Read request for key "user_42"
+  -> CHECK SSTable_1's Bloom Filter: "definitely NOT here" -> SKIP reading SSTable_1's actual DATA from disk entirely
+  -> CHECK SSTable_2's Bloom Filter: "MAYBE here"          -> ACTUALLY read SSTable_2's data from disk to check
+  -> CHECK SSTable_3's Bloom Filter: "definitely NOT here" -> SKIP reading SSTable_3's actual DATA from disk entirely
+```
+Because the Bloom Filter itself is small enough to keep entirely in memory (unlike the actual SSTable data, which lives on disk), checking it costs almost nothing — and whenever it definitively rules out a file, an expensive disk read for that file is avoided entirely; only files the Bloom Filter says "maybe" contains the key actually need a real disk read, dramatically reducing the number of files that must be physically read for a typical point-lookup query.
+
+**Why a "maybe" isn't a correctness problem, just an occasional wasted read:** a Bloom Filter can produce a false positive (says "maybe" for a file that, once actually read, turns out not to contain the key after all) but can never produce a false negative (never says "definitely not" for a file that actually does contain the key) — this asymmetry is exactly what makes it safe to trust for *skipping* reads: a "definitely not" can always be trusted completely, while a "maybe" simply costs one occasionally-wasted disk read to confirm, never an incorrect result.
+
+**Common Pitfall:** assuming a Bloom Filter can be used to answer "does this key exist" DEFINITIVELY on its own — it can only ever rule OUT non-existence with certainty; confirming actual existence (or retrieving the value) still requires the real disk read the Bloom Filter is used specifically to help *avoid doing unnecessarily*, not to replace entirely.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is a Log-Structured Merge (LSM) Tree, and how does its "always append, never modify in place" write strategy let many NoSQL storage engines (Cassandra, RocksDB, and others) achieve dramatically higher write throughput than a traditional B-Tree-based relational storage engine?**
+
+A traditional B-Tree (the storage structure underlying most relational databases' indexes, covered under SQL Server) updates data *in place* — finding the exact right location on disk and modifying it directly, which requires random disk I/O for every write. An LSM Tree instead never modifies existing on-disk data at all: every write is simply appended, sequentially, to an in-memory structure that's periodically flushed to a new, immutable on-disk file — trading random-access writes for dramatically cheaper sequential ones.
+
+```text
+TRADITIONAL B-TREE -- writes require finding and modifying the EXACT right spot ON DISK, RANDOMLY:
+  UPDATE key "X" -> disk seeks to the SPECIFIC location containing "X" -> modifies it IN PLACE
+  -- RANDOM disk I/O, for EVERY SINGLE write -- disk seeks are SLOW, especially at HIGH write volume
+
+LSM TREE -- writes are ALWAYS appended, SEQUENTIALLY, NEVER modified in place:
+  1. Write "X" -> appended to an IN-MEMORY structure (a "memtable") -- FAST, no disk I/O yet at all
+  2. Memtable fills up -> FLUSHED to disk as a NEW, IMMUTABLE file (an "SSTable") -- ONE big SEQUENTIAL write
+  3. LATER, a BACKGROUND process ("compaction") MERGES older SSTables together, discarding
+     SUPERSEDED/deleted entries -- but this happens ASYNCHRONOUSLY, NEVER blocking the WRITE path itself
+```
+Because writes never need to locate and modify a specific existing on-disk location (the single most expensive part of a traditional B-Tree write under high concurrent load), an LSM Tree can sustain dramatically higher write throughput — the trade-off is that *reads* become more complex (as covered in the Bloom Filter discussion, a single point lookup might need to check multiple SSTables) and background compaction consumes ongoing CPU/disk I/O to keep the number of SSTables from growing unboundedly.
+
+**Why this specifically explains NoSQL's frequently-cited "optimized for writes" reputation:** systems built around an LSM Tree storage engine (Cassandra being the canonical example) are explicitly optimized for very high write throughput at the cost of reads being comparatively more expensive (needing to check multiple files, mitigated by Bloom Filters) — this is a genuine, structural, engine-level trade-off, not a vague marketing claim, and directly explains why these databases are frequently chosen specifically for write-heavy workloads (time-series ingestion, event logging) where sustained write throughput matters more than the fastest possible individual read.
+
+**Common Pitfall:** treating "NoSQL is optimized for writes" as a universal, database-agnostic property of all NoSQL systems, rather than a consequence of the SPECIFIC storage engine a given database actually uses — not every NoSQL database uses an LSM Tree (some use B-Trees, similar to relational databases); the actual write/read performance trade-off profile depends on which storage engine a specific database implementation genuinely uses internally, not merely on whether it's broadly labeled "NoSQL."
+
+---
+
 ---
