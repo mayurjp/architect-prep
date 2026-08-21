@@ -700,3 +700,81 @@ This specifically addresses a threat model that traditional at-rest/in-transit e
 **Common Pitfall:** assuming standard at-rest and in-transit encryption already provides complete protection against every conceivable threat, without recognizing the "data in use" gap those mechanisms leave open — for the overwhelming majority of workloads, standard at-rest/in-transit encryption combined with trusting the cloud provider's own security practices is entirely sufficient; Confidential Computing is a specialized, additional layer worth its added cost and complexity specifically for the narrower set of workloads with a genuine "must not trust the infrastructure provider itself" requirement.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is Google Cloud's "Signed URL," and how does it let an application grant TEMPORARY, SCOPED access to a specific Cloud Storage object without requiring the requester to have any Google Cloud credentials at all?**
+
+A Signed URL grants time-limited access to a specific Cloud Storage object, generated using a service account's private key to cryptographically sign the URL's parameters (the exact resource, permission, and expiration) — anyone possessing the resulting URL can access exactly that one resource, for exactly that duration, without needing any Google Cloud account or credentials of their own.
+
+```csharp
+var urlSigner = UrlSigner.FromServiceAccountPath("service-account.json");
+var signedUrl = await urlSigner.SignAsync(
+    bucket: "user-uploads", objectName: "receipt.pdf",
+    duration: TimeSpan.FromMinutes(10)); // valid for ONLY 10 minutes
+
+// Give this URL DIRECTLY to a user's browser -- they need NO Google Cloud credentials AT ALL to use it
+```
+A user's browser can download `receipt.pdf` directly from this signed URL for the next 10 minutes, entirely without any Google Cloud login or credential of their own — the URL itself, cryptographically signed by the service account's private key, IS the proof of authorization; Cloud Storage validates the signature and expiration directly from the URL's own parameters.
+
+**Why this matters for offloading file transfer directly to Cloud Storage, bypassing the application server:** rather than routing every file download/upload through the application's own backend server (consuming its bandwidth and compute resources for what's essentially just proxying file bytes), a Signed URL lets the client interact directly with Cloud Storage for the actual file transfer — the application server's only role is generating the narrowly-scoped, time-limited signed URL itself, not handling the actual file bytes.
+
+**Common Pitfall:** generating Signed URLs with an excessively long expiration duration "just to be safe" — a Signed URL, once generated and shared, remains valid for its entire configured duration regardless of whether the original intended use case has already completed; a duration significantly longer than what's genuinely needed unnecessarily extends the window during which a leaked or intercepted URL could still be used by an unintended party.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is Google Cloud's "Workload Identity Federation," and how does it let a WORKLOAD RUNNING OUTSIDE Google Cloud (in another cloud, or on-premises) authenticate to Google Cloud APIs WITHOUT needing a downloaded, long-lived service account key file at all?**
+
+Workload Identity Federation lets an external identity (an AWS IAM role, an on-premises workload with its own OIDC-issued token) exchange its own existing credential for a short-lived Google Cloud access token — entirely without ever downloading, storing, or managing a long-lived Google Cloud service account key file, which would otherwise be a standing, sensitive credential requiring careful storage and rotation.
+
+```text
+WITHOUT Workload Identity Federation -- requires a DOWNLOADED, LONG-LIVED key file:
+  An AWS Lambda function needing to call Google Cloud APIs downloads a Google service account
+  JSON key file, stores it as a Lambda environment variable/secret -- a LONG-LIVED credential that,
+  if LEAKED, remains valid and usable INDEFINITELY until manually revoked
+
+WITH Workload Identity Federation -- NO key file downloaded or stored AT ALL:
+  The SAME AWS Lambda function uses ITS OWN existing AWS IAM role's credentials
+  -> EXCHANGES that AWS credential for a SHORT-LIVED Google Cloud access token, via Federation
+  -> NO Google Cloud key file EVER existed, was downloaded, or needs to be stored/rotated at all
+```
+Because the external workload authenticates using a credential it already has (its AWS IAM role, in this example) rather than a separately-issued, long-lived Google Cloud key, there's no sensitive key file that could be leaked, forgotten in a config file, or committed accidentally to source control — the exchanged Google Cloud token is short-lived and tied to the workload's own existing, already-managed identity, eliminating an entire category of long-lived-credential-management risk.
+
+**Why this matters specifically for genuinely multi-cloud or hybrid architectures:** an organization running workloads across AWS, on-premises, and Google Cloud simultaneously would otherwise need to manage and rotate separate Google Cloud service account keys for every non-Google-Cloud workload needing to call Google Cloud APIs — Workload Identity Federation eliminates this entire category of key management overhead by letting each workload's own existing, already-managed identity be used directly, without any additional long-lived Google-Cloud-specific credential ever needing to exist.
+
+**Common Pitfall:** continuing to generate and distribute long-lived Google Cloud service account key files to external workloads (in other clouds, or on-premises) out of familiarity, without evaluating whether Workload Identity Federation could eliminate that standing credential entirely — every long-lived key file downloaded and stored somewhere represents an ongoing management and leak-risk burden that Workload Identity Federation is specifically designed to remove for workloads that already have some other, existing identity to federate from.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is Google Cloud Spanner's "Interleaved Tables," and how does PHYSICALLY co-locating a child table's rows with their PARENT row (rather than storing them separately) optimize the common "fetch a parent and all its children" access pattern?**
+
+Interleaved Tables let a child table's rows be physically stored adjacent to their parent row on disk (rather than in an entirely separate physical location, as would be the case with an ordinary foreign-key relationship) — this co-location means fetching a parent row and all of its related child rows can be satisfied by reading one contiguous physical region, rather than requiring a separate lookup/join across physically distant storage locations.
+
+```sql
+CREATE TABLE Customers (CustomerId INT64 NOT NULL) PRIMARY KEY (CustomerId);
+
+CREATE TABLE Orders (
+    CustomerId INT64 NOT NULL, OrderId INT64 NOT NULL, OrderDate TIMESTAMP
+) PRIMARY KEY (CustomerId, OrderId),
+  INTERLEAVE IN PARENT Customers ON DELETE CASCADE;
+-- Orders rows are PHYSICALLY STORED right alongside their PARENT Customer row on disk
+```
+```text
+Fetching Customer #42 AND all of Customer #42's Orders:
+  WITHOUT interleaving: separate physical lookups -- Customers table, THEN a separate JOIN to Orders elsewhere
+  WITH interleaving: Customer #42's row AND all its Orders rows are PHYSICALLY ADJACENT on disk --
+                     a SINGLE, LOCALIZED read satisfies BOTH, with NO separate JOIN operation needed AT ALL
+```
+Because the physical storage layout itself places related parent/child rows next to each other, Spanner can satisfy a "fetch this customer and all their orders" query far more efficiently than if the two tables were stored in entirely separate physical locations requiring an explicit distributed join — this trades some schema design flexibility (the interleaving relationship must be declared upfront, in the schema) for significantly better read performance on this specific, extremely common "parent with children" access pattern.
+
+**Why this matters specifically for a globally-distributed database like Spanner:** in a distributed system, a JOIN potentially spanning data stored across different physical nodes can be considerably more expensive than one satisfied entirely from co-located, adjacent data — Interleaved Tables specifically exploit Spanner's ability to control physical row placement to make this extremely common access pattern (fetch a parent with its children) dramatically cheaper than it would be if the relationship were expressed only as an ordinary foreign key requiring a genuinely distributed join operation.
+
+**Common Pitfall:** using Interleaved Tables for a parent/child relationship that's actually queried independently far more often than together (querying `Orders` alone, filtered by criteria unrelated to any specific customer, more frequently than "fetch a customer with their orders") — the co-location benefit specifically targets the "fetch parent with children together" access pattern; for relationships genuinely queried independently more often, an ordinary (non-interleaved) foreign-key relationship may actually be the better-fitting choice.
+
+---
+
+---

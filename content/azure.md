@@ -704,4 +704,78 @@ Session Consistency, Cosmos DB's common default, specifically guarantees that wi
 
 ---
 
+## Beginner — Question 8
+
+**Q8: What is Azure's "Shared Access Signature" (SAS) token, and how does it let an application grant SCOPED, TIME-LIMITED access to a specific storage resource WITHOUT sharing the storage account's full master key?**
+
+A SAS token grants delegated access to a specific Azure Storage resource (a single blob, a container) with fine-grained permissions (read-only, write-only) and an explicit expiration time — without ever exposing the storage account's full master key, which would otherwise grant unrestricted access to everything in the entire account.
+
+```csharp
+var sasBuilder = new BlobSasBuilder
+{
+    BlobContainerName = "user-uploads",
+    BlobName = "profile-photo.jpg",
+    Resource = "b",
+    ExpiresOn = DateTimeOffset.UtcNow.AddMinutes(15) // valid for ONLY 15 minutes
+};
+sasBuilder.SetPermissions(BlobSasPermissions.Read); // READ-ONLY -- cannot write, delete, or list anything else
+
+var sasUri = blobClient.GenerateSasUri(sasBuilder);
+// Give THIS specific, time-limited, read-only URL to a client -- NEVER the storage account's master key
+```
+A client holding this SAS URL can read exactly one specific blob for the next 15 minutes — it cannot access any other blob in the account, cannot write or delete anything, and the access automatically expires, all without the client ever possessing the storage account's actual master key, which would otherwise grant unrestricted access to every resource in the entire account indefinitely.
+
+**Why this matters for scenarios needing to grant TEMPORARY, LIMITED access to an external or untrusted party:** a web application letting users download their own uploaded file directly from Blob Storage (bypassing the application server for the actual file transfer, improving performance) can generate a short-lived, read-only SAS URL specific to that one file — the user's browser gets exactly the narrow access it needs, for exactly as long as needed, without the application ever needing to expose broader storage credentials to an untrusted client.
+
+**Common Pitfall:** sharing a storage account's master key (or a long-lived, overly broad SAS token) with client-side code or external parties for convenience — this grants far more access than typically needed and for far longer than necessary; a narrowly-scoped, short-lived SAS token limited to exactly the specific resource and permission actually required is the correct, least-privilege approach for delegating storage access to any external or less-trusted party.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is Azure Service Bus's "Sessions" feature, and how does it let RELATED messages (sharing a Session ID) be processed IN ORDER by a SINGLE consumer, even when multiple consumers are competing for messages from the same queue?**
+
+Ordinarily, competing consumers pulling from the same queue process messages in whatever order they happen to receive them, with no guarantee that related messages stay together or are processed by the same consumer — Service Bus Sessions group messages sharing the same Session ID, guaranteeing all messages in that session are delivered to and processed by exactly ONE consumer, in the order they were sent, even while other consumers continue processing entirely unrelated sessions concurrently.
+
+```csharp
+// Producer -- messages for the SAME order all share the SAME Session ID
+await sender.SendMessageAsync(new ServiceBusMessage(orderCreatedPayload) { SessionId = "order-123" });
+await sender.SendMessageAsync(new ServiceBusMessage(orderUpdatedPayload) { SessionId = "order-123" });
+await sender.SendMessageAsync(new ServiceBusMessage(orderShippedPayload) { SessionId = "order-123" });
+
+// Consumer -- accepts a SESSION, processing ALL its messages, IN ORDER, before moving to another session
+var sessionReceiver = await client.AcceptNextSessionAsync(queueName);
+// this ONE consumer now handles EVERY message for "order-123", strictly in the order they were sent --
+// while OTHER consumers can simultaneously handle ENTIRELY DIFFERENT sessions (different orders) in parallel
+```
+Because every message tagged with `SessionId = "order-123"` is guaranteed to be processed by the same consumer, in the exact order sent, an order's lifecycle events (created, updated, shipped) are guaranteed to be handled in their correct sequence — while the queue's overall throughput remains high, since many *different* sessions (different orders) are still processed concurrently across multiple consumers simultaneously.
+
+**Why this specifically solves an ordering problem that plain competing-consumers queues cannot:** without Sessions, `OrderUpdated` and `OrderShipped` messages for the same order could theoretically be picked up by two different concurrent consumers and processed out of order (or even concurrently, racing each other) — Sessions guarantee that all messages sharing an identity (the Session ID) are serialized through one single consumer, in order, entirely eliminating this specific class of ordering risk for related messages.
+
+**Common Pitfall:** using competing consumers on a plain (non-session-enabled) queue for messages requiring strict per-entity ordering, then being surprised when related messages are occasionally processed out of order — recognizing that "these specific messages must stay in order relative to each other" is exactly the signal to use Sessions (grouping by the relevant entity's ID), rather than relying on a plain competing-consumers queue's inherently unordered-across-consumers delivery behavior.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is Azure's "Managed HSM" (Hardware Security Module), and how does its FIPS 140-2 Level 3 validated, single-tenant hardware isolation differ from a standard (multi-tenant) Key Vault in terms of the specific compliance/security guarantee it provides?**
+
+A standard Azure Key Vault stores secrets/keys in a multi-tenant environment, with cryptographic operations performed in shared, software/hardware infrastructure isolated via software-level tenant separation — Managed HSM provides a *dedicated*, single-tenant hardware security module, validated to FIPS 140-2 Level 3, meaning keys never leave dedicated, tamper-resistant hardware exclusively provisioned for that one customer.
+
+```text
+Standard Key Vault: keys stored/used in MULTI-TENANT infrastructure
+  -- tenant ISOLATION provided at the SOFTWARE/platform level --
+  -- appropriate for the VAST MAJORITY of applications' compliance needs --
+
+Managed HSM: keys stored/used in a DEDICATED, SINGLE-TENANT hardware module
+  -- FIPS 140-2 Level 3 validated -- keys NEVER leave TAMPER-RESISTANT hardware
+     EXCLUSIVELY provisioned for THIS ONE CUSTOMER, no shared infrastructure involved AT ALL --
+  -- required SPECIFICALLY for regulatory regimes MANDATING this SPECIFIC level of hardware isolation --
+```
+Certain regulatory or compliance regimes (specific financial services regulations, government/defense requirements) explicitly mandate FIPS 140-2 Level 3 validated, single-tenant hardware isolation for cryptographic key storage — a standard, multi-tenant Key Vault, while itself quite secure and appropriate for the overwhelming majority of applications, doesn't meet this specific, narrower compliance bar that Managed HSM is specifically built to satisfy.
+
+**Why this represents a genuinely different guarantee, not just "the more expensive/premium option":** the distinction isn't merely about additional features or convenience — it's about a specific, narrowly-defined regulatory/compliance requirement (dedicated hardware, not shared infrastructure, at a specific FIPS validation level) that some organizations are legally or contractually required to satisfy, while the vast majority of applications have no such specific requirement and are well-served by the standard, multi-tenant Key Vault.
+
+**Common Pitfall:** adopting Managed HSM by default, assuming "more dedicated hardware isolation is always better," without an actual regulatory or compliance requirement mandating it — Managed HSM carries meaningfully higher cost and operational complexity than standard Key Vault; it should be reserved specifically for the narrower set of scenarios with an actual, identified compliance requirement mandating single-tenant, FIPS 140-2 Level 3 hardware isolation, not adopted reflexively as a generically "more secure" default choice.
+
 ---

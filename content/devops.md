@@ -753,4 +753,87 @@ Because the controller runs continuously and reconciles state on an ongoing basi
 
 ---
 
+## Beginner — Question 8
+
+**Q8: What is a "Post-Mortem" (or "Incident Retrospective"), and why does the specific practice of a BLAMELESS post-mortem produce more genuinely useful findings than one focused on identifying "who made the mistake"?**
+
+A Post-Mortem is a structured review conducted after a production incident, documenting the timeline, root cause, and follow-up actions — a *blameless* post-mortem specifically frames the investigation around "what conditions in our systems/processes allowed this to happen" rather than "who is at fault," on the premise that this framing produces more honest, complete information and more durable systemic fixes.
+
+```text
+BLAME-FOCUSED framing (produces WORSE outcomes):
+  "Alice deployed the change that caused the outage. Alice should be more careful next time."
+  -- Alice (and everyone else watching) learns: mistakes get you SINGLED OUT --
+  -- future incidents are LESS likely to be reported HONESTLY or IN FULL DETAIL --
+  -- the underlying SYSTEMIC gap (why did the deployment process ALLOW this mistake to reach production
+     at all, with NO safety net catching it?) is NEVER actually examined or FIXED --
+
+BLAMELESS framing (produces BETTER outcomes):
+  "A deployment reached production without catching an issue that a specific automated check
+   COULD have caught. Why didn't that check exist? Let's add it."
+  -- focuses on the SYSTEM'S gap, not any INDIVIDUAL'S mistake --
+  -- people INVOLVED feel SAFE providing FULL, HONEST details about what actually happened --
+  -- produces a CONCRETE, SYSTEMIC fix (the missing automated check) rather than just "be more careful" --
+```
+Blame-focused post-mortems tend to produce vague, non-actionable conclusions ("be more careful") because the people who could provide the most useful, detailed information about what actually happened have a strong incentive to minimize their own involvement or omit details that might reflect poorly on them — a blameless framing removes that incentive, encouraging complete, honest detail that reveals the actual systemic gap (a missing safeguard, an unclear process) worth genuinely fixing.
+
+**Why "blameless" doesn't mean "no accountability at all":** a blameless post-mortem still identifies what happened and who was involved in the timeline — the distinction is specifically about *framing* the investigation around systemic conditions rather than individual fault-finding, which in practice tends to produce more honest reporting and more durable, systemic fixes than a framing that leaves individuals feeling they need to defend or minimize their own role in what happened.
+
+**Common Pitfall:** conducting post-mortems that nominally use "blameless" language while still implicitly (or explicitly) singling out individuals for the mistake that caused an incident — genuine blamelessness requires consistent practice, not just terminology; a team that says "blameless" but still informally treats incidents as individual failures loses the actual benefit (more honest, complete reporting) the practice is meant to provide.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is "Chaos Engineering's" specific relationship to a formal "Game Day" exercise, and how does SCHEDULING a deliberate failure injection exercise (with STAKEHOLDERS AWARE and PREPARED) differ from continuous, automated chaos experiments running unannounced?**
+
+A Game Day is a scheduled, deliberate exercise where a team intentionally simulates a significant failure scenario (a full region outage, a critical dependency going down) with relevant stakeholders aware and prepared — distinct from continuous, automated Chaos Engineering experiments (covered elsewhere) that run smaller-scale, often unannounced failure injections as an ongoing practice.
+
+```text
+Continuous, automated Chaos Engineering:
+  Small-scale failure experiments run CONTINUOUSLY, often WITHOUT advance announcement,
+  validating that EXISTING resilience mechanisms (circuit breakers, retries) work as expected
+  on an ONGOING basis, as part of routine operations
+
+Game Day (a DELIBERATE, SCHEDULED, LARGER-SCALE exercise):
+  "Next Tuesday at 2pm, we will simulate a COMPLETE outage of our primary database region.
+   All on-call engineers should be AVAILABLE and PREPARED. We will observe HOW WELL our
+   failover/DR procedures ACTUALLY work under a REALISTIC, LARGE-SCALE failure scenario."
+  -- everyone INVOLVED KNOWS this is happening, and is SPECIFICALLY THERE to observe/respond --
+```
+A Game Day exercises significantly larger-scale, more disruptive failure scenarios (an entire region failing, not just one dependency's latency) that would be genuinely risky to inject unannounced via routine automated chaos experiments — having stakeholders explicitly aware and prepared lets the team safely validate large-scale disaster-recovery procedures under realistic conditions, with people specifically positioned to intervene if something goes more wrong than intended.
+
+**Why the two practices are complementary rather than one replacing the other:** continuous, automated chaos experiments validate that smaller, everyday resilience mechanisms remain correctly configured on an ongoing basis — a Game Day validates larger, less-frequently-exercised procedures (full disaster recovery, cross-region failover) that are too risky and disruptive to inject as routine, unannounced automated experiments, requiring the deliberate preparation and stakeholder awareness a scheduled Game Day specifically provides.
+
+**Common Pitfall:** relying solely on small-scale, continuous chaos experiments while never conducting a genuine, larger-scale Game Day exercise — everyday resilience mechanisms (circuit breakers, retries) might be well-validated through continuous chaos experiments, while an organization's actual disaster-recovery procedures for a genuinely catastrophic scenario (full region failure) remain completely untested until a real such event actually occurs, at which point discovering gaps in the DR plan is far more costly than discovering them during a deliberately scheduled, controlled Game Day exercise.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is "Error Budget" (a Site Reliability Engineering concept), and how does explicitly quantifying an ACCEPTABLE amount of unreliability let teams make DATA-DRIVEN trade-off decisions between shipping new features and investing in reliability work?**
+
+An Error Budget is the explicitly quantified difference between a service's SLO (Service Level Objective — e.g., "99.9% availability") and theoretically perfect (100%) reliability — this budget represents an *acceptable*, deliberately-permitted amount of unreliability that can be "spent" on the inherent risk of shipping new features, rather than treating every single failure as an unacceptable violation requiring a full stop of all new development.
+
+```text
+SLO: 99.9% availability per 30-day period
+-- this means: 0.1% of the 30-day period IS ALLOWED to be "down" without violating the SLO --
+-- 0.1% of 30 days = approximately 43 MINUTES of "acceptable" downtime PER MONTH --
+   -- THIS is the ERROR BUDGET: 43 minutes, to be "SPENT" across the ENTIRE month --
+
+IF the team has used ONLY 10 of their 43 minutes so far this month:
+  -> PLENTY of budget REMAINING -> reasonable to CONTINUE shipping new features at NORMAL pace,
+     accepting the INHERENT risk new changes carry
+
+IF the team has ALREADY used ALL 43 minutes, early in the month:
+  -> ERROR BUDGET IS EXHAUSTED -> team should PAUSE new feature releases, FOCUS EXCLUSIVELY
+     on reliability work, until the budget "resets" for the NEXT period
+```
+Rather than an ad-hoc, subjective debate every time a decision needs to be made about "should we ship this risky feature or focus on reliability instead," the Error Budget provides an objective, quantified answer: if budget remains, shipping features (accepting some inherent risk) is a reasonable, deliberate trade-off; if the budget is exhausted, the data-driven answer is to pause and focus on reliability until the budget replenishes.
+
+**Why this specifically prevents both "reliability at the total expense of feature velocity" and "features shipped with zero regard for reliability":** without an Error Budget, an organization tends toward one of two unhealthy extremes — treating every failure as unacceptable (grinding feature velocity to a halt) or ignoring reliability entirely in the pursuit of feature velocity; the Error Budget provides an explicit, quantified, mutually-agreed-upon boundary that both the product/feature team and the reliability-focused team can point to as a shared, objective decision criterion.
+
+**Common Pitfall:** setting an SLO without deriving and actually tracking the corresponding Error Budget, then having each individual incident's severity debated ad-hoc and subjectively rather than measured against an agreed, quantified, remaining budget — the Error Budget's actual value comes specifically from being tracked continuously and referenced as the objective basis for feature-velocity-versus-reliability trade-off decisions, not merely existing as an abstract concept discussed occasionally without concrete, ongoing measurement.
+
+---
+
 ---

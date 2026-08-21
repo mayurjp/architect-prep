@@ -773,3 +773,77 @@ This directly addresses the fundamental weakness of plain bearer tokens covered 
 **Common Pitfall:** treating "our tokens are transmitted over HTTPS" as equivalent to having genuine token binding protection — TLS in transit protects the token from network-level interception, but says nothing about protecting against a token being stolen through an entirely different vector (XSS, a compromised logging pipeline, a malicious browser extension) and then reused by the attacker from their own separate client; genuine token binding specifically protects against exactly this post-theft reuse scenario, which transport-layer TLS encryption alone does not address.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is a "Claim" in a JWT/identity token, and how does its key-value structure let a token carry structured, verifiable information about the authenticated subject BEYOND just a bare identifier?**
+
+A Claim is a single key-value assertion embedded within a token — rather than a token being merely an opaque string identifying "who this is," claims let it carry structured, meaningful information about the authenticated subject directly, verifiable by anyone who can validate the token's signature.
+
+```json
+{
+  "sub": "user-12345",           // "subject" -- WHO this token represents
+  "email": "alice@example.com",   // a CLAIM about the subject
+  "role": "admin",                 // ANOTHER claim -- structured information, not just a bare identifier
+  "exp": 1735689600                // "expiration" -- ALSO a claim, controlling the token's own validity
+}
+```
+```csharp
+// Reading claims directly from a validated token -- no separate database lookup needed for THIS information
+var role = User.FindFirst("role")?.Value; // "admin" -- read DIRECTLY from the token's own claims
+```
+Because claims are embedded directly in the token and cryptographically protected by its signature, an application can trust and use this information (a user's role, email) directly from the token itself, without needing a separate database round-trip to look up the same information — this is part of why tokens are efficient for distributed systems (covered under the stateless-vs-stateful session discussion elsewhere): the relevant information travels with the token itself.
+
+**Common Pitfall:** embedding highly sensitive or frequently-changing information as claims in a long-lived token — since a token's claims are fixed at issuance time and only refreshed when a new token is issued, a claim like `"role": "admin"` could become stale if the user's role changes before the token naturally expires or is refreshed; claims are best suited for information that's either genuinely static or where some acceptable staleness window (bounded by the token's lifetime) is tolerable for that specific piece of information.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is "Federated Identity" (as a general concept, distinct from any one specific protocol like SAML or OIDC), and how does it let a user authenticate to Service B USING an identity/credential they already established with an entirely separate Service A?**
+
+Federated Identity lets a user authenticate to one service (a "Relying Party") using credentials and an identity already established with a completely separate service (an "Identity Provider") — rather than needing a separate, distinct username/password specifically for every individual service, one trusted Identity Provider's authentication is accepted across many different Relying Parties.
+
+```text
+WITHOUT Federation -- a SEPARATE identity/credential needed for EVERY service:
+  User has a distinct username/password for ServiceA, ANOTHER distinct one for ServiceB,
+  yet ANOTHER for ServiceC -- THREE separate credentials to manage, remember, and separately secure
+
+WITH Federation -- ONE identity, TRUSTED across MULTIPLE services:
+  User authenticates ONCE with a single Identity Provider (their company's own identity system,
+  or a public provider like Google/Microsoft)
+  -> ServiceA, ServiceB, AND ServiceC all TRUST that SAME Identity Provider's authentication
+  -> the user NEVER needs a SEPARATE credential for ANY of them -- ONE identity, federated ACROSS all three
+```
+Because ServiceA, ServiceB, and ServiceC all trust the same Identity Provider's assertion of who the user is, the user only ever needs to authenticate once with that one provider — every relying service accepts that authentication as sufficient proof of identity, rather than requiring its own separate, independently-managed credential.
+
+**Why this reduces both user friction AND an organization's overall security exposure:** beyond the obvious user convenience (one login instead of many), Federated Identity also means a compromised credential at any *one* Relying Party doesn't expose credentials for any of the *other* services, since there was only ever one actual credential (with the Identity Provider) in the first place — centralizing authentication also means security improvements (MFA enforcement, credential rotation policies) applied at the Identity Provider automatically benefit every federated Relying Party simultaneously.
+
+**Common Pitfall:** treating "Federated Identity," "SSO" (Single Sign-On), and "OIDC"/"SAML" as interchangeable terms for the exact same specific thing — Federated Identity is the general concept; SSO is the user-facing experience/outcome it enables (log in once, access many services); OIDC and SAML are specific *protocols* implementing federated identity — understanding the general concept independently of any one specific protocol helps recognize the same underlying idea across different concrete technology choices.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is "Step-Up Authentication," and how does requiring an ADDITIONAL authentication factor ONLY for a specific, high-risk action (rather than universally, at initial login) balance security against everyday user friction?**
+
+Step-Up Authentication requires an additional authentication factor only at the moment a user attempts a specific, higher-risk action — rather than requiring the strongest possible authentication universally for every single action a user might ever take, which would impose unnecessary friction on the vast majority of ordinary, lower-risk interactions.
+
+```text
+Initial login: username + password (a SINGLE factor) -- SUFFICIENT for ordinary, LOW-RISK actions
+  (viewing account balance, browsing products, reading order history)
+
+User attempts a HIGH-RISK action: "transfer $50,000 to a NEW, never-before-used bank account"
+  -> the application requires an ADDITIONAL authentication factor RIGHT NOW, specifically for THIS action
+     (a fresh MFA code, a biometric re-confirmation) -- EVEN THOUGH the user is ALREADY logged in
+  -> ONLY after providing this ADDITIONAL factor does the high-risk transfer proceed
+```
+Ordinary, low-risk actions (browsing, viewing account details) proceed with just the initial authentication — but the moment a user attempts something genuinely high-risk (a large financial transfer, changing account recovery settings), the application demands additional proof of identity specifically for that action, right at the moment it matters most, rather than imposing that same friction on every single interaction regardless of its actual risk level.
+
+**Why this specifically balances security against usability better than a uniform, universally-strict authentication requirement:** requiring the strongest possible authentication for every single action (even routine, low-risk ones) would create significant user friction with limited corresponding security benefit for those low-risk actions — Step-Up Authentication concentrates the additional friction specifically where the risk genuinely justifies it, providing strong protection for high-stakes actions while keeping the vast majority of everyday interactions convenient and low-friction.
+
+**Common Pitfall:** applying Step-Up Authentication uniformly and indiscriminately, or conversely, never applying it at all and treating every action as equally low-risk once a user is authenticated — the value of Step-Up Authentication comes specifically from correctly identifying which actions are genuinely high-risk enough to warrant the additional friction (a large financial transfer) versus which are routine enough that requiring it would just be unnecessary annoyance without a meaningful corresponding security benefit.
+
+---
+
+---

@@ -814,3 +814,83 @@ Because `FixedTimeEquals` always examines every byte of both inputs regardless o
 **Common Pitfall:** using ordinary `==`/`.Equals()` string comparison for ANY secret-vs-user-input comparison (API key validation, HMAC signature verification, password hash comparison) without recognizing the timing side-channel risk — while exploiting this in practice requires an attacker capable of extremely precise timing measurement (often network jitter makes this harder remotely than it sounds), it's a well-documented, real vulnerability class, and constant-time comparison functions exist specifically to eliminate this risk at negligible cost, making them the correct default for any genuine secret-comparison scenario.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is "Cross-Site Request Forgery" (CSRF), and how does it trick a victim's BROWSER into submitting an authenticated request the victim never actually intended to make?**
+
+CSRF exploits the fact that a browser automatically attaches a user's authentication cookies to every request sent to a given site, regardless of which page/site actually triggered that request — an attacker crafts a malicious page that, when visited by an already-logged-in victim, silently triggers a request to a legitimate site, with the victim's own browser automatically attaching their valid session cookie, making the forged request appear fully authenticated.
+
+```html
+<!-- On the ATTACKER'S malicious website, silently triggered when the VICTIM (already logged into bank.com) visits it -->
+<img src="https://bank.com/transfer?amount=10000&to=attacker-account" style="display:none">
+<!-- The VICTIM'S browser AUTOMATICALLY attaches their bank.com session cookie to THIS request --
+     bank.com sees what LOOKS like a fully legitimate, authenticated request FROM the actual logged-in user -->
+```
+Because the victim is already authenticated to `bank.com` (holding a valid session cookie), their browser automatically attaches that cookie to the forged request triggered by the attacker's page — from `bank.com`'s perspective, the request appears to come from a legitimate, authenticated user, since the cookie itself is entirely genuine; the attacker never needed to steal the cookie at all, just trick the victim's own browser into using it against the victim's will.
+
+**The primary mitigation — Anti-Forgery Tokens (CSRF tokens):** the server embeds a unique, unpredictable token in legitimate forms/pages it serves, and requires that same token to be included in any state-changing request — since the attacker's malicious page has no way to know or obtain this token (it wasn't served the legitimate page), a forged request lacking the correct token is rejected, even though the browser still automatically attached the valid session cookie.
+
+**Common Pitfall:** relying solely on cookie-based authentication for state-changing operations (`POST`/`PUT`/`DELETE`) without any CSRF protection (anti-forgery tokens, or the `SameSite` cookie attribute covered under the HTTP topic) — cookies alone provide no protection against CSRF, since the browser's automatic cookie-attachment behavior is exactly the mechanism the attack exploits; genuine CSRF protection requires an explicit mitigation like anti-forgery tokens layered on top of cookie-based authentication.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is "Clickjacking," and how does the `X-Frame-Options`/`Content-Security-Policy: frame-ancestors` header prevent a malicious site from tricking a user into clicking something on YOUR site while believing they're clicking something else entirely?**
+
+Clickjacking loads a legitimate site inside an invisible (or disguised) `<iframe>` on an attacker's malicious page, overlaid with deceptive content — the victim believes they're clicking a harmless button on the attacker's visible page, but their click actually lands on the invisible, legitimate site underneath, potentially triggering a real, unintended action (a purchase confirmation, a permission grant) on the legitimate site.
+
+```html
+<!-- The ATTACKER's page -- shows an innocent-looking "Click here to win a prize!" button VISUALLY --
+     but has the VICTIM'S BANK'S real page loaded INVISIBLY UNDERNEATH, precisely positioned -->
+<div style="opacity: 0.01; position: absolute; top: 0; left: 0;">
+    <iframe src="https://bank.com/confirm-transfer"></iframe>  <!-- INVISIBLE, but CLICKABLE -->
+</div>
+<button style="position: absolute; top: 100px; left: 50px;">Click here to win a prize!</button>
+<!-- The VICTIM clicks the VISIBLE "prize" button, but the click ACTUALLY LANDS on the INVISIBLE
+     bank.com CONFIRM button positioned PRECISELY underneath it -->
+```
+```http
+X-Frame-Options: DENY
+Content-Security-Policy: frame-ancestors 'none'
+```
+By sending either header, `bank.com` instructs browsers to refuse to render its pages inside ANY `<iframe>` at all (or only within explicitly allowed origins) — the attacker's page attempting to embed `bank.com` in a hidden iframe simply fails to load it, breaking the entire clickjacking setup, since there's no invisible legitimate page left underneath for the victim's click to actually land on.
+
+**Why this attack specifically requires the victim to already be authenticated to the legitimate site:** clickjacking doesn't steal credentials or bypass authentication — it tricks an already-authenticated user's own genuine click into triggering a real action on a site they're already logged into, relying entirely on the browser's normal, legitimate rendering of the real site inside the invisible iframe, combined with careful visual positioning to align the invisible "real" button with the visible "decoy" button the victim believes they're clicking.
+
+**Common Pitfall:** omitting `X-Frame-Options`/`frame-ancestors` entirely on a site with any sensitive, action-triggering pages (payment confirmations, permission grants, account settings changes) — without these headers, browsers happily allow the site to be embedded in an iframe on any arbitrary external page, providing zero protection against exactly this "invisible overlay tricking a genuine click" attack technique.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is a "Race Condition" vulnerability in the context of multi-step, MULTI-REQUEST business logic (as distinct from the single-process TOCTOU pattern covered earlier), and how can sending MULTIPLE CONCURRENT HTTP requests exploit a check that's only enforced correctly under SEQUENTIAL access?**
+
+Beyond the earlier single-process TOCTOU race (a check-then-act gap within one process), a similar race condition can exist across *multiple concurrent HTTP requests* against business logic that assumes requests arrive sequentially — an attacker deliberately sending many simultaneous, concurrent requests can exploit a gap where a check (like "does this discount code still have remaining uses?") is performed separately from the action, with the same TOCTOU-style gap now spanning multiple HTTP requests instead of just one process's internal logic.
+
+```csharp
+// VULNERABLE -- assumes requests arrive ONE AT A TIME; check and USE-COUNT DECREMENT are SEPARATE steps
+[HttpPost("redeem-coupon")]
+public async Task<IActionResult> RedeemCoupon(string code)
+{
+    var coupon = await _db.Coupons.FirstAsync(c => c.Code == code);
+    if (coupon.RemainingUses <= 0) return BadRequest("Coupon exhausted");   // CHECK
+
+    // if 100 requests ALL execute THIS check ABOVE simultaneously, before ANY of them reach the line below,
+    // ALL 100 could see "RemainingUses = 1" and ALL pass the check --
+
+    coupon.RemainingUses--;                                                 // ACT (separate step, TOO LATE)
+    await _db.SaveChangesAsync();
+    return Ok("Coupon redeemed!");
+}
+```
+An attacker sending 100 simultaneous requests to redeem a coupon with only 1 remaining use could have all 100 requests read `RemainingUses = 1` (and pass the check) before any single one of them has actually decremented the count — all 100 requests then proceed to redeem the "single remaining use" coupon, since the check-then-act gap spans the time between the read and the write, and concurrent requests can all land within that same gap.
+
+**The fix — the SAME general principle as the single-process TOCTOU fix, applied across concurrent requests:** collapse the check and the decrement into one atomic database operation (an `UPDATE ... WHERE RemainingUses > 0` statement, checking the row count affected), exactly as covered under the earlier TOCTOU discussion — the fix is structurally identical, just applied to a vulnerability surfaced via concurrent HTTP requests rather than concurrent threads within a single process.
+
+**Common Pitfall:** assuming a vulnerability class like TOCTOU only applies to multi-threaded code within a single process, and not recognizing that the exact same check-then-act gap can be exploited across multiple concurrent HTTP requests hitting a stateless web API — any business logic performing a check followed by a separate action, without atomicity, is vulnerable to this race regardless of whether the concurrent access comes from multiple threads in one process or multiple simultaneous HTTP requests from an attacker deliberately sending many requests at once.
+
+---
+
+---
