@@ -807,4 +807,105 @@ Because compaction specifically retains the latest value per unique key rather t
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What are the three "Delivery Semantics" (At-Most-Once, At-Least-Once, Exactly-Once) a message broker can offer, and why does the ordering of "process the message" versus "acknowledge the message" determine which one a system actually gets?**
+
+Delivery Semantics describe the guarantee a messaging system makes about how many times a given message is actually processed by a consumer, in the presence of failures (a consumer crashing mid-processing, a network drop). Which guarantee you get is determined almost entirely by *when* a consumer acknowledges a message relative to when it actually finishes processing it.
+
+**At-Most-Once — acknowledge BEFORE processing (fast, but a crash mid-processing LOSES the message):**
+```text
+1. Consumer receives message, IMMEDIATELY acknowledges it (removed from the queue)
+2. Consumer THEN begins processing
+3. If the consumer CRASHES during step 2 -- the message is ALREADY gone from the queue, GONE FOREVER
+-- Message may be processed ZERO times or ONE time -- but NEVER retried if lost --
+```
+
+**At-Least-Once — acknowledge AFTER processing succeeds (safe against loss, but a crash AFTER processing but BEFORE the ack causes a DUPLICATE):**
+```text
+1. Consumer receives message, does NOT yet acknowledge it
+2. Consumer PROCESSES the message (e.g., sends an email, updates a database)
+3. Consumer acknowledges ONLY AFTER processing completes successfully
+4. If the consumer CRASHES between steps 2 and 3 -- the UNACKNOWLEDGED message REAPPEARS on the queue,
+   and gets processed AGAIN by another consumer -- a DUPLICATE, since step 2 already happened once
+-- Message is processed ONE OR MORE times -- but NEVER silently lost --
+```
+
+**Exactly-Once — the ideal, but genuinely hard to achieve end-to-end across a network:**
+```text
+Requires EITHER: a broker with native transactional support spanning BOTH the read AND the
+write side of processing (Kafka's Exactly-Once Semantics, covered elsewhere) -- OR, far more
+commonly in practice: At-Least-Once delivery COMBINED with an IDEMPOTENT consumer (covered
+in an earlier question) that safely tolerates and de-duplicates the OCCASIONAL redelivered message
+```
+True broker-level Exactly-Once is a narrow, specific guarantee that's genuinely difficult to provide across an entire distributed pipeline — most production systems instead choose At-Least-Once (the safer default, since it never silently loses a message) and achieve an *effectively* exactly-once *outcome* by making the consumer's processing logic idempotent, so that an occasional duplicate delivery simply has no additional effect the second time.
+
+**Common Pitfall:** choosing At-Most-Once for business-critical messages (an order, a payment) purely because it's simpler to reason about (no duplicate-handling logic needed) — At-Most-Once silently *loses* messages on a crash, which is almost always worse for critical business data than occasionally having to de-duplicate a harmless repeat; At-Least-Once plus an idempotent consumer is the standard, safer default for anything where losing a message would be a real business problem.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is a "Schema Registry," and how does it let producers and consumers evolve a message's structure over time (adding/removing fields) without breaking each other, especially in a system using a compact binary format like Avro or Protobuf?**
+
+A Schema Registry is a centralized service that stores every version of every message schema ever used on a given topic, and enforces *compatibility rules* (can a new schema version safely coexist with consumers still expecting the old one?) before a producer is even allowed to publish messages using a changed schema — critical for binary formats like Avro/Protobuf, which (unlike self-describing JSON) don't embed field names in every single message.
+
+**The problem it solves — a binary format's messages don't carry their own field names:**
+```text
+An Avro-encoded message on the wire is just compact BINARY BYTES -- e.g.: 0x0A 0x05 41 6C 69 63 65 ...
+-- there is NO "name": "Alice" text ANYWHERE in the message itself -- a consumer can ONLY
+   correctly decode these bytes if it has the EXACT SCHEMA describing "byte 3 onward is a string
+   field called 'name'" -- WITHOUT the matching schema, the bytes are MEANINGLESS
+```
+
+**How the registry lets schemas evolve safely over time:**
+```text
+1. Producer registers schema V1: { id: int, name: string }               -- topic "orders"
+2. Producer WANTS to add a new field: schema V2: { id: int, name: string, notes: string (OPTIONAL, with a DEFAULT) }
+3. Producer attempts to register V2 -- the REGISTRY checks: "is V2 BACKWARD-COMPATIBLE with V1?"
+   -- YES, because 'notes' has a DEFAULT VALUE -- an OLD consumer reading a NEW V2 message simply
+      IGNORES the unfamiliar 'notes' field it doesn't know about; a NEW consumer reading an OLD V1
+      message just uses the DEFAULT value for the missing 'notes' field
+4. Registry APPROVES V2 -- producer starts sending messages tagged with a SCHEMA ID referencing V2
+5. Every message on the wire ONLY carries a small SCHEMA ID (not the full schema) -- consumers
+   FETCH the actual schema FROM the registry, by ID, THE FIRST time they encounter it, and CACHE it
+```
+Because each message only needs to carry a compact schema ID rather than repeating the full schema definition, the registry both keeps messages small AND acts as the enforcement point that rejects any schema change that would actually break compatibility with consumers still running older code — the compatibility CHECK happens once, at publish/registration time, rather than being discovered later as a runtime deserialization failure in some consumer.
+
+**Common Pitfall:** allowing producers to publish schema changes without a registry (or with compatibility checking disabled) — a producer might casually rename a field or remove one still relied upon by an older consumer, and because a binary format's messages carry no self-describing field names, that consumer doesn't get a clear error; it either crashes on deserialization or, worse, silently misreads bytes as the wrong field, with no compatibility check ever having caught the breaking change before it reached production.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is Kafka Consumer Group "Rebalancing," and why does it cause a brief window of duplicate or delayed message processing whenever a consumer instance joins or leaves the group — directly explaining the duplicate-emails-during-deployment scenario covered earlier?**
+
+Rebalancing is the process by which a Kafka consumer group's partitions get reassigned across its currently-active consumer instances whenever group membership changes (an instance crashes, is added, or — as in the earlier rolling-deployment scenario — is gracefully shut down and replaced) — during the rebalance itself, partition ownership is briefly in flux, which is exactly what creates a window for duplicate processing.
+
+**The mechanics of a rebalance, triggered by a rolling deployment:**
+```text
+BEFORE: 6 consumer instances (C1..C6), each OWNS exactly 1 of 6 partitions, processing steadily
+
+Rolling deployment BEGINS: OLD instance C1 is SENT a shutdown signal, starts terminating
+  -> C1 was in the MIDDLE of processing a message from partition 0, had NOT yet committed its offset
+  -> Kafka's group coordinator DETECTS C1 leaving -> TRIGGERS A REBALANCE for the ENTIRE group
+
+DURING the rebalance: ALL 6 consumers PAUSE processing (a "stop-the-world" rebalance, in the
+  classic/eager protocol) while the group coordinator recomputes partition assignments
+
+AFTER rebalance completes: partition 0 (previously owned by C1) is now assigned to a DIFFERENT,
+  already-running consumer, say C3 -- C3 begins consuming from partition 0 starting at the LAST
+  COMMITTED offset -- but that offset is FROM BEFORE C1's in-flight message was fully processed!
+  -> C3 RE-PROCESSES that same message -- the message C1 was ALREADY handling when it was killed
+  -> THIS is the duplicate-email root cause: the message was processed ONCE by the dying C1
+     (which never got to COMMIT its offset) and ONCE MORE by C3 after the rebalance
+```
+The duplicate isn't a bug in Kafka's rebalancing logic itself — it's the direct, structural consequence of "at-least-once" delivery (covered in an earlier question) combined with the fact that a consumer's progress is only durably recorded at the granularity of its *last committed offset*, not at the granularity of "this individual message was fully handled" — any message processed but not yet committed before a rebalance reassigns its partition WILL be re-delivered to whichever consumer picks up that partition next.
+
+**Why "Incremental Cooperative Rebalancing" (a newer Kafka protocol) reduces, but doesn't eliminate, this disruption:** the classic "eager" rebalance protocol revokes *every* partition across the *entire* group and reassigns from scratch on any single membership change — the newer incremental cooperative protocol only reassigns the specific partitions that actually need to move, letting unaffected consumers keep processing their existing partitions uninterrupted during the rebalance, which shrinks the disruption window considerably but doesn't remove the fundamental at-least-once duplicate-on-reassignment possibility for the specific partition that did move.
+
+**Common Pitfall:** treating "duplicates only happen during deployments" as a sign of a specific deployment-process bug to fix, rather than recognizing that ANY consumer group membership change (a crash, an autoscaler adding an instance, a manual restart) triggers the identical rebalance mechanics and the identical duplicate-processing possibility — the actual fix is the same one covered under idempotent consumers and the Outbox pattern (design consumer-side processing to be safely idempotent), not trying to prevent rebalances from ever happening at all, since group membership changes are a completely normal and unavoidable part of operating a Kafka consumer group in production.
+
+---
+
 ---

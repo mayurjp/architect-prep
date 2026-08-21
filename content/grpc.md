@@ -918,4 +918,123 @@ Because each interceptor wraps around the next one (rather than running as indep
 
 ---
 
+## Beginner — Question 9
+
+**Q9: What is gRPC-Web, and why can't a standard browser JavaScript application call a gRPC service directly the way a .NET or Go client can?**
+
+gRPC-Web is a JavaScript client library and a companion server-side proxy layer that lets browser-based applications call gRPC services — it exists specifically because browsers don't give JavaScript low-level enough control over HTTP/2 to implement true gRPC directly, unlike a native client library written in a language with full socket/HTTP/2-frame access.
+
+**Why plain gRPC doesn't work directly from browser JavaScript:**
+```text
+True gRPC requires:
+  1. Full control over HTTP/2 framing (trailers arriving AFTER the message body, not just headers)
+  2. The ability to read HTTP/2 TRAILERS specifically -- browsers' fetch/XHR APIs simply do NOT
+     expose HTTP/2 trailers to JavaScript at all -- this is a fundamental browser platform limitation,
+     not a gRPC-specific restriction
+-- gRPC's OWN status code (success/failure) is CARRIED in those trailers -- a browser CANNOT read them --
+```
+
+**The gRPC-Web solution — a translation layer:**
+```text
+Browser (gRPC-Web JS client) ──(a MODIFIED protocol, browser-compatible)──► Envoy/a gRPC-Web-aware
+                                                                              proxy or built-in ASP.NET
+                                                                              Core middleware
+                                                                                     │
+                                                                                     ▼
+                                                                          translates to TRUE gRPC/HTTP2
+                                                                                     │
+                                                                                     ▼
+                                                                            Your ACTUAL gRPC service
+```
+```csharp
+// ASP.NET Core -- enabling gRPC-Web support directly, no separate Envoy proxy needed
+app.UseGrpcWeb();
+app.MapGrpcService<OrderService>().EnableGrpcWeb();
+```
+The gRPC-Web client library speaks a modified variant of the protocol that a browser genuinely *can* send/receive (avoiding the trailers-in-JavaScript limitation), and a translation layer (either a dedicated Envoy proxy, or built directly into ASP.NET Core via `UseGrpcWeb()`) converts between that browser-compatible variant and true, standard gRPC on the way to your actual service implementation — your service code itself is completely unaware it's talking to a browser client rather than a native one.
+
+**Common Pitfall:** assuming gRPC-Web gives a browser client the *full* feature set of native gRPC — bi-directional streaming, in particular, has much more limited support in gRPC-Web (browsers' underlying HTTP request/response model doesn't support it the same way a native HTTP/2 client can), so a design that critically depends on true bi-directional streaming for a browser-facing client may need a different approach (like SignalR, covered under ASP.NET Core) rather than assuming gRPC-Web transparently provides everything native gRPC does.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is the gRPC Health Checking Protocol, and how does having every gRPC service implement the SAME standardized health-check RPC let generic infrastructure (load balancers, Kubernetes) monitor services WITHOUT needing service-specific knowledge?**
+
+The gRPC Health Checking Protocol is a standardized, well-known RPC contract (`grpc.health.v1.Health`) that any gRPC service can implement to report its own health status in a uniform way — rather than every team inventing its own bespoke "am I healthy" endpoint with its own shape, generic tooling (Kubernetes liveness probes, load balancers, service meshes) can check the health of *any* compliant gRPC service using the exact same, universal call.
+
+**The standardized contract every implementing service shares:**
+```protobuf
+// This exact .proto is PART of the gRPC standard itself -- NOT something each team defines independently
+service Health {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse); // STREAMING health status updates
+}
+message HealthCheckResponse {
+  enum ServingStatus { UNKNOWN = 0; SERVING = 1; NOT_SERVING = 2; }
+  ServingStatus status = 1;
+}
+```
+```csharp
+// ASP.NET Core -- implementing it via the official package, reporting the ACTUAL service's health
+builder.Services.AddGrpcHealthChecks()
+    .AddCheck("database", () => CanReachDatabase() ? HealthCheckResult.Healthy() : HealthCheckResult.Unhealthy());
+
+app.MapGrpcHealthChecksService(); // exposes the STANDARD Health.Check/Watch RPCs
+```
+```bash
+# GENERIC tooling -- e.g. a Kubernetes liveness probe -- can check ANY compliant gRPC service THE SAME WAY,
+# with NO knowledge of what that specific service actually DOES internally
+grpc-health-probe -addr=localhost:5000
+```
+Because the health-check *contract itself* (method name, request/response shape, status enum) is fixed and standardized across the entire gRPC ecosystem, generic infrastructure never needs service-specific configuration to understand "is this particular microservice healthy" — a Kubernetes cluster running a hundred different gRPC microservices, written by different teams, can probe every single one identically, since they all expose the exact same standardized health RPC.
+
+**Why the `Watch` streaming variant matters beyond a simple poll-based `Check`:** rather than a monitoring system repeatedly polling `Check` on an interval, `Watch` lets a client (a service mesh sidecar, for instance) open one long-lived streaming call and receive a push notification the *instant* the service's health status actually changes — reacting to a service becoming unhealthy immediately, rather than only discovering it up to a full polling interval later.
+
+**Common Pitfall:** implementing a health check that simply always returns `SERVING` unconditionally, treated as a "the process is running" liveness check rather than a genuine health signal — a meaningful health check should verify the service can actually do its job (reach its database, its own required downstream dependencies), since infrastructure relying on this signal (routing traffic away from unhealthy instances, restarting genuinely broken pods) needs it to reflect *actual* operational health, not merely "the process hasn't crashed."
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is gRPC's "Hedging" retry policy, and how does PROACTIVELY sending a duplicate, redundant copy of a slow-running call to a DIFFERENT backend instance — before the original call has even failed — reduce tail latency at the cost of extra load?**
+
+Hedging is a retry variant distinct from ordinary retry-on-failure (covered earlier) — rather than waiting for a call to actually fail before retrying, a hedged call proactively sends an *additional*, redundant copy of the same request to a different backend instance if the original hasn't responded within a configured delay, then simply uses whichever response (original or hedge) comes back first, canceling the other.
+
+**Ordinary retry — waits for an actual FAILURE before trying again:**
+```text
+Call to Instance A ──► TIMES OUT / FAILS after full timeout ──► THEN retry against Instance B
+-- the ENTIRE original timeout must elapse UNSUCCESSFULLY before a retry even BEGINS --
+```
+
+**Hedging — proactively starts a SECOND attempt WITHOUT waiting for failure, based purely on SLOWNESS:**
+```csharp
+services.AddGrpcClient<OrderService.OrderServiceClient>()
+    .ConfigureChannel(o => o.ServiceConfig = new ServiceConfig
+    {
+        MethodConfigs = { new MethodConfig
+        {
+            HedgingPolicy = new HedgingPolicy
+            {
+                MaxAttempts = 2,
+                HedgingDelay = TimeSpan.FromMilliseconds(100) // if NO response within 100ms, hedge!
+            }
+        }}
+    });
+```
+```text
+t=0ms:    Call sent to Instance A
+t=100ms:  Instance A HASN'T responded yet (maybe it's just momentarily slow, NOT necessarily failed)
+          -> a SECOND, hedged copy of the SAME request is sent to Instance B, SIMULTANEOUSLY IN FLIGHT
+t=105ms:  Instance B responds FIRST (A happened to be unusually slow this one time)
+          -> the client uses B's response IMMEDIATELY, and CANCELS the still-pending call to A
+```
+Because the hedge is triggered purely by *slowness* (not a confirmed failure), it specifically targets **tail latency** — the small fraction of requests that happen to hit a momentarily slow instance (garbage collection pause, a transient hot spot) get a second, parallel chance at a fast instance instead of being stuck waiting out the original slow instance's full response time, trading extra backend load for a faster p99 response time.
+
+**Why Hedging is fundamentally only safe for IDEMPOTENT operations, more strictly than ordinary retries:** an ordinary retry-after-failure at least knows the first attempt genuinely failed (probably didn't take effect) — a hedged request sends a *second, live* copy of the request while the *first* might still fully succeed moments later; for anything with a side effect (charging a payment, sending an email), both copies could independently succeed, causing the exact same double-processing problem covered under idempotent consumers, except now self-inflicted by the client's own hedging policy rather than caused by an external failure/retry.
+
+**Common Pitfall:** enabling Hedging broadly across all RPC methods to "improve latency" without restricting it specifically to genuinely idempotent, read-only, or safely-repeatable operations — hedging a non-idempotent write operation (unlike ordinary failure-triggered retries, which at least have some chance the first attempt didn't take effect) can cause both the original and hedged copies to independently succeed and both take effect, since neither one necessarily failed at all; hedging policies should be scoped explicitly to operations where duplicate execution is genuinely harmless.
+
+---
+
 ---
