@@ -1521,4 +1521,78 @@ The naive version makes a separate network round trip for every single order ID 
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is a "Bounded Context" (from Domain-Driven Design), and how does it define the boundary within which a specific microservice's own model and terminology stay internally consistent?**
+
+A Bounded Context is a boundary within which a particular domain model — its entities, terminology, and business rules — applies consistently; the *same* real-world word ("Customer," "Order") can legitimately mean something meaningfully different in two different Bounded Contexts, and that's not a naming inconsistency to "fix," but an accurate reflection of each context's own genuinely different concerns.
+
+```text
+"Customer" in the BILLING service's Bounded Context:
+  Customer { Id, PaymentMethod, OutstandingBalance, BillingAddress }
+  -- concerned with: CAN this customer PAY, and HOW MUCH do they OWE
+
+"Customer" in the SHIPPING service's Bounded Context:
+  Customer { Id, ShippingAddress, PreferredDeliveryWindow, SignatureRequired }
+  -- concerned with: WHERE and WHEN does this customer's PACKAGE get delivered
+```
+Both services genuinely need "a Customer," but each one's version captures only the specific facets *its own* Bounded Context actually cares about — Billing has no reason to know about delivery windows, and Shipping has no reason to know about payment methods; each microservice's Bounded Context is precisely the boundary within which its *own* version of "Customer" is the authoritative, internally-consistent one.
+
+**Why this directly justifies the Database-per-Service pattern (covered earlier):** because each Bounded Context legitimately models the same real-world concept differently, forcing all services to share one single, unified "Customer" table would require constant compromise — a schema serving Billing's needs and Shipping's needs simultaneously satisfies neither well; the Database-per-Service pattern is the concrete technical mechanism that lets each Bounded Context's own model actually be authoritative within its own boundary, without needing to compromise with every other service's differing concerns.
+
+**Common Pitfall:** treating multiple services having "different" definitions of the same real-world entity as a data-modeling bug to be fixed by unifying them into one shared, canonical model — this is precisely the mistake Bounded Contexts exist to prevent; each service's model is *correctly* scoped to its own concerns, and attempting to force a single shared model across genuinely different Bounded Contexts typically produces an awkward, over-general model that serves no single context particularly well.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is the Two-Phase Commit (2PC) protocol, and why do microservices architectures generally avoid it in favor of the Saga pattern (covered extensively) for coordinating a distributed transaction across multiple services?**
+
+Two-Phase Commit is a classic distributed-transaction protocol where a coordinator asks every participant to "prepare" (lock resources, confirm it *can* commit) in phase one, then tells every participant to actually "commit" in phase two, only once *all* participants confirmed they could — providing genuine atomicity across multiple resources, but at a structural cost that makes it a poor fit for typical microservices.
+
+```text
+PHASE 1 ("PREPARE"): coordinator asks EVERY participant "can you commit this?"
+  InventoryService: "yes, I've LOCKED the stock, ready to commit"
+  PaymentService:   "yes, I've LOCKED the funds, ready to commit"
+  -- BOTH services are now HOLDING LOCKS, BLOCKED, waiting for the coordinator's PHASE 2 decision --
+
+PHASE 2 ("COMMIT" or "ABORT"): coordinator tells EVERYONE to actually commit (or abort) TOGETHER
+  -- IF the coordinator ITSELF crashes BETWEEN phase 1 and phase 2, EVERY participant remains
+     BLOCKED, HOLDING its locks INDEFINITELY, until the coordinator recovers --
+```
+The fundamental problem is that every participant must hold locks and remain *blocked*, unable to serve other requests, for the entire duration between phase one and phase two — and if the coordinator itself fails during that window, participants can be stuck blocked indefinitely, a single point of failure that directly contradicts microservices' goal of independently-available, loosely-coupled services.
+
+**Why the Saga pattern (covered extensively elsewhere) is preferred instead:** a Saga breaks the transaction into a sequence of independent, *locally committed* steps (each service commits its own local transaction immediately, no cross-service locks held at all), with compensating actions defined to *undo* prior steps if a later one fails — trading 2PC's strong, blocking atomicity guarantee for eventual consistency and no cross-service blocking, a trade-off that fits microservices' independence goals far better than 2PC's tightly-coupled, blocking coordination model.
+
+**Common Pitfall:** reaching for 2PC (or a distributed-transaction-coordinator library implementing it) as a seemingly "more correct" alternative to a Saga's eventual-consistency model, without weighing 2PC's severe availability cost — 2PC provides strong atomicity, but at the cost of every participant being blocked and unavailable during the commit window, and a genuine single point of failure risk if the coordinator itself fails mid-protocol; this is precisely why 2PC saw far more adoption in traditional, tightly-coupled distributed systems than in modern microservices architectures, which generally prioritize service independence and availability over that specific strong-atomicity guarantee.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What are Service-Level Objectives (SLOs) and Error Budgets, and how do they let independent microservice teams negotiate a concrete, measurable reliability CONTRACT with each other rather than relying on vague, informal expectations?**
+
+An SLO is a specific, measurable reliability target a service commits to (e.g., "99.9% of requests succeed within 200ms, measured over a rolling 30-day window") — an Error Budget is the corresponding *allowed* amount of unreliability that target implies (0.1% of requests, in this example), providing a concrete, shared number that both a service's own team and its downstream *consumers* can plan around.
+
+```text
+SERVICE: PaymentService
+SLO: 99.9% of requests succeed within 200ms (rolling 30-day window)
+ERROR BUDGET: 0.1% of requests -- e.g., roughly 43 minutes of FULL downtime-equivalent, PER MONTH,
+              is the "ALLOWED" unreliability BEFORE the SLO itself is considered VIOLATED
+
+-- Downstream CONSUMERS of PaymentService can DESIGN their OWN resilience (retries, timeouts, circuit
+   breakers, covered elsewhere) AROUND this SPECIFIC, KNOWN number, rather than GUESSING at how
+   reliable PaymentService actually is --
+
+-- PaymentService's OWN team uses the ERROR BUDGET to decide: "we've used 80% of this month's error
+   budget already -- SLOW DOWN on risky, feature-shipping DEPLOYS until NEXT month's budget resets" --
+```
+Because the SLO is a specific, agreed-upon, *measured* number (not a vague "we try to be reliable"), downstream consumer teams can make concrete architectural decisions (how aggressive to make a circuit breaker's threshold, whether a fallback is worth building) based on an actual, known reliability figure — and the *producing* team gets an explicit, data-driven signal ("we're burning through our error budget too fast") for when to prioritize stability work over shipping new features, rather than that trade-off being argued informally and inconsistently.
+
+**Why this matters specifically at microservices scale, more than in a monolith:** in a monolith, there's typically one team accountable for the whole system's reliability — in a microservices architecture, dozens of independently-deployed services each affect overall system reliability, and without an explicit, per-service SLO/Error-Budget contract, there's no clear, measurable way to know *which* service's reliability is actually the limiting factor for the overall user-facing experience, or to hold any specific team accountable for their own service's contribution to it.
+
+**Common Pitfall:** setting an SLO target with no connection to what's actually achievable or what consumers genuinely need (an aspirational "99.99%" chosen without analysis) — an SLO that's either far stricter than downstream consumers actually require (wasting engineering effort chasing unnecessary reliability) or looser than what consumers have implicitly designed around (causing consumer-side failures the SLO technically "permits" but that nobody actually planned for) undermines the entire point of having an explicit, negotiated contract in the first place; a meaningful SLO should be derived from actual consumer needs and genuine historical achievability, not chosen arbitrarily.
+
+---
+
 ---

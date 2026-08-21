@@ -946,4 +946,89 @@ This guarantees that genuinely critical workloads (system-level infrastructure P
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is a Kubernetes `ReplicaSet`, and how does it relate to a `Deployment` — given that you almost never create a `ReplicaSet` directly yourself?**
+
+A `ReplicaSet` is the lower-level Kubernetes object actually responsible for ensuring a specified number of identical Pod replicas are running at all times — a `Deployment` sits *above* it, managing ReplicaSets on your behalf to provide rolling updates and rollback history, which is why you almost always interact with Deployments directly and rarely touch ReplicaSets by hand.
+
+```text
+Deployment "my-api"
+  │
+  ├─► ReplicaSet "my-api-abc123" (OLD version) -- 0 replicas, kept for ROLLBACK history
+  │
+  └─► ReplicaSet "my-api-def456" (CURRENT version) -- 3 replicas, ACTIVELY running
+        │
+        ├─► Pod (replica 1)
+        ├─► Pod (replica 2)
+        └─► Pod (replica 3)
+```
+```bash
+kubectl apply -f deployment.yaml   # updates the DEPLOYMENT -- creates a NEW ReplicaSet for the NEW version
+kubectl get replicasets            # shows BOTH the old (scaled to 0) and current ReplicaSets
+```
+When you update a Deployment's image version, it creates a *new* ReplicaSet for the new Pod template and gradually shifts replica count from the old ReplicaSet to the new one (the rolling update mechanism) — the *old* ReplicaSet is kept around (scaled to zero) specifically so `kubectl rollout undo` can quickly scale it back up if the new version turns out to be broken, rather than needing to rebuild it from scratch.
+
+**Common Pitfall:** creating a bare `ReplicaSet` directly instead of a `Deployment` — a ReplicaSet alone provides no rolling-update or rollback mechanism at all; updating a bare ReplicaSet's Pod template doesn't automatically replace existing Pods (they simply keep running with their old spec), missing the entire orchestrated-update capability a Deployment provides on top of the ReplicaSet it manages.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is `kubectl rollout undo`, and how does a Deployment's revision history let you quickly roll back to a previous, known-good version after a bad release?**
+
+Every time a Deployment's Pod template changes (a new image version, a config change), Kubernetes records it as a new revision in the Deployment's rollout history — `kubectl rollout undo` reverts the Deployment back to a previous revision's exact Pod template, triggering the same rolling-update mechanism in reverse, without you needing to manually reconstruct the previous working configuration.
+
+```bash
+kubectl rollout history deployment/my-api
+# REVISION  CHANGE-CAUSE
+# 1         initial deployment
+# 2         update image to v1.2.0
+# 3         update image to v1.3.0   <- just deployed, and it's BROKEN
+
+kubectl rollout undo deployment/my-api
+# rolls back to the PREVIOUS revision (2, image v1.2.0) -- via the SAME rolling-update mechanism,
+# gradually replacing the BROKEN v1.3.0 Pods with the KNOWN-GOOD v1.2.0 Pods
+
+kubectl rollout undo deployment/my-api --to-revision=1
+# or roll back to a SPECIFIC, older revision by NUMBER, not just the immediately PRIOR one
+```
+Because the rollback reuses the exact same rolling-update strategy (gradually replacing Pods, respecting readiness probes) covered under zero-downtime deployments earlier, rolling back is itself a zero-downtime operation — old, broken Pods are gradually replaced by Pods running the previous, known-good image, rather than an abrupt, all-at-once switch.
+
+**Common Pitfall:** manually re-applying an old YAML file or re-running a previous `docker build`/`kubectl apply` sequence to "roll back," rather than using `kubectl rollout undo` — this risks subtle drift from what was actually running previously (a manually reconstructed YAML might not exactly match the prior revision's actual applied state); `rollout undo` guarantees reverting to *exactly* what Kubernetes actually recorded as running in that specific prior revision.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is Kubernetes Pod Affinity and Anti-Affinity, and how do they let you influence which node a Pod is scheduled onto RELATIVE TO other Pods, as distinct from a Taint/Toleration's node-centric repulsion (covered earlier)?**
+
+Taints/Tolerations (covered earlier) express a *node's* own repulsion of Pods that don't tolerate it — Pod Affinity/Anti-Affinity instead express a *Pod's* preference relative to *other Pods* already running, letting you say "schedule me near Pods like X" (Affinity) or "never schedule me on the same node as Pods like Y" (Anti-Affinity).
+
+```yaml
+# Pod Anti-Affinity -- spread REPLICAS of the SAME app across DIFFERENT nodes, for FAULT TOLERANCE
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels: { app: my-api }
+        topologyKey: "kubernetes.io/hostname" # "different NODE" -- don't co-locate replicas of THIS app
+```
+```yaml
+# Pod Affinity -- schedule a CACHE-hungry service NEAR its cache, on the SAME node, to minimize network latency
+affinity:
+  podAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels: { app: redis-cache }
+        topologyKey: "kubernetes.io/hostname" # SAME node as a Pod labeled "redis-cache"
+```
+Anti-Affinity configured this way ensures the scheduler never places two replicas of `my-api` on the *same* node — directly protecting against a single node failure taking down multiple replicas of the same application simultaneously (which would otherwise be possible if the scheduler happened to pack all 3 replicas onto one node purely by coincidence); Affinity does the opposite, deliberately co-locating related Pods to reduce network latency between them.
+
+**Why this is a fundamentally different axis of control than Taints/Tolerations:** a Taint is a property of the *node* itself, repelling Pods regardless of what else is scheduled — Affinity/Anti-Affinity rules are properties of the *Pod*, expressed relative to *other currently-scheduled Pods*, letting scheduling decisions account for the cluster's *current* Pod placement state, not just fixed, static node characteristics; the two mechanisms are frequently used together (a Taint reserving certain nodes for certain workloads, combined with Anti-Affinity ensuring replicas of one workload spread across whichever nodes remain available to it).
+
+**Common Pitfall:** using `requiredDuringSchedulingIgnoredDuringExecution` (a *hard* requirement) for Anti-Affinity in a cluster with too few nodes to satisfy it — if there are fewer available nodes than replicas requiring mutual exclusion, new Pods will simply fail to schedule at all rather than falling back to co-location; `preferredDuringSchedulingIgnoredDuringExecution` (a *soft* preference) is often the safer choice unless the hard guarantee is genuinely worth Pods potentially failing to schedule when the cluster's current node count can't satisfy it.
+
+---
+
 ---

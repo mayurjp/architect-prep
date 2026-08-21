@@ -840,4 +840,83 @@ Because the host's process table (a fixed-size kernel data structure) is shared 
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What does a Dockerfile's `EXPOSE` instruction actually do, and why does it NOT, by itself, make a container's port reachable from outside — despite the name suggesting otherwise?**
+
+`EXPOSE` is purely documentation — it declares which port(s) the containerized application listens on, informing anyone reading the Dockerfile (or tools like `docker inspect`) what the image expects, but it does not itself publish that port to the host machine or make it reachable from outside the container at all.
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+EXPOSE 8080
+# this ALONE does NOT make port 8080 reachable from OUTSIDE the container -- it's PURELY documentation/metadata
+```
+```bash
+docker run myapi                  # port 8080 is STILL NOT reachable from the HOST machine at all
+docker run -p 8080:8080 myapi     # THIS is what ACTUALLY publishes/maps the port -- -p is REQUIRED
+```
+Running the container without `-p` leaves the application listening on port 8080 *inside* the container's own isolated network namespace, completely unreachable from the host or the outside world — `EXPOSE` only signals intent (and lets `docker run -P`, capital P, auto-map all exposed ports to random host ports); the actual port publishing that makes a port reachable from outside always requires an explicit `-p`/`--publish` flag (or the equivalent `ports:` mapping in Compose).
+
+**Common Pitfall:** assuming `EXPOSE 8080` in a Dockerfile is sufficient for a container's API to be reachable, then being confused why `curl localhost:8080` fails against a container started without `-p` — `EXPOSE` and `-p` solve two different problems (documentation/metadata versus actual port publishing) and both are commonly needed together, but only `-p` actually makes a port reachable from the host.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is a Docker Multi-Stage Build's `--target` flag, and how does it let ONE Dockerfile produce genuinely DIFFERENT images (a development image with debugging tools, a lean production image) from the exact same set of build stages?**
+
+A multi-stage Dockerfile (covered earlier for producing small production images) can define more than just a "build" stage and a "final" stage — `--target` lets you stop the build at *any* named stage, producing a distinct image from that specific point, rather than always building all the way through to the final stage.
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet publish -o /app
+
+FROM build AS development
+RUN apt-get update && apt-get install -y vim curl # DEBUGGING TOOLS -- only in the DEV image
+ENTRYPOINT ["dotnet", "watch", "run"]
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final # the SMALL, LEAN runtime-only image
+COPY --from=build /app .
+ENTRYPOINT ["dotnet", "MyApi.dll"]
+```
+```bash
+docker build --target development -t myapi:dev .   # builds ONLY through the "development" stage -- has vim, curl
+docker build --target final -t myapi:prod .        # builds through to "final" -- SMALL, lean, NO dev tools at all
+```
+Because both images are defined in the *same* Dockerfile and share the earlier `build` stage's cached layers, there's no need to maintain two separate Dockerfiles (one for local development convenience, one for lean production) — `--target` simply selects which named stage to stop at, letting the same source of truth serve both purposes.
+
+**Common Pitfall:** maintaining two entirely separate Dockerfiles (a `Dockerfile.dev` and a `Dockerfile.prod`) to get a development-friendly image and a lean production image — this duplicates the shared build logic between them, risking the two files drifting out of sync over time; `--target` on a single, shared multi-stage Dockerfile keeps both variants defined in exactly one place, guaranteed to share the same underlying build steps.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is a Docker container's `cgroup` (control group)-based resource limit, and what specifically happens when a container's memory usage exceeds its configured `--memory` limit — resulting in the OOMKilled status covered under the Kubernetes topic?**
+
+Linux `cgroups` (control groups) are the kernel mechanism that actually enforces Docker's `--memory`/`--cpus` limits — a container isn't a genuinely separate virtual machine with its own fixed hardware allocation; it's a set of ordinary Linux processes whose resource consumption the kernel's cgroup subsystem constrains and accounts for.
+
+```bash
+docker run --memory=512m myapi
+# under the hood, Docker configures a CGROUP for this container's process(es), instructing the
+# LINUX KERNEL ITSELF to enforce a HARD 512MB memory ceiling for everything running inside it
+```
+```text
+WHAT HAPPENS when the container's actual memory usage EXCEEDS 512MB:
+  1. The kernel's cgroup subsystem DETECTS the container has hit its configured memory ceiling
+  2. The Linux OOM (Out-Of-Memory) Killer is invoked, SCOPED to just this cgroup
+  3. The OOM Killer picks a process WITHIN the container (typically the largest memory consumer)
+     and SENDS it SIGKILL -- an ABRUPT, un-catchable, immediate termination
+  4. Docker reports the container's exit code as 137 (128 + SIGKILL's signal number 9) --
+     this EXACT mechanism is what surfaces as "OOMKilled" status in Kubernetes (covered in that topic)
+```
+Because the OOM Killer acts specifically *within* the container's own cgroup boundary (rather than the *host's* overall memory pressure), a single misbehaving, memory-leaking container can be killed and restarted without directly starving or crashing other, unrelated containers running on the same host — the cgroup limit contains the damage to the specific container that exceeded its own configured ceiling.
+
+**Why understanding the underlying cgroup/OOM-Killer mechanism matters beyond "just set a memory limit":** a container being SIGKILLed by the OOM Killer gets ZERO opportunity for graceful cleanup (no chance to flush in-flight writes, close connections cleanly, or log a meaningful shutdown reason) — this is fundamentally different from a graceful `SIGTERM`-based shutdown (covered elsewhere for Kubernetes' graceful termination), meaning a memory-limit-triggered kill is always an abrupt, uncontrolled termination, not a negotiated one, which has real implications for what state a container's application might be left in in-flight at the moment it's killed.
+
+**Common Pitfall:** setting a container's memory limit based purely on "what seems like enough" without profiling the application's actual peak memory usage under realistic load — a limit set too low causes frequent, abrupt OOM kills (each one a hard `SIGKILL`, not a graceful shutdown) even under entirely normal operation, while a limit set with no real basis in measured behavior provides no meaningful protection against a genuine memory leak either; the limit should be derived from actual observed memory behavior under realistic load, with enough headroom for legitimate peak usage, not a guessed round number.
+
+---
+
 ---

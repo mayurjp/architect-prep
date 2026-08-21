@@ -1071,3 +1071,107 @@ public class OrderFulfillmentDomainService
 **Common Pitfall:** either (a) forcing genuinely multi-entity business logic awkwardly onto one Entity that doesn't naturally own it, distorting that Entity's responsibility, or (b) mistakenly pushing such logic out to the Infrastructure/outer layer simply because it doesn't fit neatly into any one Entity — the correct home for genuine, multi-entity business logic is a dedicated Domain Service, kept in the inner layer alongside Entities, not forced onto an ill-fitting Entity or incorrectly demoted to an outer layer it doesn't actually belong in.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: What role does the Presentation Layer play in Clean Architecture, and what specifically should — and should NOT — live there?**
+
+The Presentation Layer is the outermost layer responsible for handling a specific delivery mechanism (an ASP.NET Core Web API controller, a Blazor UI, a console app's `Main`) — its job is strictly to translate between the outside world's format (an HTTP request, a button click) and the Application layer's own use cases, containing no business logic of its own at all.
+
+```csharp
+// Presentation Layer -- a Web API controller -- TRANSLATES an HTTP request into an APPLICATION LAYER call
+[HttpPost]
+public async Task<IActionResult> CreateOrder(CreateOrderRequest request)
+{
+    var command = new CreateOrderCommand(request.CustomerId, request.Items); // TRANSLATE HTTP DTO -> Application command
+    var result = await _mediator.Send(command); // DELEGATE the ACTUAL work to the Application layer
+    return result.IsSuccess ? Ok(result.Value) : BadRequest(result.Error); // TRANSLATE the result BACK to HTTP
+}
+```
+The controller here does nothing except translate: HTTP request → Application-layer command, and Application-layer result → HTTP response — it contains no business rules, no validation logic beyond basic input shape, and no direct database access; all of that lives in the inner layers this controller simply delegates to.
+
+**Why this thin-translation-only role matters for the Dependency Rule (covered earlier):** because the Presentation Layer is the OUTERMOST layer, it can freely depend on everything inward (the Application layer's commands/queries) — but nothing inward should ever depend on it; keeping the Presentation Layer this thin means swapping *how* the application is delivered (adding a console-based batch tool alongside the Web API, for instance) requires writing a new, similarly thin Presentation Layer, without touching any of the actual business logic at all.
+
+**Common Pitfall:** letting business logic creep into a controller action "just this once" (a validation rule, a conditional business decision) because it seems convenient to have direct access to the request data right there — every such addition means that specific logic exists ONLY in the Web API's Presentation Layer, unavailable and unreused by any other delivery mechanism (a background job, a CLI tool) that might need the exact same business rule, and untestable without spinning up the full HTTP pipeline.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is a Domain Exception, and how does throwing a specific, named exception type from within domain logic communicate a business rule violation more precisely than throwing a generic exception?**
+
+A Domain Exception is a custom exception type representing a specific, named business rule violation — rather than throwing a generic `Exception` or `InvalidOperationException` with only a string message, a Domain Exception's *type itself* carries meaning, letting calling code (and readers) immediately recognize exactly which business rule was violated, and letting different violations be handled differently by type rather than by parsing a message string.
+
+```csharp
+// GENERIC exception -- the CALLER can only distinguish WHAT went wrong by PARSING the message STRING
+public void Withdraw(decimal amount)
+{
+    if (amount > Balance)
+        throw new InvalidOperationException("Insufficient funds"); // just a STRING -- fragile to catch SPECIFICALLY
+}
+
+// a DOMAIN EXCEPTION -- the TYPE ITSELF communicates EXACTLY which business rule was violated
+public class InsufficientFundsException : DomainException
+{
+    public InsufficientFundsException(decimal requested, decimal available)
+        : base($"Cannot withdraw {requested:C}; only {available:C} available")
+    {
+        RequestedAmount = requested;
+        AvailableBalance = available; // structured DATA, not just a STRING message
+    }
+    public decimal RequestedAmount { get; }
+    public decimal AvailableBalance { get; }
+}
+
+public void Withdraw(decimal amount)
+{
+    if (amount > Balance)
+        throw new InsufficientFundsException(amount, Balance);
+}
+```
+```csharp
+// Calling code can catch THIS SPECIFIC business rule violation, distinctly from OTHER unrelated failures
+try { account.Withdraw(500); }
+catch (InsufficientFundsException ex) // catches ONLY this SPECIFIC business rule violation
+{
+    return BadRequest(new { ex.RequestedAmount, ex.AvailableBalance }); // STRUCTURED data, not string-parsing
+}
+```
+Because `InsufficientFundsException` is its own distinct type (rather than a generic exception with a descriptive string), calling code can catch it *specifically*, separately from other, unrelated failures that might also throw a generic `InvalidOperationException` for entirely different reasons — and it can carry genuinely structured data (`RequestedAmount`, `AvailableBalance`) that calling code can use directly, rather than needing to parse a human-readable message string to extract the same information.
+
+**Common Pitfall:** using generic, built-in exception types (`Exception`, `InvalidOperationException`) for every domain-level business rule violation, distinguishing between them only by their message text — this makes it impossible for calling code to reliably catch and react to one *specific* business rule violation without also accidentally catching (or having to parse the message of) every *other* unrelated failure that happens to throw the same generic exception type, an especially fragile pattern once a message's exact wording changes for an unrelated reason (like a copy-editing pass) and silently breaks string-matching logic elsewhere in the codebase.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is Vertical Slice Architecture, and how does organizing code by FEATURE (rather than Clean Architecture's horizontal LAYERS) trade off differently in terms of what changes together and what stays isolated?**
+
+Clean Architecture organizes code *horizontally*, by technical layer (all Domain entities together, all Application handlers together, all Infrastructure repositories together) — Vertical Slice Architecture instead organizes code by *feature*, with each feature's controller, handler, validation, and data access all living together in one cohesive folder, minimizing how many *different* folders a single feature's change touches.
+
+```text
+CLEAN ARCHITECTURE -- organized by LAYER -- ONE feature's code is SPREAD ACROSS MANY folders:
+  /Domain/Entities/Order.cs
+  /Application/Commands/CreateOrderCommand.cs
+  /Application/Commands/CreateOrderCommandHandler.cs
+  /Application/Validators/CreateOrderValidator.cs
+  /Infrastructure/Repositories/OrderRepository.cs
+  /WebApi/Controllers/OrdersController.cs
+  -- adding "Cancel Order" touches at LEAST SIX DIFFERENT FOLDERS, EACH shared with EVERY OTHER FEATURE --
+
+VERTICAL SLICE ARCHITECTURE -- organized by FEATURE -- ONE feature's code lives TOGETHER, in ONE place:
+  /Features/CreateOrder/CreateOrderCommand.cs
+  /Features/CreateOrder/CreateOrderHandler.cs
+  /Features/CreateOrder/CreateOrderValidator.cs
+  /Features/CreateOrder/CreateOrderEndpoint.cs
+  /Features/CancelOrder/CancelOrderCommand.cs
+  /Features/CancelOrder/CancelOrderHandler.cs
+  -- EACH feature is SELF-CONTAINED -- adding "Cancel Order" means adding ONE NEW FOLDER, touching NOTHING ELSE --
+```
+In the layered approach, a single feature's related code is scattered across many shared folders, each one also containing code for *every other* feature — a Vertical Slice groups everything one specific feature needs into its own self-contained unit, meaning most changes touch only that one feature's folder, without needing to navigate through folders shared with unrelated features.
+
+**Why this is a genuinely different trade-off, not simply "better" or "worse" than Clean Architecture's layering:** Clean Architecture's horizontal layering optimizes for enforcing a strict, uniform dependency direction and consistent cross-cutting rules *across the entire application* (every Domain entity follows the same rules, regardless of feature) — Vertical Slices optimize for minimizing how many files/folders a single feature change touches, at the cost of potentially duplicating some structural boilerplate across features (each slice defining its own command/handler/validator, rather than sharing one common structure); many real codebases actually combine both ideas, using Vertical Slices for organizing *where* code lives while still keeping each individual slice's own internal code respecting Clean Architecture's Dependency Rule.
+
+**Common Pitfall:** treating Vertical Slice Architecture and Clean Architecture as mutually exclusive, forced-choice alternatives — they answer different questions (Vertical Slices: "how should files be organized on disk, to minimize cross-feature folder-hopping for a single change?" versus Clean Architecture: "which direction may source-code dependencies point, regardless of folder structure?") and are frequently combined in practice, rather than needing to pick exactly one architectural philosophy to the total exclusion of the other.
+
+---

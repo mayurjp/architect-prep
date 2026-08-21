@@ -1363,4 +1363,89 @@ Because each cell is a fully self-contained, independent replica of the entire s
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is a Reverse Proxy, and how does it differ conceptually from a Load Balancer, even though a single real-world tool (like NGINX or a cloud load balancer) often performs both roles simultaneously?**
+
+A Reverse Proxy sits in front of one or more backend servers, receiving client requests on the servers' behalf and forwarding them onward — its defining feature is *hiding* the backend's existence from the client, which only ever talks to the proxy. A Load Balancer's defining feature is *distributing* requests across multiple backend instances. Many real tools do both at once, but the two concepts describe genuinely different concerns.
+
+```text
+REVERSE PROXY (the CONCEPT) -- hides the backend, handles concerns on ITS behalf:
+  Client ──► Reverse Proxy ──► ONE backend server
+  -- the proxy might ALSO handle TLS termination, request logging, response caching --
+  -- the CLIENT never knows (or needs to know) the backend server's ACTUAL address at all --
+
+LOAD BALANCER (the CONCEPT) -- distributes requests ACROSS multiple backend instances:
+  Client ──► Load Balancer ──┬──► Backend Instance A
+                              ├──► Backend Instance B
+                              └──► Backend Instance C
+```
+A tool can be purely a reverse proxy in front of a *single* backend (handling TLS, caching, logging, without distributing anything across multiple servers) — or it can be purely a load balancer with no proxy-like features beyond distribution — but in practice, tools like NGINX or a cloud load balancer commonly combine both roles: hiding backend details from clients *and* distributing requests across many backend instances simultaneously.
+
+**Common Pitfall:** treating "Reverse Proxy" and "Load Balancer" as strictly synonymous terms simply because the same physical tool commonly provides both — understanding them as two separate *concerns* (hiding/fronting a backend, versus distributing load across multiple instances of it) clarifies which specific concern is actually relevant when discussing a particular design decision, even when one tool happens to address both simultaneously in a given deployment.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is a Distributed Lock (implemented via Redis or a similar external store), and what specific failure mode — a lock's lease expiring while the holder is still doing work — makes it meaningfully trickier to get right than an in-process lock?**
+
+A Distributed Lock lets multiple separate processes/machines coordinate "only one of us should be doing this right now," implemented by having all participants attempt to acquire a lock record in a shared external store (Redis, most commonly) — but unlike an in-process `lock` statement (which the runtime automatically releases when the holding thread finishes), a distributed lock needs an explicit expiration (lease), and that lease can expire while the actual work is still legitimately in progress.
+
+```csharp
+// Acquire a distributed lock WITH an expiration -- REQUIRED, since a crashed holder must NOT hold it forever
+bool acquired = await redis.StringSetAsync("lock:billing-job", instanceId, expiry: TimeSpan.FromMinutes(2), when: When.NotExists);
+
+if (acquired)
+{
+    // ... the ACTUAL billing job work begins ...
+    // PROBLEM: what if this work takes LONGER than 2 minutes?
+    // -- the LEASE EXPIRES WHILE the ORIGINAL holder is STILL WORKING --
+    // -- a DIFFERENT instance can NOW acquire the SAME lock, believing the FIRST holder is DONE --
+    // -- BOTH instances are NOW doing the SAME work SIMULTANEOUSLY -- the EXACT problem the lock EXISTED to PREVENT
+}
+```
+Because the lease must have *some* finite expiration (otherwise a crashed holder that never explicitly releases the lock would leave it held forever, deadlocking every future attempt), there's an inherent tension: too short a lease risks exactly this "expires while legitimately still working" scenario; too long a lease means a genuinely crashed holder's lock stays held (blocking everyone else) for an uncomfortably long time before anyone else can proceed.
+
+**The mitigation — lease renewal ("heartbeating") from within the still-working holder:**
+```csharp
+// While STILL actively working, PERIODICALLY extend the lease's expiration, proving "I'm STILL alive and working"
+await redis.KeyExpireAsync("lock:billing-job", TimeSpan.FromMinutes(2)); // called every ~30 seconds WHILE working
+```
+A holder that's still genuinely working periodically renews its own lease *before* it expires — if the holder crashes (and can no longer renew), the lease naturally expires on its own after the configured window, and a different instance can then safely take over, correctly distinguishing "the holder crashed" from "the holder is still legitimately working," which a single fixed-expiration lease alone cannot distinguish.
+
+**Common Pitfall:** setting a distributed lock's expiration based on a rough estimate of "how long the job usually takes," without implementing lease renewal — any run that takes meaningfully longer than usual (a slower-than-typical batch, a temporary downstream slowdown) risks the exact "two instances working simultaneously" failure the lock was meant to prevent in the first place; renewal-based ("heartbeat") lease extension is the standard, robust fix, rather than simply padding the fixed expiration with a large safety margin and hoping it's always enough.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is Quorum-based Consistency (the N/W/R parameters in a Dynamo-style distributed system), and how does tuning `W + R > N` guarantee strong, read-your-writes consistency without requiring EVERY replica to participate in EVERY operation?**
+
+In a system replicating each piece of data across N total replicas, Quorum-based consistency lets you tune exactly how many replicas must acknowledge a *write* (`W`) and how many must be *consulted* for a *read* (`R`) — rather than requiring all N replicas for every operation (which would sacrifice availability the moment even one replica is unreachable), or just one (sacrificing consistency).
+
+```text
+N = 5 (total replicas of each piece of data, spread across multiple nodes)
+
+IF W + R > N (e.g., W=3, R=3, since 3+3=6 > 5):
+  -- ANY successful WRITE touched AT LEAST 3 of the 5 replicas
+  -- ANY subsequent READ consults AT LEAST 3 of the 5 replicas
+  -- because 3+3 > 5, THOSE TWO SETS OF REPLICAS ARE MATHEMATICALLY GUARANTEED TO OVERLAP by AT LEAST ONE replica
+  -- THAT overlapping replica IS GUARANTEED to have the MOST RECENT write -- the READ is GUARANTEED
+     to SEE it, EVEN THOUGH neither the read NOR the write touched ALL 5 replicas
+```
+```text
+IF W + R <= N (e.g., W=2, R=2, since 2+2=4 <= 5):
+  -- the WRITE's 2 replicas and the READ's 2 replicas COULD, in the WORST case, be COMPLETELY DISJOINT --
+  -- a read COULD consult ONLY replicas that NEVER received the LATEST write -- returning STALE data --
+  -- this is DELIBERATELY choosing EVENTUAL consistency (and BETTER availability/latency) INSTEAD
+```
+The mathematical guarantee comes purely from pigeonhole reasoning: if a write's replica set and a read's replica set are each large enough that their combined size exceeds the total number of replicas, they *cannot* both avoid overlapping — that guaranteed overlap is what ensures a read always sees at least one replica holding the most recent write, achieving strong consistency without requiring literally every replica to participate in every single operation.
+
+**Why this specific tunability is the point, not just an implementation detail:** a system can choose `W=1, R=N` (fast writes, slower/more thorough reads), `W=N, R=1` (slower writes, fast reads), or a balanced `W=R=majority` — different workloads genuinely benefit from different points along this trade-off, and Quorum's N/W/R parameters let the *same* underlying replication mechanism serve very different consistency/availability/latency priorities simply by adjusting these three numbers, rather than needing an entirely different replication architecture for each desired trade-off.
+
+**Common Pitfall:** assuming a Dynamo-style system with configurable N/W/R automatically provides strong consistency by default — many such systems default to `W + R <= N` (favoring availability/latency, i.e., eventual consistency) unless explicitly configured otherwise; achieving the strong, read-your-writes guarantee genuinely requires deliberately choosing W and R values satisfying `W + R > N`, not simply assuming a "quorum-capable" system provides this guarantee automatically without deliberate configuration.
+
+---
+
 ---
