@@ -729,4 +729,82 @@ Because CDC derives events directly from the database's own transaction log (whi
 
 ---
 
+## Beginner — Question 8
+
+**Q8: What is "Message TTL" (Time-To-Live), and how does automatically discarding a message that's sat unprocessed for too long prevent a consumer from acting on hopelessly stale, no-longer-relevant data?**
+
+Message TTL specifies a maximum lifetime for a message sitting in a queue — if a message isn't consumed within that window, the broker automatically discards it (or routes it to a Dead Letter Queue, covered earlier) rather than delivering it to a consumer well after the information it carries is no longer relevant or actionable.
+
+```text
+A "price-update" message sits in a queue for 6 HOURS because the consuming service was DOWN
+-- WITHOUT a TTL: the message is EVENTUALLY delivered once the consumer recovers, applying a
+   PRICE UPDATE that's now SIX HOURS stale -- possibly conflicting with several MORE RECENT
+   price changes that already happened AFTER this message was originally published --
+
+-- WITH a TTL of, say, 15 minutes: the message EXPIRES and is DISCARDED before ever being
+   delivered -- the consumer, once it recovers, instead re-fetches CURRENT price data directly,
+   rather than applying a stale update that's since been superseded by MORE RECENT changes --
+```
+For certain categories of message (real-time price updates, live location data, anything where "old" information is actively *wrong* rather than merely outdated), delivering a very stale message can actively cause incorrect behavior — TTL ensures such messages simply expire and are discarded rather than being acted upon well past the point where their content is still valid or relevant.
+
+**Why TTL is specifically appropriate for some message types but actively wrong for others:** a payment confirmation or an order-placement event genuinely needs eventual, reliable delivery regardless of how long it takes (a TTL would risk silently losing a critical, non-repeatable business event) — a live price update or a real-time location ping, by contrast, is actively harmful if delivered stale, since a newer, more current value has likely already superseded it; TTL should be applied deliberately, based on whether a message's content genuinely becomes actively wrong (not just outdated) after some time window.
+
+**Common Pitfall:** applying a Message TTL uniformly across all message types in a system, without considering which specific messages genuinely need guaranteed, eventual delivery (financial transactions, order events) versus which are safe to discard once stale (live telemetry, price ticks) — applying TTL to the wrong category of message risks silently discarding critical business events that should have been reliably delivered regardless of delay, a potentially serious correctness/compliance issue.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is a "Saga's Choreography-based" implementation SPECIFICALLY using a message broker's Topic/Pub-Sub mechanism, and how does each participating service subscribing independently to relevant events (rather than a central orchestrator explicitly calling each one) embody the Choreography approach concretely?**
+
+Building on the general Saga Choreography concept (covered under system design) — concretely implemented via a message broker, each service independently subscribes to the specific events it cares about and publishes its own events in response, with no central coordinator explicitly directing the sequence; the overall workflow emerges from each service's own independent, local event-handling logic.
+
+```text
+OrderService: publishes "OrderCreated" -- has NO KNOWLEDGE of who (if anyone) is listening
+
+PaymentService: INDEPENDENTLY subscribes to "OrderCreated"
+  -> upon receiving it, charges the customer, THEN publishes "PaymentProcessed"
+  -- PaymentService has NO KNOWLEDGE of InventoryService's existence AT ALL --
+
+InventoryService: INDEPENDENTLY subscribes to "PaymentProcessed"
+  -> upon receiving it, reserves stock, THEN publishes "StockReserved"
+  -- InventoryService has NO KNOWLEDGE of OrderService's existence, EITHER --
+
+-- The OVERALL workflow (Order -> Payment -> Inventory) EMERGES from each service's OWN
+   independent subscriptions -- NO single component holds or dictates the FULL sequence --
+```
+Each service publishes events describing what it did, and independently subscribes to whatever events it needs to react to — no single component holds the complete picture of "the entire order-placement workflow," since that overall sequence emerges purely from the sum of each service's own, independently-configured subscriptions and reactions.
+
+**Why this specific implementation makes understanding "what happens when an order is placed" genuinely harder than the Orchestration alternative:** to understand the complete sequence, a developer must trace through every individual service's own event handlers, discovering the full workflow only by piecing together many separate, independently-deployed pieces of logic — this is precisely the Choreography trade-off covered under system design (no centralized visibility) made concrete through the actual publish/subscribe mechanics of a real message broker implementation.
+
+**Common Pitfall:** implementing a Choreography-based saga via a message broker without any centralized way to trace/visualize the full workflow across services (distributed tracing correlating a single business transaction's events across every participating service) — without this, diagnosing "why didn't this order's inventory ever get reserved" requires manually checking logs across multiple, independently-deployed services one at a time, a genuinely difficult debugging experience that distributed tracing (correlating all related events under one shared trace ID) specifically helps address.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is Kafka's "Log Compaction" (as distinct from ordinary time/size-based retention), and how does it let a topic retain the LATEST value for EVERY unique key INDEFINITELY, while still discarding SUPERSEDED older values for the SAME key?**
+
+Ordinary Kafka retention discards messages entirely after a configured time or size threshold, regardless of their content — Log Compaction instead retains at least the *most recent* message for every unique key indefinitely, discarding only *older, superseded* messages sharing that same key, letting a compacted topic function as a durable, continuously-updated "latest state" store rather than a purely time-bounded event log.
+
+```text
+A topic "user-profile-updates", KEYED by userId, with LOG COMPACTION enabled:
+
+Message 1: key=user42, value={name: "Alice", email: "alice@old.com"}
+Message 2: key=user42, value={name: "Alice", email: "alice@new.com"}   <-- SUPERSEDES message 1
+Message 3: key=user99, value={name: "Bob", email: "bob@example.com"}
+
+AFTER compaction runs:
+  Message 1 (user42's OLD value) is DISCARDED -- SUPERSEDED by a newer message with the SAME key
+  Message 2 (user42's CURRENT value) is RETAINED INDEFINITELY -- the LATEST value for THIS key
+  Message 3 (user99's value) is RETAINED -- it's the ONLY (and therefore LATEST) message for THIS key
+```
+Because compaction specifically retains the latest value per unique key rather than discarding by age/size alone, a compacted topic can be replayed from the beginning to reconstruct the CURRENT state of every key that's ever been written — a new consumer starting from scratch reads exactly the latest value for every key, without needing to process the entire, potentially enormous history of every intermediate, now-superseded value.
+
+**Why this specifically enables Kafka's use as a durable "table" (not just an event stream), directly connecting to the earlier Kafka Streams/KTable discussion:** log-compacted topics are precisely the mechanism underlying Kafka's `KTable` abstraction (covered earlier as a stream processing concept) — a `KTable` is essentially a materialized view built from a compacted topic's "latest value per key" semantics, making log compaction the concrete Kafka feature that makes treating a topic as a durable, continuously-updated table (rather than purely a stream of historical events) actually work.
+
+**Common Pitfall:** enabling log compaction on a topic that's genuinely meant to represent a historical, append-only EVENT log (where every individual event matters, not just the latest one per key) — compaction would discard historically significant intermediate events, keeping only the latest per key, which is exactly wrong for a topic meant to preserve full event history; compaction should be reserved specifically for topics conceptually representing "current state per key," not genuine historical event streams where every individual event carries lasting significance.
+
+---
+
 ---

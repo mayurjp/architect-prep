@@ -830,3 +830,92 @@ Because the actual bearer token is resolved fresh on each individual call (via t
 **Common Pitfall:** creating a brand-new gRPC channel per individual user/request specifically to carry that user's distinct authentication token, when `CallCredentials` would let a single shared channel handle this far more efficiently — channels are relatively expensive to establish and are specifically designed to be long-lived and reused; using per-call credentials on a shared channel is almost always the more efficient approach compared to creating and tearing down channels per individual request.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is a gRPC "Client-Streaming" RPC, and how does it let a client send a SEQUENCE of messages to the server over time, receiving just ONE final response only after the client finishes sending?**
+
+Client-Streaming lets a client send multiple messages to the server as a stream, over time, with the server processing them incrementally but returning only a single response once the client signals it has finished sending — useful for scenarios where a client accumulates data gradually (uploading a large file in chunks) before the server needs to produce its final result.
+
+```protobuf
+service UploadService {
+    rpc UploadFile (stream FileChunk) returns (UploadSummary); // CLIENT streams MANY chunks, gets ONE summary back
+}
+```
+```csharp
+using var call = client.UploadFile();
+await foreach (var chunk in ReadFileChunksAsync(filePath))
+{
+    await call.RequestStream.WriteAsync(chunk); // sends EACH chunk, one at a time, over the SAME call
+}
+await call.RequestStream.CompleteAsync(); // signals: "I'm DONE sending chunks"
+
+var summary = await call.ResponseAsync; // the SERVER'S single, FINAL response, sent ONLY after ALL chunks received
+```
+The client streams file chunks one at a time as they're read from disk, and only once `CompleteAsync()` signals the end of the stream does the server produce and return its single, final `UploadSummary` response — this differs from a simple unary call (one request, one response) specifically in letting the client send data incrementally over time, rather than needing the entire payload assembled and sent as a single, complete message upfront.
+
+**Why this matters specifically for large or incrementally-generated data:** for genuinely large uploads (a multi-gigabyte file), sending the entire payload as one unary request would require holding the whole thing in memory before sending — client streaming lets the data be sent incrementally as it becomes available, without needing to buffer the entire payload in memory on the client side before transmission begins.
+
+**Common Pitfall:** using a unary RPC (regular request/response) for a scenario genuinely involving large or incrementally-produced client data, forcing the entire payload to be assembled and held in memory before a single request can even be sent — client streaming is specifically the right tool when data is naturally produced or available incrementally over time, avoiding the memory/latency cost of buffering everything upfront before transmission can even begin.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is gRPC's `grpc.keepalive_time_ms` (Keepalive Ping), and how does periodically sending an application-level "ping" over an idle connection let both sides detect a DEAD connection faster than relying on TCP's own, much slower failure-detection timers?**
+
+TCP's own built-in mechanisms for detecting a dead connection (a peer that crashed or a network partition that silently dropped packets) can take a very long time to notice anything is wrong, particularly across NAT/firewall boundaries that might silently drop an idle connection without either side being immediately informed — gRPC's Keepalive mechanism instead has each side periodically send a lightweight, application-level "ping" over an otherwise-idle connection, expecting a prompt "pong" response; a missing response within a configured window lets gRPC detect and recover from a dead connection dramatically faster than waiting on TCP's own default timers.
+
+```csharp
+var channel = GrpcChannel.ForAddress("https://order-service", new GrpcChannelOptions
+{
+    HttpHandler = new SocketsHttpHandler
+    {
+        KeepAlivePingDelay = TimeSpan.FromSeconds(30),   // send a ping every 30s of IDLE time
+        KeepAlivePingTimeout = TimeSpan.FromSeconds(10)  // if NO pong within 10s, consider the connection DEAD
+    }
+});
+```
+If the server crashes or a network partition silently drops the connection without either side receiving a proper TCP-level close notification, the periodic keepalive ping (sent every 30 seconds of idle time) will simply go unanswered — after the configured timeout (10 seconds) with no response, gRPC proactively considers the connection dead and can trigger reconnection logic, far faster than TCP's own default dead-peer-detection timers (which can sometimes take minutes) would have noticed the same failure on their own.
+
+**Why this specifically matters for connections that might sit IDLE for extended periods:** an actively-used connection (constant traffic flowing) tends to naturally reveal a dead peer relatively quickly, since any attempted send would fail — a genuinely *idle* connection (no application traffic for a while) has no such natural signal, making it specifically vulnerable to sitting silently "dead" for a long time without either side noticing, unless something (the keepalive ping) actively probes it periodically even during idle periods.
+
+**Common Pitfall:** configuring keepalive ping intervals far too aggressively (very short intervals) for a connection where this isn't actually needed — this generates unnecessary network chatter and, in some environments, restrictive network intermediaries (proxies, load balancers) may actively penalize or even terminate connections perceived as sending an unusually high volume of low-value keepalive traffic; keepalive intervals should be tuned to detect genuine failures promptly without generating excessive, unnecessary background network traffic.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is gRPC's Interceptor chain ORDERING (when multiple interceptors are registered), and how does each interceptor WRAPPING the next one (rather than running independently) affect both request-processing AND response-processing order?**
+
+When multiple gRPC interceptors are registered, they form a nested chain, similar to middleware (covered under ASP.NET Core) — each interceptor wraps the *next* one in the chain, meaning the FIRST-registered interceptor's request-side logic runs FIRST (outermost), but its response-side logic (code after calling the next interceptor) runs LAST, since it's the outermost wrapper around everything else.
+
+```csharp
+public class LoggingInterceptor : Interceptor
+{
+    public override async Task<TResponse> UnaryServerHandler<TRequest, TResponse>(
+        TRequest request, ServerCallContext context, UnaryServerMethod<TRequest, TResponse> continuation)
+    {
+        Console.WriteLine("Logging: BEFORE"); // runs FIRST if registered FIRST (outermost, request side)
+        var response = await continuation(request, context); // calls the NEXT interceptor in the chain
+        Console.WriteLine("Logging: AFTER");  // runs LAST if registered FIRST (outermost, response side)
+        return response;
+    }
+}
+// Registration order: services.AddGrpc(options => { options.Interceptors.Add<LoggingInterceptor>(); ... });
+```
+```text
+Registered order: Logging, then Auth
+Request-side execution order:  Logging(before) -> Auth(before) -> ACTUAL HANDLER
+Response-side execution order: ACTUAL HANDLER -> Auth(after) -> Logging(after)
+-- Logging, registered FIRST, is the OUTERMOST wrapper -- runs FIRST on the way IN, LAST on the way OUT --
+```
+Because each interceptor wraps around the next one (rather than running as independent, unordered pieces), the request-processing order and response-processing order are effectively mirror images of each other — the first-registered interceptor is the outermost layer, seeing the request before anyone else, but also being the last to see the response on the way back out, exactly like nested function calls or matryoshka dolls.
+
+**Why this ordering matters concretely for interceptors with genuine dependencies on each other:** an authentication interceptor generally needs to run before a logging interceptor that wants to log the authenticated user's identity — getting the registration order backwards (logging registered before auth) would mean the logging interceptor's "before" logic runs before authentication has actually happened, with no authenticated user identity yet available to log at that point in the chain.
+
+**Common Pitfall:** registering interceptors without carefully considering their relative ordering and dependencies, then being confused when one interceptor's logic doesn't have access to information a supposedly-earlier interceptor was expected to have already established — interceptor chain ordering is a real, consequential design decision (exactly like ASP.NET Core middleware ordering, covered elsewhere), not an arbitrary detail that can be assumed to work correctly regardless of the sequence interceptors happen to be registered in.
+
+---
+
+---

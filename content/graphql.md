@@ -860,4 +860,100 @@ Without `@defer`, the entire response — including the fast `name`/`price` fiel
 
 ---
 
+## Beginner — Question 8
+
+**Q8: What is a GraphQL "Union" type, and how does it let a single field return ONE OF SEVERAL entirely different object shapes, with the client's query specifying which fields to select PER possible type?**
+
+A Union type declares that a field can return one of several entirely different object types, with no shared fields required between them (unlike an interface, which requires all member types to share a common set of fields) — the client's query must use inline fragments to specify which fields it wants for each specific possible type the union might actually return.
+
+```graphql
+union SearchResult = Product | Article | User   # THREE entirely UNRELATED types, no shared fields required
+
+type Query {
+    search(term: String!): [SearchResult!]!
+}
+```
+```graphql
+query {
+    search(term: "keyboard") {
+        ... on Product { name price }        # fields SPECIFIC to Product
+        ... on Article { title author }       # fields SPECIFIC to Article -- COMPLETELY different shape
+        ... on User { username }               # fields SPECIFIC to User -- yet ANOTHER different shape
+    }
+}
+```
+Because `Product`, `Article`, and `User` share no common fields at all, the client must use a separate inline fragment (`... on Product`, `... on Article`) for each possible type the union might return, specifying exactly which fields it wants for that specific type — this lets a single search field return genuinely heterogeneous results (mixing products, articles, and user profiles in one result list) while the client explicitly declares how to handle each possible shape.
+
+**Why this differs from an Interface (a related but distinct GraphQL type):** an Interface requires every implementing type to share a defined common set of fields (letting the client query those shared fields without needing a type-specific fragment at all) — a Union has no such shared-field requirement, since its member types can be entirely unrelated; Union is the right choice specifically when the possible return types genuinely don't share any meaningful common fields, while Interface fits when they do share some common, always-queryable fields.
+
+**Common Pitfall:** using a Union type for a set of types that actually DO share meaningful common fields (all having `id` and `name`, for instance) — an Interface would let the client query those shared fields directly without needing type-specific inline fragments for the common data, making Interface the better-fitting choice whenever the possible types genuinely share some meaningful common structure, reserving Union specifically for cases where the possible types are genuinely unrelated.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is GraphQL's "Automatic Persisted Queries" (APQ), and how does it differ from the manually-curated Persisted Query allowlist (covered earlier) by letting the CLIENT register new queries dynamically, on first use, rather than requiring a separate BUILD-TIME registration step?**
+
+Automatic Persisted Queries let a client register a query's hash dynamically, the first time it's used, rather than requiring a separate, explicit build-time step to pre-register every query with the server ahead of time (as the manually-curated Persisted Query allowlist, covered earlier, requires).
+
+```text
+FIRST time the client sends this query:
+  Client sends ONLY the hash: { "extensions": { "persistedQuery": { "sha256Hash": "abc123..." } } }
+  Server: "I don't recognize this hash yet" -> responds with PersistedQueryNotFound
+
+Client then sends the FULL query TEXT, ALONG WITH the SAME hash:
+  { "query": "query GetOrder(...) {...}", "extensions": { "persistedQuery": { "sha256Hash": "abc123..." } } }
+  Server: REGISTERS this hash -> full-query-text mapping, AUTOMATICALLY, for FUTURE use
+
+EVERY SUBSEQUENT time the client sends this SAME query:
+  Client sends ONLY the hash again -- the SERVER ALREADY KNOWS it now, from the PREVIOUS registration
+  -- bandwidth savings from THIS POINT FORWARD, with NO manual, separate registration step EVER required --
+```
+Unlike the manually-curated allowlist approach (requiring an explicit build/deploy step to register every known query with the server ahead of time), APQ lets this registration happen automatically and dynamically, the very first time any given query is actually used — subsequent uses of that same query then benefit from the bandwidth savings of sending just the hash, without any separate, manual registration process ever needing to run.
+
+**Why this specifically trades away the strict, allowlist-based security benefit the manually-curated approach provides:** because APQ allows *any* client to register a *new* query dynamically (simply by sending its full text alongside a hash), it doesn't provide the same "only pre-approved queries can ever execute" security guarantee the strict, manually-curated allowlist offers — APQ is primarily a bandwidth-optimization mechanism, not a security control, whereas the manually-curated allowlist (covered earlier) is specifically what provides the security benefit of restricting execution to only pre-approved queries.
+
+**Common Pitfall:** adopting Automatic Persisted Queries under the mistaken belief it provides the same security benefit as a strict, manually-curated Persisted Query allowlist — APQ's automatic, dynamic registration means an attacker could still register and execute an arbitrary, malicious query of their own choosing (simply by sending its full text once) — for the specific security benefit of restricting execution to only pre-approved queries, the manually-curated, build-time-registered allowlist approach (not APQ) is the mechanism that actually provides that guarantee.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is GraphQL Federation's "Entity" and its `@key` directive, and how does it let MULTIPLE separate subgraphs each contribute DIFFERENT fields to what the CLIENT perceives as ONE single, unified type?**
+
+In GraphQL Federation, an Entity is a type that can be split across multiple separate subgraphs (separately-owned, separately-deployed GraphQL services), each contributing a different subset of that type's fields — the `@key` directive identifies which field(s) uniquely identify an instance of that entity, letting the Federation gateway correctly merge contributions from different subgraphs into what the client perceives as one single, unified type.
+
+```graphql
+# Subgraph A (Products service) -- owns the CORE Product entity
+type Product @key(fields: "id") {
+    id: ID!
+    name: String!
+    price: Float!
+}
+```
+```graphql
+# Subgraph B (Reviews service) -- EXTENDS the SAME Product entity with ADDITIONAL fields, OWNED by THIS subgraph
+extend type Product @key(fields: "id") {
+    id: ID! @external
+    reviews: [Review!]!   # a field OWNED entirely by the Reviews subgraph, NOT the Products subgraph
+}
+```
+```graphql
+# The CLIENT's query -- queries fields from BOTH subgraphs as if Product were ONE single, unified type
+query {
+    product(id: "5") {
+        name        # resolved by SUBGRAPH A (Products service)
+        price       # resolved by SUBGRAPH A (Products service)
+        reviews { rating }  # resolved by SUBGRAPH B (Reviews service) -- ENTIRELY DIFFERENT service!
+    }
+}
+```
+The `@key(fields: "id")` directive tells the Federation gateway that both subgraphs' `Product` types represent the SAME logical entity, uniquely identified by `id` — the gateway transparently fetches `name`/`price` from the Products subgraph and `reviews` from the Reviews subgraph, stitching them together into one unified response, with the client having no visibility into (or need to know about) this underlying multi-service split at all.
+
+**Why this specifically enables independent team ownership of different ASPECTS of the SAME conceptual entity:** the Reviews team can own and independently deploy the `reviews` field's resolution logic without needing any involvement from the Products team, and vice versa for `name`/`price` — each team owns its own subgraph's contribution to the shared `Product` entity, deployed and evolved independently, while the client experiences a single, coherent, unified `Product` type regardless of how many separate teams/services actually contribute to it behind the scenes.
+
+**Common Pitfall:** defining a `@key` field inconsistently across subgraphs (different subgraphs identifying the same conceptual entity by different fields, or with a mismatched type) — the Federation gateway relies entirely on the `@key` fields matching consistently across subgraphs to correctly merge their contributions into one entity; an inconsistency here breaks the entity resolution, causing fields from different subgraphs to fail to merge correctly into the single, unified type the client expects.
+
+---
+
 ---
