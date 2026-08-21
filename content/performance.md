@@ -700,3 +700,78 @@ Without tiered compilation, the JIT would need to choose between compiling every
 **Common Pitfall:** benchmarking an application's throughput immediately after startup (before hot methods have had a chance to actually be promoted to Tier 1) and concluding the measured performance represents the application's genuine steady-state throughput — a benchmark run too early captures methods still running Tier 0, unoptimized code, understating the application's true, sustained performance once tiered compilation has had time to promote its actual hot paths; meaningful performance benchmarks should allow sufficient warm-up time for tiered compilation to reach steady state first.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is "Premature Optimization," and why does the famous phrase "premature optimization is the root of all evil" specifically warn against optimizing code BEFORE having evidence (via profiling) of where the actual bottleneck is?**
+
+Premature Optimization refers to spending time and effort optimizing code based on a *guess* about what's slow, rather than actual, measured evidence from profiling — the phrase warns that this habit tends to waste effort on parts of the code that were never actually a meaningful bottleneck, while potentially making the code harder to read/maintain for a performance gain that doesn't matter in practice.
+
+```csharp
+// PREMATURE optimization -- optimizing based on a GUESS, adding complexity for an UNMEASURED benefit
+public int[] GetActiveUserIds()
+{
+    // "I bet allocating a List first and converting is slower, let me hand-roll an array with manual resizing"
+    // ... complicated, harder-to-read manual array-growth logic, based purely on INTUITION about performance ...
+}
+
+// Reasonable DEFAULT -- simple, readable code FIRST; optimize ONLY once profiling identifies an actual bottleneck
+public int[] GetActiveUserIds() => _users.Where(u => u.IsActive).Select(u => u.Id).ToArray(); // simple, clear
+// -- if PROFILING later reveals THIS specific method is a genuine, measured bottleneck, optimize IT specifically --
+```
+The "premature" version sacrifices code clarity for a performance benefit that was never actually verified to exist or matter — the simple, readable version is very likely fast enough in practice for the vast majority of code paths, and specific hotspots (identified through actual profiling data, not guesswork) can be optimized deliberately and individually once genuinely proven to matter.
+
+**Why this doesn't mean "never think about performance until there's a proven problem":** the guidance specifically targets *micro-level* optimization decisions made on unverified guesses, not architectural decisions with large, foreseeable performance implications (choosing an approach with obviously poor algorithmic complexity for a known-large dataset is worth avoiding upfront) — the distinction is between deliberate, foreseeable architectural choices versus reflexively micro-optimizing code paths without any actual evidence they matter.
+
+**Common Pitfall:** treating "premature optimization is the root of all evil" as license to never think about performance at all, even for glaringly foreseeable architectural issues (an obviously poor algorithm for a known large dataset) — the actual guidance is specifically about not micro-optimizing based on guesswork *before* profiling reveals a genuine, measured bottleneck, not a blanket excuse to ignore reasonably foreseeable performance implications of a major architectural decision.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is .NET's `GC.TryStartNoGCRegion`, and how does temporarily suspending garbage collection for a critical, latency-sensitive code section trade increased memory usage for the elimination of GC pauses during that specific window?**
+
+`GC.TryStartNoGCRegion` requests that the garbage collector suspend collection for a specified amount of memory, for the duration of a critical code section — during that window, no GC pause can interrupt execution, at the cost of memory simply accumulating (uncollected) until the no-GC region ends or the requested memory budget is exhausted.
+
+```csharp
+bool started = GC.TryStartNoGCRegion(100_000_000); // request a 100MB budget with NO GC pauses allowed
+try
+{
+    // CRITICAL, latency-sensitive code -- a GC pause here would be UNACCEPTABLE
+    ProcessTimeCriticalTradingOrder();
+}
+finally
+{
+    if (started) GC.EndNoGCRegion(); // resumes NORMAL garbage collection afterward
+}
+```
+For a genuinely latency-critical operation (a trading system processing an order, a real-time audio processing callback) where even a brief GC pause could cause an unacceptable delay, `TryStartNoGCRegion` guarantees no such pause occurs during the critical section — the trade-off is that any garbage generated during that window simply accumulates uncollected, meaning the requested memory budget must be generous enough to cover the critical section's actual allocation needs without running out.
+
+**Why this is reserved for genuinely rare, extreme-latency-sensitivity scenarios rather than general use:** suspending GC entirely means memory pressure builds up during the no-GC window with no collection occurring — if the critical section allocates more than the requested budget, the GC forcibly resumes anyway (defeating the purpose), and for most ordinary application code, the occasional GC pause is a perfectly acceptable trade-off compared to the complexity and memory-budgeting precision `TryStartNoGCRegion` demands.
+
+**Common Pitfall:** requesting an insufficiently large memory budget for the actual allocation needs of the critical section, causing the GC to resume mid-section anyway (silently defeating the entire purpose of the no-GC region) — or applying this technique broadly across ordinary application code where occasional GC pauses were never actually a genuine problem, adding real complexity and memory-budget management overhead for a benefit that wasn't actually needed in the first place.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is .NET's `DATAS` (Dynamically Adapting To Application Sizes) Server GC heap-sizing mode, and how does it let the Server GC's heap size shrink DURING periods of low application load, rather than only ever growing?**
+
+Traditionally, .NET's Server GC mode sizes its heap based on the number of CPU cores and tends to grow (but rarely, if ever, shrink) over an application's lifetime, even during periods of genuinely low load — `DATAS` introduces heap-sizing behavior that can dynamically shrink the heap during low-load periods, then grow it again as load increases, rather than heap size being effectively a one-way ratchet that only ever increases.
+
+```text
+Traditional Server GC: heap grows to accommodate PEAK load, and generally STAYS large
+                        even during a subsequent LOW-load period (e.g., overnight, off-peak hours)
+                        -- memory footprint remains HIGH even when the application ISN'T under heavy load --
+
+DATAS-enabled Server GC: heap SHRINKS during low-load periods, reducing memory footprint
+                         -- then GROWS AGAIN as load increases -- adapting DYNAMICALLY to CURRENT need,
+                            rather than being sized for PEAK load PERMANENTLY --
+```
+For applications with genuinely variable load (a service busy during business hours, comparatively idle overnight), DATAS reduces the "wasted," permanently-reserved memory footprint during low-load periods — a meaningful benefit specifically in containerized/cloud environments where memory is often a metered, cost-relevant resource, and where over-provisioned, permanently-large heaps represent real ongoing cost even when that memory isn't actually being used for anything.
+
+**Why this specifically matters more in modern containerized deployments than in traditional, dedicated-server deployments:** in a traditional, dedicated-server deployment, unused memory sitting reserved by a large heap has comparatively little direct cost (the server's total RAM was fixed and paid for regardless) — in a cloud/container environment where memory allocation is often directly tied to cost (a container's memory limit, a cloud VM's memory-based pricing tier), a heap that stays large even during low load represents real, avoidable ongoing cost that DATAS's dynamic shrinking specifically helps reduce.
+
+**Common Pitfall:** assuming Server GC's heap sizing is a fixed, one-way-growing characteristic that must simply be accepted or worked around via manual configuration/restarts — DATAS (available in recent .NET versions) directly addresses this specific limitation, and applications with genuinely variable load patterns running in cost-sensitive, memory-metered environments should specifically evaluate whether enabling DATAS meaningfully reduces their actual memory footprint and cost during real-world, variable-load conditions.
+
+---

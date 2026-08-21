@@ -811,4 +811,69 @@ Because a transient failure partway through a multi-step transaction leaves that
 
 ---
 
+## Beginner — Question 8
+
+**Q8: What is EF Core's `Find`/`FindAsync` method, and how does it check the CURRENTLY-TRACKED entities in memory FIRST, potentially avoiding a database round trip entirely, before `Where`/`FirstOrDefault` would always hit the database?**
+
+`Find`/`FindAsync` looks up an entity by its primary key — critically, it first checks whether an entity with that exact key is *already being tracked* by the current `DbContext` (perhaps loaded earlier in the same unit of work), returning that already-in-memory instance directly without any database query at all; only if no matching tracked entity exists does it fall back to querying the database.
+
+```csharp
+var product = await context.Products.FindAsync(5); // loads Product #5 -- QUERIES the database
+// ... later in the SAME DbContext instance/scope ...
+var sameProduct = await context.Products.FindAsync(5); // returns the ALREADY-TRACKED instance --
+                                                          // NO second database query at all!
+
+// COMPARE: Where/FirstOrDefault ALWAYS queries the database, regardless of tracked state
+var alwaysQueries = await context.Products.Where(p => p.Id == 5).FirstOrDefaultAsync(); // ALWAYS hits the DB
+```
+Because `FindAsync` checks the context's local, in-memory tracked-entity cache before falling back to a database query, calling it a second time for an already-loaded entity (within the same `DbContext` instance) is essentially free — `Where`/`FirstOrDefaultAsync`, by contrast, always translates to and executes a fresh SQL query, even if the exact same entity was already loaded and tracked moments earlier in the same context.
+
+**Common Pitfall:** using `Where(p => p.Id == id).FirstOrDefaultAsync()` as a habit for simple primary-key lookups, missing the small but real optimization `FindAsync` provides for repeatedly looking up entities that may already be tracked within the same unit of work — for a genuine primary-key lookup (not a lookup by any other, non-key criteria), `FindAsync` is both more idiomatic and potentially more efficient than an equivalent `Where`/`FirstOrDefault` query.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is EF Core's `TPH` (Table-Per-Hierarchy) versus `TPT` (Table-Per-Type) inheritance mapping strategy, and how does the choice affect whether querying a SPECIFIC derived type requires a JOIN across multiple tables?**
+
+When mapping a class hierarchy (a base `Payment` class with derived `CreditCardPayment`/`BankTransferPayment` types) to a relational database, TPH stores every type in the hierarchy in ONE single table (with a discriminator column identifying which derived type each row represents) — TPT instead uses a SEPARATE table per type, with derived-type tables linked back to the base table via a shared primary key, requiring a JOIN to reconstruct a specific derived-type instance.
+
+```csharp
+// TPH -- ONE table for the ENTIRE hierarchy, with a DISCRIMINATOR column
+// Payments table: Id, Amount, Discriminator, CardNumber (NULL for non-credit-card rows), BankAccountNo (NULL for non-bank-transfer rows)
+var creditCardPayments = await context.Set<CreditCardPayment>().ToListAsync();
+// -- SQL: SELECT * FROM Payments WHERE Discriminator = 'CreditCardPayment' -- NO JOIN NEEDED AT ALL
+
+// TPT -- SEPARATE tables: Payments (base), CreditCardPayments (derived), BankTransferPayments (derived)
+var creditCardPaymentsTpt = await context.Set<CreditCardPayment>().ToListAsync();
+// -- SQL: SELECT * FROM Payments p JOIN CreditCardPayments cc ON p.Id = cc.Id -- REQUIRES a JOIN
+```
+TPH's single-table approach avoids any JOIN when querying a specific derived type (faster reads), at the cost of a wide table with many nullable columns (only relevant to some of the derived types) and no database-level constraint preventing a `CreditCardPayment` row from having a non-null `BankAccountNo` value that shouldn't apply to it at all — TPT's separate-tables approach keeps each type's own columns cleanly isolated in their own table (better relational normalization, real database-level constraints per type), at the cost of a JOIN being required to reconstruct a derived-type instance.
+
+**Why TPH is EF Core's default despite its normalization trade-offs:** TPH's query performance advantage (no JOIN needed for reading a specific derived type) is often the more practically significant factor for typical application workloads, and EF Core defaults to it accordingly — TPT remains available and preferable specifically when the normalization/constraint benefits (avoiding a wide table of many nullable columns, enforcing real per-type database constraints) outweigh the JOIN-based query performance cost for a particular application's specific needs.
+
+**Common Pitfall:** choosing TPT for a hierarchy queried extremely frequently by specific derived type, without considering the JOIN overhead this introduces on every single such query — for read-heavy workloads specifically querying derived types often, TPH's join-free single-table approach is frequently the better-performing choice, despite TPT's cleaner relational normalization; the right choice genuinely depends on the specific hierarchy's actual read patterns and how much the wide-table/nullable-column trade-off actually matters for that specific case.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is EF Core's Compiled Query (`EF.CompileAsyncQuery`), and how does pre-compiling a LINQ query's translation to SQL ONCE avoid the (typically small, but non-zero) per-execution translation cost EF Core normally pays for repeatedly-executed queries?**
+
+Every time EF Core executes a LINQ query, it must translate that LINQ expression tree into the equivalent SQL — this translation has a real (if usually small) cost, and for a query executed extremely frequently (millions of times), this repeated translation cost can accumulate into a measurable overhead. A Compiled Query performs this translation exactly once, ahead of time, and reuses the already-translated result for every subsequent execution.
+
+```csharp
+private static readonly Func<AppDbContext, int, Task<Product?>> _getProductById =
+    EF.CompileAsyncQuery((AppDbContext context, int id) =>
+        context.Products.FirstOrDefault(p => p.Id == id));
+// The LINQ-to-SQL TRANSLATION happens ONCE, HERE, when this static field is first initialized
+
+var product = await _getProductById(context, 5); // reuses the ALREADY-TRANSLATED query -- no re-translation
+```
+Without compilation, EF Core's query pipeline re-translates the same LINQ expression into SQL on every single execution (EF Core does cache some of this internally already, but a fully compiled query goes further, skipping even more of the per-execution overhead) — for a query executed at very high frequency, this repeated translation work, however individually small, adds up to a real, measurable cost that compiled queries eliminate by performing the translation exactly once.
+
+**Why this optimization is reserved for genuinely hot, high-frequency query paths rather than applied universally:** EF Core already caches query translation reasonably well by default for typical usage patterns — `EF.CompileAsyncQuery`'s additional benefit is measurable specifically for queries executed at very high frequency (a query run millions of times in a tight loop, or an extremely hot API endpoint); for the vast majority of typical, moderate-frequency queries, the additional complexity of explicitly compiled queries isn't likely to produce a measurable, worthwhile improvement.
+
+**Common Pitfall:** applying `EF.CompileAsyncQuery` broadly across an entire codebase as a blanket "performance optimization," including queries that are executed rarely or run only a handful of times per request — this adds code complexity and a static field to maintain for queries where the translation-caching benefit is negligible; compiled queries are best reserved specifically for query paths verified (via actual profiling) to be genuinely hot and frequently executed enough for the translation-caching savings to be meaningful.
+
 ---

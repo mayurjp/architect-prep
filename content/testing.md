@@ -850,4 +850,90 @@ public bool IsEligibleForDiscount(int orderCount) => orderCount >= 10;
 
 ---
 
+## Beginner — Question 8
+
+**Q8: What is a "Test Double," and how does the umbrella term encompass distinct sub-types (Dummy, Stub, Spy, Mock, Fake) that are frequently conflated under the single word "mock"?**
+
+"Test Double" is the general umbrella term for any object substituted for a real dependency in a test — "mock" is casually used to refer to all of them, but the term actually encompasses several distinct sub-types, each with a different specific purpose worth distinguishing.
+
+```csharp
+// DUMMY -- passed only to satisfy a required parameter, NEVER actually used by the test
+var dummy = new Order(); // just needs to EXIST to satisfy a method signature, its VALUES don't matter at all
+
+// STUB -- returns CANNED, pre-programmed responses, no verification of HOW it was called
+var stub = new Mock<IOrderRepository>();
+stub.Setup(r => r.GetById(5)).Returns(new Order { Id = 5 }); // just returns FIXED data when asked
+
+// SPY -- records HOW it was called, for LATER inspection, without pre-programmed behavior necessarily
+var spy = new Mock<ILogger>();
+// ... test runs ...
+spy.Verify(l => l.Log(It.IsAny<string>()), Times.Once); // VERIFIES a specific interaction actually occurred
+
+// MOCK (in the STRICT sense) -- pre-programmed with EXPECTATIONS, test FAILS if those expectations aren't met
+var mock = new Mock<IPaymentGateway>();
+mock.Setup(p => p.Charge(100m)).Verifiable(); // EXPECTS this SPECIFIC call -- test explicitly verifies it happened
+
+// FAKE -- a WORKING, simplified implementation (like an in-memory database), NOT just canned responses
+public class FakeOrderRepository : IOrderRepository
+{
+    private readonly List<Order> _orders = new(); // ACTUALLY stores/retrieves data, just NOT a real database
+}
+```
+A Stub simply returns pre-programmed data without caring how or whether it was called; a Mock, in the strict sense, specifically verifies that particular calls actually occurred as expected; a Fake is a genuinely working (if simplified) implementation, rather than one returning hardcoded canned responses — using "mock" loosely to describe all of these can obscure which specific testing concern (canned data vs. interaction verification vs. a working simplified implementation) a particular test double is actually serving.
+
+**Common Pitfall:** using a Mock (in the strict, interaction-verifying sense) when a simple Stub would suffice — over-specifying exact call verification for interactions that don't actually matter to the test's real intent creates brittle tests that fail on harmless refactors (calling a dependency in a slightly different way that produces the identical observable outcome) — reaching for the least strict test double sub-type that still adequately expresses what the test genuinely needs to verify keeps tests more resilient to unrelated implementation changes.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is "Testing in Production" (as a deliberate, monitored practice, not an accident), and how does techniques like Canary Analysis and Feature Flags (covered under DevOps) let some genuine validation happen safely against REAL production traffic that no pre-production environment can fully replicate?**
+
+"Testing in Production" refers to deliberately, safely validating behavior against real production traffic and conditions — using controlled techniques (Canary releases, feature-flagged rollouts, covered extensively under DevOps) rather than "we don't have a test environment so we just find out in prod," which is an entirely different, reckless practice masquerading under a similar-sounding name.
+
+```text
+DELIBERATE, SAFE "testing in production":
+  A new payment processing path is deployed behind a feature flag, enabled for ONLY 1% of REAL traffic
+  Health metrics (error rate, latency) are monitored closely for THIS SPECIFIC 1%
+  If healthy: gradually ramp up (Progressive Delivery, covered under DevOps) to more real traffic
+  If unhealthy: the flag is FLIPPED OFF immediately, reverting instantly, minimal actual impact
+
+RECKLESS "testing in production" (NOT what this term should mean):
+  "We don't have a staging environment, so we just push straight to prod and see what breaks"
+  -- NO controlled exposure, NO monitoring plan, NO safe rollback mechanism -- just hoping for the best
+```
+The deliberate version specifically limits blast radius (only 1% of traffic, easily and instantly reversible) while gaining genuine signal from REAL production conditions (actual user behavior, actual production-scale load, actual real-world data shapes) that even a very good staging environment often cannot perfectly replicate — the reckless version has none of these safety mechanisms and is simply skipping pre-production validation entirely, hoping nothing goes wrong.
+
+**Why some validation genuinely CANNOT be fully replicated in pre-production, no matter how good the staging environment is:** production-scale load, genuinely diverse real user behavior patterns, and real-world data's actual shape/distribution are extremely difficult to fully replicate in a staging environment — deliberate, safely-controlled testing in production (specifically leveraging the safety mechanisms of canary analysis and feature flags) captures signal from these genuinely hard-to-replicate conditions that pre-production testing alone cannot fully substitute for.
+
+**Common Pitfall:** using "we test in production" as an excuse to skip pre-production testing entirely, rather than treating deliberate production testing as a *complementary* practice layered on top of (not a replacement for) thorough pre-production testing — genuine "testing in production" specifically requires the safety mechanisms (canary rollout, feature flags, close monitoring, instant rollback) to be a responsible practice at all; without those mechanisms, it's simply skipping testing altogether under a more palatable-sounding name.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is "Contract Testing" combined with a "Pact Broker" (as a concrete implementation detail beyond the general Consumer-Driven Contract concept covered under microservices), and how does a CENTRAL BROKER let a producer know EXACTLY which consumers depend on which specific parts of its API?**
+
+Building on Consumer-Driven Contract Testing (covered under microservices) — a Pact Broker is a centralized service that stores published contracts from every consumer and coordinates verification between consumers and producers, giving a producer team visibility into exactly which consumers depend on which specific parts of its API, across potentially many different consumer services.
+
+```text
+Consumer A (MobileApp) publishes its contract to the Pact Broker:
+  "I expect GET /orders/{id} to return { status, total }"
+
+Consumer B (WebApp) publishes ITS OWN, possibly DIFFERENT contract to the SAME broker:
+  "I expect GET /orders/{id} to return { status, total, customerName }"
+
+Producer (OrderService) queries the Broker BEFORE deploying a change:
+  "Which contracts currently exist for MY API? Do I still satisfy BOTH Consumer A's AND Consumer B's needs?"
+  -> Broker runs BOTH published contracts against the producer's CANDIDATE new version
+  -> if EITHER contract would break, the Broker flags it, and (often) BLOCKS the deployment via CI
+```
+Because every consumer's contract is centrally published to and tracked by the Broker, a producer team gets a single, authoritative, always-current view of every consumer's actual requirements — without a central broker, discovering "which consumers exist, and what do they each specifically need" would require manually tracking down and communicating with every consuming team individually, an approach that doesn't scale as the number of consumers grows.
+
+**Why the Broker's "can-i-deploy" check specifically matters for CI/CD gating:** a Pact Broker typically exposes a "can-i-deploy" query that a producer's CI pipeline calls before actually deploying — this automatically checks the candidate version against every currently-published consumer contract, blocking a deployment that would break any of them, turning contract compatibility from a manual, easy-to-forget check into an automated, CI-enforced gate.
+
+**Common Pitfall:** implementing Consumer-Driven Contract Testing without a central broker (each consumer/producer pair coordinating contracts manually, bilaterally) — this scales poorly as the number of consumers grows, since there's no single, authoritative place tracking every consumer's current contract; a Pact Broker (or equivalent centralized contract registry) becomes increasingly valuable specifically as the number of services and cross-service dependencies grows beyond what bilateral, manual coordination can reasonably handle.
+
+---
+
 ---

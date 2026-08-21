@@ -725,4 +725,71 @@ Because `ProductId` and `Revenue` are each stored contiguously as their own comp
 
 ---
 
+## Beginner — Question 8
+
+**Q8: What is the SQL Server `IDENTITY` column property, and how does it differ from manually generating a primary key value (like a client-generated GUID) in terms of who is responsible for guaranteeing uniqueness?**
+
+An `IDENTITY` column has SQL Server itself automatically generate a sequential, guaranteed-unique numeric value for each new row — the application never needs to compute or supply this value itself, and SQL Server guarantees no two rows ever receive the same value, even under concurrent inserts from multiple connections.
+
+```sql
+CREATE TABLE Products (
+    Id INT IDENTITY(1,1) PRIMARY KEY,  -- starts at 1, increments by 1 -- SQL SERVER assigns this automatically
+    Name NVARCHAR(100) NOT NULL
+);
+
+INSERT INTO Products (Name) VALUES ('Keyboard'); -- Id is NOT specified -- SQL Server assigns it AUTOMATICALLY
+SELECT SCOPE_IDENTITY(); -- retrieves the Id value SQL Server JUST generated for this specific INSERT
+```
+Because SQL Server manages identity generation internally (using its own internal locking/sequencing mechanism), concurrent `INSERT` statements from multiple different connections are guaranteed to each receive a distinct, non-colliding value — the application code never has to implement its own uniqueness-guaranteeing logic, and never risks a collision from generating the same value independently in two different places.
+
+**Common Pitfall:** manually attempting to generate a "next" primary key value in application code (querying `MAX(Id) + 1`, then inserting) rather than relying on `IDENTITY` — this reintroduces exactly the TOCTOU-style race condition covered under application security: two concurrent inserts could both read the same `MAX(Id)` before either has committed, both compute the same "next" value, and one insert then fails on a primary key violation (or, worse, silently corrupts data if there's no unique constraint at all) — `IDENTITY` avoids this entirely by having the database's own internal, properly-synchronized mechanism generate the value.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is a SQL Server "Deadlock," and how does the database engine's own deadlock detection mechanism resolve it by choosing a "deadlock victim" rather than letting both transactions wait forever?**
+
+A deadlock occurs when two transactions each hold a lock the OTHER transaction needs, with neither able to proceed — Transaction A holds a lock on Resource 1 and is waiting for Resource 2 (held by Transaction B), while Transaction B holds Resource 2 and is waiting for Resource 1 (held by Transaction A); both would wait forever without intervention. SQL Server's own deadlock detection mechanism automatically identifies this circular wait and forcibly terminates one transaction (the "deadlock victim") to break the cycle.
+
+```text
+Transaction A: locks Row 1 -> then tries to lock Row 2 (currently held by Transaction B) -> WAITS
+Transaction B: locks Row 2 -> then tries to lock Row 1 (currently held by Transaction A) -> WAITS
+-- Neither can EVER proceed without intervention -- a CLASSIC DEADLOCK --
+
+SQL Server's deadlock monitor detects this circular wait pattern automatically (checking periodically)
+-> picks ONE transaction as the "deadlock victim" (typically the one that would be CHEAPER to roll back)
+-> KILLS that transaction, rolling it back, and returns error 1205 to its caller
+-> the OTHER transaction can now proceed, since its needed lock has been released by the victim's rollback
+```
+SQL Server doesn't let deadlocked transactions wait indefinitely — its deadlock monitor periodically scans for circular lock-wait patterns and, upon detecting one, automatically kills one of the involved transactions (returning error 1205, "Transaction was deadlocked...") specifically to break the cycle and let the other transaction proceed, rather than both transactions hanging forever with no resolution.
+
+**Why application code must be prepared to catch and retry a deadlock-victim error, rather than treating it as a fatal, unrecoverable failure:** being selected as the deadlock victim is a normal, expected occurrence under genuine lock contention, not necessarily a sign of an application bug — well-written data-access code catches error 1205 specifically and retries the entire transaction from the beginning, since the transaction itself was rolled back cleanly and is safe to simply attempt again.
+
+**Common Pitfall:** failing to implement retry logic for deadlock-victim errors, treating error 1205 as an unrecoverable, fatal exception that simply propagates up and fails the entire operation — deadlocks are a normal, expected part of operating a database under genuine concurrent load; production code interacting with a database under real concurrency should generally include deadlock-specific retry logic, rather than assuming deadlocks are rare edge cases unworthy of explicit handling.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is SQL Server's "Filtered Index," and how does indexing only a SUBSET of a table's rows (matching a WHERE clause) produce a smaller, more efficient index than a full-table index for queries that only ever target that same subset?**
+
+A Filtered Index includes only rows matching a specified `WHERE` predicate, rather than indexing every row in the table — for a query that only ever needs to search within that same subset, a filtered index is smaller (less disk space, less memory to cache), and consequently faster to scan/seek, than a full-table index that includes irrelevant rows the query never actually needs.
+
+```sql
+-- Most orders are "Completed" -- only a SMALL fraction are ever "Pending"
+CREATE INDEX IX_Orders_PendingOnly ON Orders (OrderDate)
+WHERE Status = 'Pending';  -- indexes ONLY the "Pending" rows -- a TINY fraction of the whole table
+
+-- A query specifically searching PENDING orders benefits from this SMALLER, more targeted index:
+SELECT * FROM Orders WHERE Status = 'Pending' AND OrderDate > '2026-01-01';
+```
+If "Pending" orders represent only 2% of the total table, a filtered index covering just those rows is roughly 50 times smaller than an equivalent full-table index — smaller indexes mean less I/O to scan, more of the index fitting in memory cache, and faster maintenance (updates to "Completed" orders don't need to touch this index at all, since those rows aren't included in it).
+
+**Why this specifically outperforms a full-table index for queries scoped to the same subset:** a full-table index on `Status, OrderDate` would include entries for every "Completed" order too, even though the query in question never searches for those — the filtered index skips indexing irrelevant rows entirely, producing a meaningfully smaller structure that's faster to scan for queries that only ever care about the specific, narrow subset the filter targets.
+
+**Common Pitfall:** creating a filtered index whose `WHERE` predicate doesn't precisely match the predicates of the queries actually intended to benefit from it — SQL Server's query optimizer can only use a filtered index if the query's own `WHERE` clause is provably compatible with (a subset of) the index's filter predicate; a filtered index defined with a predicate not aligned with actual query patterns provides no benefit at all, since the optimizer simply won't choose to use it for queries it can't prove are compatible with the filter.
+
+---
+
 ---
