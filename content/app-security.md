@@ -732,3 +732,85 @@ Because `__proto__` is a special accessor referring to an object's own prototype
 **Common Pitfall:** writing a "safe-looking" recursive merge/clone/extend utility that filters user input for obviously dangerous top-level keys but misses that `__proto__` can also appear *nested* inside a deeply nested object structure, or that `constructor.prototype` provides an alternate path to the same prototype object — robust protection requires explicitly blocking `__proto__`, `constructor`, and `prototype` as forbidden keys at every level of recursion, or using a merge utility from a library specifically hardened against and tested for this exact vulnerability class, rather than trusting a hand-rolled recursive merge function to have anticipated every bypass technique.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is SQL Injection, and how does a Parameterized Query (as opposed to string concatenation) structurally prevent user input from ever being interpreted as SQL syntax?**
+
+SQL Injection occurs when untrusted user input is concatenated directly into a SQL query string — the database cannot distinguish "legitimate query structure written by the developer" from "attacker-supplied data that happens to look like SQL syntax," so malicious input can alter the query's actual logic entirely. A Parameterized Query keeps the query's structure and the user-supplied data strictly separate, sent to the database as distinct pieces, making this confusion structurally impossible.
+
+```csharp
+// VULNERABLE -- user input concatenated DIRECTLY into the SQL string
+var query = $"SELECT * FROM Users WHERE Username = '{username}'";
+// If username is: ' OR '1'='1
+// The query BECOMES: SELECT * FROM Users WHERE Username = '' OR '1'='1'
+// '1'='1' is ALWAYS true -- this returns EVERY user row, bypassing the intended filter entirely
+```
+```csharp
+// SAFE -- parameterized query: the QUERY STRUCTURE and the DATA are sent SEPARATELY
+var command = new SqlCommand("SELECT * FROM Users WHERE Username = @username", connection);
+command.Parameters.AddWithValue("@username", username);
+// Even if username IS "' OR '1'='1", it's treated as a LITERAL STRING VALUE to search for --
+// NOT as SQL syntax -- the database looks for a username LITERALLY containing those characters
+```
+Because the parameterized query sends the SQL structure (`SELECT * FROM Users WHERE Username = @username`) and the actual data value as two entirely separate pieces to the database driver, the database engine never parses the user-supplied value as part of the SQL syntax at all — it's treated purely as a literal data value to match against, regardless of what characters it happens to contain.
+
+**Common Pitfall:** believing that manually "escaping" special characters (replacing `'` with `''`, for instance) provides equivalent protection to parameterized queries — manual escaping is error-prone and easy to get subtly wrong (different database engines have different escaping rules, and some injection techniques don't even require quote characters at all); parameterized queries/prepared statements structurally eliminate the entire vulnerability class by design, rather than relying on the developer correctly anticipating and escaping every dangerous character themselves.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is "Insecure Deserialization," and how does deserializing untrusted, attacker-controlled data using a FORMAT/LIBRARY that supports embedding TYPE information let an attacker potentially achieve remote code execution?**
+
+Some serialization formats/libraries (particularly certain binary or "polymorphic" JSON deserializers) allow the serialized data itself to specify which .NET/Java/etc. type should be instantiated during deserialization — if an attacker controls the serialized payload, they can specify an unexpected, dangerous type, and if that type's constructor or property setters have exploitable side effects, deserializing the attacker's payload can trigger those side effects, potentially leading to remote code execution.
+
+```csharp
+// DANGEROUS -- deserializing with a setting that allows the PAYLOAD to specify ARBITRARY types
+var settings = new JsonSerializerSettings { TypeNameHandling = TypeNameHandling.All };
+var obj = JsonConvert.DeserializeObject(untrustedJson, settings);
+// If the attacker's JSON specifies a "$type" pointing to some obscure .NET class whose
+// constructor/property-setter has an exploitable side effect (file writes, process execution),
+// simply DESERIALIZING the attacker's data can trigger that side effect -- NO explicit "execute" call needed
+```
+```csharp
+// SAFE -- deserializes ONLY into a specific, KNOWN, expected type -- attacker CANNOT specify an arbitrary type
+var order = JsonConvert.DeserializeObject<OrderDto>(untrustedJson); // ONLY ever produces an OrderDto, nothing else
+```
+When `TypeNameHandling` (or an equivalent polymorphic-deserialization setting in another library/language) is enabled, the deserializer trusts the incoming data itself to specify which type to instantiate — an attacker exploiting this doesn't need to find a traditional "code execution" bug at all; they simply need to find *some* type, anywhere in the loaded assemblies, whose deserialization side effects (a constructor, a property setter) can be abused, then specify that type in their malicious payload.
+
+**Why deserializing into a specific, known, expected type (as the safe example does) eliminates this entire vulnerability class:** when deserialization always produces one specific, developer-chosen type (`OrderDto`), there's no mechanism for attacker-controlled data to influence *which* type gets instantiated at all — the type is fixed by the code itself, not by the untrusted input, structurally closing off the entire "attacker specifies a dangerous type" attack vector this vulnerability class depends on.
+
+**Common Pitfall:** enabling permissive, polymorphic deserialization settings (`TypeNameHandling.All` or equivalent) broadly across an application "for flexibility," without recognizing this setting specifically enables attacker-controlled type instantiation for any data that isn't fully trusted — this setting should be reserved for genuinely fully-trusted data sources; any deserialization of data originating from an external, potentially-attacker-influenced source should deserialize into a fixed, known, specific type instead.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is a "Timing Attack" against a naive string-comparison-based authentication check, and how does a CONSTANT-TIME comparison function prevent an attacker from inferring a secret VALUE purely from how long the comparison takes to return?**
+
+A naive string equality check (like a standard `==` comparison, or many languages' default string comparison) typically short-circuits and returns as soon as the FIRST mismatched character is found — this means a comparison against a mostly-correct guess takes measurably (if only very slightly) longer than a comparison against a wildly incorrect guess, since more characters had to be checked before the mismatch was found. An attacker who can measure response timing with sufficient precision can exploit this to infer a secret value one character at a time.
+
+```csharp
+// VULNERABLE -- a naive equality check that SHORT-CIRCUITS on the FIRST mismatched character
+if (userSuppliedApiKey == actualSecretApiKey) { /* authenticated */ }
+// Comparing "Xxxxxxxx" against the real secret "Abcdefgh" fails IMMEDIATELY (first char differs)
+// Comparing "Abcdefgx" (matches the first 7 characters) takes SLIGHTLY LONGER to find the mismatch
+// -- an attacker measuring RESPONSE TIME PRECISELY can use this timing difference to guess
+//    the secret ONE CHARACTER AT A TIME, trying all possible values for each position
+```
+```csharp
+// SAFE -- a CONSTANT-TIME comparison, checking EVERY character regardless of where a mismatch occurs
+bool isEqual = CryptographicOperations.FixedTimeEquals(
+    Encoding.UTF8.GetBytes(userSuppliedApiKey),
+    Encoding.UTF8.GetBytes(actualSecretApiKey));
+// Takes the EXACT SAME amount of time REGARDLESS of how many characters matched before a mismatch --
+// reveals NOTHING about how "close" the guess was, via timing
+```
+Because `FixedTimeEquals` always examines every byte of both inputs regardless of where a mismatch is found (rather than short-circuiting the moment a difference is detected), its execution time is constant regardless of how correct or incorrect the guess was — an attacker measuring response times gains no signal whatsoever about how many leading characters of their guess happened to be correct, closing off the entire timing-based inference technique.
+
+**Why this specific vulnerability is easy to overlook, since it requires no obviously "wrong" code:** ordinary string equality (`==`) is completely correct, idiomatic code for nearly every purpose — the vulnerability is specific and narrow: comparing a SECRET value against user-supplied input, where an attacker might have the ability to measure response timing with enough precision to exploit the comparison's data-dependent execution time; using ordinary equality for comparing two non-secret values is completely fine and carries no such risk.
+
+**Common Pitfall:** using ordinary `==`/`.Equals()` string comparison for ANY secret-vs-user-input comparison (API key validation, HMAC signature verification, password hash comparison) without recognizing the timing side-channel risk — while exploiting this in practice requires an attacker capable of extremely precise timing measurement (often network jitter makes this harder remotely than it sounds), it's a well-documented, real vulnerability class, and constant-time comparison functions exist specifically to eliminate this risk at negligible cost, making them the correct default for any genuine secret-comparison scenario.
+
+---

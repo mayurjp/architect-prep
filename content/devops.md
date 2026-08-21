@@ -674,3 +674,83 @@ Because Ring 0/1 populations are deliberately chosen to be more engaged and more
 **Common Pitfall:** relying solely on a Ring strategy's cohort selection without also applying percentage-based, health-metric-gated ramping *within* each ring — even a well-chosen Ring 0 (internal employees) rolled out to 100% all at once, with no gradual ramp or automated health check, still risks a broad-within-that-ring outage if something goes wrong; Rings determine a thoughtful *sequence* of populations, but still benefit from the same gradual, metric-gated exposure increase within each one.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is the "Build Once, Deploy Many" principle in CI/CD, and why does REBUILDING an application separately for each environment (dev, staging, production) risk deploying subtly different artifacts than what was actually tested?**
+
+"Build Once, Deploy Many" means an application is compiled/packaged into a single, immutable artifact exactly once — that same artifact is then promoted, unchanged, through each successive environment (dev → staging → production), rather than being rebuilt separately for each one.
+
+```text
+VIOLATES "Build Once, Deploy Many" -- rebuilds separately for EACH environment:
+  git checkout main -> BUILD for dev -> deploy to dev -> test passes
+  git checkout main -> BUILD AGAIN for staging -> deploy to staging -> test passes
+  git checkout main -> BUILD AGAIN for production -> deploy to production
+  -- each BUILD is a SEPARATE compilation -- even from the SAME source, subtle differences CAN occur --
+
+FOLLOWS "Build Once, Deploy Many" -- ONE build, promoted UNCHANGED through each environment:
+  git checkout main -> BUILD ONCE -> produces artifact "app-v1.2.3.zip"
+  deploy "app-v1.2.3.zip" to dev -> test passes
+  deploy the EXACT SAME "app-v1.2.3.zip" to staging -> test passes
+  deploy the EXACT SAME "app-v1.2.3.zip" to production
+  -- the artifact tested in staging is LITERALLY, BYTE-FOR-BYTE, the SAME one deployed to production --
+```
+Rebuilding separately for each environment introduces a real risk: a dependency version resolving slightly differently between builds (a floating version range picking up a newer patch release between builds), a different compiler/toolchain version being used on a different build agent, or a subtly different build-time configuration — any of these could mean the artifact actually deployed to production is not truly identical to the one that was tested in staging, undermining the entire point of testing it there first.
+
+**Why this specifically matters for genuine confidence in "what we tested is what we're shipping":** the whole value of testing in staging is the assumption that staging's behavior predicts production's behavior — if production runs an artifact that was independently rebuilt (and could theoretically differ, even subtly, from what staging actually tested), that assumption is undermined; "Build Once, Deploy Many" makes the artifact's identity across environments a hard guarantee rather than an assumption.
+
+**Common Pitfall:** rebuilding an application separately for each environment using environment-specific build configurations (different compiler flags, different dependency-resolution behavior per environment) — beyond the "what we tested may not be what we ship" risk, this also means build failures could occur only in one specific environment's build process, an entirely avoidable class of environment-specific build inconsistency that "Build Once, Deploy Many" eliminates by construction.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is a "Blue-Green Deployment," and how does keeping the OLD environment (Blue) fully running and unchanged alongside the NEW environment (Green) enable a near-instantaneous ROLLBACK, simply by switching traffic back?**
+
+Blue-Green Deployment maintains two complete, independent production environments — "Blue" (the currently-live version) and "Green" (the new version being deployed) — traffic is switched from Blue to Green only once Green is fully deployed and verified; critically, Blue remains fully running and untouched throughout, meaning a rollback is just switching traffic back, not a lengthy redeploy.
+
+```text
+BEFORE deployment: Blue is LIVE (serving 100% of traffic), Green does not yet exist
+DURING deployment: Green is deployed FULLY, in PARALLEL, while Blue CONTINUES serving ALL live traffic
+                    -- Green is tested THOROUGHLY while STILL receiving ZERO real user traffic --
+CUTOVER: traffic is switched from Blue to Green (often via a load balancer/router config change)
+         -- Blue REMAINS running, untouched, NOT torn down --
+
+IF something goes wrong with Green AFTER cutover:
+  -> traffic is switched BACK to Blue INSTANTLY -- Blue never stopped running, so this is NEAR-INSTANT
+  -> compare to a rollback that requires REDEPLOYING the previous version from scratch (much slower)
+```
+Because Blue is kept fully running (not decommissioned) throughout Green's deployment and initial traffic period, a rollback is simply re-pointing traffic back to an already-running, already-warm environment — dramatically faster than a rollback requiring an entirely fresh redeploy of the previous version, which could itself take significant time and carries its own risk of failing.
+
+**The trade-off Blue-Green specifically accepts:** running two complete, full-scale production environments simultaneously (even if briefly, during the cutover window) means paying for double the infrastructure during that period — a real cost trade-off made in exchange for the near-instant rollback capability and the ability to fully test Green under production-like conditions before any real traffic ever reaches it.
+
+**Common Pitfall:** decommissioning the Blue environment immediately after cutover, rather than keeping it running for a reasonable observation period — this eliminates the fast-rollback benefit that's Blue-Green's primary reason for existing; Blue should typically remain available (even if idle) for some meaningful window after cutover specifically so a fast rollback remains possible if a problem with Green only becomes apparent once real production traffic and load patterns are actually flowing through it.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is "GitOps," and how does making Git the SINGLE SOURCE OF TRUTH for a system's desired infrastructure/deployment state (with an automated CONTROLLER continuously reconciling actual state to match it) differ from a traditional, imperative CI/CD pipeline pushing changes out?**
+
+GitOps declares the desired state of infrastructure/deployments declaratively in Git — rather than a CI/CD pipeline imperatively executing a sequence of deployment commands, a dedicated controller (like Flux or Argo CD) continuously and automatically reconciles the actual running state of the system to match whatever is currently declared in Git, pulling changes rather than having them pushed.
+
+```text
+Traditional (imperative) CI/CD:
+  Developer merges PR -> PIPELINE runs `kubectl apply` (or similar) -> PUSHES the change out to the cluster
+  -- the PIPELINE is the thing that ACTIVELY performs the deployment --
+
+GitOps (declarative, PULL-based):
+  Developer merges PR -> Git repository's desired state CHANGES
+  A CONTROLLER running INSIDE the cluster CONTINUOUSLY watches Git, notices the change,
+  and PULLS the new desired state, reconciling the cluster's ACTUAL state to MATCH it
+  -- the CLUSTER ITSELF actively PULLS and applies changes, rather than an external pipeline PUSHING them in --
+```
+Because the controller runs continuously and reconciles state on an ongoing basis (not just at the moment of a deployment), it also automatically corrects "drift" — if someone manually changes something directly in the cluster (bypassing Git entirely), the GitOps controller detects the actual state no longer matches Git's declared desired state and automatically reverts it back, since Git remains the single, authoritative source of truth at all times, not just at deployment time.
+
+**Why the pull-based model provides a meaningfully different security posture than push-based CI/CD:** a traditional push-based pipeline typically needs credentials with write access to the production cluster, stored in the CI system — a pull-based GitOps controller instead runs *inside* the cluster itself and only needs read access to the Git repository, meaning no external system needs standing write-credentials into production at all, a meaningfully smaller attack surface for production credential compromise.
+
+**Common Pitfall:** implementing "GitOps" as merely "we store our YAML manifests in Git" without an actual continuously-reconciling controller — storing configuration in Git is necessary but not sufficient for genuine GitOps; without an automated controller actively watching for and reconciling drift, changes made directly against the cluster (bypassing Git) go undetected and uncorrected, losing GitOps' core benefit of Git being a genuinely authoritative, continuously-enforced source of truth rather than just a place configuration happens to be version-controlled.
+
+---
+
+---

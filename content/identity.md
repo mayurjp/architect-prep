@@ -695,3 +695,81 @@ Rather than relying solely on short token lifetimes to bound the risk window (th
 **Common Pitfall:** assuming CAE is a drop-in security guarantee available automatically for any OAuth/OIDC deployment — it requires both the Identity Provider and the specific resource providers/APIs involved to explicitly support and correctly implement the CAE signaling protocol; a resource server that doesn't participate in CAE will simply continue honoring a token for its full stated lifetime regardless of any revocation signal the Identity Provider attempts to push, meaning CAE's benefit depends entirely on end-to-end support across the specific components actually deployed.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is Multi-Factor Authentication (MFA), and why does combining factors from DIFFERENT categories (something you know + something you have) provide meaningfully stronger protection than requiring two things from the SAME category?**
+
+MFA requires proving identity via two or more independent factors drawn from different categories: something you *know* (a password), something you *have* (a phone, a hardware key), or something you *are* (a fingerprint) — genuine security improvement comes specifically from combining factors across *different* categories, since compromising one category's factor (a leaked password) doesn't automatically compromise a factor from an entirely different category.
+
+```text
+WEAK "MFA" -- both factors are from the SAME category (something you KNOW):
+  Factor 1: password
+  Factor 2: a security QUESTION ("what's your mother's maiden name?")
+  -- an attacker who phishes/guesses ONE of these has a MUCH easier time obtaining the OTHER too,
+     since BOTH are "things you know," often discoverable through similar means (social engineering,
+     data breaches, public records)
+
+GENUINE MFA -- factors from DIFFERENT categories:
+  Factor 1: password (something you KNOW)
+  Factor 2: a one-time code from an authenticator app on your PHONE (something you HAVE)
+  -- an attacker who phishes your PASSWORD still does NOT have your PHYSICAL PHONE --
+  -- compromising ONE factor does NOT meaningfully help compromise the OTHER --
+```
+A password and a security question are both purely knowledge-based — an attacker skilled at phishing or social engineering to obtain one is often well-positioned to obtain the other through similar means, providing far less genuine additional security than the category name "two-factor" might suggest; requiring a physical device (something you have) as the second factor means an attacker needs to separately compromise something entirely different in kind, not just "ask nicely" (or phish) a second time.
+
+**Common Pitfall:** implementing "MFA" using two factors from the same underlying category (two knowledge-based questions, for instance) and considering the security requirement satisfied — genuine security improvement from MFA specifically comes from the *independence* of the compromise paths for each factor; two factors that could both plausibly be compromised via the same attack technique (phishing, social engineering) provide much weaker real-world protection than the "multiple factors" label might suggest.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is "Just-In-Time" (JIT) Access / Privileged Access Management (PAM), and how does granting elevated permissions for a LIMITED, TEMPORARY window (rather than permanently) reduce the standing attack surface of privileged accounts?**
+
+Rather than a user holding elevated/administrative permissions permanently (a "standing" privilege), JIT Access grants those elevated permissions only for a specific, limited time window, requested and approved as needed — automatically expiring and reverting to the user's normal, lower-privilege access once that window ends.
+
+```text
+Traditional STANDING privilege:
+  Alice is PERMANENTLY a member of the "Database Admins" group
+  -- Alice's account, if EVER compromised (phished, malware), gives an attacker
+     PERMANENT admin database access, 24/7, regardless of whether Alice actually NEEDS it at that moment --
+
+Just-In-Time Access:
+  Alice's account normally has NO elevated database access at all
+  Alice REQUESTS temporary admin access -> approved -> GRANTED for exactly 2 HOURS
+  -- after 2 hours, the elevated access AUTOMATICALLY EXPIRES, reverting Alice to normal access --
+  -- if Alice's account is compromised OUTSIDE that 2-hour window, the attacker gets NO elevated access at all --
+```
+Because Alice's account only holds elevated privileges during the specific, narrow window she actually requested and needed them, an attacker who compromises her credentials at some *other*, unrelated time gains no elevated access at all — dramatically reducing the "standing attack surface" (the total time during which a compromised account would grant an attacker privileged access) compared to permanent group membership.
+
+**Why this specifically matters for limiting the BLAST RADIUS of credential compromise, not just preventing the compromise itself:** JIT Access doesn't prevent an account from being phished or otherwise compromised in the first place — its value is specifically in limiting what a *successful* compromise actually grants an attacker, by ensuring elevated privileges exist only for the narrow windows they're genuinely needed, rather than being available to an attacker at any arbitrary moment they happen to strike.
+
+**Common Pitfall:** granting broad, permanent privileged group membership "because it's more convenient than requesting access every time it's needed" — this convenience trade-off directly expands the window during which a compromised credential grants an attacker privileged access, from a narrow, deliberately-requested window down to effectively "always"; JIT Access's added friction (having to request elevated access when genuinely needed) is a deliberate, worthwhile trade-off against this expanded attack surface for genuinely sensitive privileges.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is "Token Binding" (as a broader concept encompassing DPoP, covered earlier, and mTLS-bound tokens), and how does cryptographically binding a token to a specific TLS connection/key pair prevent it from being usable if EXFILTRATED to a different client entirely?**
+
+Token Binding cryptographically ties an issued token to a specific underlying cryptographic proof (a TLS client certificate, or a DPoP key pair, covered earlier) — an attacker who steals the token string itself still cannot successfully use it from a *different* client, since presenting the token now also requires proving possession of the specific cryptographic material it was bound to at issuance.
+
+```text
+WITHOUT token binding (a plain bearer token):
+  Attacker steals the TOKEN STRING (via XSS, a log leak, a network intercept)
+  -> attacker can use it from ANY client, ANY machine -- the token string ALONE is sufficient
+
+WITH token binding (mTLS-bound, or DPoP as covered earlier):
+  Attacker steals the SAME token string
+  -> attacker attempts to use it from THEIR OWN machine/client
+  -> the resource server ALSO requires proof of possessing the SPECIFIC TLS client certificate
+     (or DPoP private key) the token was originally bound to AT ISSUANCE
+  -> the attacker does NOT have that specific cryptographic material -- the stolen token is USELESS
+```
+This directly addresses the fundamental weakness of plain bearer tokens covered under the DPoP discussion earlier: possessing the token string alone is no longer sufficient to use it, since the resource server additionally verifies proof of possessing the specific cryptographic key/certificate the token was bound to when originally issued — a token stolen via any means that doesn't also grant the underlying cryptographic material remains unusable to the attacker.
+
+**Why mTLS-bound tokens and DPoP represent two different practical approaches to the SAME underlying concept:** mTLS-bound tokens rely on a mutual-TLS client certificate as the binding mechanism (requiring PKI infrastructure for certificate issuance/management) — DPoP (covered earlier) instead uses an application-layer proof-of-possession mechanism that doesn't require the heavier PKI infrastructure mTLS demands; both achieve the same fundamental goal (binding a token to something beyond the token string itself) via different mechanisms with different infrastructure/complexity trade-offs.
+
+**Common Pitfall:** treating "our tokens are transmitted over HTTPS" as equivalent to having genuine token binding protection — TLS in transit protects the token from network-level interception, but says nothing about protecting against a token being stolen through an entirely different vector (XSS, a compromised logging pipeline, a malicious browser extension) and then reused by the attacker from their own separate client; genuine token binding specifically protects against exactly this post-theft reuse scenario, which transport-layer TLS encryption alone does not address.
+
+---

@@ -632,3 +632,76 @@ The expensive, multi-round-trip connection setup (TCP handshake, TLS negotiation
 **Common Pitfall:** assuming a CDN or edge network like Front Door only helps by *caching content* — the Split TCP/connection-termination benefit described here applies even to entirely dynamic, non-cacheable content, since it's optimizing the *connection setup* itself, not the content delivery; conflating "CDN" purely with "content caching" misses this separate, connection-level latency benefit that applies broadly, even to APIs returning uncacheable, per-request data.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is Azure App Configuration, and how does centralizing feature flags and settings SEPARATELY from Key Vault (which handles secrets specifically) reflect a deliberate separation of concerns?**
+
+Azure App Configuration is a dedicated service for centralizing an application's non-secret configuration values and feature flags — deliberately separate from Key Vault, which is specifically scoped to secrets (passwords, connection strings, certificates); this separation reflects the different access patterns, audit requirements, and sensitivity levels these two categories of configuration actually have.
+
+```csharp
+builder.Configuration.AddAzureAppConfiguration(options =>
+{
+    options.Connect(appConfigConnectionString)
+           .UseFeatureFlags(); // pulls BOTH regular settings AND feature flags from App Configuration
+});
+
+// Elsewhere, Key Vault is referenced SEPARATELY, specifically for actual SECRETS:
+builder.Configuration.AddAzureKeyVault(keyVaultUri, credential);
+```
+Regular settings (a feature flag's on/off state, a UI theme color, a retry-count threshold) don't carry the same sensitivity or audit requirements a database password does — App Configuration is optimized for frequent, low-friction updates to this kind of non-secret configuration (including built-in feature-flag management and dynamic configuration refresh), while Key Vault applies stricter access controls and audit logging appropriate specifically for genuine secrets.
+
+**Why keeping these two concerns separate matters operationally:** an application's non-secret settings often need frequent updates by a broader set of people (adjusting a feature flag, tweaking a threshold) — requiring Key-Vault-level access controls for every such minor, non-sensitive change would create unnecessary friction; conversely, treating genuine secrets with App Configuration's more relaxed access model would be a meaningful security regression. Keeping them as separate services lets each be governed by access policies appropriate to its actual sensitivity.
+
+**Common Pitfall:** storing genuine secrets (connection strings, API keys) directly in App Configuration rather than Key Vault, for convenience — App Configuration doesn't provide Key Vault's specific secret-management features (fine-grained access auditing, secret rotation support, the additional security hardening Key Vault is specifically built around); secrets belong in Key Vault, with App Configuration reserved for genuinely non-sensitive settings and feature flags.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is Azure's "Availability Set" versus "Availability Zone," and how does each protect against a DIFFERENT scope of failure within a datacenter/region?**
+
+An Availability Set groups VMs within a *single* datacenter to protect against failures at the level of a single rack (power, network switch) — an Availability Zone is a physically separate datacenter *within the same region*, protecting against a failure affecting an entire datacenter, not just a rack within one.
+
+```text
+Availability Set (protects against RACK-level failure, within ONE datacenter):
+  VM1 -> Rack A, Update Domain 0, Fault Domain 0
+  VM2 -> Rack B, Update Domain 1, Fault Domain 1
+  -- if Rack A loses power, VM2 (on a DIFFERENT rack) is UNAFFECTED --
+  -- but if the ENTIRE DATACENTER goes down, BOTH VMs are affected --
+
+Availability Zone (protects against DATACENTER-level failure, within ONE region):
+  VM1 -> Availability Zone 1 (a SEPARATE physical datacenter)
+  VM2 -> Availability Zone 2 (a DIFFERENT separate physical datacenter, same region)
+  -- if Zone 1's ENTIRE datacenter goes down, VM2 (in Zone 2) is UNAFFECTED --
+```
+An Availability Set's protection is scoped to failures *within* a single datacenter (a rack losing power, a network switch failing) — it provides no protection if the entire datacenter itself becomes unavailable, since every VM in the set still lives in that same physical building; Availability Zones instead place VMs in genuinely separate physical datacenters, protecting against a failure scope Availability Sets structurally cannot address.
+
+**Why choosing between them (or using both) depends on the actual failure scope being protected against:** for protection against a rack/hardware-level failure within a single datacenter, an Availability Set suffices and has historically been simpler/cheaper to configure — for protection against an entire datacenter becoming unavailable (a more severe, if less frequent, failure), Availability Zones are necessary, since Availability Sets have no mechanism to spread VMs across genuinely separate buildings.
+
+**Common Pitfall:** assuming an Availability Set alone provides sufficient resilience against "any" Azure datacenter failure — an Availability Set's protection is explicitly scoped to rack/hardware-level failures *within* one datacenter; a genuine datacenter-wide outage affects every VM in that Availability Set simultaneously, regardless of how carefully fault/update domains were configured, since Availability Zones (a physically separate datacenter) are the specific mechanism needed to protect against that broader failure scope.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is Azure Cosmos DB's tunable Consistency Levels (spanning Strong, Bounded Staleness, Session, Consistent Prefix, and Eventual), and how does choosing a level BETWEEN the two extremes let an application balance latency/availability against consistency guarantees more precisely than a binary "strong or eventual" choice?**
+
+Rather than forcing a binary choice between Strong Consistency (highest guarantee, highest latency/lowest availability under partition) and Eventual Consistency (lowest latency/highest availability, weakest guarantee), Cosmos DB offers five distinct levels spanning that spectrum, letting an application choose a more precisely-tuned trade-off for its actual specific needs.
+
+```text
+Strong:             every read sees the LATEST committed write, globally -- HIGHEST latency, LOWEST availability
+Bounded Staleness:   reads lag behind writes by AT MOST a configured time/version bound -- a MIDDLE ground
+Session:             a SINGLE CLIENT's own reads always see ITS OWN writes (read-your-own-writes) -- common default
+Consistent Prefix:   reads NEVER see writes out of order (no "gaps"), but MAY be stale -- weaker than Session
+Eventual:             NO ordering guarantee at all -- LOWEST latency, HIGHEST availability, WEAKEST guarantee
+```
+Session Consistency, Cosmos DB's common default, specifically guarantees that within a single client's own session, that client always sees its own prior writes reflected in subsequent reads — even though a genuinely *different* client reading the same data might briefly see slightly stale data, which is an entirely acceptable trade-off for the extremely common "a user should immediately see their own just-made change" requirement, without paying Strong Consistency's full global latency cost for every single read.
+
+**Why this granularity matters more than a binary choice:** many real-world applications don't actually need Strong Consistency's expensive global guarantee, but DO need something stronger than pure Eventual Consistency's "no guarantee at all" — Bounded Staleness and Session Consistency specifically fill this middle ground, letting an application pick a consistency/performance trade-off precisely matched to its actual requirements, rather than being forced into either extreme.
+
+**Common Pitfall:** defaulting to Strong Consistency for every Cosmos DB container "just to be safe," without evaluating whether the actual application requirements genuinely need it — Strong Consistency's global coordination cost meaningfully increases latency and reduces availability during network partitions compared to any of the weaker levels; for the common "user sees their own changes immediately" requirement, Session Consistency typically provides everything actually needed, at meaningfully better performance than Strong Consistency would provide.
+
+---
+
+---

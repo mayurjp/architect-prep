@@ -621,3 +621,82 @@ This specifically protects against a scenario ordinary IAM permissions alone can
 **Common Pitfall:** treating IAM permissions as sufficient protection for genuinely sensitive data (financial records, health data, regulated PII) without an additional perimeter control like VPC Service Controls — IAM excels at controlling *who* can access what, but says nothing about preventing that access from being used to move data to an uncontrolled destination; genuinely sensitive datasets typically warrant this additional layer specifically because credential compromise (not just IAM misconfiguration) is a realistic threat model IAM alone cannot fully address.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is Google Cloud's "Project" hierarchy (Organization → Folder → Project), and how does this nested structure let policies applied at a HIGHER level automatically apply to everything beneath it?**
+
+Google Cloud organizes resources into a hierarchy: an Organization at the top, containing Folders (which can nest further), each containing Projects, which in turn contain the actual resources (VMs, storage buckets, databases) — a policy (IAM binding, organizational constraint) applied at any level automatically inherits down to everything nested beneath it.
+
+```text
+Organization: "Acme Corp"
+  Folder: "Engineering"
+    Folder: "Backend Team"
+      Project: "payments-service-prod"
+      Project: "payments-service-dev"
+    Folder: "Frontend Team"
+      Project: "web-app-prod"
+```
+```bash
+# A policy applied at the "Engineering" FOLDER level automatically applies to EVERY project beneath it:
+gcloud resource-manager org-policies set-policy --folder=engineering-folder-id restrict-vm-external-ip.yaml
+# -- affects "Backend Team", "Frontend Team", AND every project nested under EITHER of them --
+```
+An organization-wide security policy (like restricting VMs from having public IP addresses) applied once at the Organization or an appropriate Folder level automatically governs every Project nested beneath it — without needing to individually configure that same policy separately on each of potentially hundreds of projects, and automatically applying to any *new* project created under that folder in the future too.
+
+**Why this hierarchical inheritance matters at organizational scale:** without this hierarchy, enforcing a consistent security baseline across dozens or hundreds of projects would require configuring the same policy individually on every single one, with real risk of some projects being missed or drifting out of compliance over time — the hierarchy lets a security or platform team enforce baseline policies centrally, at whatever level makes sense (organization-wide, or scoped to a specific business unit's folder), with confidence that inheritance guarantees consistent application without per-project manual configuration.
+
+**Common Pitfall:** configuring critical security policies individually at the Project level across many separate projects, rather than at an appropriate Folder or Organization level — this misses the entire benefit of the hierarchy's inheritance, requires redundant configuration effort per project, and risks inconsistency (a policy correctly applied to 9 of 10 projects, but forgotten on the 10th) that hierarchical policy inheritance is specifically designed to prevent.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is Google Cloud's "Cloud Tasks" service, and how does it differ from Pub/Sub specifically in terms of guaranteeing ORDERED, RATE-LIMITED execution of individual, targeted tasks?**
+
+Both Cloud Tasks and Pub/Sub handle asynchronous work, but for different shapes of problem — Pub/Sub is designed for broadcasting events to potentially many independent subscribers (covered earlier); Cloud Tasks is designed for scheduling and executing individual, specifically-targeted units of work with fine-grained control over rate, retry, and (optionally) ordering, dispatched to one specific HTTP endpoint per task.
+
+```csharp
+// Cloud Tasks -- schedules a SPECIFIC task, targeting a SPECIFIC HTTP endpoint, with RATE CONTROL
+var task = new Task
+{
+    HttpRequest = new HttpRequest
+    {
+        Url = "https://myapi.com/process-order",
+        Body = ByteString.CopyFromUtf8(JsonSerializer.Serialize(orderData))
+    }
+};
+await client.CreateTaskAsync(queuePath, task);
+// The QUEUE itself can be configured with a MAX DISPATCH RATE (e.g., 10 tasks/second),
+// protecting the target endpoint from being overwhelmed -- Pub/Sub has no equivalent per-queue rate control
+```
+Cloud Tasks queues can be explicitly configured with dispatch-rate limits (protecting a downstream endpoint that can only handle a certain throughput) and per-task retry/backoff configuration targeting one specific destination — Pub/Sub, by contrast, is built around fan-out to potentially many subscribers with no inherent concept of "don't overwhelm this one specific downstream endpoint," since it's not designed around a single target destination in the same way.
+
+**Why the choice between them depends on the actual shape of the problem:** if the need is "broadcast this event to however many interested subscribers exist" (Pub/Sub's core use case), Cloud Tasks isn't the right fit at all — if the need is "reliably execute this specific task against this specific endpoint, without overwhelming it, with fine control over retry/rate" (Cloud Tasks' core use case), Pub/Sub's fan-out model doesn't naturally provide that same fine-grained, single-destination rate control.
+
+**Common Pitfall:** using Pub/Sub for a scenario that's really "dispatch individual, rate-controlled tasks to one specific downstream endpoint," then hand-rolling rate-limiting logic in the subscriber to protect that endpoint — Cloud Tasks already provides this rate-limiting/dispatch-control natively at the queue level; reaching for Pub/Sub by default for every asynchronous-work scenario, without considering whether Cloud Tasks' rate-controlled, single-destination model is actually the better structural fit, adds unnecessary custom logic that Cloud Tasks already handles out of the box.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is Google Cloud's "Confidential Computing" (Confidential VMs), and how does encrypting data IN USE (not just at rest or in transit) protect against a threat model where even the CLOUD PROVIDER's own infrastructure operators are untrusted?**
+
+Data is traditionally protected "at rest" (encrypted on disk) and "in transit" (encrypted over the network) — but while actively being processed in memory, data is normally decrypted and exposed in plaintext to anything with sufficient privilege on the underlying physical host, including (in principle) the cloud provider's own infrastructure operators or a sufficiently privileged hypervisor-level attacker. Confidential VMs use hardware-based memory encryption to keep data encrypted even while actively in use, in memory, during computation.
+
+```text
+Traditional VM: data DECRYPTED in memory during processing
+  -- a sufficiently privileged host-level attacker (or malicious/compromised hypervisor)
+     COULD theoretically inspect memory contents directly --
+
+Confidential VM: memory is ENCRYPTED using HARDWARE-based encryption keys the HYPERVISOR ITSELF
+                  cannot access -- data remains encrypted EVEN WHILE being actively processed
+  -- protects against a threat model where even the underlying HOST/HYPERVISOR is untrusted --
+```
+This specifically addresses a threat model that traditional at-rest/in-transit encryption cannot: a scenario where the customer doesn't fully trust the cloud provider's own infrastructure layer itself (a malicious insider with hypervisor access, or a compromised hypervisor) — hardware-enforced memory encryption (via AMD SEV or similar technologies) ensures that even someone with privileged access to the physical host cannot read the VM's in-memory data in plaintext.
+
+**Why this matters specifically for highly regulated or sensitive workloads:** certain industries (healthcare, finance, government) sometimes have compliance or threat-model requirements that explicitly include "assume the cloud provider's own infrastructure could be compromised" as a scenario needing mitigation — Confidential Computing directly addresses this specific, unusually strict threat model, which ordinary at-rest/in-transit encryption (protecting data everywhere EXCEPT while actively being computed on) does not cover.
+
+**Common Pitfall:** assuming standard at-rest and in-transit encryption already provides complete protection against every conceivable threat, without recognizing the "data in use" gap those mechanisms leave open — for the overwhelming majority of workloads, standard at-rest/in-transit encryption combined with trusting the cloud provider's own security practices is entirely sufficient; Confidential Computing is a specialized, additional layer worth its added cost and complexity specifically for the narrower set of workloads with a genuine "must not trust the infrastructure provider itself" requirement.
+
+---
