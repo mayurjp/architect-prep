@@ -1080,4 +1080,87 @@ Because the buffer never touches the managed heap at all, allocating it produces
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is a NuGet package's `TargetFramework` (e.g., `net8.0`), and how does `TargetFrameworks` (plural) let a single project produce builds for multiple different .NET versions from one codebase?**
+
+`TargetFramework` in a `.csproj` declares which specific .NET version/API surface a project compiles against — `TargetFrameworks` (plural, note the "s") lets a single project multi-target several versions at once, producing a separate build output for each, useful for a library that needs to support consumers still on an older .NET version alongside consumers on the latest.
+
+```xml
+<!-- Single target -- ONE specific .NET version -->
+<PropertyGroup>
+  <TargetFramework>net8.0</TargetFramework>
+</PropertyGroup>
+
+<!-- MULTI-targeting -- BUILDS SEPARATELY for BOTH versions, from the SAME source code -->
+<PropertyGroup>
+  <TargetFrameworks>net6.0;net8.0</TargetFrameworks>
+</PropertyGroup>
+```
+```csharp
+#if NET8_0_OR_GREATER
+    // code using a .NET 8-ONLY API, ONLY compiled when building the net8.0 TARGET
+#else
+    // a FALLBACK implementation, compiled ONLY for the net6.0 TARGET
+#endif
+```
+Building a multi-targeted project produces genuinely separate assemblies (one compiled specifically for `net6.0`, another for `net8.0`) packaged together into a single NuGet package — a consumer's own project automatically gets whichever specific build matches their own `TargetFramework`, letting one library's package serve consumers across several different .NET versions simultaneously.
+
+**Common Pitfall:** multi-targeting a library "just in case" without an actual consumer base still needing the older target — every additional target adds real build time and, if the code needs `#if` conditional compilation to handle API differences between versions, ongoing maintenance complexity; multi-targeting earns its complexity specifically when there's a genuine, known population of consumers still requiring an older target framework.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is .NET's Generic Host (`IHost`), and how does it provide a unified foundation for configuration, Dependency Injection, and logging across both ASP.NET Core web applications AND non-web console/worker applications?**
+
+Before the Generic Host, ASP.NET Core's `IWebHostBuilder` provided DI/configuration/logging specifically for web applications, while a console app or background worker had no equivalent, standardized foundation at all — the Generic Host (`Host.CreateDefaultBuilder()` / `Host.CreateApplicationBuilder()`) extracted that same DI/configuration/logging infrastructure into a *web-independent* foundation, usable identically whether or not the application actually serves HTTP requests at all.
+
+```csharp
+// A NON-WEB worker service -- gets the EXACT SAME DI/configuration/logging infrastructure as a web app
+var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddHostedService<EmailProcessingWorker>(); // an IHostedService, covered under ASP.NET Core
+builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
+
+var host = builder.Build();
+await host.RunAsync(); // manages STARTUP, GRACEFUL SHUTDOWN, and runs EVERY registered IHostedService
+```
+```csharp
+// ASP.NET Core's OWN builder is ACTUALLY BUILT ON TOP of the SAME Generic Host foundation
+var builder = WebApplication.CreateBuilder(args); // internally, STILL the Generic Host, PLUS web-specific additions
+```
+Because both a web application and a plain background-worker console app are built on the exact same underlying Generic Host foundation, a developer's DI/configuration/logging knowledge transfers directly between the two — a team building a Web API and a separate background-processing worker service can share the same configuration patterns, the same `IHostedService`-based background task model (covered under ASP.NET Core), and the same graceful-shutdown behavior, regardless of which one happens to also expose HTTP endpoints.
+
+**Common Pitfall:** building a standalone console application's own bespoke DI container setup and configuration-loading logic from scratch, unaware that the Generic Host provides this exact foundation already, batteries-included — reinventing DI container wiring, configuration-source layering (`appsettings.json`, environment variables, covered under ASP.NET Core), and graceful shutdown handling by hand duplicates functionality the Generic Host already provides in a well-tested, consistent way across the entire .NET ecosystem.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is the difference between .NET's Concurrent (Background) GC mode and a plain blocking GC, and how does Background GC let a Gen 2 collection run without fully pausing the application's own threads?**
+
+An ordinary, non-concurrent GC collection is a "stop-the-world" event — every application thread pauses completely while the GC does its work, including for the more time-consuming Gen 2 (full heap) collections. Background (Concurrent) GC specifically lets most of a Gen 2 collection's work happen on a *separate* GC thread, running *concurrently* alongside the application's own threads, which continue executing (and can even keep allocating, in Gen 0/1) for most of that collection's duration.
+
+```xml
+<!-- runtimeconfig.json / .csproj -- Background GC is actually the DEFAULT in modern .NET, but can be toggled -->
+<PropertyGroup>
+  <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+</PropertyGroup>
+```
+```text
+BLOCKING Gen 2 GC -- the ENTIRE application PAUSES for the FULL DURATION of the collection:
+  App threads: [RUNNING] ---- [FULLY PAUSED, for the ENTIRE Gen 2 collection] ---- [RUNNING again]
+
+BACKGROUND (Concurrent) Gen 2 GC -- MOST of the work happens CONCURRENTLY, app threads KEEP RUNNING:
+  App threads: [RUNNING] -- [BRIEF pause] -- [STILL RUNNING, while GC thread works CONCURRENTLY] -- [BRIEF pause] -- [RUNNING]
+  GC thread:                [starts marking reachable objects CONCURRENTLY, WHILE the app keeps executing]
+```
+Background GC still requires two brief, genuinely blocking pauses (at the very start and end of the collection, to establish a consistent snapshot and finalize the collection) — but the *bulk* of the actual mark/sweep work for the large Gen 2 heap happens on a separate thread while application threads continue running, dramatically reducing the total pause duration compared to a fully blocking Gen 2 collection, which is especially significant given how much longer Gen 2 collections take than Gen 0/1 (covered under GC generations).
+
+**Why this specifically matters for latency-sensitive applications more than throughput-focused batch workloads:** an application serving live, latency-sensitive requests (a web API) benefits enormously from Background GC's shortened pause windows, since a long blocking pause directly translates into a spike in request latency for whoever happens to be making a request during that exact window — a pure batch-processing workload with no live request-latency concerns is comparatively less sensitive to this distinction, since nothing is waiting on an immediate response during the collection anyway.
+
+**Common Pitfall:** disabling Concurrent GC (`ConcurrentGarbageCollection=false`) under the mistaken belief that a fully blocking, non-concurrent GC is somehow more "predictable" or efficient — for the vast majority of interactive, request-serving workloads, Background GC's shorter, more frequent pauses provide a meaningfully better *tail latency* profile than a blocking GC's occasional but much longer full-stop pauses, which is precisely why it's the default in modern .NET rather than something that needs to be explicitly opted into.
+
+---
+
 ---

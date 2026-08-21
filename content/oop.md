@@ -1207,4 +1207,87 @@ A method written against the `Ellipse` base class, expecting `RadiusX = 10` to a
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is the `this` keyword's role in disambiguating a constructor parameter from a field of the same name, and how does constructor chaining via `: this(...)` let one constructor delegate its setup work to another?**
+
+`this.` explicitly refers to the current instance's own member, resolving the ambiguity when a constructor parameter happens to share a name with a field it's meant to initialize — `: this(...)` lets one constructor call *another* constructor on the same class first, avoiding duplicated initialization logic across multiple overloads.
+
+```csharp
+public class Product
+{
+    private readonly string name;
+    private readonly decimal price;
+
+    public Product(string name, decimal price)
+    {
+        this.name = name;    // 'this.name' -- the FIELD -- disambiguated from the PARAMETER also named 'name'
+        this.price = price;
+    }
+
+    // A SIMPLER overload -- CHAINS to the constructor above via ': this(...)', rather than DUPLICATING its logic
+    public Product(string name) : this(name, 0m) { }
+}
+```
+Without `this.`, writing `name = name;` inside the constructor would simply assign the *parameter* to itself (since a local parameter shadows a field of the same name), never actually initializing the field at all — `this.name` explicitly says "the field belonging to this instance," resolving the ambiguity; and `: this(name, 0m)` lets the single-parameter constructor reuse the two-parameter constructor's exact initialization logic, rather than repeating `this.name = name;` a second time.
+
+**Common Pitfall:** duplicating the same field-initialization logic across multiple constructor overloads instead of using `: this(...)` chaining — if the initialization logic later needs to change (adding validation, for instance), duplicated logic across several constructors means remembering to update every single copy, whereas a chained constructor only has one place where the actual initialization work happens.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: How does the Single Responsibility Principle (covered under Design Principles primarily at the class level) apply at the METHOD level, and how can a single method that does several unrelated things violate it just as a class with too many responsibilities can?**
+
+SRP is usually introduced as a class-level principle ("a class should have one reason to change"), but the same underlying idea applies at the method level: a method that validates input, performs a calculation, AND sends a notification is doing three genuinely unrelated things within one unit, exactly the kind of tangled responsibility SRP warns against at the class level, just at a smaller scale.
+
+```csharp
+// ONE method doing THREE unrelated things -- validation, calculation, AND a side effect (notification)
+public decimal ProcessOrder(Order order)
+{
+    if (order.Items.Count == 0) throw new ArgumentException("Empty order"); // VALIDATION
+    decimal total = order.Items.Sum(i => i.Price * i.Quantity);              // CALCULATION
+    _emailService.SendOrderConfirmation(order.CustomerEmail, total);         // SIDE EFFECT / NOTIFICATION
+    return total;
+}
+
+// SPLIT into three methods, EACH with ITS OWN single, focused responsibility
+public void ValidateOrder(Order order) { /* ... */ }
+public decimal CalculateTotal(Order order) { /* ... */ }
+public void SendConfirmation(Order order, decimal total) { /* ... */ }
+```
+The original method has three separate reasons to change (a new validation rule, a new pricing calculation, a different notification channel) all tangled together in one place — splitting it means a change to *how* confirmations are sent touches only `SendConfirmation`, without any risk of accidentally breaking the validation or calculation logic living in the same method.
+
+**Why this connects directly to the earlier Single Level of Abstraction Principle (SLAP):** a method violating SRP at this scale often *also* violates SLAP (covered under Design Principles), since mixing validation, calculation, and notification typically also mixes different levels of abstraction within the same block of code — the two principles frequently point toward the same underlying fix (breaking the method into smaller, single-purpose pieces), approached from slightly different angles (responsibility versus abstraction level).
+
+**Common Pitfall:** applying SRP analysis only when reviewing class-level design, while overlooking that individual methods within an otherwise well-designed class can accumulate the exact same kind of tangled, multi-responsibility bloat over time — a class can look properly scoped at a glance while one of its methods has quietly grown into its own miniature God Object (covered earlier), doing far more than its name suggests.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is Multiple Dispatch, as a generalization of the Double Dispatch technique covered earlier for the Visitor pattern, and why doesn't C# support it natively the way some other languages do?**
+
+Double Dispatch (covered earlier) selects behavior based on the runtime types of *two* objects involved in a single operation — Multiple Dispatch generalizes this further, selecting behavior based on the runtime types of *any number* of arguments simultaneously, a language feature some languages (Julia, Common Lisp) support natively but C# does not, which is precisely why the Visitor pattern exists as a workaround technique in the first place.
+
+```csharp
+// C#'s method OVERLOAD resolution is based on the STATIC (COMPILE-TIME) type, NOT the runtime type
+public void Collide(Shape a, Shape b) { /* generic fallback */ }
+public void Collide(Circle a, Circle b) { /* circle-circle specific logic */ }
+public void Collide(Circle a, Square b) { /* circle-square specific logic */ }
+
+Shape shape1 = new Circle();
+Shape shape2 = new Circle();
+Collide(shape1, shape2); // calls the GENERIC Collide(Shape, Shape) overload -- NOT Collide(Circle, Circle) --
+                          // because OVERLOAD RESOLUTION happens based on the COMPILE-TIME type ('Shape'),
+                          // NOT the ACTUAL runtime type (both are ACTUALLY Circles) -- NO multiple dispatch
+```
+Because C#'s overload resolution is determined entirely at compile time based on the *declared* (static) type of each argument, calling `Collide(shape1, shape2)` where both variables are statically typed as `Shape` always resolves to the `Collide(Shape, Shape)` overload — regardless of what concrete type each object actually is at runtime — which is exactly why languages lacking native multiple dispatch need patterns like Visitor (using Double Dispatch, chaining together *two* separate single-dispatch virtual calls) to simulate runtime-type-based selection across more than one object.
+
+**Why Visitor's Double Dispatch is specifically a workaround for this exact gap, not an unrelated technique:** Visitor achieves "dispatch based on two objects' runtime types" by performing *two sequential* single-dispatch virtual method calls (each individually resolved based on one object's actual runtime type) — this is precisely the trick needed to simulate Multiple Dispatch's effect using only the single-dispatch virtual method calls C#'s type system natively provides, rather than the language offering true multi-argument runtime dispatch directly.
+
+**Common Pitfall:** expecting C#'s method overloading to behave like Multiple Dispatch — resolving based on the actual runtime types of multiple arguments — and being surprised when a call resolves to a more generic overload than the arguments' actual runtime types would suggest; recognizing that C#'s overload resolution is fundamentally a compile-time, static-type mechanism (not a runtime, multiple-dispatch one) is what correctly explains this behavior, and is precisely the gap patterns like Visitor exist to fill.
+
+---
+
 ---

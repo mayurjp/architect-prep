@@ -1140,4 +1140,94 @@ The checkout flow itself (a genuinely stable concept — "calculate and apply a 
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is the actual scope of "Don't Repeat Yourself" (DRY), and why does it apply to duplicated KNOWLEDGE/business rules specifically, rather than to code that merely happens to look identical?**
+
+DRY is frequently misunderstood as "never write the same lines of code twice" — its actual, original scope (from Andy Hunt and Dave Thomas's *The Pragmatic Programmer*) is narrower and more precise: "every piece of *knowledge* must have a single, unambiguous, authoritative representation." Two pieces of code that look identical but represent genuinely *different* business rules don't actually violate DRY, even though a superficial "no duplicate code" reading might suggest otherwise.
+
+```csharp
+// Two validation checks that LOOK IDENTICAL right now -- but represent GENUINELY DIFFERENT business rules
+public bool IsValidUsername(string value) => value.Length >= 3 && value.Length <= 20;
+public bool IsValidProductCode(string value) => value.Length >= 3 && value.Length <= 20;
+// -- these happen to SHARE the SAME length bounds TODAY, purely by COINCIDENCE --
+// -- but USERNAME rules and PRODUCT CODE rules are DIFFERENT KNOWLEDGE, owned by DIFFERENT
+//    parts of the business, that could EASILY diverge INDEPENDENTLY tomorrow --
+```
+If a developer "DRYs up" this coincidental similarity by extracting one shared `IsValidLength(string value)` helper used by both, they've inadvertently coupled two *genuinely unrelated* business rules together — the moment product managers decide product codes should allow up to 30 characters while usernames stay capped at 20, the shared helper must be split apart again, undoing the "DRY" refactor that was never actually eliminating duplicated *knowledge* in the first place, just duplicated *text* that happened to coincide.
+
+**Why this distinction matters for making good refactoring decisions:** the correct question isn't "does this code look the same as that code?" but "do these two pieces of code represent the *same underlying business rule or fact*, such that a change to one should always imply the identical change to the other?" — when the answer is genuinely yes (the same tax rate calculated in two places), DRY-ing it up into one shared source is exactly right; when the answer is no (two coincidentally-identical but conceptually unrelated rules), leaving them as separate, independently-evolvable code is the correct call, despite the superficial code duplication.
+
+**Common Pitfall:** aggressively eliminating any code that merely *looks* duplicated, without first checking whether it represents the same underlying knowledge — this is sometimes called premature or "false" DRY, and it introduces exactly the kind of accidental coupling (covered under Coupling/Cohesion) between conceptually unrelated parts of a system that good design principles are meant to help avoid, not create.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is the "Stable Dependencies Principle" (from Robert Martin's package-design principles), and how does it guide WHICH direction a dependency between two modules/packages should point, based on which one is more likely to change?**
+
+The Stable Dependencies Principle states that a module should only depend on modules that are *more stable* than itself (less likely to change) — a module expected to change frequently should never be depended upon by modules that need to remain stable, since every dependent would then be at risk of breaking whenever the frequently-changing module itself changes.
+
+```text
+UNSTABLE module (changes OFTEN -- lots of experimental, rapidly-evolving feature code):
+  ExperimentalRecommendationEngine  -- iterates WEEKLY, business rules still being figured out
+
+STABLE module (changes RARELY -- foundational, well-established, widely-depended-upon):
+  CoreDomainModel  -- Order, Customer, Product entities -- CHANGES RARELY, WIDELY depended upon
+
+CORRECT dependency direction (the UNSTABLE module depends on the STABLE one):
+  ExperimentalRecommendationEngine ──depends on──► CoreDomainModel
+  -- frequent CHANGES to the recommendation engine NEVER force CoreDomainModel (or its OTHER
+     many dependents) to change AT ALL --
+
+WRONG dependency direction (a STABLE module depending on an UNSTABLE one):
+  CoreDomainModel ──depends on──► ExperimentalRecommendationEngine
+  -- EVERY one of CoreDomainModel's OWN many dependents is now AT RISK of being AFFECTED,
+     INDIRECTLY, by the recommendation engine's frequent, EXPERIMENTAL churn --
+```
+Because `CoreDomainModel` is depended upon by many other parts of the system, any instability introduced into it (even indirectly, through a dependency that itself changes often) ripples out to *everything* depending on it — keeping the dependency arrow pointing from the unstable, frequently-changing module toward the stable one contains that instability to just the module that's already expected to change frequently, rather than letting it leak outward into everything relying on the stable core.
+
+**Why this principle gives concrete guidance beyond the general "low coupling" advice (covered earlier):** "keep coupling low" doesn't by itself say anything about *direction* — two modules can have exactly the same *amount* of coupling between them regardless of which one depends on the other; the Stable Dependencies Principle specifically addresses *directionality*, providing an additional, concrete criterion (depend toward stability) for deciding which of two mutually-aware modules should be the one holding the reference.
+
+**Common Pitfall:** allowing a stable, foundational module to accumulate a dependency on a newer, still-actively-evolving module purely because it was convenient at the time (reusing a utility method that happened to live in the wrong place) — even a single such dependency inverts the intended stability direction, and every future change to the unstable module now carries a real, if often overlooked, risk of destabilizing the supposedly-stable foundational one and everything that in turn depends on it.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is a "Role Interface" (as distinct from a "Header Interface"), and how does this distinction deepen the Interface Segregation Principle (covered earlier) beyond simply "keep interfaces small"?**
+
+A Header Interface mechanically mirrors a single concrete class's entire public surface (essentially "extract everything this class exposes into an interface") — a Role Interface is instead designed around a specific *client's* particular need, exposing only the members that specific role of caller actually uses, even if that means a single class ends up implementing several small, differently-focused Role Interfaces rather than one large one mirroring itself.
+
+```csharp
+// HEADER Interface -- mechanically MIRRORS the ENTIRE OrderService class's public surface
+public interface IOrderService
+{
+    void PlaceOrder(Order order);
+    void CancelOrder(int orderId);
+    void RefundOrder(int orderId);
+    OrderReport GenerateMonthlyReport();
+    void ArchiveOldOrders();
+    // -- EVERY client depending on IOrderService sees ALL FIVE methods, REGARDLESS of which
+    //    ONES that SPECIFIC client actually USES --
+}
+
+// ROLE Interfaces -- EACH shaped around a SPECIFIC CLIENT'S actual need, NOT the class's FULL surface
+public interface IOrderPlacement { void PlaceOrder(Order order); void CancelOrder(int orderId); }
+public interface IOrderReporting { OrderReport GenerateMonthlyReport(); }
+public interface IOrderMaintenance { void ArchiveOldOrders(); }
+
+public class OrderService : IOrderPlacement, IOrderReporting, IOrderMaintenance { /* implements ALL of them */ }
+
+// A CHECKOUT controller depends ONLY on the ROLE it ACTUALLY needs -- NOT the entire surface
+public class CheckoutController(IOrderPlacement orderPlacement) { /* ... */ }
+```
+`CheckoutController` depending on the narrow `IOrderPlacement` role interface (rather than the full `IOrderService`) means it's structurally impossible for it to accidentally call `GenerateMonthlyReport()` or `ArchiveOldOrders()` — and, more importantly for ISP's actual intent, a change to the reporting logic's *signature* has zero compile-time impact on `CheckoutController` at all, since its dependency doesn't even mention that method.
+
+**Why this is a meaningfully deeper insight than just "interfaces should be small":** the Role Interface framing specifically asks "what does *this particular kind of client* actually need," which can produce a genuinely different interface boundary than simply looking at the *class* and asking "how do I split up its public surface into smaller pieces" — the former is driven by actual client usage patterns, the latter by the implementing class's own existing shape, and the two don't always align, especially before a class's various client usages have actually been examined individually.
+
+**Common Pitfall:** "splitting" a large interface into several smaller ones purely by mechanically dividing its existing method list into arbitrary, evenly-sized groups, without examining which *specific clients* actually use which *specific* subsets of methods — this produces smaller interfaces in name, satisfying ISP only superficially, without necessarily aligning any of them with an actual client's genuine, narrow usage pattern the way a true Role-Interface-driven split would.
+
+---
+
 ---

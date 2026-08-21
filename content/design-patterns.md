@@ -1377,4 +1377,107 @@ Because `SettingsPanel` depends only on the abstract `IUiFactory` interface, swa
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is the Proxy pattern in its general form, and how does inserting a stand-in object implementing the SAME interface as a real object let you add a transparent control layer (like authorization checking) in front of it?**
+
+A Proxy implements the exact same interface as a "real" object it stands in for — client code interacts with the Proxy exactly as it would with the real object, unaware that the Proxy might be adding an additional layer of control (checking authorization, logging access, deferring expensive creation) before, or instead of, actually delegating to the real object underneath.
+
+```csharp
+public interface IBankAccount { void Withdraw(decimal amount); }
+
+public class RealBankAccount : IBankAccount
+{
+    public void Withdraw(decimal amount) { /* actually withdraws the money */ }
+}
+
+// a PROTECTION PROXY -- implements the SAME interface, adds an AUTHORIZATION check TRANSPARENTLY
+public class ProtectedBankAccountProxy : IBankAccount
+{
+    private readonly RealBankAccount _realAccount;
+    private readonly ICurrentUser _currentUser;
+
+    public void Withdraw(decimal amount)
+    {
+        if (!_currentUser.IsAccountOwner) throw new UnauthorizedAccessException();
+        _realAccount.Withdraw(amount); // ONLY delegates to the REAL object if the check PASSES
+    }
+}
+```
+Client code holding an `IBankAccount` reference calls `Withdraw()` exactly the same way whether it's actually talking to the real account or the protecting proxy — the proxy transparently inserts its authorization check in front of the real object's behavior, without the calling code needing any awareness that a proxy is even involved at all.
+
+**Common Pitfall:** confusing the general Proxy pattern with the specific Virtual Proxy variant (covered elsewhere, which specifically defers *creation* of an expensive object) — Proxy is a broader pattern with several distinct variants (Virtual, Protection, Remote) sharing the same core structural idea (a stand-in implementing the real object's interface), each variant solving a genuinely different problem despite the shared underlying shape.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is the Builder pattern's optional "Director" class, and how does separating WHO orchestrates the construction steps from HOW each individual step is actually implemented let the SAME construction process produce different concrete representations?**
+
+Beyond the Fluent Interface style (covered earlier), the classic Builder pattern includes an optional Director — a class that knows the *sequence* of construction steps to call, but delegates *how* each step is actually implemented to whichever concrete Builder is currently plugged in, letting the same orchestrated sequence produce genuinely different final products depending only on which Builder implementation is supplied.
+
+```csharp
+public interface IPcBuilder
+{
+    void BuildCpu(); void BuildRam(); void BuildStorage();
+    Pc GetResult();
+}
+
+// the DIRECTOR -- knows the SEQUENCE of steps, but NOT how each step is ACTUALLY implemented
+public class PcAssemblyDirector
+{
+    public Pc ConstructGamingPc(IPcBuilder builder)
+    {
+        builder.BuildCpu(); builder.BuildRam(); builder.BuildStorage(); // the SAME sequence, EVERY time
+        return builder.GetResult();
+    }
+}
+
+public class BudgetPcBuilder : IPcBuilder { /* builds CHEAP components */ }
+public class HighEndPcBuilder : IPcBuilder { /* builds PREMIUM components */ }
+
+var budgetPc = director.ConstructGamingPc(new BudgetPcBuilder());   // SAME director, DIFFERENT builder
+var highEndPc = director.ConstructGamingPc(new HighEndPcBuilder()); // SAME sequence -- DIFFERENT RESULT
+```
+The Director's `ConstructGamingPc` method never changes regardless of which concrete `IPcBuilder` is supplied — it simply calls the same sequence of steps in the same order every time — while the *actual content* of each step (what "building the CPU" concretely means) is entirely up to whichever Builder implementation is plugged in, letting one single, reusable orchestration sequence produce meaningfully different final products.
+
+**Why modern C# code often skips the explicit Director class, relying on the Fluent Interface style instead:** the Director's main value is reusing one *fixed* construction sequence across multiple different Builders — for scenarios where each caller might reasonably want a genuinely different sequence of steps (not just different step *implementations*), a Fluent Interface (where the calling code itself chooses which methods to chain, and in what order) is often more flexible and is why the Director is frequently omitted in idiomatic C# Builder implementations, even though it remains part of the pattern's classic, original formulation.
+
+**Common Pitfall:** introducing a Director class when there's really only ever one fixed construction sequence and one Builder implementation ever used in practice — the Director's value specifically comes from reusing one sequence across *multiple* Builder implementations; without genuine variation in which Builder gets plugged in, the Director adds a layer of indirection with no actual reuse benefit to justify it.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is the Flyweight pattern's distinction between "Intrinsic" and "Extrinsic" state (touched on earlier at a high level), and how does an object's shared versus per-instance data actually get physically separated in memory to achieve its memory savings?**
+
+Intrinsic state is the data genuinely *shared* across many logical instances (stored once, reused by all of them) — Extrinsic state is the data that's *specific to one particular usage* and must be supplied by the caller each time, rather than stored inside the shared Flyweight object at all; correctly separating these two is what actually produces Flyweight's memory savings.
+
+```csharp
+// INTRINSIC state -- the CHARACTER GLYPH's shape/font data -- genuinely SHARED, IDENTICAL for every 'A' rendered
+public class CharacterGlyph // the FLYWEIGHT -- ONE instance PER unique character, SHARED across ALL its uses
+{
+    public char Character { get; }         // e.g., 'A' -- INTRINSIC -- SAME for every occurrence of 'A'
+    public byte[] GlyphBitmap { get; }     // the actual PIXEL data for THIS character's SHAPE -- INTRINSIC, SHARED
+
+    // RENDER accepts EXTRINSIC state as PARAMETERS -- NOT stored inside the FLYWEIGHT itself AT ALL
+    public void Render(int x, int y, string fontColor) // x, y, fontColor -- EXTRINSIC -- DIFFERENT per OCCURRENCE
+    {
+        // draws THIS character's SHARED glyph bitmap, AT the CALLER-SUPPLIED position/color
+    }
+}
+
+// a document with A MILLION characters -- but only ~26-100 UNIQUE CharacterGlyph FLYWEIGHTS actually EXIST
+var glyphA = glyphFactory.GetGlyph('A'); // returns the SAME shared instance EVERY time 'A' is needed
+glyphA.Render(x: 10, y: 20, fontColor: "black");  // FIRST occurrence of 'A' -- position/color passed IN
+glyphA.Render(x: 15, y: 20, fontColor: "red");    // a DIFFERENT occurrence -- SAME shared glyph, DIFFERENT extrinsic data
+```
+The `GlyphBitmap` (potentially large pixel data) exists exactly *once* per unique character, no matter how many times that character actually appears in a document — every individual occurrence's position and color (genuinely different per occurrence) are passed in as method parameters at render time, rather than being stored as fields inside the (shared) `CharacterGlyph` object itself, which is precisely what keeps the shared object's memory footprint from being duplicated per occurrence.
+
+**Why getting this separation wrong defeats the ENTIRE pattern:** if `x`/`y`/`fontColor` were mistakenly stored as fields *on* `CharacterGlyph` itself (rather than passed as `Render` parameters), each "occurrence" would need its own separate `CharacterGlyph` instance to hold its own distinct position/color — completely undoing the sharing the Flyweight pattern exists to provide, since the object would no longer genuinely be shared across occurrences at all, defeating its entire memory-saving purpose.
+
+**Common Pitfall:** implementing a "Flyweight" that stores per-occurrence data (position, unique identifiers, occurrence-specific state) directly on the shared flyweight object "for convenience," rather than correctly passing it as extrinsic parameters at the point of use — this is a common and easy mistake specifically because it still *compiles* and *works correctly*, it just silently defeats the entire memory-sharing benefit the pattern was adopted to achieve in the first place, since a genuinely separate object ends up being created per occurrence anyway.
+
+---
+
 ---

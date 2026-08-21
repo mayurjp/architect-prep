@@ -1083,4 +1083,82 @@ Because the constraint requires `T` to implement `IAdditionOperators<T>`, the co
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is C#'s `params` keyword, and how does it let a method accept a variable number of arguments, called either as a comma-separated list or as an already-existing array?**
+
+`params` marks a method's final parameter as accepting any number of arguments — the caller can pass them as a plain, comma-separated list, or pass an already-existing array directly, and the compiler handles wrapping the loose arguments into an array behind the scenes.
+
+```csharp
+public int Sum(params int[] numbers)
+{
+    int total = 0;
+    foreach (var n in numbers) total += n;
+    return total;
+}
+
+Sum(1, 2, 3);           // called with a LOOSE, comma-separated list -- compiler wraps it into an int[] automatically
+Sum(new[] { 1, 2, 3 });  // called with an ALREADY-EXISTING array directly -- also works, no wrapping needed
+Sum();                   // even ZERO arguments works -- 'numbers' becomes an EMPTY array
+```
+Without `params`, calling `Sum` with a variable number of values would require the caller to construct an array explicitly every time (`Sum(new[] { 1, 2, 3 })`) — `params` lets the more natural, comma-separated calling syntax work directly, while the underlying method body still just sees an ordinary array to iterate over.
+
+**Common Pitfall:** overloading a method with both a `params` version and several fixed-arity versions (`Sum(int a, int b)`, `Sum(int a, int b, int c)`) without realizing the compiler always prefers a more specific, non-`params` overload when one matches exactly — this can create confusing overload-resolution behavior where adding a third argument suddenly calls a completely different overload than expected, rather than simply extending the `params` array.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is a C# iterator block (`yield return`), and how does the compiler transform a method containing it into a full state machine implementing `IEnumerable<T>`, without the developer writing that state machine by hand?**
+
+`yield return` lets a method produce a sequence of values lazily, one at a time, pausing its own execution between each value — the compiler automatically rewrites the method into a hidden class implementing `IEnumerator<T>`/`IEnumerable<T>`, tracking exactly where execution paused so it can resume from that same point the next time a value is requested.
+
+```csharp
+public IEnumerable<int> GetEvenNumbersUpTo(int max)
+{
+    for (int i = 0; i <= max; i++)
+    {
+        if (i % 2 == 0)
+            yield return i; // PAUSES here -- returns THIS value -- resumes from EXACTLY this point on the NEXT call
+    }
+}
+
+foreach (var n in GetEvenNumbersUpTo(10)) Console.WriteLine(n); // pulls values ONE AT A TIME, LAZILY
+```
+Each call to `MoveNext()` on the compiler-generated enumerator resumes execution exactly where the previous `yield return` left off — the loop variable `i`, and the fact that execution was partway through the `for` loop, are all preserved automatically by the generated state machine, without the developer needing to manually track any of that state themselves the way a hand-written `IEnumerator<T>` implementation would require.
+
+**Why this directly connects to LINQ's deferred execution (covered earlier):** many of LINQ's own operators (`Where`, `Select`) are themselves implemented using iterator blocks internally — this is precisely the mechanism that lets a LINQ query not actually execute until it's enumerated, since the iterator block's body doesn't run at all until something actually calls `MoveNext()` on it, exactly the deferred-execution behavior covered in that earlier discussion.
+
+**Common Pitfall:** assuming a method containing `yield return` executes its body immediately when called — it doesn't; calling an iterator method only constructs the compiler-generated state machine object, and none of the method's actual code runs until the returned sequence is first enumerated (via `foreach` or calling `MoveNext()` directly), a subtlety that can surprise a developer expecting side effects (like a log statement at the top of the method) to fire immediately upon calling it.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is C#'s `unsafe` code and raw pointer arithmetic, and what specific memory-safety guarantees does it trade away in exchange for direct, low-level memory manipulation?**
+
+`unsafe` code lets C# use raw pointers (`int*`) and pointer arithmetic directly, stepping outside the CLR's normal memory-safety guarantees (bounds checking, type safety, the guarantee that a reference always points to a live object) — a deliberate, explicitly-marked escape hatch for scenarios needing the same low-level control C or C++ provides.
+
+```csharp
+public unsafe void ProcessBuffer(byte[] buffer)
+{
+    fixed (byte* ptr = buffer) // "pins" the array so the GC won't MOVE it while a raw pointer references it
+    {
+        byte* current = ptr;
+        for (int i = 0; i < buffer.Length; i++)
+        {
+            *current = (byte)(*current ^ 0xFF); // DIRECT pointer dereference and arithmetic -- NO bounds checking at all
+            current++; // raw POINTER ARITHMETIC -- advances by exactly one BYTE
+        }
+    }
+}
+```
+Because `current` is a raw pointer with no bounds checking, incrementing it past the end of `buffer`'s actual memory (a bug, not a deliberate act) reads or writes to memory *outside* the array entirely — something the CLR's normal, safe array-indexing (`buffer[i]`) would never allow, since it always bounds-checks and throws an `IndexOutOfRangeException` rather than silently corrupting adjacent memory.
+
+**Why `fixed` is specifically required alongside `unsafe` for managed memory:** the .NET Garbage Collector can *move* objects in memory during a compacting collection (covered under GC generations) — a raw pointer into an array's memory would become invalid/dangling the instant the GC moved that array, so `fixed` "pins" the array in place for the duration of the block, temporarily suspending the GC's ability to relocate it, specifically so the raw pointer remains valid throughout.
+
+**Common Pitfall:** using `unsafe`/pointers reflexively for "performance" without first establishing (via profiling) that the managed alternative (`Span<T>`, covered elsewhere, which provides many of the same performance benefits with bounds-checking intact) is genuinely insufficient — `Span<T>` gives array-like, low-overhead access with the CLR's normal safety guarantees preserved; raw `unsafe` pointers should be reserved for the narrow cases where even `Span<T>`'s guarantees are demonstrably too costly, not reached for by default.
+
+---
+
 ---
