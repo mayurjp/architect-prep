@@ -832,3 +832,80 @@ context.Response.HttpContext.Features.Get<IHttpResponsePushFeature>()
 **Common Pitfall:** implementing or relying on HTTP/2 Server Push in new API development, unaware that major browser vendors have already removed client-side support for it — code attempting to use `IHttpResponsePushFeature` today would find no browser actually honoring the pushed resource, since the client-side half of the mechanism no longer exists in any major browser; `103 Early Hints` is the modern, actually-supported alternative for a related, but not identical, class of optimization.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is Web API's `[Consumes]` attribute, and how does explicitly declaring which request Content-Types an action accepts let the framework reject an incompatible request BEFORE the action method's body ever runs?**
+
+`[Consumes]` explicitly declares which request `Content-Type`(s) an action is willing to accept — a request whose `Content-Type` doesn't match any declared type is rejected automatically by the framework (typically with a `415 Unsupported Media Type` response) before the action method's own code ever executes.
+
+```csharp
+[HttpPost]
+[Consumes("application/json")] // ONLY accepts JSON request bodies
+public IActionResult CreateProduct(ProductDto dto) { ... }
+```
+```http
+POST /api/products
+Content-Type: application/xml
+<product>...</product>
+
+HTTP/1.1 415 Unsupported Media Type   <-- REJECTED automatically, action method body NEVER runs
+```
+Because the framework checks the `Content-Type` against the declared `[Consumes]` list before invoking the action, a request with an unsupported content type never reaches the action's own logic at all — the action method can safely assume, by the time its code runs, that the request body is genuinely in one of the formats it explicitly declared support for.
+
+**Common Pitfall:** omitting `[Consumes]` and instead manually checking `Request.ContentType` inside the action body — this means every request (regardless of content type) still reaches the action method's code, requiring manual, easy-to-forget validation logic scattered across every action, rather than the framework structurally guaranteeing only compatible requests ever reach the action at all.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is Web API's Route Constraint for API Versioning via URL segment (`{version:apiVersion}`), and how does the `Microsoft.AspNetCore.Mvc.Versioning` package's `ApiVersion` route constraint differ from an ordinary route parameter in terms of what values it accepts?**
+
+The `apiVersion` route constraint is a specialized constraint (from the API versioning package) that validates a URL segment specifically as a recognized, registered API version — rejecting the route as non-matching if the segment isn't a version the application has actually registered, rather than accepting any arbitrary string the way an ordinary route parameter would.
+
+```csharp
+[ApiVersion("1.0")]
+[ApiVersion("2.0")]
+[Route("api/v{version:apiVersion}/products")]
+public class ProductsController : ControllerBase { ... }
+```
+```http
+GET /api/v1.0/products   -> MATCHES -- "1.0" is a REGISTERED version
+GET /api/v99.0/products  -> does NOT match this route -- "99.0" was NEVER registered as a valid version
+```
+Because the `apiVersion` constraint specifically validates against registered versions (rather than accepting any string), requesting an unregistered version number produces a proper "unsupported version" response rather than either a confusing generic 404 or, worse, silently matching a route it shouldn't — this constraint-based validation is specifically what the versioning package adds beyond what an ordinary, unconstrained route parameter would provide on its own.
+
+**Common Pitfall:** using a plain, unconstrained route parameter (`{version}`) for API versioning rather than the dedicated `apiVersion` constraint — a plain parameter accepts literally any string value, meaning a request for a nonexistent version number would still match the route (routing to the wrong/default handling) rather than being properly recognized and rejected as an unsupported/unrecognized version by the versioning-aware constraint.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is Web API's Minimal API `IEndpointFilter`, and how does it let cross-cutting logic (like input validation) be applied to a SPECIFIC Minimal API endpoint, similar to how Action Filters work for MVC controllers?**
+
+`IEndpointFilter` provides a Minimal-API-specific mechanism analogous to MVC's Action Filters — logic that runs before/after a specific endpoint's handler delegate, letting cross-cutting concerns (validation, logging, response shaping) be applied to individual Minimal API endpoints without embedding that logic directly inside the endpoint's own handler code.
+
+```csharp
+public class ValidationFilter<T> : IEndpointFilter
+{
+    public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        var arg = context.GetArgument<T>(0);
+        var validationResults = new List<ValidationResult>();
+        if (!Validator.TryValidateObject(arg!, new ValidationContext(arg!), validationResults, true))
+            return Results.BadRequest(validationResults); // SHORT-CIRCUITS -- the endpoint's OWN handler never runs
+
+        return await next(context); // validation passed -- proceed to the endpoint's ACTUAL handler
+    }
+}
+
+app.MapPost("/products", (ProductDto dto) => Results.Ok(dto))
+   .AddEndpointFilter<ValidationFilter<ProductDto>>(); // applied to THIS specific endpoint
+```
+Because the filter runs before the endpoint's own handler delegate, invalid input is rejected (with `BadRequest`) before the handler code ever executes — this keeps the validation logic reusable across multiple Minimal API endpoints (by attaching the same filter to each) rather than duplicating the same validation code inline inside every individual endpoint's handler lambda.
+
+**Why this matters specifically for Minimal APIs, which otherwise lack MVC's Action Filter pipeline:** Minimal APIs are deliberately more lightweight than full MVC controllers, without MVC's action filter pipeline built in by default — `IEndpointFilter` fills this gap, providing an equivalent cross-cutting-concerns mechanism specifically designed for the Minimal API programming model, rather than requiring a full MVC controller purely to gain filter-based cross-cutting behavior.
+
+**Common Pitfall:** duplicating the same validation/cross-cutting logic inline inside multiple Minimal API endpoint handler lambdas, rather than extracting it into a reusable `IEndpointFilter` — this scatters identical logic across many endpoint definitions, exactly the kind of code duplication `IEndpointFilter` (analogous to MVC's Action Filters) is specifically designed to eliminate by centralizing the cross-cutting logic into one reusable, attachable filter class.
+
+---

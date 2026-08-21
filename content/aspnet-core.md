@@ -909,3 +909,87 @@ Because routing consults every registered `EndpointDataSource` (not just the bui
 **Common Pitfall:** implementing a custom `EndpointDataSource` without correctly implementing `GetChangeToken()` to fire when the underlying endpoint set actually changes — this leaves dynamically added or removed endpoints invisible to the routing system until an application restart, defeating the entire purpose of using a dynamic data source in the first place, since the routing table would only ever reflect whatever endpoints existed at the moment the application first started.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is ASP.NET Core's `[FromServices]` attribute (as an alternative to constructor injection), and when would you inject a service directly into an action method's parameters rather than via the controller's constructor?**
+
+`[FromServices]` lets a specific action method parameter be resolved from the DI container directly, rather than requiring the dependency to be injected into the controller's constructor (and thus available to every action on that controller, even ones that don't need it).
+
+```csharp
+public class ReportsController : ControllerBase
+{
+    // Constructor injection -- EVERY action gets THIS dependency, whether it needs it or not
+    private readonly IOrderRepository _orders;
+    public ReportsController(IOrderRepository orders) => _orders = orders;
+
+    [HttpGet("monthly")]
+    public IActionResult MonthlyReport([FromServices] IReportGenerator generator) // ONLY this ONE action needs it
+    {
+        return Ok(generator.GenerateMonthly(_orders.GetAll()));
+    }
+}
+```
+`IReportGenerator` is only needed by the `MonthlyReport` action specifically — using `[FromServices]` scopes its resolution to just that one action method, rather than forcing every action on `ReportsController` (even ones with nothing to do with report generation) to have `IReportGenerator` constructed and injected via the constructor regardless of whether that specific action actually uses it.
+
+**Why this matters most for controllers with many actions having genuinely different dependency needs:** a controller with ten actions, where each action needs a different, specific set of services, would otherwise need its constructor injecting all ten services (even though any given action only uses one or two of them) — `[FromServices]` lets each action's specific, narrow dependency needs be expressed directly on that action, rather than bloating the controller's shared constructor with every dependency any single action might ever need.
+
+**Common Pitfall:** overusing `[FromServices]` for dependencies that are actually needed by most or all actions on a controller — for a dependency genuinely shared across most of a controller's actions, constructor injection remains the clearer, more conventional choice; `[FromServices]` is specifically valuable for the narrower case of a dependency needed by only one or a small handful of actions on an otherwise broader controller.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is ASP.NET Core's `IHostApplicationLifetime`, and how does subscribing to its `ApplicationStopping` event let application code perform graceful cleanup DURING shutdown, distinct from the `IHostedService.StopAsync` mechanism covered earlier?**
+
+`IHostApplicationLifetime` exposes cancellation tokens/events corresponding to the application's lifecycle phases (`ApplicationStarted`, `ApplicationStopping`, `ApplicationStopped`) — any component, not just registered `IHostedService`s, can subscribe to these events to run cleanup logic at the appropriate lifecycle phase, offering a more general-purpose hook than the `IHostedService`-specific `StopAsync` mechanism.
+
+```csharp
+public class MyService
+{
+    public MyService(IHostApplicationLifetime lifetime)
+    {
+        lifetime.ApplicationStopping.Register(() =>
+        {
+            Console.WriteLine("Application is shutting down -- performing cleanup here");
+            // any cleanup logic -- doesn't need to be a registered IHostedService at all
+        });
+    }
+}
+```
+Unlike `IHostedService.StopAsync` (which specifically applies to components registered as hosted services), `IHostApplicationLifetime` can be injected into and used by *any* component, letting arbitrary application code hook into shutdown-phase cleanup without needing to be structured as a formal hosted service — useful for simpler, more ad-hoc cleanup needs that don't warrant the full `IHostedService` ceremony.
+
+**Why this provides a genuinely more general-purpose mechanism than `IHostedService` alone:** `IHostedService` is specifically designed for components with their own background execution lifecycle (a `BackgroundService` running a continuous loop) — `IHostApplicationLifetime` is a lighter-weight mechanism for any component that simply needs to react to lifecycle *events* (started, stopping, stopped) without needing the full hosted-service execution model at all.
+
+**Common Pitfall:** implementing a full `IHostedService` purely to run a small amount of shutdown cleanup logic that doesn't actually need any of `IHostedService`'s background-execution capabilities — for simple "run this when the application is stopping" needs, subscribing to `IHostApplicationLifetime.ApplicationStopping` directly is a lighter-weight, more directly-fitting solution than the added ceremony of a full hosted service implementation.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is ASP.NET Core's `Microsoft.AspNetCore.Http.Result<T>` / Minimal API `TypedResults`, and how does using `TypedResults` (rather than `Results`) let the OpenAPI/Swagger generation tooling correctly infer a Minimal API endpoint's possible response types at COMPILE TIME?**
+
+`Results.Ok(...)`/`Results.NotFound()` return the non-generic `IResult` interface — `TypedResults.Ok(...)`/`TypedResults.NotFound()` return a specific, strongly-typed result type, letting the compiler (and OpenAPI generation tooling reading the method's actual return type) know exactly which possible result shapes an endpoint can return, without needing separate `[ProducesResponseType]` annotations.
+
+```csharp
+// Using 'Results' -- returns the NON-GENERIC IResult -- tooling CANNOT infer possible response types from this alone
+app.MapGet("/orders/{id}", (int id) =>
+{
+    var order = _repository.Find(id);
+    return order is null ? Results.NotFound() : Results.Ok(order);
+}); // OpenAPI generation needs SEPARATE [ProducesResponseType] annotations to know the possible response shapes
+
+// Using 'TypedResults' -- returns a STRONGLY-TYPED result -- tooling can INFER response types from the SIGNATURE alone
+app.MapGet("/orders/{id}", Results<Ok<Order>, NotFound> (int id) =>
+{
+    var order = _repository.Find(id);
+    return order is null ? TypedResults.NotFound() : TypedResults.Ok(order);
+}); // the METHOD'S OWN return type ALREADY documents: "returns either Order (200) or NotFound (404)"
+```
+Because `TypedResults` returns concrete types (`Ok<Order>`, `NotFound`) rather than the generic `IResult`, the endpoint's own method signature (`Results<Ok<Order>, NotFound>`) already fully documents every possible response shape the endpoint can produce — OpenAPI/Swagger generation tooling can read this directly from the compiled method signature, without needing separate, easily-forgotten `[ProducesResponseType]` attribute annotations describing the same information redundantly.
+
+**Why this specifically reduces the risk of documentation drifting out of sync with actual behavior:** with `Results` and separate `[ProducesResponseType]` annotations, nothing prevents the annotations from silently becoming stale if the actual returned result types change but the annotations aren't updated to match — with `TypedResults`, the return type IS the documentation, and the compiler enforces that the method actually returns what its signature declares, structurally eliminating the possibility of this specific kind of drift.
+
+**Common Pitfall:** continuing to use `Results` with separately-maintained `[ProducesResponseType]` annotations in new Minimal API code, missing the opportunity `TypedResults` provides to have the compiler-enforced return type serve as the single source of truth for both actual behavior and generated API documentation simultaneously, rather than maintaining these as two separate, independently-driftable things.
+
+---

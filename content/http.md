@@ -703,3 +703,83 @@ Because QUIC itself (not the application layer) natively understands and tracks 
 **Common Pitfall:** assuming HTTP/2's stream multiplexing alone fully solved head-of-line blocking, without realizing the underlying TCP transport still imposes strict, connection-wide in-order delivery beneath it — HTTP/2 successfully solved *application-layer* head-of-line blocking (from HTTP/1.1's strict request-response ordering), but the *transport-layer* head-of-line blocking inherent to TCP itself remained unaddressed until HTTP/3's shift to QUIC specifically targeted that deeper, transport-level limitation.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is the HTTP `Range` request header, and how does it let a client request only a SPECIFIC portion of a resource (like resuming a partially-downloaded file) rather than the entire thing?**
+
+The `Range` header lets a client request only a specific byte range of a resource, rather than the entire response body — the server, if it supports range requests, responds with just the requested portion and a `206 Partial Content` status, rather than the full resource.
+
+```http
+GET /large-video.mp4
+Range: bytes=1000000-1999999
+
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 1000000-1999999/5000000
+Content-Length: 1000000
+(only THIS specific 1MB slice of the file's bytes, not the entire 5MB file)
+```
+A client that already downloaded the first 1,000,000 bytes of a file (before a connection dropped) can resume by requesting only `bytes=1000000-` (from that point onward) rather than re-downloading the entire file from scratch — this is exactly how download managers and video players supporting "seek to a specific point" and "resume an interrupted download" are implemented.
+
+**Why a server must explicitly advertise support for this via `Accept-Ranges`:** not every server/resource supports partial range requests — a server signals its support via an `Accept-Ranges: bytes` response header; a client attempting a `Range` request against a server that doesn't support it typically just receives the full `200 OK` response with the entire body, ignoring the `Range` header entirely, so clients should check for range support before assuming a partial request will actually be honored.
+
+**Common Pitfall:** assuming every server/endpoint supports range requests by default — many dynamically-generated API responses don't support partial range requests at all (there's no meaningful way to "resume" a computed JSON response mid-way through), and even for genuinely static file-serving scenarios, range support depends on the specific server/configuration actually implementing and advertising it via `Accept-Ranges`.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is the `Upgrade` header and HTTP's protocol upgrade mechanism, and how does it let a connection that STARTS as a regular HTTP request transition to an entirely DIFFERENT protocol (like WebSocket) on the SAME underlying TCP connection?**
+
+The `Upgrade` header, combined with a `101 Switching Protocols` response, lets a client and server negotiate switching an already-established connection from HTTP to a different protocol entirely — this is specifically how a WebSocket connection is established: it begins as an ordinary HTTP request, then "upgrades" to the WebSocket protocol on that same underlying TCP connection.
+
+```http
+GET /chat HTTP/1.1
+Host: example.com
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+-- FROM THIS POINT ONWARD, the SAME TCP connection now speaks the WEBSOCKET protocol, NOT HTTP anymore --
+```
+The initial request is a completely ordinary HTTP `GET` request (allowing it to pass through existing HTTP-aware infrastructure like proxies and firewalls without special handling) — once the server responds with `101 Switching Protocols`, both sides agree the *same* underlying TCP connection now carries WebSocket frames instead of further HTTP requests/responses, without needing to tear down and re-establish a brand-new connection for the different protocol.
+
+**Why beginning as ordinary HTTP specifically matters for compatibility:** because the handshake starts as a standard HTTP request, it can traverse existing web infrastructure (corporate proxies, load balancers, firewalls) designed to understand and route HTTP traffic — a protocol that instead required an entirely separate, non-HTTP initial handshake would face much greater difficulty passing through infrastructure that only understands and permits standard HTTP traffic.
+
+**Common Pitfall:** assuming a WebSocket connection requires an entirely separate network connection/port from the original HTTP request — the Upgrade mechanism specifically reuses the *same* underlying TCP connection the original HTTP request was made on, which is precisely what allows it to benefit from existing HTTP-aware network infrastructure during the initial handshake, rather than requiring separate connection setup and its own distinct infrastructure compatibility considerations.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is HTTP's `103 Early Hints` status code, and how does it let a server send PRELIMINARY response headers (hinting at resources the client should start fetching) BEFORE the actual final response is fully ready?**
+
+`103 Early Hints` lets a server send an interim, preliminary response containing headers (typically `Link` headers pointing at resources the page will need) while the server is still preparing the actual, final response — the client can begin fetching those hinted resources immediately, in parallel with the server still computing the main response, rather than waiting for the final response to arrive before starting to fetch anything.
+
+```http
+GET /article
+
+HTTP/1.1 103 Early Hints
+Link: </styles.css>; rel=preload as=style
+Link: </hero-image.jpg>; rel=preload as=image
+-- client can START FETCHING these resources IMMEDIATELY, WHILE the server is STILL COMPUTING the main response --
+
+(... server takes another 800ms to finish rendering the actual page ...)
+
+HTTP/1.1 200 OK
+Content-Type: text/html
+<html>... the actual page, referencing styles.css and hero-image.jpg ...</html>
+```
+While the server spends time on expensive backend work (database queries, template rendering) to produce the final HTML response, the client has already been given a head start on fetching the CSS and hero image it will need once that HTML finally arrives — by the time the actual page content shows up, its key resources may already be fully or partially downloaded, reducing the perceived time until the page is fully rendered and usable.
+
+**Why this specifically succeeds where HTTP/2 Server Push (covered earlier) failed:** unlike Server Push (which proactively *sent* resources the client might not have needed, wasting bandwidth on cache hits, and which was hard to cancel), Early Hints only *hints* at what to fetch — the client remains in full control of whether and how to actually fetch each hinted resource (and can skip anything already in its own cache), avoiding Server Push's exact failure mode of forcing unwanted, un-cancellable resource transfers onto the client.
+
+**Common Pitfall:** confusing `103 Early Hints` with HTTP/2 Server Push, assuming they share the same deprecation status — Early Hints is an actively-supported, genuinely useful modern mechanism specifically designed to address the same underlying problem Server Push attempted to solve, while avoiding the specific practical failures (cache-unaware pushing, inability to cancel) that led to Server Push's removal; the two should not be treated as equivalent or equally deprecated.
+
+---
+
+---

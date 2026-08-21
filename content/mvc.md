@@ -784,4 +784,87 @@ The combination of the route template (`{id}`), the HTTP verb (`HttpGet`), and t
 
 ---
 
+## Beginner — Question 8
+
+**Q8: What is MVC's `ModelState.AddModelError`, and how does adding a CUSTOM validation error (beyond what Data Annotations catch automatically) let an action report business-rule violations through the same validation-error response mechanism?**
+
+`ModelState.AddModelError` lets an action manually add a validation error under a specific key — this integrates with the exact same `ModelState`-based validation infrastructure that Data Annotations automatically populate, letting business-rule violations (which Data Annotations can't express declaratively) be reported through the identical error response mechanism the client already expects for validation failures.
+
+```csharp
+[HttpPost]
+public IActionResult CreateProduct(ProductDto dto)
+{
+    if (!ModelState.IsValid) return BadRequest(ModelState); // catches DATA ANNOTATION failures automatically
+
+    if (_repository.SkuAlreadyExists(dto.Sku)) // a BUSINESS RULE -- Data Annotations CANNOT express this
+    {
+        ModelState.AddModelError(nameof(dto.Sku), "A product with this SKU already exists.");
+        return BadRequest(ModelState); // returns the SAME error response SHAPE as a Data Annotation failure
+    }
+
+    _repository.Add(dto);
+    return Ok();
+}
+```
+Because `AddModelError` populates the same `ModelState` structure Data Annotations use, the resulting `BadRequest(ModelState)` response has the exact same shape whether the failure came from a declarative `[Required]` violation or this manually-added business-rule check — the client's error-handling code doesn't need to distinguish between the two; both surface through the identical validation-error response format.
+
+**Common Pitfall:** returning a completely different, ad-hoc error response shape for business-rule violations (a custom `{ "error": "SKU exists" }` object) rather than integrating with `ModelState` — this forces client code to handle two entirely different error response shapes (one for Data Annotation failures, another for business-rule failures) rather than a single, consistent validation-error format regardless of which specific check actually failed.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is MVC's `[ResponseCache]` attribute, and how does its VaryByQueryKeys parameter let a single action's cached responses be correctly keyed per distinct combination of query parameters?**
+
+`[ResponseCache]` configures HTTP response caching for a specific action — its `VaryByQueryKeys` parameter tells the caching layer that responses should be cached and served separately for each distinct combination of the specified query parameter values, rather than treating every request to the same action (regardless of query string) as interchangeable.
+
+```csharp
+[HttpGet]
+[ResponseCache(Duration = 60, VaryByQueryKeys = new[] { "category", "page" })]
+public IActionResult GetProducts(string category, int page) => Ok(_repository.GetByCategory(category, page));
+```
+```text
+GET /products?category=electronics&page=1  -> cached SEPARATELY, keyed by THESE specific values
+GET /products?category=electronics&page=2  -> a DIFFERENT cached entry, keyed by page=2 instead
+GET /products?category=books&page=1         -> yet ANOTHER separate cached entry
+```
+Without `VaryByQueryKeys`, a caching layer might either cache nothing (treating every request as unique due to varying query strings) or incorrectly serve one query combination's cached response to a request with entirely different query parameters — `VaryByQueryKeys` ensures the cache correctly distinguishes between each meaningfully different combination of inputs this action actually depends on.
+
+**Common Pitfall:** applying `[ResponseCache]` without `VaryByQueryKeys` to an action whose response genuinely varies based on query parameters — this risks the caching layer serving one query combination's cached response to a request with different query parameters entirely, a serious correctness bug (rather than just a caching inefficiency) that's easy to overlook since the cached response is technically valid, just for the *wrong* combination of inputs.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is MVC's `IAuthorizationMiddlewareResultHandler`, and how does implementing it let an application customize the RESPONSE produced for a FAILED authorization check (beyond the default 401/403 status codes)?**
+
+`IAuthorizationMiddlewareResultHandler` intercepts the outcome of ASP.NET Core's authorization middleware, letting an application override the default behavior (a bare 401/403 status code) with custom logic — such as returning a structured JSON error body, redirecting to a specific page, or logging additional context about the failed authorization attempt.
+
+```csharp
+public class CustomAuthorizationResultHandler : IAuthorizationMiddlewareResultHandler
+{
+    private readonly AuthorizationMiddlewareResultHandler _default = new();
+
+    public async Task HandleAsync(RequestDelegate next, HttpContext context,
+        AuthorizationPolicy policy, PolicyAuthorizationResult authorizeResult)
+    {
+        if (!authorizeResult.Succeeded)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { error = "You lack the required permission." });
+            return; // CUSTOM response body, instead of the DEFAULT bare status code with no body
+        }
+        await _default.HandleAsync(next, context, policy, authorizeResult); // delegate to DEFAULT behavior otherwise
+    }
+}
+
+// Registration:
+builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, CustomAuthorizationResultHandler>();
+```
+By default, a failed authorization check produces a bare `403 Forbidden` with no response body describing why — many client applications (especially SPAs) benefit from a structured error body explaining the specific reason for the denial, which this custom handler provides by intercepting the authorization outcome before the default bare-status-code behavior takes over.
+
+**Why delegating to the default handler for the SUCCESS case (rather than reimplementing everything) matters:** the custom handler only needs to override behavior for the specific case it cares about (a failed authorization) — delegating back to `AuthorizationMiddlewareResultHandler`'s own default implementation for the success case avoids needing to reimplement the (non-trivial) correct behavior for every other outcome the handler might encounter.
+
+**Common Pitfall:** reimplementing the ENTIRE authorization result handling logic from scratch (including the success path) rather than delegating to the default handler for cases the custom logic doesn't specifically need to change — this risks subtly reimplementing framework behavior incorrectly; a custom `IAuthorizationMiddlewareResultHandler` should typically only override the specific outcome(s) it cares about, delegating everything else to the framework's own default implementation.
+
 ---
