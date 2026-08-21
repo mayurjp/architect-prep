@@ -623,3 +623,71 @@ Without the cache mount, if `package-lock.json` changes even slightly (invalidat
 **Common Pitfall:** assuming a Cache Mount behaves like a regular Docker layer cache (invalidated by earlier changes) — it doesn't; a Cache Mount persists regardless of what else changed earlier in the Dockerfile, which is exactly the point (a package manager's download cache should remain valid even when application source code changes), but this also means stale or corrupted cache contents can persist silently across many builds unless explicitly cleared (`docker builder prune`), a debugging wrinkle unique to this caching mechanism.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is the difference between `docker exec` and `docker attach`, and why is `exec` almost always the safer choice for inspecting a running container?**
+
+`docker attach` connects directly to a container's own main process (PID 1) and its standard input/output streams — pressing Ctrl+C while attached can send a termination signal to that main process, potentially stopping the entire container. `docker exec` instead starts a brand-new, separate process *inside* the container's existing namespaces, entirely independent of the container's main process.
+
+```bash
+docker exec -it my-container /bin/bash   # starts a NEW shell process INSIDE the container -- safe to exit
+docker attach my-container                # connects DIRECTLY to the container's main process -- risky
+```
+Running `docker exec -it my-container /bin/bash` starts a completely separate bash process alongside the container's actual main application process — exiting that shell (even via Ctrl+C or `exit`) has no effect on the container's actual main process, which keeps running entirely undisturbed; `docker attach`, by contrast, connects to the main process's own stdin/stdout directly, meaning an accidental Ctrl+C can send a signal straight to it.
+
+**Common Pitfall:** using `docker attach` out of habit to "just peek inside" a running container, then accidentally sending a termination signal to the container's main process via Ctrl+C, unexpectedly stopping the entire container — `docker exec` (starting a genuinely separate process) is almost always the safer default for interactive inspection/debugging, reserving `attach` specifically for the rarer cases where interacting with the main process's own stdin/stdout directly is actually the intent.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is a Docker "Multi-Platform" image (built via `docker buildx build --platform linux/amd64,linux/arm64`), and how does a SINGLE image tag transparently resolve to the CORRECT architecture-specific image when pulled on different machines?**
+
+A multi-platform image is really a "manifest list" — a single image tag that references multiple underlying images, each built for a different CPU architecture (`amd64`, `arm64`) — when a client pulls that tag, Docker automatically selects and downloads only the specific underlying image matching the pulling machine's own architecture, entirely transparently.
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t myapp:latest --push .
+# Produces ONE tag ("myapp:latest") backed by a MANIFEST LIST referencing TWO separate images:
+#   - myapp:latest's amd64-specific image (for Intel/AMD machines)
+#   - myapp:latest's arm64-specific image (for Apple Silicon / ARM-based servers)
+```
+```bash
+# On an Intel/AMD machine:
+docker pull myapp:latest   # Docker AUTOMATICALLY resolves and pulls the amd64-specific image
+
+# On an Apple Silicon Mac or ARM-based cloud instance:
+docker pull myapp:latest   # the SAME tag AUTOMATICALLY resolves to the arm64-specific image instead
+```
+Developers and deployment pipelines never need to know or specify which architecture-specific image to pull — they simply reference `myapp:latest`, and Docker's manifest-list resolution mechanism transparently selects the correct underlying image for whatever machine is doing the pulling, which is exactly what makes a single image tag usable seamlessly across a mixed fleet of Intel and ARM-based machines (a genuinely common scenario given Apple Silicon's prevalence and ARM-based cloud instances' growing popularity).
+
+**Common Pitfall:** building and pushing an image for only ONE architecture, then being surprised when it fails to run (or runs very slowly via emulation) on a machine with a different CPU architecture — as ARM-based development machines and cloud instances have become increasingly common, building genuinely multi-platform images (rather than assuming `amd64` is the only architecture that matters) has become an increasingly important, easy-to-overlook consideration for any image intended to run across a mixed-architecture fleet.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is a Docker container's default `seccomp` (secure computing mode) profile, and how does restricting which Linux SYSCALLS a containerized process is allowed to make reduce its potential attack surface, even against an already-exploited application?**
+
+`seccomp` is a Linux kernel feature that restricts which system calls a process is permitted to make — Docker applies a default seccomp profile to every container, blocking a substantial list of syscalls that containerized applications essentially never legitimately need but that historically have been used in various privilege-escalation/container-escape exploits.
+
+```bash
+docker run --security-opt seccomp=default.json myapp   # Docker's DEFAULT profile -- blocks ~44 risky syscalls
+
+docker run --security-opt seccomp=unconfined myapp     # REMOVES this protection entirely -- ALL syscalls allowed
+```
+```text
+Syscalls blocked by Docker's default profile include things like:
+  - reboot() -- a containerized process has NO legitimate reason to reboot the HOST machine
+  - mount() -- generally unneeded, and historically involved in container-escape techniques
+  - kexec_load() -- loading a NEW KERNEL -- absolutely never needed by an ordinary application
+```
+Even if an attacker manages to fully exploit and gain code execution within a containerized application (through an entirely separate, unrelated vulnerability), the seccomp profile restricts what that compromised process can actually *do* at the kernel level — syscalls that could otherwise be used to escalate privileges or escape the container's isolation are blocked at the kernel boundary itself, regardless of what the (already-compromised) application code inside the container attempts to do.
+
+**Why this specifically matters as defense-in-depth, not primary protection:** seccomp doesn't prevent an application from being exploited in the first place (that requires actually fixing the underlying vulnerability) — its value is specifically in limiting the *blast radius* once something has already gone wrong, which is exactly the "defense in depth" philosophy covered extensively elsewhere in this material: multiple independent layers of protection, so that a failure in one layer (the application itself being exploited) doesn't automatically cascade into a complete compromise of the underlying host.
+
+**Common Pitfall:** running containers with `--security-opt seccomp=unconfined` to work around some obscure permission error, without narrowing the fix to only the specific syscall actually needed — disabling seccomp entirely removes an entire layer of kernel-level defense-in-depth for the sake of a single missing syscall permission; a custom, narrowly-scoped seccomp profile (allowing just the specific syscall genuinely needed) preserves the vast majority of the protection while still fixing the actual underlying issue.
+
+---
+
+---

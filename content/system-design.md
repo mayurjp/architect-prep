@@ -1141,3 +1141,73 @@ Unlike Choreography (where the overall workflow logic is implicitly scattered ac
 **Common Pitfall:** choosing Choreography for a saga with many steps and complex, conditional compensation logic, purely to "avoid centralization on principle" — for workflows with many participants and non-trivial branching/compensation logic, Choreography's scattered-across-many-services event handlers can become genuinely difficult to reason about as a whole ("what's the complete sequence of events when X happens?" requires tracing through many separate services' code) — Orchestration's centralization, despite its coupling trade-off, is often the more maintainable choice specifically once a saga's complexity crosses a certain threshold.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is "Vertical Scaling" versus "Horizontal Scaling," and what hard ceiling does Vertical Scaling eventually run into that Horizontal Scaling avoids?**
+
+Vertical Scaling ("scaling up") means adding more resources (CPU, RAM) to a single existing machine — Horizontal Scaling ("scaling out") means adding more machines running the same workload in parallel, distributing load across all of them. Vertical Scaling is simpler (no distributed-systems complexity) but eventually hits a hard physical ceiling; Horizontal Scaling has no comparable inherent limit, but introduces real distributed-systems complexity in exchange.
+
+```text
+Vertical Scaling: 1 server, 4 CPU cores -> upgrade to the SAME 1 server, 64 CPU cores
+  -- simpler: no load balancing, no distributed state to coordinate --
+  -- but EVENTUALLY hits a ceiling: there's a LARGEST machine that can physically be bought/rented --
+
+Horizontal Scaling: 1 server -> 10 servers, EACH running the SAME workload, load BALANCED across them
+  -- more complex: needs a load balancer, and any SHARED STATE must now be coordinated across machines --
+  -- but has NO comparable ceiling: adding the 11th, 100th, or 1000th server is structurally the SAME operation --
+```
+A single machine, no matter how powerful, is ultimately bounded by the largest CPU/RAM configuration physically available at any given time — Horizontal Scaling sidesteps this ceiling entirely by distributing load across many machines instead, at the cost of needing a load balancer and, critically, needing to handle any state that would otherwise have lived conveniently on just one machine (sessions, in-memory caches) in a way that works correctly across many independent instances.
+
+**Why real-world systems typically use BOTH, not just one exclusively:** Vertical Scaling remains useful up to a point (a genuinely more powerful single machine is simpler to operate than many small ones, when it's sufficient) — but for systems needing to scale well beyond what any single machine can provide, or needing high availability (no single point of failure), Horizontal Scaling becomes necessary specifically because Vertical Scaling's ceiling and single-point-of-failure risk make it insufficient alone at genuinely large scale.
+
+**Common Pitfall:** designing a system's persistence/session layer in a way that assumes "there's only ever one server" (storing session state purely in that one server's local memory, for instance) — this works perfectly under Vertical Scaling, but breaks the moment Horizontal Scaling is later introduced (a user's session, stored only on Server A's memory, becomes invisible to a request that happens to land on Server B instead) — architecting for eventual horizontal scalability from the start (externalizing session state to a shared store) avoids a painful retrofit later.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is a "Write-Behind" (or "Write-Back") cache strategy, and how does deferring the write to the underlying database ASYNCHRONOUSLY improve write latency, at the cost of what specific durability risk?**
+
+A Write-Behind cache writes new/updated data to the cache immediately, returning success to the caller right away, then asynchronously (and typically batched, on a delay) writes that same data through to the actual underlying database — as opposed to a "Write-Through" cache, which writes to both the cache and the database synchronously, before returning success to the caller.
+
+```text
+Write-Through (SYNCHRONOUS): write to CACHE, write to DATABASE, THEN return success to the caller
+  -- caller-perceived latency includes the FULL database write cost --
+  -- but the moment "success" is returned, the data is GUARANTEED durably persisted --
+
+Write-Behind (ASYNCHRONOUS): write to CACHE, return success to the caller IMMEDIATELY,
+                              THEN write to the database LATER, asynchronously, often BATCHED
+  -- caller-perceived latency is MUCH lower (just the cache write) --
+  -- but there's a WINDOW where the write exists ONLY in the cache, not yet durably in the database --
+```
+The caller experiences dramatically lower write latency under Write-Behind, since it only waits for the (typically very fast) cache write, not the full database write — but this introduces a genuine durability risk: if the cache crashes or loses data during the window before the asynchronous database write actually completes, that write is lost entirely, despite the caller having already been told it succeeded.
+
+**Why this specific trade-off is acceptable for SOME workloads but not others:** Write-Behind is appropriate for data where losing a small window of very recent writes during a rare cache failure is tolerable (analytics event counters, non-critical activity logs) — it's generally unacceptable for data requiring strong durability guarantees (financial transactions, order confirmations), where a caller being told "success" must genuinely mean the data is durably persisted, not merely cached and pending an eventual write that might never actually happen.
+
+**Common Pitfall:** applying a Write-Behind caching strategy to genuinely critical, durability-sensitive data purely for the write-latency improvement, without considering the data-loss window it introduces — the latency benefit is real, but it comes at the cost of a durability guarantee that many types of business-critical data genuinely cannot afford to lose, even for a brief window; the choice between Write-Through and Write-Behind should be driven by how tolerable that specific data's loss-on-cache-failure risk actually is, not purely by the latency improvement alone.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is the "Geo-Distributed Leader Election" problem, and how does the SPEED-OF-LIGHT latency between geographically distant regions impose a fundamental lower bound on how fast cross-region CONSENSUS (like electing a single leader) can possibly happen?**
+
+Distributed consensus protocols (Raft, Paxos) require multiple nodes to communicate back and forth to agree on something (like which node is the current leader) — when those nodes are spread across geographically distant regions (different continents), the physical speed-of-light latency for each required round trip imposes a hard floor on how fast that consensus can possibly complete, no matter how well-optimized the software itself is.
+
+```text
+Consensus requires nodes in Region A (US) and Region B (Asia) to exchange MULTIPLE round trips
+to agree on a new leader -- each round trip's MINIMUM possible latency is bounded by the actual
+PHYSICAL DISTANCE between the two regions and the speed of light through fiber optic cable
+
+Even with ZERO software overhead, a single US-to-Asia round trip has a physically-imposed
+minimum latency of roughly 150-200ms -- consensus requiring MULTIPLE such round trips
+means leader election across these regions CANNOT complete faster than some MULTIPLE of that floor
+```
+No amount of software optimization, better algorithms, or more powerful hardware can make a genuinely cross-continental round trip faster than what the speed of light through fiber optic cable physically permits — this is a hard, physics-imposed floor on cross-region consensus latency, fundamentally different from a typical software performance problem that can be optimized away with better code or more resources.
+
+**Why this specifically shapes real-world architecture decisions for globally-distributed systems:** systems requiring frequent, fast leader elections or consensus decisions are often deliberately designed to keep the consensus-participating nodes within a *single* region (or a small number of nearby regions) specifically to avoid this physics-imposed latency floor — cross-region replication/consensus is reserved for operations that can tolerate the inherent latency (occasional failover, not routine, frequent coordination), precisely because no engineering effort can shrink a genuinely cross-continental round trip's minimum physical latency.
+
+**Common Pitfall:** designing a system requiring frequent, low-latency consensus across geographically distant regions, then being surprised when performance targets can't be met despite extensive software-level optimization efforts — when a latency requirement is being violated by a hard, physics-imposed floor (not a software inefficiency), no amount of code optimization can close that gap; the architectural fix is keeping frequent-consensus operations confined to nodes within acceptable physical proximity, not attempting to engineer around the speed of light.
+
+---

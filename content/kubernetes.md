@@ -673,3 +673,86 @@ When an administrator runs `kubectl drain` on a node hosting some of `payments-a
 **Common Pitfall:** setting `minAvailable` equal to the Deployment's total replica count (e.g., `minAvailable: 3` for exactly 3 replicas) — this makes it *impossible* for the cluster to ever voluntarily evict even one Pod, which can block legitimate node drains and cluster upgrades indefinitely; a PDB's `minAvailable`/`maxUnavailable` should be set to genuinely reflect the minimum the workload can tolerate, not simply "all of them," or routine cluster maintenance operations become unexpectedly stuck.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is a Kubernetes `Secret`, and how does it differ from an ordinary `ConfigMap` in terms of the intent behind storing sensitive values (even though, by default, both are stored similarly under the hood)?**
+
+A `Secret` is Kubernetes' dedicated object type for sensitive configuration (passwords, API keys, certificates) — structurally very similar to a `ConfigMap` (both hold key-value data mountable into Pods), but `Secret` signals intent (this data is sensitive) and integrates with additional protections a `ConfigMap` doesn't (encryption-at-rest configuration, tighter RBAC conventions, `kubectl` masking values by default in output).
+
+```bash
+kubectl create secret generic db-credentials --from-literal=password=SuperSecret123
+```
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      envFrom:
+        - secretRef: { name: db-credentials }   # injects the secret's values as environment variables
+```
+```bash
+kubectl get secret db-credentials -o yaml
+# data: { password: U3VwZXJTZWNyZXQxMjM= }  -- Base64-ENCODED, NOT encrypted, by default!
+```
+Critically, a `Secret`'s values are Base64-*encoded* by default, not encrypted — Base64 is trivially reversible by anyone with read access to the Secret object, meaning genuine confidentiality requires additional configuration (encryption-at-rest for the cluster's underlying etcd store, or an external secrets manager integration) rather than assuming `Secret` alone provides meaningful encryption.
+
+**Common Pitfall:** assuming a Kubernetes `Secret` is automatically encrypted and therefore safe to treat as sufficient protection for highly sensitive credentials without any further configuration — Base64 encoding provides zero confidentiality against anyone who can read the Secret object (or the underlying etcd data store it's persisted in); genuinely sensitive production credentials typically warrant enabling etcd encryption-at-rest and/or integrating with a dedicated external secrets manager (Azure Key Vault, HashiCorp Vault), not relying on `Secret`'s default Base64 encoding alone.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is a Kubernetes `Init Container`, and how does its "runs to completion before the main container starts" guarantee let it perform setup work the main container depends on?**
+
+An Init Container runs to completion *before* any of a Pod's regular (main) containers start — if an Init Container fails, the Pod doesn't proceed to start its main containers at all (retrying the Init Container instead), providing a strict, ordered guarantee that certain setup work has genuinely finished successfully before the application itself ever begins running.
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  initContainers:
+    - name: wait-for-db
+      image: busybox
+      command: ['sh', '-c', 'until nc -z db-service 5432; do sleep 2; done']
+      # Pod's MAIN container will NOT start until this INIT container exits successfully
+  containers:
+    - name: app
+      image: myapp:latest
+      # by the time THIS starts, the database is GUARANTEED to already be reachable
+```
+The main `app` container is guaranteed to start only after `wait-for-db` has successfully exited — this eliminates an entire class of "application started before its dependency was ready" race conditions, since Kubernetes itself enforces the strict ordering rather than relying on the main application's own code to implement retry/wait logic for a dependency that might not be ready yet.
+
+**Why this differs from simply adding retry logic inside the main application itself:** while application-level retry logic (covered under resilience patterns elsewhere) is also valuable, an Init Container provides this guarantee structurally, at the Pod level, without needing the main application's own code to implement any waiting/retry logic at all — useful specifically for setup that's cleanly separable from the application's own runtime logic (waiting for a dependency, running a one-time migration, fetching a configuration file).
+
+**Common Pitfall:** using an Init Container for work that should really be a fully separate `Job` (a one-time database migration, for instance) rather than genuine per-Pod-startup setup — Init Containers re-run every time their Pod restarts (a Pod rescheduled after a node failure runs its Init Containers again), which is appropriate for idempotent setup work (waiting for a dependency) but potentially problematic for genuinely one-time operations that shouldn't be repeated every time a Pod happens to restart.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is Kubernetes' "Horizontal Pod Autoscaler" (HPA) scaling on a CUSTOM metric (rather than just CPU/memory), and why does this matter for workloads where the actual bottleneck ISN'T CPU or memory utilization at all?**
+
+The HPA can scale a Deployment's replica count based on CPU or memory utilization by default — but for many real-world workloads, the actual scaling-relevant bottleneck is something entirely different (queue depth, requests-per-second, active connections) that CPU/memory utilization doesn't directly capture at all; a Custom Metrics-based HPA lets scaling decisions be driven by whatever metric actually reflects the true load.
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+spec:
+  scaleTargetRef: { kind: Deployment, name: order-processor }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: External
+      external:
+        metric: { name: rabbitmq_queue_depth }   # a CUSTOM metric -- NOT CPU or memory at all
+        target: { type: AverageValue, averageValue: "100" }  # scale to keep ~100 messages per replica
+```
+A queue-processing service might sit at low CPU utilization even while its message queue backs up severely (each message takes meaningful I/O-bound time to process, not CPU time) — CPU-based autoscaling would never trigger a scale-up in this scenario, since CPU utilization simply isn't the actual signal indicating the service is falling behind; scaling based on the queue's actual depth (via a custom metrics adapter, commonly backed by Prometheus) directly targets the metric that genuinely reflects whether the workload needs more replicas.
+
+**Why this requires an additional metrics adapter component, not something built into Kubernetes by default:** Kubernetes' core HPA mechanism only understands CPU/memory (via the built-in metrics server) out of the box — scaling on any other metric requires deploying a metrics adapter (the Prometheus Adapter being a common choice) that exposes the desired custom/external metric through the same API surface the HPA expects, bridging an arbitrary monitoring metric into a form the HPA's scaling logic can actually consume.
+
+**Common Pitfall:** relying solely on CPU/memory-based autoscaling for a workload whose actual bottleneck is I/O-bound, queue-depth-driven, or otherwise unrelated to CPU/memory utilization — this can leave a genuinely overloaded service under-scaled indefinitely (CPU/memory utilization simply never crosses the configured threshold, even while the service is falling further and further behind on actual work), a mismatch that's only resolved by identifying and scaling on the metric that actually reflects the workload's true bottleneck.
+
+---

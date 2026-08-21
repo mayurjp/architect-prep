@@ -1258,3 +1258,85 @@ Because each BFF is scoped to exactly one client type's specific needs, a mobile
 **Common Pitfall:** adopting BFFs merely because "it's a recognized pattern," in an organization where client needs are actually quite similar across client types — this multiplies the number of deployable services and operational surface area for a coordination problem that, in that specific context, wasn't actually severe enough to justify the added complexity; BFF earns its keep specifically when a single shared gateway has become a demonstrated, real coordination bottleneck, not as a default architectural choice applied preemptively.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is a "Health Check Endpoint," and how does distinguishing between "Liveness" (is the process alive) and "Readiness" (is the service ready to receive traffic) let an orchestrator make two genuinely different decisions?**
+
+A health check endpoint lets an orchestrator (or load balancer) query a service's own self-reported status — but a single, generic "health" check conflates two genuinely different questions: Liveness ("is this process still running/responsive at all, or should it be restarted?") and Readiness ("is this instance currently able to correctly serve traffic right now, or should it be temporarily removed from the load balancer's rotation?").
+
+```csharp
+app.MapGet("/health/live", () => Results.Ok("Alive"));   // LIVENESS -- is the process itself responsive?
+
+app.MapGet("/health/ready", async (IDbConnection db, IMessageQueueClient mq) =>
+{
+    if (!await db.CanConnectAsync()) return Results.StatusCode(503);      // NOT ready -- DB unreachable
+    if (!await mq.CanConnectAsync()) return Results.StatusCode(503);      // NOT ready -- queue unreachable
+    return Results.Ok("Ready");                                          // genuinely ready for traffic
+});
+```
+A service instance might be perfectly *alive* (the process is running, responding to requests) while temporarily *not ready* (its database connection just dropped, or it's still warming up a cache after startup) — an orchestrator seeing a failing Liveness check restarts the Pod/container entirely; an orchestrator seeing a failing Readiness check instead simply removes that instance from load-balancer rotation temporarily, without restarting anything, since restarting wouldn't actually fix "the database is temporarily unreachable."
+
+**Why conflating these into one check produces the WRONG remediation action:** if Readiness-style logic (checking database connectivity) were used as the Liveness check instead, a temporary database outage would cause the orchestrator to repeatedly restart perfectly healthy application processes — restarting doesn't fix an external database being down, so this produces a pointless, potentially harmful restart loop instead of the correct response (simply routing traffic away until the dependency recovers).
+
+**Common Pitfall:** implementing only a single, combined "health" endpoint that checks everything (process health AND all downstream dependencies) and wiring it to BOTH Liveness and Readiness probes identically — this is exactly the conflation described above, risking unnecessary restart loops during a transient downstream dependency outage that should have been handled by traffic-routing (Readiness) alone, not process restarts (Liveness).
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is "Consumer-Driven Contract Testing," and how does having each CONSUMER service publish its own expectations of a producer's API let a producer verify compatibility without needing full end-to-end integration tests spun up for every consumer?**
+
+Consumer-Driven Contract Testing has each consumer of a service publish a "contract" — a concrete, executable specification of exactly what fields/behavior it actually relies on from that producer's API — the producer then runs these contracts as part of its own test suite, verifying it hasn't broken any consumer's actual, real-world usage, without needing to spin up every consumer's full application in an end-to-end test environment.
+
+```text
+Consumer (OrderService) publishes a CONTRACT describing what it actually needs from PaymentService:
+  "When I call GET /payments/{id}, I expect a response containing AT LEAST:
+   { status: string, amount: number } -- these specific fields, this specific shape"
+
+Producer (PaymentService)'s OWN test suite runs THIS EXACT CONTRACT against its real implementation:
+  -> if PaymentService's team later renames "status" to "paymentStatus", the CONTRACT TEST FAILS
+     immediately, in PaymentService's OWN CI pipeline -- BEFORE it's ever deployed and breaks OrderService
+```
+Because the contract is executable and runs directly against the producer's own test suite, a producer team gets fast, automated, pre-deployment feedback the moment their change would break a specific consumer's actual documented expectations — without needing OrderService's full application running anywhere, and without waiting for the breakage to be discovered only after both services are deployed together in a shared environment.
+
+**Why this specifically solves what full end-to-end integration testing struggles with at microservices scale:** spinning up every consumer's entire application just to verify one producer's change is compatible becomes increasingly impractical as the number of services and consumers grows — Consumer-Driven Contracts instead let each producer verify compatibility against a lightweight, focused *specification* of what consumers actually need, rather than the consumers' entire running applications, making this kind of cross-service compatibility verification practical even at significant scale.
+
+**Common Pitfall:** consumer teams writing contracts that assert far more than they actually rely on (asserting the presence and exact values of every field in a response, rather than just the specific fields the consumer's own code actually reads) — an overly broad contract makes the producer's contract tests fail for changes that wouldn't have actually broken the consumer at all (adding a new, unrelated field, for instance), creating unnecessary friction; a well-written contract should assert only what the consumer genuinely depends on, not the producer's entire response shape.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is the "Sidecar Pattern" for extending a service's capabilities (as distinct from a Service Mesh's sidecar proxy specifically), and how does deploying a helper process ALONGSIDE the main application container let cross-cutting functionality be added without modifying the application's own code?**
+
+The Sidecar Pattern deploys a separate, helper container alongside a service's main application container, within the same Pod (sharing network namespace and, optionally, storage volumes) — the sidecar handles some cross-cutting concern (log shipping, configuration reloading, a service mesh proxy) entirely independently of the main application's own code, which remains completely unaware the sidecar even exists.
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app                     # the MAIN application -- completely UNAWARE any sidecar exists
+      image: myapp:latest
+      volumeMounts:
+        - { name: logs, mountPath: /var/log/app }
+
+    - name: log-shipper              # the SIDECAR -- ships logs to a central aggregator
+      image: fluentbit:latest
+      volumeMounts:
+        - { name: logs, mountPath: /var/log/app }   # reads the SAME shared volume the app writes to
+
+  volumes:
+    - name: logs
+      emptyDir: {}
+```
+The main `app` container simply writes its logs to a local file, exactly as it always would, with zero code or configuration aware that anything else is watching that directory — the `log-shipper` sidecar, running as a completely separate process/container within the same Pod, independently reads and ships those same log files to a central aggregation system, entirely decoupled from the main application's own implementation.
+
+**Why this is the SAME general pattern underlying a Service Mesh's proxy sidecar (covered under system design):** a Service Mesh's per-Pod proxy (Envoy, in Istio's case) is really just one specific, widely-adopted application of this same general Sidecar Pattern — intercepting network traffic transparently, without the main application needing any code changes at all to gain mTLS, retries, or observability; recognizing the Sidecar Pattern as the underlying general concept helps understand why service mesh proxies are architected the way they are, rather than treating service mesh as an entirely separate, unrelated mechanism.
+
+**Common Pitfall:** using a sidecar for functionality that's actually tightly coupled to the main application's own request-handling logic (rather than a genuinely independent, cross-cutting concern like log shipping or a network proxy) — the Sidecar Pattern works best for concerns the main application can remain entirely oblivious to; forcing a sidecar to handle logic requiring tight, synchronous coordination with the main application's own request-processing defeats the pattern's core benefit of clean, code-free decoupling.
+
+---
+
+---

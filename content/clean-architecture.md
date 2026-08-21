@@ -790,3 +790,108 @@ public class OrderSummaryPresenter
 **Common Pitfall:** letting "just a little bit" of real logic creep into the humble/UI layer over time (a conditional here, a calculation there, "it's just one small thing") — each such addition is untested and untestable by the same means as the rest of the logic, and these small additions accumulate; the discipline of Humble Object requires actively resisting even small amounts of logic creeping into the deliberately "dumb" outer shell, not just applying the pattern once and assuming it stays that way.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is a "Domain Entity" in Clean Architecture, and how does keeping it completely free of any persistence-related attributes (no `[Table]`, `[Column]`, or EF Core-specific decorations) preserve the Dependency Rule?**
+
+A Domain Entity represents a core business concept (`Order`, `Customer`) and should contain only genuine business logic and state — decorating it with persistence-framework-specific attributes (`[Table("Orders")]`, `[Column("customer_id")]`) would make the innermost layer (Domain) directly reference an outer-layer concern (the specific ORM/database technology), violating the Dependency Rule covered earlier.
+
+```csharp
+// VIOLATES the Dependency Rule -- Domain entity directly references EF Core-specific attributes
+[Table("Orders")]
+public class Order
+{
+    [Column("order_id")]
+    public int Id { get; set; }
+    [Column("customer_id")]
+    public int CustomerId { get; set; }
+}
+
+// RESPECTS the Dependency Rule -- Domain entity is PURE, knows NOTHING about how it's persisted
+public class Order
+{
+    public int Id { get; private set; }
+    public int CustomerId { get; private set; }
+    public void ConfirmOrder() { /* pure business logic */ }
+}
+
+// Mapping to the database schema happens SEPARATELY, in the OUTER (Infrastructure) layer:
+public class OrderConfiguration : IEntityTypeConfiguration<Order>
+{
+    public void Configure(EntityTypeBuilder<Order> builder)
+    {
+        builder.ToTable("Orders");
+        builder.Property(o => o.CustomerId).HasColumnName("customer_id");
+    }
+}
+```
+The `Order` class itself has zero knowledge that EF Core exists at all — the mapping between `Order`'s properties and the actual database table/column names lives entirely in `OrderConfiguration`, a separate class in the outer, Infrastructure layer, which is exactly where EF-Core-specific knowledge belongs according to the Dependency Rule.
+
+**Why this matters beyond just "cleaner code":** if `Order` directly referenced EF Core attributes, switching to a different persistence technology (a different ORM, or a NoSQL document store) would require modifying the `Order` class itself — with the mapping externalized to `OrderConfiguration`, swapping persistence technologies means writing a new outer-layer mapping class, with zero changes needed to `Order` or any other domain logic depending on it.
+
+**Common Pitfall:** decorating domain entities directly with ORM-specific attributes "because it's convenient and EF Core supports it" — this quietly violates the Dependency Rule the moment it happens, even if it seems harmless in the short term; the cost becomes apparent specifically when the persistence technology needs to change, or when trying to unit test domain logic without accidentally pulling in the ORM's own assemblies and conventions as an unintended dependency.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is a "Repository" in Clean Architecture, and how does defining its INTERFACE in the inner (Domain/Application) layer while its IMPLEMENTATION lives in the outer (Infrastructure) layer exemplify the Dependency Inversion Principle in practice?**
+
+A Repository abstracts data access behind an interface — Clean Architecture specifically places the *interface* definition (`IOrderRepository`) in an inner layer (alongside the domain logic that needs it), while the *concrete implementation* (`EfOrderRepository`, using a specific ORM) lives in an outer, Infrastructure layer — the inner layer depends only on the abstraction it defines, never on the concrete class that eventually implements it.
+
+```csharp
+// INNER layer (Application/Domain) -- defines the INTERFACE, has NO knowledge of EF Core at all
+public interface IOrderRepository
+{
+    Task<Order?> GetByIdAsync(int id);
+    Task SaveAsync(Order order);
+}
+
+// OUTER layer (Infrastructure) -- implements the interface, USES EF Core here specifically
+public class EfOrderRepository : IOrderRepository
+{
+    private readonly AppDbContext _context;
+    public EfOrderRepository(AppDbContext context) => _context = context;
+    public Task<Order?> GetByIdAsync(int id) => _context.Orders.FindAsync(id).AsTask();
+    public Task SaveAsync(Order order) { _context.Orders.Update(order); return _context.SaveChangesAsync(); }
+}
+```
+The inner layer's Use Case (covered earlier) depends only on `IOrderRepository` — it never references `EfOrderRepository` or EF Core directly at all; the *outer* layer depends on (implements) the *inner* layer's interface, which is precisely the inverted dependency direction the Dependency Inversion Principle describes: the abstraction is owned by the layer that needs it, not by the layer that implements it.
+
+**Why this specific placement (interface inward, implementation outward) is what makes the whole architecture actually work:** if `IOrderRepository` were instead defined in the Infrastructure layer alongside `EfOrderRepository`, the inner Application layer would need to reference the Infrastructure layer just to see the interface — reintroducing exactly the inward-pointing-to-outward dependency the Dependency Rule forbids; placing the interface in the inner layer is what allows the inner layer to depend on an abstraction it fully owns, while the outer layer supplies the concrete implementation.
+
+**Common Pitfall:** defining a Repository's interface in the same project/layer as its concrete implementation (both in Infrastructure), purely out of familiarity with how many tutorials structure this — this subtly breaks the Dependency Rule the moment the inner Application layer needs to reference that interface, since it now must reference the Infrastructure project to do so; the interface belongs in the inner layer specifically so the inner layer never needs to depend on the outer layer at all.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is the concept of "Screaming Architecture" (a term coined by Robert C. Martin, the originator of Clean Architecture), and how does a well-organized codebase's TOP-LEVEL FOLDER STRUCTURE reveal the business domain rather than merely the framework it happens to be built with?**
+
+"Screaming Architecture" argues that a codebase's high-level structure should immediately communicate what the *application actually does* (its business domain — orders, payments, inventory) rather than merely which framework or technical layers it happens to use — the top-level folders should "scream" the business intent, not the technology stack.
+
+```text
+DOESN'T scream the business domain -- screams "this is an ASP.NET Core MVC app" instead:
+  /Controllers
+  /Models
+  /Views
+  /Services
+  -- looking at this folder structure alone, you'd have NO IDEA what business the application is actually in --
+
+DOES scream the business domain -- immediately reveals what the application ACTUALLY DOES:
+  /Ordering
+  /Payments
+  /Inventory
+  /Shipping
+  -- a glance at this folder structure IMMEDIATELY reveals: this is an e-commerce/fulfillment system --
+```
+The first structure could belong to literally any ASP.NET Core MVC application regardless of its actual business purpose (a blog, a banking system, a game — the folder names give no hint whatsoever) — the second structure immediately communicates the application's actual business purpose to anyone opening the codebase for the first time, entirely independent of which specific framework or technology happens to be used underneath.
+
+**Why this connects directly back to the Dependency Rule covered earlier:** a codebase organized around technical layers (`Controllers`, `Services`) often reflects (and reinforces) exactly the kind of framework-centric thinking the Dependency Rule is meant to guard against — organizing top-level folders around business capabilities instead naturally encourages keeping framework-specific concerns pushed to the edges/outer layers, since the business-domain folders themselves have no inherent reason to be organized around any particular framework's conventions at all.
+
+**Common Pitfall:** organizing a codebase's top-level structure purely around technical/framework layers (`Controllers`, `Models`, `Services`, `Repositories`) rather than business capabilities — this is a purely organizational choice, separate from the Dependency Rule itself, but the two tend to reinforce each other: a framework-organized folder structure often correlates with (and can subtly encourage) framework-coupled thinking creeping into the business logic itself, whereas a domain-organized structure keeps the actual business purpose front and center regardless of the underlying technology.
+
+---
+
+---
