@@ -657,3 +657,72 @@ Under RCSI, SQL Server maintains row versions in `tempdb`'s version store — a 
 **Common Pitfall:** enabling RCSI purely because "our app has blocking issues" without accounting for the additional `tempdb` I/O and space pressure row versioning introduces — for a system whose `tempdb` is already under-provisioned or already a contention point, RCSI's version-store overhead can shift the bottleneck rather than eliminate it; the trade should be evaluated with actual `tempdb` capacity/monitoring in mind, not applied as a reflexive fix for any blocking complaint.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is a SQL Server `VIEW`, and how does it let a complex, frequently-reused query be referenced as if it were a simple table, without duplicating the underlying query logic everywhere it's needed?**
+
+A `VIEW` is a named, stored query definition that can be queried exactly like a regular table — it doesn't store data of its own (an ordinary view, as distinct from an indexed/materialized view); every time the view is queried, SQL Server executes its underlying defining query against the real, live data.
+
+```sql
+CREATE VIEW ActiveCustomerOrders AS
+SELECT o.Id, o.OrderDate, c.Name AS CustomerName
+FROM Orders o
+JOIN Customers c ON o.CustomerId = c.Id
+WHERE c.IsActive = 1;
+
+-- Querying the VIEW looks exactly like querying an ordinary table:
+SELECT * FROM ActiveCustomerOrders WHERE OrderDate > '2026-01-01';
+```
+Any query needing "orders from active customers, joined with the customer's name" can simply reference `ActiveCustomerOrders` instead of re-writing the underlying `JOIN`/`WHERE` logic every single time — if the definition of "active customer" or the join logic needs to change later, updating the view's single definition automatically updates every query referencing it, rather than needing to find and update every duplicated copy of that join logic scattered throughout the codebase.
+
+**Common Pitfall:** treating a view as if it caches or stores its result set — an ordinary view re-executes its underlying query fresh every single time it's referenced, meaning it provides zero performance benefit on its own (query complexity/cost is identical to just writing the same query inline); views are primarily a tool for reuse/abstraction and access-control simplification, not for caching or performance improvement — that specific benefit requires a genuinely different feature (an Indexed/Materialized View) which physically stores its result set.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is SQL Server's `MERGE` statement, and how does it let an INSERT-or-UPDATE ("upsert") operation be expressed as ONE atomic statement rather than a separate check-then-insert-or-update sequence?**
+
+`MERGE` combines conditional insert, update, and delete logic against a target table, driven by comparing it to a source dataset, all within a single atomic statement — commonly used for the "upsert" pattern (insert a row if it doesn't exist, update it if it does), avoiding the separate check-then-act sequence that would otherwise be needed (and which risks the TOCTOU race condition covered under application security).
+
+```sql
+MERGE Products AS target
+USING (VALUES (5, 'Keyboard', 29.99)) AS source (Id, Name, Price)
+ON target.Id = source.Id
+WHEN MATCHED THEN
+    UPDATE SET Name = source.Name, Price = source.Price
+WHEN NOT MATCHED THEN
+    INSERT (Id, Name, Price) VALUES (source.Id, source.Name, source.Price);
+```
+This single statement handles both cases atomically: if a `Products` row with `Id = 5` already exists, it's updated; if not, a new row is inserted — all within one statement, rather than the application needing to first `SELECT` to check existence, then conditionally issue either an `INSERT` or an `UPDATE` as a separate follow-up statement.
+
+**Why doing this as separate check-then-act statements from application code is riskier:** a separate "check if it exists, then insert or update" sequence has the exact same race-condition exposure as the TOCTOU pattern covered under application security — under concurrent access, two simultaneous "upsert" attempts for the same row could both see "doesn't exist yet" and both attempt an `INSERT`, one of them failing on a primary key violation; `MERGE`'s single-statement atomicity avoids this specific race entirely.
+
+**Common Pitfall:** assuming `MERGE` is fully immune to race conditions under extremely high concurrency without additional precautions — while `MERGE` is far safer than a naive check-then-act application-level sequence, achieving fully race-free behavior under very high concurrent load may still require an appropriate transaction isolation level or additional locking hints, since `MERGE`'s atomicity guarantees have historically had some documented edge cases under specific concurrent conditions that are worth being aware of for genuinely high-concurrency upsert scenarios.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is SQL Server's Columnstore Index, and how does its column-oriented physical storage layout make it dramatically more efficient than a traditional Rowstore index specifically for large-scale ANALYTICAL (aggregate) queries?**
+
+A traditional Rowstore index physically stores all of a row's column values together, contiguously — efficient for retrieving entire rows (typical OLTP access patterns), but wasteful for analytical queries that only need a handful of columns aggregated across millions of rows, since the database must still read every column of every row from disk even when most columns aren't needed. A Columnstore Index instead physically stores each *column's* values together, contiguously, across all rows.
+
+```sql
+CREATE COLUMNSTORE INDEX CCI_Sales ON SalesFact (SaleDate, ProductId, Quantity, Revenue, StoreId, ...);
+
+-- An analytical aggregate query touching only 2 of the table's many columns:
+SELECT ProductId, SUM(Revenue) FROM SalesFact GROUP BY ProductId;
+```
+Because `ProductId` and `Revenue` are each stored contiguously as their own compact column segments (rather than interspersed with every other column's data within each row), this query can read *only* those two columns' data from disk, skipping every other column entirely — a Rowstore index, by contrast, would need to read entire rows (every column) even though only two are actually needed for this specific aggregate.
+
+**Why columnstore also achieves dramatically better compression:** a column containing many repeated or similar values (like `ProductId`, likely repeating across many rows) compresses far more effectively when stored together as one contiguous column, compared to a row-oriented layout where that same `ProductId` value is scattered between many different, unrelated column values — this compression advantage compounds with the reduced I/O from reading fewer columns, producing dramatic performance gains specifically for the large-table, few-columns, heavy-aggregation query pattern typical of data warehousing and analytical workloads.
+
+**Why this specifically trades away typical OLTP transactional efficiency:** the same column-oriented physical layout that makes analytical aggregate queries fast makes single-row lookups/updates (the dominant OLTP pattern) comparatively less efficient, since retrieving or modifying one complete row now requires touching many separate column segments rather than one contiguous row — Columnstore Indexes are specifically suited to analytical/reporting workloads, not as a wholesale replacement for Rowstore indexes on tables serving primarily transactional, single-row-oriented access patterns.
+
+**Common Pitfall:** applying a Columnstore Index to a table whose actual workload is dominated by single-row OLTP-style reads/writes rather than large-scale analytical aggregation — this can make the more common access pattern *slower*, not faster, since columnstore's benefits are specifically realized for wide-table, few-column, many-row aggregate queries; the choice between Rowstore and Columnstore should be driven by the table's actual dominant query pattern, not applied as a blanket "columnstore is always faster" assumption.
+
+---
+
+---

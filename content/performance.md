@@ -622,3 +622,81 @@ Because `Rent` may hand back a larger array than requested (to maximize reuse ac
 **Common Pitfall:** treating a rented array's `.Length` as the amount of valid data it contains — since `Rent` may return an oversized array, code that iterates `for (int i = 0; i < buffer.Length; i++)` instead of the actual known-valid length can process garbage/stale bytes left over from a previous renter (or simply uninitialized memory), a bug that's easy to overlook since it doesn't throw an exception, it just silently processes incorrect data.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is "Lazy Initialization" via .NET's `Lazy<T>`, and how does it defer an expensive object's construction until the FIRST time it's actually accessed, rather than at the moment it's declared?**
+
+`Lazy<T>` wraps a factory function that constructs a value only the first time `.Value` is actually accessed — if that access never happens, the expensive construction never runs at all, avoiding wasted work for a value that might not always be needed.
+
+```csharp
+public class ReportGenerator
+{
+    private readonly Lazy<ExpensiveTemplateEngine> _templateEngine =
+        new(() => new ExpensiveTemplateEngine()); // NOT constructed yet -- just a deferred factory
+
+    public string GenerateSimpleReport() => "Simple report, no template engine needed at all";
+
+    public string GenerateComplexReport()
+    {
+        return _templateEngine.Value.Render(); // constructed HERE, on FIRST access -- not before
+    }
+}
+```
+If a caller only ever calls `GenerateSimpleReport()`, `ExpensiveTemplateEngine` is never constructed at all — its potentially costly initialization (loading template files, compiling templates) is entirely avoided for that usage pattern; only code paths that actually reach `_templateEngine.Value` pay the construction cost, and only the first time.
+
+**Why `Lazy<T>` is also thread-safe by default, which matters for shared instances:** by default, `Lazy<T>` guarantees the factory function runs at most once even under concurrent access from multiple threads — if two threads simultaneously access `.Value` for the first time, `Lazy<T>`'s internal synchronization ensures only one of them actually invokes the factory, with the other thread receiving the same, single constructed instance rather than triggering a duplicate, wasteful construction.
+
+**Common Pitfall:** using `Lazy<T>` for a value that's cheap to construct and always needed anyway — the deferred-construction mechanism itself carries a small overhead (checking whether the value has already been constructed on every access), which is wasted effort for a value that would be constructed eagerly and unconditionally regardless; `Lazy<T>` earns its keep specifically for genuinely expensive constructions that are conditionally, not always, needed.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is .NET's `System.Threading.Channels` (`Channel<T>`), and how does it provide a genuinely async-native producer/consumer queue, as distinct from `BlockingCollection<T>`'s thread-blocking model?**
+
+`Channel<T>` provides an async-first producer/consumer data structure — a producer writes items via `WriteAsync`, a consumer reads them via `ReadAsync`, and when the channel is empty, the consumer's `await` suspends without blocking a thread at all, unlike `BlockingCollection<T>`'s older model, which blocks the calling thread outright while waiting for an item to become available.
+
+```csharp
+var channel = Channel.CreateUnbounded<Order>();
+
+// Producer -- writes items, potentially from multiple concurrent producers
+await channel.Writer.WriteAsync(new Order { Id = 1 });
+
+// Consumer -- reads items as they become available, WITHOUT blocking a thread while waiting
+await foreach (var order in channel.Reader.ReadAllAsync())
+{
+    await ProcessOrderAsync(order); // processes each order as it arrives
+}
+```
+While the channel is empty, `ReadAllAsync()`'s `await` suspends the consuming method without occupying a thread pool thread at all — consistent with the broader async/await philosophy (covered extensively elsewhere) of never blocking a thread on an operation (here, "waiting for the next item") that can instead be awaited.
+
+**Why this matters specifically for high-throughput producer/consumer scenarios:** `BlockingCollection<T>`'s thread-blocking wait model means a dedicated thread sits blocked, doing nothing, for as long as the collection is empty — under a workload with many concurrent consumers each waiting on their own `BlockingCollection`, this ties up a correspondingly large number of threads purely for waiting; `Channel<T>`'s async model frees those threads to do other useful work while waiting, a meaningful difference at scale.
+
+**Common Pitfall:** using `BlockingCollection<T>` in a new, async-first codebase purely out of familiarity, when `Channel<T>` would provide the same producer/consumer functionality without the thread-blocking cost — for genuinely synchronous, thread-based code (not already using async/await), `BlockingCollection<T>` remains a reasonable, simpler choice; but introducing it into an otherwise fully async codebase reintroduces exactly the kind of thread-blocking-while-waiting inefficiency async/await is meant to avoid.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is .NET's Tiered Compilation (Tier 0 / Tier 1 JIT), and how does initially compiling a method QUICKLY with minimal optimization, then later RE-compiling it more aggressively if it's called frequently, balance startup time against steady-state throughput?**
+
+Tiered Compilation JIT-compiles a method initially with Tier 0 (fast to produce, minimally optimized) — if that method turns out to be called frequently (a "hot" method), the runtime later re-compiles it with Tier 1 (slower to produce, but much more aggressively optimized), replacing the Tier 0 version transparently while the application continues running.
+
+```text
+Application starts -> Method Foo() is called for the FIRST time
+  -> JIT compiles Foo() using TIER 0 (fast compilation, minimal optimization) -- gets the app RUNNING quickly
+
+Foo() is called REPEATEDLY, thousands of times, over the following seconds
+  -> the runtime notices Foo() is "HOT" -> triggers a BACKGROUND re-compilation using TIER 1
+     (slower to produce, but applies much more aggressive optimization)
+  -> Foo()'s Tier 0 version is TRANSPARENTLY REPLACED with the newly-compiled Tier 1 version
+  -> subsequent calls to Foo() now run the FASTER, more optimized Tier 1 code
+```
+Without tiered compilation, the JIT would need to choose between compiling every method with full optimization upfront (slow application startup, since heavy optimization takes real time even for methods that are only ever called once or twice) or compiling everything minimally (fast startup, but permanently leaving "hot," frequently-executed methods running comparatively unoptimized code) — tiered compilation gets the benefit of both: fast initial startup via Tier 0, and eventual full optimization specifically for the methods that are actually called often enough to justify the extra compilation cost.
+
+**Why this specifically improves application startup time without permanently sacrificing steady-state throughput:** a method called only once or twice (common for a lot of application startup/initialization code) never needs Tier 1 re-compilation at all, since it never gets "hot" — the compilation-time savings from skipping unnecessary aggressive optimization on rarely-called methods directly improves startup time, while methods that genuinely run in a hot loop still eventually receive full Tier 1 optimization once they've proven, through actual execution frequency, that the additional compilation investment is worthwhile.
+
+**Common Pitfall:** benchmarking an application's throughput immediately after startup (before hot methods have had a chance to actually be promoted to Tier 1) and concluding the measured performance represents the application's genuine steady-state throughput — a benchmark run too early captures methods still running Tier 0, unoptimized code, understating the application's true, sustained performance once tiered compilation has had time to promote its actual hot paths; meaningful performance benchmarks should allow sufficient warm-up time for tiered compilation to reach steady state first.
+
+---

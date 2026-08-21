@@ -758,3 +758,96 @@ Rather than hand-writing dozens of individual `Assert.Equal` calls for every fie
 **Common Pitfall:** blindly accepting/updating a snapshot whenever a test fails ("just re-approve it") without actually reviewing *what* changed and whether that change was intentional — a snapshot test's entire value depends on a human genuinely reviewing each diff before approving a new snapshot; reflexively re-approving failing snapshots without review defeats the pattern's purpose entirely, turning it into a test that can never meaningfully fail regardless of what regression occurs.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is a "Test Fixture" (as distinct from a Test Data Builder, covered earlier), and how does it let expensive, shared setup happen ONCE across many tests rather than being repeated before every individual test?**
+
+A Test Fixture represents shared context/setup that many tests within a class (or across a test run) can reuse — some setup work is genuinely expensive (spinning up a test database container, seeding common reference data) and repeating it before every single test would make the overall test suite unacceptably slow; a fixture runs that expensive setup once and shares the result across all tests that need it.
+
+```csharp
+public class DatabaseFixture : IDisposable
+{
+    public TestDbContext Context { get; }
+    public DatabaseFixture()
+    {
+        Context = new TestDbContext(); // EXPENSIVE setup -- runs ONCE for the whole test class
+        Context.Database.Migrate();
+        Context.SeedReferenceData();
+    }
+    public void Dispose() => Context.Database.EnsureDeleted();
+}
+
+public class OrderTests : IClassFixture<DatabaseFixture> // xUnit shares ONE fixture instance across ALL tests here
+{
+    private readonly DatabaseFixture _fixture;
+    public OrderTests(DatabaseFixture fixture) => _fixture = fixture;
+
+    [Fact]
+    public void Test1() { /* uses _fixture.Context -- setup already done, NOT repeated for this test */ }
+
+    [Fact]
+    public void Test2() { /* SAME fixture instance, SAME already-migrated database */ }
+}
+```
+The expensive database migration and seeding happens exactly once, shared across every test in `OrderTests` — without a fixture, each individual test's own setup/teardown would need to repeat this expensive work, multiplying the total suite runtime by the number of tests needing that same shared setup.
+
+**Why this requires care about test isolation, unlike per-test setup:** because the fixture (and whatever state it holds) is shared *across* tests, one test's actions could inadvertently affect another test relying on the same shared fixture (the flaky-test root cause covered earlier) — fixtures need deliberate care (resetting mutable shared state between tests, or ensuring tests only read from shared data rather than mutating it) to avoid reintroducing the exact cross-test interference that per-test isolation was designed to prevent.
+
+**Common Pitfall:** sharing a fixture across tests that mutate its underlying state, without resetting that state between tests — this reintroduces the classic shared-mutable-state flakiness (covered earlier) that fixtures, if used carelessly, can accidentally cause rather than avoid; a fixture's genuine benefit (avoiding repeated expensive setup) needs to be balanced against ensuring the shared state it provides doesn't leak side effects between the tests using it.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is "Property-Based Testing" (as distinct from ordinary example-based unit testing), and how does having the FRAMEWORK generate many random inputs, checking a general PROPERTY holds for all of them, differ from hand-writing a fixed set of example test cases?**
+
+Ordinary (example-based) unit tests assert specific, hand-chosen input/output pairs — Property-Based Testing instead asserts a general *property* that should hold true for a very wide, randomly-generated range of inputs, with the testing framework itself generating hundreds or thousands of varied inputs and checking the property against each one, actively searching for a counterexample.
+
+```csharp
+// Example-based testing -- a FEW, HAND-CHOSEN specific inputs
+[Fact]
+public void Reverse_TwoElements() => Assert.Equal(new[] { 2, 1 }, Reverse(new[] { 1, 2 }));
+
+[Fact]
+public void Reverse_EmptyList() => Assert.Empty(Reverse(Array.Empty<int>()));
+
+// Property-based testing -- a GENERAL property, checked against MANY RANDOMLY-GENERATED inputs
+[Property]
+public bool ReversingTwice_ReturnsOriginalList(int[] list) =>
+    Reverse(Reverse(list)).SequenceEqual(list); // true for EVERY possible list, not just a few examples
+```
+The property-based test doesn't hand-pick specific input values at all — the testing framework (FsCheck, for instance) generates a large number of varied, random arrays (empty, single-element, very large, containing duplicates, negative numbers) and checks that the property (`Reverse(Reverse(x)) == x`) holds for every one of them, actively searching for any input that breaks the invariant, something a small, hand-picked set of example inputs might never happen to stumble upon.
+
+**Why this specifically catches edge cases a developer might not have thought to test explicitly:** a developer writing example-based tests can only think of the specific inputs they imagine might be problematic — property-based testing's randomized generation frequently surfaces genuinely unexpected edge cases (an unusual combination of values, an extreme size) that never occurred to the test author, precisely because the framework isn't limited by what a human happened to think of when writing the test.
+
+**Common Pitfall:** attempting to property-test something that doesn't actually have a clean, general, checkable property (many business rules are genuinely example-specific, not naturally expressible as a universal invariant) — property-based testing shines specifically for code with genuine mathematical/structural invariants (reversal, sorting, serialization round-trips); forcing it onto logic that's inherently example-driven (specific business rules with no clean general property) tends to produce awkward, contrived properties that don't actually capture what matters, rather than genuinely improving test coverage.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is "Mutation Testing," and how does deliberately introducing small, artificial bugs ("mutants") into the SOURCE CODE and checking whether the existing test suite catches them measure something Code Coverage percentage alone cannot?**
+
+Code Coverage measures which lines of code were *executed* during a test run — but a line being executed doesn't mean any test actually *asserts* something meaningful about its behavior. Mutation Testing instead deliberately introduces small, artificial modifications (mutants) into the source code — flipping a `>` to `>=`, changing a `+` to `-` — then re-runs the existing test suite against each mutant; if the test suite still passes despite the introduced bug, that's a "surviving mutant," revealing a gap the test suite fails to actually catch.
+
+```csharp
+// ORIGINAL code:
+public bool IsEligibleForDiscount(int orderCount) => orderCount > 10;
+
+// MUTANT #1 (automatically generated): flips > to >=
+public bool IsEligibleForDiscount(int orderCount) => orderCount >= 10;
+
+// If the EXISTING test suite still passes against this mutant, the mutant "SURVIVED" --
+// meaning NO EXISTING TEST actually checks the boundary condition (orderCount == 10) at all,
+// even if code coverage reports 100% coverage for this exact line
+```
+100% code coverage on this line only confirms the line was *executed* by some test — it says nothing about whether any test specifically exercises the boundary value `orderCount == 10`, which is exactly the gap the surviving mutant reveals; a test suite could have full coverage of this line while still missing the specific edge case that would catch this off-by-one-style bug.
+
+**Why this specifically exposes what coverage percentage cannot:** coverage answers "was this code executed at all during testing?" — mutation testing answers the much more meaningful question "if this exact code had a subtle bug, would any existing test actually catch it?" — a test suite can achieve high coverage while still having many surviving mutants, revealing that coverage numbers alone substantially overstate how well-tested the code's actual *behavior* really is.
+
+**Common Pitfall:** treating a high code coverage percentage as sufficient evidence of a well-tested codebase, without ever running mutation testing to check whether that coverage translates into tests that would actually catch a real bug — coverage is a necessary but far from sufficient signal; a codebase with 100% coverage and a high mutant-survival rate has tests that merely execute the code without meaningfully verifying its behavior, a distinction mutation testing specifically surfaces that coverage tooling alone cannot.
+
+---
+
+---

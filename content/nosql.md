@@ -588,3 +588,76 @@ Without the lock, a popular product's cache entry expiring during heavy traffic 
 **Common Pitfall:** implementing the lock-acquisition/release logic non-atomically (checking existence, then separately setting the lock as two distinct operations) — this reintroduces a race condition where multiple requests could both believe they acquired the lock; correct implementations rely on the cache's own atomic "set if not exists" primitive (as shown above) specifically to guarantee only one concurrent request ever successfully acquires the lock.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is a Key-Value Store's fundamental data model, and why does its deliberate simplicity (just a key mapping to an opaque value, with no query language over the value's internal structure) make it exceptionally fast for its narrow use case?**
+
+A Key-Value Store's entire data model is exactly what its name says: a unique key maps to a value, where the value itself is treated as an opaque blob the store doesn't inspect, index, or understand the internal structure of at all — this deliberate simplicity (no schema, no query language reaching *inside* the value) is precisely what allows extremely fast lookups, since the store never needs to parse or understand the value's contents to serve a request.
+
+```text
+SET session:abc123 -> { "userId": 42, "loggedInAt": "2026-01-15T10:00:00Z", ... (opaque blob) }
+GET session:abc123 -> returns the ENTIRE blob, exactly as stored -- the store never looked INSIDE it
+
+-- You CANNOT ask a pure key-value store: "find all sessions where userId = 42"
+-- Because the store has NO understanding of the value's internal structure at all --
+-- only "give me the value for THIS EXACT KEY" is a supported operation
+```
+Because the store never parses, validates, or indexes the value's internal fields, a `GET`/`SET` operation is about as fast as a lookup can possibly be — there's no query planning, no schema validation, no secondary index maintenance to worry about; the entire operation is "hash the key, find the value, return it" (or the reverse for a write).
+
+**Why this narrow simplicity is the whole point, not a limitation to work around:** a Key-Value Store is specifically suited to access patterns that are always "fetch by exact key" (a session token, a user's shopping cart by user ID, a cached computed value by its cache key) — the moment an application needs to query *by* something other than the exact key (find all sessions for a given user, say), a pure key-value store structurally cannot help, and a different data model (a document database, or a secondary indexing layer built on top) becomes necessary instead.
+
+**Common Pitfall:** choosing a Key-Value Store for data that actually needs to be queried by criteria other than an exact key lookup, then working around this limitation with awkward secondary indexing schemes maintained manually in application code — if the access pattern genuinely requires querying by non-key attributes, a document database or a relational database (offering native secondary indexing) is usually a better-fitting choice than forcing a pure key-value store to do something structurally outside its core design.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is a Time-Series Database's "Downsampling" (or "Rollup"), and how does automatically aggregating old, high-resolution data into coarser summaries manage storage growth for data that accumulates indefinitely?**
+
+Time-series data (sensor readings, application metrics) is typically generated continuously and indefinitely — storing every single raw data point forever, at full resolution, would cause storage to grow without bound. Downsampling automatically aggregates older data (once it's no longer needed at full resolution) into coarser time buckets, retaining useful summary statistics while discarding (or archiving elsewhere) the original high-resolution detail.
+
+```text
+Raw data (last 24 hours): one data point every SECOND -- full resolution, for recent detailed analysis
+After 7 days: automatically DOWNSAMPLED to one data point per MINUTE (average, min, max, count)
+After 90 days: automatically DOWNSAMPLED further to one data point per HOUR
+After 1 year: automatically DOWNSAMPLED further to one data point per DAY
+
+-- Storage for the "1 year ago" data is a TINY fraction of what per-second resolution would have required --
+-- but daily min/max/average trends remain fully queryable for long-term historical analysis --
+```
+Recent data (where fine-grained, second-by-second detail genuinely matters for debugging or real-time analysis) stays at full resolution — older data, where nobody realistically needs second-by-second granularity from a year ago, is progressively summarized into coarser buckets, dramatically reducing the total storage footprint while preserving the ability to answer "what was the general trend a year ago" queries.
+
+**Why this is usually configured as an automatic, policy-driven process rather than a manual, one-off task:** a time-series database expected to run indefinitely needs downsampling to happen continuously and automatically (a retention/downsampling policy applied on an ongoing schedule) — manually running a one-off downsampling job periodically would be error-prone and easy to forget, whereas a configured policy (common in tools like InfluxDB, TimescaleDB, Prometheus) handles this continuously without requiring ongoing manual intervention.
+
+**Common Pitfall:** configuring a downsampling policy that discards raw, high-resolution data too aggressively, only to later discover a need for fine-grained historical detail that's already been irreversibly summarized away — downsampling policies should be set deliberately based on genuine analysis needs (how far back does anyone actually need second-by-second detail?), since once raw data has been summarized/discarded, that original granularity typically cannot be recovered.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is a Graph Database's "Native Graph Processing" (index-free adjacency), and how does it let a multi-hop relationship traversal query perform with CONSTANT-TIME cost per hop, regardless of the TOTAL size of the overall dataset?**
+
+In a graph database with native, index-free adjacency, each node physically stores direct pointers to its adjacent nodes/relationships — traversing from one node to its neighbors is a direct pointer-following operation, with a cost that depends only on the number of *relationships that specific node has*, entirely independent of how many total nodes exist elsewhere in the entire dataset.
+
+```text
+Relational equivalent of "find friends-of-friends of User X":
+  JOIN Users to Friendships (WHERE UserId = X) -> JOIN AGAIN to Friendships (for each friend found)
+  -- Each JOIN's cost is influenced by the SIZE of the tables/indexes involved, which GROWS as the
+  -- overall dataset grows, even though we only care about User X's own small, local neighborhood
+
+Graph database equivalent:
+  Start at User X's node -> follow ITS direct adjacency pointers to friends (cost: proportional to
+  X's own friend COUNT, NOT the total number of users in the entire graph)
+  -> from EACH friend, follow THEIR OWN adjacency pointers similarly
+  -- Total cost is proportional to the SIZE OF THE TRAVERSED NEIGHBORHOOD, not the overall dataset size
+```
+Because each node's relationships are stored as direct references rather than requiring a lookup through a shared, dataset-wide index (which typically grows and gets more expensive to search as the *overall* dataset grows), traversing from a specific node to its neighbors costs the same regardless of whether the graph has a thousand nodes or a billion — the cost scales with the *local* neighborhood actually being traversed, not the total graph size, which is precisely the property that makes deep, multi-hop traversal queries (find friends-of-friends-of-friends) remain fast even on enormous graphs.
+
+**Why a relational database's JOIN-based approach doesn't share this property:** a relational `JOIN` operation's cost is generally influenced by the size of the tables/indexes being joined (even with proper indexing, larger tables mean larger index structures to search through) — as the overall dataset grows, JOIN-based multi-hop traversal queries tend to become progressively more expensive, whereas a native graph database's index-free adjacency keeps per-hop cost proportional only to the specific node's own local relationship count, regardless of overall dataset scale.
+
+**Common Pitfall:** modeling a genuinely graph-shaped problem (deep, multi-hop relationship traversal being a core, frequent access pattern) in a relational database using traditional foreign-key JOINs, then being surprised when traversal queries scale poorly as the dataset grows — if an application's dominant access pattern is specifically "traverse many hops through a richly-interconnected relationship graph" (social networks, fraud-detection ring analysis, recommendation engines), a native graph database's index-free adjacency structurally outperforms JOIN-based traversal at scale, precisely because of this fundamental difference in how per-hop cost scales with total dataset size.
+
+---
+
+---

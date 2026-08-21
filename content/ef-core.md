@@ -724,3 +724,91 @@ For a query matching thousands of rows, the old approach must materialize every 
 **Common Pitfall:** using `ExecuteUpdate`/`ExecuteDelete` on entities that have important `SaveChanges`-time behavior configured (like an interceptor recording an audit log entry per change, or domain events raised from entity setters) — because these bulk operations bypass EF Core's normal change-tracking and `SaveChanges` pipeline entirely, any custom `SaveChanges` interceptor, audit logging, or domain-event-raising logic tied to that pipeline simply won't run for rows updated this way, which can introduce a subtle audit/consistency gap in the affected rows' history.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is EF Core's `DbContext.ChangeTracker.Clear()` method, and how does it let a long-lived `DbContext` release memory held by tracked entities WITHOUT disposing the context itself?**
+
+Normally, every entity a `DbContext` has queried or added remains tracked (and held in memory) for that context's entire lifetime — for a `DbContext` intentionally kept alive across a long batch operation (processing thousands of entities in a loop), this tracked-entity memory can accumulate significantly. `ChangeTracker.Clear()` detaches every currently-tracked entity at once, freeing that memory, without requiring the context itself to be disposed and recreated.
+
+```csharp
+using var context = new AppDbContext();
+
+foreach (var batch in largeBatches) // processing MANY batches with the SAME, long-lived context
+{
+    foreach (var item in batch)
+    {
+        context.Products.Add(new Product { Name = item.Name });
+    }
+    await context.SaveChangesAsync();
+    context.ChangeTracker.Clear(); // releases ALL tracked entities from THIS batch, freeing memory
+}
+```
+Without `Clear()`, every entity added across every single batch remains tracked for the context's entire lifetime — for a long-running batch job processing millions of rows, this tracked-entity memory can grow unboundedly, eventually causing significant memory pressure; `Clear()` resets the tracker back to empty after each batch is saved, keeping memory usage bounded regardless of how many total batches are processed.
+
+**Why this differs from simply disposing and creating a new `DbContext` per batch:** creating a fresh `DbContext` per batch also resets tracked state, but incurs the overhead of establishing a new context (and potentially a new underlying connection) each time — `ChangeTracker.Clear()` achieves the same "reset tracked state" goal while reusing the same context and connection, avoiding that repeated setup/teardown cost for scenarios specifically needing a long-lived context across many batches.
+
+**Common Pitfall:** using a single, long-lived `DbContext` for a large batch operation without ever clearing or disposing it, assuming tracked entities are automatically garbage collected once no longer needed — as long as the context itself remains alive, every entity it has ever tracked remains reachable (and un-collectible) through the context's internal tracking structures, meaning memory only grows throughout the operation unless explicitly cleared via `ChangeTracker.Clear()` or the context itself is periodically disposed and recreated.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is EF Core's `AsSplitQuery()`, and how does it avoid the "Cartesian Explosion" problem that a single `JOIN`-based query with MULTIPLE `Include()` calls on sibling collections can produce?**
+
+Including multiple *sibling* collection navigation properties (two separate one-to-many relationships off the same parent) via a single SQL query produces a Cartesian product — each row is duplicated once per combination of the two collections' items, producing a result set far larger than the actual data, which EF Core must then de-duplicate client-side. `AsSplitQuery()` instead issues a *separate* SQL query per included collection, avoiding this multiplication entirely.
+
+```csharp
+// SINGLE query (default) -- JOINS both Orders AND Reviews, producing a CARTESIAN PRODUCT
+var customer = await context.Customers
+    .Include(c => c.Orders)      // customer has 10 orders
+    .Include(c => c.Reviews)     // customer has 5 reviews
+    .FirstAsync(c => c.Id == 1);
+// Result set: 10 x 5 = 50 rows returned from SQL, even though there are only 15 actual related entities!
+
+// SPLIT query -- issues TWO SEPARATE queries instead, avoiding the multiplication
+var customer = await context.Customers
+    .Include(c => c.Orders)
+    .Include(c => c.Reviews)
+    .AsSplitQuery() // Orders and Reviews are now fetched via SEPARATE round trips, no Cartesian product
+    .FirstAsync(c => c.Id == 1);
+```
+Without `AsSplitQuery()`, EF Core's single JOIN-based query returns one row per *combination* of an order and a review (10 orders × 5 reviews = 50 rows for what's logically only 15 distinct related entities) — for collections with even moderately large counts, this multiplication can produce a genuinely enormous result set transferred over the network, only to be immediately de-duplicated back down by EF Core once received.
+
+**The trade-off `AsSplitQuery()` accepts in exchange:** multiple separate database round trips (one per included collection) instead of one single round trip — for a scenario without the Cartesian multiplication problem (a single collection `Include`, or generally small collections), the single-query default is usually preferable (fewer round trips); `AsSplitQuery()` earns its keep specifically when multiple sibling collections are both being included and at least one has a meaningful row count.
+
+**Common Pitfall:** including multiple large sibling collections via the default single-query behavior without recognizing the Cartesian multiplication risk — the resulting query can silently transfer a dramatically larger result set than the actual data would suggest, sometimes causing serious performance problems that aren't obvious just from reading the LINQ query itself, since the multiplication happens implicitly as a consequence of how SQL `JOIN`s combine multiple one-to-many relationships in a single query.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is EF Core's `IExecutionStrategy` and its relationship to `EnableRetryOnFailure()`, and why does wrapping MULTIPLE separate `SaveChangesAsync()` calls in a manual transaction REQUIRE using the execution strategy's own `ExecuteAsync` wrapper rather than a plain `try`/`catch` retry loop?**
+
+`EnableRetryOnFailure()` configures EF Core to automatically retry a database operation that fails due to a transient error (a momentary network blip, a cloud database's transient throttling) — but when multiple operations are wrapped in an explicit, manually-created transaction, a naive retry of just the failed operation would be unsafe, since the transaction itself may already be in an indeterminate state; the `IExecutionStrategy`'s own `ExecuteAsync` wrapper handles this correctly by retrying the *entire* transaction block from scratch.
+
+```csharp
+// WRONG -- wrapping a multi-operation transaction in a plain retry loop is UNSAFE with retries enabled
+using var transaction = await context.Database.BeginTransactionAsync();
+await context.SaveChangesAsync(); // if THIS specific call fails and is retried in isolation,
+await _otherContext.SaveChangesAsync(); // the transaction's state is now ambiguous/corrupted
+
+// CORRECT -- the EXECUTION STRATEGY wraps the ENTIRE transactional block, retrying it AS A WHOLE if needed
+var strategy = context.Database.CreateExecutionStrategy();
+await strategy.ExecuteAsync(async () =>
+{
+    using var transaction = await context.Database.BeginTransactionAsync();
+    await context.SaveChangesAsync();
+    await _otherContext.SaveChangesAsync();
+    await transaction.CommitAsync();
+});
+```
+Because a transient failure partway through a multi-step transaction leaves that transaction's actual committed/uncommitted state ambiguous, simply retrying the one operation that failed (while leaving the surrounding transaction untouched) risks operating against a transaction that's already in an inconsistent state — `ExecuteAsync` instead retries the *entire* block, including beginning a brand-new transaction from scratch each retry attempt, which is the only way to safely retry when a transaction spans multiple operations.
+
+**Why this specific requirement is easy to overlook:** `EnableRetryOnFailure()` works correctly and transparently for the *common* case of a single `SaveChangesAsync()` call with no explicit transaction — the requirement to wrap the *entire* transactional block in `ExecuteAsync` only becomes relevant once a developer manually introduces an explicit transaction spanning multiple operations, a less common but not rare pattern, and one where naively retrying without the execution strategy's wrapper can silently reintroduce data-consistency bugs specifically under the failure conditions the retry logic was meant to handle safely.
+
+**Common Pitfall:** manually wrapping multiple `SaveChangesAsync()` calls in an explicit transaction while retry-on-failure is enabled, without using the execution strategy's `ExecuteAsync` wrapper around the entire block — EF Core actually throws a clear, explicit exception at runtime if it detects this specific unsafe pattern (a user-initiated transaction combined with retry enabled, but without the execution strategy wrapper), specifically to prevent this class of bug from silently slipping into production.
+
+---
+
+---
