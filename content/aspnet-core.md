@@ -993,3 +993,87 @@ Because `TypedResults` returns concrete types (`Ok<Order>`, `NotFound`) rather t
 **Common Pitfall:** continuing to use `Results` with separately-maintained `[ProducesResponseType]` annotations in new Minimal API code, missing the opportunity `TypedResults` provides to have the compiler-enforced return type serve as the single source of truth for both actual behavior and generated API documentation simultaneously, rather than maintaining these as two separate, independently-driftable things.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is ASP.NET Core's `WebApplicationFactory<T>` for integration testing, and how does it let a test spin up an ENTIRE, REAL application pipeline in-memory, WITHOUT actually binding to a real network port?**
+
+`WebApplicationFactory<T>` bootstraps a full, real instance of an ASP.NET Core application entirely in-memory for testing purposes — the actual middleware pipeline, routing, and DI container all run exactly as they would in production, but requests are dispatched directly in-process rather than over a real network socket, making integration tests fast and avoiding any actual port-binding conflicts.
+
+```csharp
+public class OrdersApiTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client;
+    public OrdersApiTests(WebApplicationFactory<Program> factory) => _client = factory.CreateClient();
+
+    [Fact]
+    public async Task GetOrder_ReturnsOk()
+    {
+        var response = await _client.GetAsync("/api/orders/5"); // hits the REAL pipeline, IN-MEMORY, no real socket
+        response.EnsureSuccessStatusCode();
+    }
+}
+```
+The `HttpClient` returned by `factory.CreateClient()` looks and behaves exactly like a normal HTTP client making real network calls, but requests are actually routed directly in-memory through the application's genuine middleware pipeline and routing — this means the test genuinely exercises real middleware, real routing, real model binding, and real DI-resolved services, not a simplified mock of any of them, while still running fast and without needing an actual network port.
+
+**Why this matters for genuinely meaningful integration testing, beyond mere unit-level mocking:** unit tests (using mocked dependencies) verify individual components in isolation, but can miss integration-level issues (a misconfigured middleware ordering, a routing conflict) that only manifest when the real, full pipeline actually runs — `WebApplicationFactory` lets tests exercise this genuine, full integration while still running with the speed and CI-friendliness of an in-memory test, rather than needing a genuinely deployed, network-accessible test environment.
+
+**Common Pitfall:** replacing so many of the application's real services with test doubles (via `WithWebHostBuilder`'s service overrides) that the test barely exercises any of the application's actual, real configuration/pipeline at all — while overriding a genuinely external dependency (a real database, a real third-party API) for testing is appropriate, over-mocking internal application services defeats much of `WebApplicationFactory`'s value, which is specifically to test the REAL, actually-configured application pipeline, not a heavily-mocked substitute for it.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is ASP.NET Core's Rate Limiting Middleware (`AddRateLimiter`, built into the framework since .NET 7), and how does its built-in `PartitionedRateLimiter` let DIFFERENT rate-limit buckets apply PER USER/CLIENT, rather than one single, shared limit for the entire application?**
+
+ASP.NET Core's built-in rate limiting middleware lets you define rate-limiting policies applied per-request — critically, `PartitionedRateLimiter` lets the actual rate-limit "bucket" be partitioned by some key (a user ID, an API key, a client IP), so each distinct partition gets its own independent limit, rather than one single, shared limit consumed by every client's requests combined.
+
+```csharp
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddPolicy("PerUserPolicy", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: context.User.Identity?.Name ?? "anonymous", // PARTITIONS by user identity
+            factory: _ => new FixedWindowRateLimiterOptions { PermitLimit = 100, Window = TimeSpan.FromMinutes(1) }));
+});
+
+app.MapGet("/api/orders", () => Results.Ok(GetOrders())).RequireRateLimiting("PerUserPolicy");
+```
+Because the rate limiter is partitioned by `context.User.Identity.Name`, each individual user gets their OWN independent "100 requests per minute" budget — User A making 100 requests doesn't consume any of User B's separate, independent budget, unlike a single, shared, application-wide limit where all users' requests would collectively count against one combined total.
+
+**Why per-partition rate limiting matters specifically for fairness in a multi-tenant API:** a single, shared, application-wide rate limit would let one especially active (or abusive) user consume the entire available budget, starving every other user of their fair share of the API's capacity — partitioning by user/client key ensures each individual consumer's usage is measured and limited independently, protecting the API from being monopolized by any single client's excessive usage.
+
+**Common Pitfall:** implementing a single, application-wide rate limit (not partitioned by user/client) for an API serving many independent consumers — this allows one particularly heavy or abusive user's traffic to exhaust the entire shared budget, effectively denying service to every other legitimate user; per-partition rate limiting (keyed by user, API key, or client IP) is generally the more appropriate default for any multi-tenant API where fairness across independent consumers matters.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is ASP.NET Core's `IStartupFilter`-based diagnostics middleware ordering GUARANTEE specifically for the Developer Exception Page, and why must it be registered as the ABSOLUTE FIRST middleware in the pipeline to correctly catch exceptions thrown by EVERY subsequent middleware?**
+
+The Developer Exception Page middleware (`app.UseDeveloperExceptionPage()`) can only catch and display an exception if it's registered *before* (earlier in the pipeline than) whatever middleware actually throws that exception — since ASP.NET Core's middleware pipeline executes in registration order, and exception handling middleware works by wrapping everything registered *after* it in a try/catch, it must be positioned as close to the very beginning of the pipeline as possible to have any chance of catching exceptions from every other middleware.
+
+```csharp
+var app = builder.Build();
+
+app.UseDeveloperExceptionPage(); // MUST be FIRST (or very near first) -- wraps EVERYTHING registered AFTER it
+
+app.UseHttpsRedirection(); // if THIS throws, the exception page ABOVE catches it (registered BEFORE)
+app.UseRouting();
+app.UseAuthorization();     // if THIS throws, the exception page catches it too
+app.MapControllers();       // if a CONTROLLER ACTION throws, the exception page catches THIS too
+```
+```csharp
+// WRONG ordering -- registered LATE, AFTER other middleware that might throw
+app.UseHttpsRedirection();       // if THIS throws, there's NO exception-catching middleware registered YET
+app.UseDeveloperExceptionPage(); // TOO LATE -- can only catch exceptions from middleware registered AFTER it
+```
+Because the Developer Exception Page middleware can only wrap (and therefore catch exceptions from) whatever is registered *after* it in the pipeline, registering it late means any exception thrown by earlier-registered middleware bypasses it entirely, surfacing as an unhandled exception instead of the intended, helpful diagnostic page — this is a direct, concrete consequence of the middleware-pipeline-as-Chain-of-Responsibility structure covered earlier, applied specifically to why exception-handling middleware's *position* in the pipeline is so consequential.
+
+**Why this specific ordering requirement is easy to overlook, since the application still "works" most of the time:** if no earlier-registered middleware ever actually throws, the ordering mistake produces no visible symptom at all — the bug only manifests specifically when an exception occurs in middleware registered before the exception page, at which point the developer sees a confusing, unhandled exception instead of the diagnostic page they expected, with no obvious hint that middleware *ordering* (not the exception page itself) is the actual root cause.
+
+**Common Pitfall:** registering `UseDeveloperExceptionPage()` in the "conventional" middle-of-the-pipeline position (after routing, for instance) rather than as close to the absolute beginning as possible — this leaves exceptions thrown by any earlier-registered middleware (HTTPS redirection, static files, or even the exception page's own earlier position relative to routing) uncaught by the exception page, a subtle gap that only becomes visible when one of those specific earlier middleware components actually throws.
+
+---
+
+---

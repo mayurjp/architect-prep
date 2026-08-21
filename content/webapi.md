@@ -909,3 +909,86 @@ Because the filter runs before the endpoint's own handler delegate, invalid inpu
 **Common Pitfall:** duplicating the same validation/cross-cutting logic inline inside multiple Minimal API endpoint handler lambdas, rather than extracting it into a reusable `IEndpointFilter` — this scatters identical logic across many endpoint definitions, exactly the kind of code duplication `IEndpointFilter` (analogous to MVC's Action Filters) is specifically designed to eliminate by centralizing the cross-cutting logic into one reusable, attachable filter class.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: What is Web API's `[FromQuery]`/`[FromRoute]`/`[FromBody]` explicit binding-source attributes, and why does relying on the framework's DEFAULT binding-source inference (rather than declaring these explicitly) occasionally produce surprising, hard-to-predict behavior?**
+
+These attributes explicitly declare exactly where a parameter's value should be bound from (the query string, a route segment, the request body) — without them, ASP.NET Core applies a set of default inference rules (simple types typically from route/query, complex types typically from the body) that can occasionally produce surprising results for parameter shapes that don't cleanly fit the framework's default assumptions.
+
+```csharp
+[HttpGet("products")]
+public IActionResult Search(
+    [FromQuery] string category,   // EXPLICIT -- always from the query string, unambiguous
+    [FromQuery] int page)           // EXPLICIT -- always from the query string, unambiguous
+
+// WITHOUT explicit attributes -- relies on DEFAULT INFERENCE, which CAN be surprising for some shapes:
+[HttpPost("products")]
+public IActionResult Create(ProductDto dto) // INFERRED as [FromBody] -- because it's a COMPLEX type
+```
+For simple parameter types (strings, ints), ASP.NET Core's default inference generally binds from the route/query string, which usually matches developer expectations — but for more unusual signatures (multiple complex-type parameters, or a mix of simple and complex types in less common combinations), the default inference rules can sometimes bind from a source the developer didn't actually expect, a source of genuine, if occasionally surprising, confusion.
+
+**Why explicit attributes are generally the safer default for anything beyond the most straightforward, conventional signatures:** being explicit about a parameter's binding source removes any ambiguity about where its value actually comes from, both for the framework's own binding behavior and for a future developer reading the code — relying purely on default inference works fine for conventional, simple cases, but becomes progressively riskier and harder to predict as an action's parameter list grows more complex or unconventional.
+
+**Common Pitfall:** relying entirely on default binding-source inference for an action with a non-trivial or unconventional parameter signature, then being confused when a parameter doesn't bind from the source expected — explicitly declaring `[FromQuery]`/`[FromRoute]`/`[FromBody]` removes this ambiguity entirely, making the actual binding behavior immediately clear from the method signature itself, rather than requiring familiarity with the framework's specific default-inference rules to predict correctly.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is Web API's Global Exception Handling via `IExceptionHandler` (introduced in .NET 8), and how does implementing it provide a CENTRALIZED, TESTABLE alternative to the older `UseExceptionHandler` middleware's inline lambda approach?**
+
+`IExceptionHandler` provides a structured, DI-friendly interface for handling unhandled exceptions globally, registered as a service rather than expressed as an inline middleware lambda — this makes the exception-handling logic itself independently unit-testable and allows multiple handlers to be registered, each handling different exception types, rather than one large, monolithic inline lambda handling every case.
+
+```csharp
+public class ValidationExceptionHandler : IExceptionHandler
+{
+    public async ValueTask<bool> TryHandleAsync(HttpContext context, Exception exception, CancellationToken ct)
+    {
+        if (exception is not ValidationException validationEx) return false; // NOT handled by THIS handler
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsJsonAsync(new { error = validationEx.Message }, ct);
+        return true; // handled -- STOP trying OTHER registered handlers
+    }
+}
+
+// Registration:
+builder.Services.AddExceptionHandler<ValidationExceptionHandler>();
+builder.Services.AddProblemDetails(); // a FALLBACK for exceptions NO specific handler caught
+app.UseExceptionHandler();
+```
+Because `IExceptionHandler` is a proper DI-registered service (not an inline lambda), it can be unit tested directly and independently, and multiple handlers can be registered, each responsible for a specific exception type — the framework tries each registered handler in order until one returns `true` (handled), falling back to `AddProblemDetails()`'s generic handling for anything no specific handler recognized.
+
+**Why this specifically improves on the older `UseExceptionHandler(app => { ... })` inline-lambda pattern:** the older pattern requires all exception-handling logic to live inline within `Program.cs` (or a similarly awkward location), making it harder to unit test in isolation and harder to organize as exception types and their specific handling logic grow — `IExceptionHandler`'s DI-registered, class-based structure keeps each specific exception type's handling logic in its own focused, independently testable class.
+
+**Common Pitfall:** implementing all exception-handling logic as one large, monolithic `IExceptionHandler` (or the older inline lambda) with a long chain of `if (exception is X) ... else if (exception is Y) ...` checks — this misses the specific benefit of registering multiple, focused `IExceptionHandler` implementations (each handling one specific exception type), which keeps each handler small, focused, and independently testable, rather than accumulating into one large, ever-growing conditional block.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is Web API's support for `System.Text.Json`'s Polymorphic Serialization (`[JsonDerivedType]`), and how does it let a BASE type's JSON serialization automatically include a DISCRIMINATOR identifying which DERIVED type a given instance actually is, WITHOUT manual discriminator-handling code?**
+
+`[JsonDerivedType]` lets `System.Text.Json` automatically serialize (and deserialize) a polymorphic base-type reference, embedding a discriminator value identifying the actual concrete derived type — without this, serializing a base-typed reference would lose information about which specific derived type the instance actually was, since ordinary serialization only considers the STATIC (declared) type.
+
+```csharp
+[JsonDerivedType(typeof(CreditCardPayment), typeDiscriminator: "creditCard")]
+[JsonDerivedType(typeof(BankTransferPayment), typeDiscriminator: "bankTransfer")]
+public abstract class Payment { public decimal Amount { get; set; } }
+
+public class CreditCardPayment : Payment { public string CardNumber { get; set; } = ""; }
+public class BankTransferPayment : Payment { public string AccountNumber { get; set; } = ""; }
+
+[HttpGet]
+public IActionResult GetPayment() => Ok((Payment)new CreditCardPayment { Amount = 50, CardNumber = "1234" });
+// Serializes AS: { "$type": "creditCard", "amount": 50, "cardNumber": "1234" } -- discriminator INCLUDED automatically
+```
+Without `[JsonDerivedType]`, serializing a `Payment`-typed reference (even one that's actually a `CreditCardPayment` underneath) would, by default, only serialize the members declared on the STATIC `Payment` type, losing the `CardNumber` field entirely and giving the client no way to know which concrete derived type the response actually represents — `[JsonDerivedType]` fixes both problems, automatically including a discriminator and correctly serializing the derived type's own additional members.
+
+**Why this specifically matters for API responses where a field's runtime type genuinely varies (a payment method, a notification type):** an API endpoint whose response field could be one of several different derived types needs the client to be able to tell them apart and correctly parse each one's specific additional fields — `[JsonDerivedType]`'s automatic discriminator handling removes the need to manually implement custom serialization logic to embed and interpret this discriminator, a problem that used to require hand-written custom converters before this feature existed.
+
+**Common Pitfall:** manually implementing a custom `JsonConverter` to handle polymorphic serialization/discriminator logic, unaware that `[JsonDerivedType]` now provides this exact capability built directly into `System.Text.Json` — for straightforward polymorphic serialization needs matching this attribute's supported patterns, using the built-in mechanism avoids the complexity and maintenance burden of a hand-written custom converter that a more recent .NET version's built-in feature already handles correctly.
+
+---
+
+---

@@ -782,4 +782,72 @@ While the server spends time on expensive backend work (database queries, templa
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is the HTTP `Connection: keep-alive` header (and HTTP/1.1's default persistent-connection behavior), and how does REUSING one underlying TCP connection for MULTIPLE sequential requests avoid the overhead of a fresh TCP handshake for EVERY single request?**
+
+Establishing a new TCP connection requires a handshake (and, for HTTPS, a TLS negotiation on top) — meaningful overhead if paid separately for every single HTTP request. `Connection: keep-alive` (the default behavior in HTTP/1.1) keeps one underlying TCP connection open across multiple sequential requests to the same server, avoiding this handshake cost for every request after the first.
+
+```http
+GET /page1 HTTP/1.1
+Host: example.com
+Connection: keep-alive
+-- SAME underlying TCP connection reused for the NEXT request, NO NEW HANDSHAKE needed --
+GET /page2 HTTP/1.1
+Host: example.com
+Connection: keep-alive
+```
+Without `keep-alive` (`Connection: close`, HTTP/1.0's original default behavior), each individual request would require establishing a brand new TCP connection (and TLS handshake, for HTTPS) — for a page loading a dozen separate resources (images, CSS, JS files) from the same server, this would mean paying the connection-setup cost twelve separate times, rather than once for the first request and then reusing that same connection for the remaining eleven.
+
+**Why this specifically became the default in HTTP/1.1 (rather than remaining opt-in, as it was in HTTP/1.0):** the overhead of repeatedly establishing new connections for every single request was significant enough, and beneficial enough to avoid by default, that HTTP/1.1 made persistent connections the default behavior rather than requiring clients to explicitly opt in via `Connection: keep-alive`, as HTTP/1.0 originally required.
+
+**Common Pitfall:** explicitly sending `Connection: close` for every request out of outdated habit (carried over from HTTP/1.0-era practices) — this forces a fresh TCP (and TLS) handshake for every single request, discarding the connection-reuse benefit HTTP/1.1 provides by default, and should generally be avoided unless there's a specific, deliberate reason to force a connection to close after one particular request.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is the HTTP `Digest` authentication scheme (as distinct from `Basic`), and how does it avoid transmitting a password in PLAINTEXT (even over an unencrypted connection), by sending a CRYPTOGRAPHIC HASH instead?**
+
+`Basic` authentication transmits a username/password combination Base64-encoded (which is NOT encryption — trivially reversible) directly in the `Authorization` header — anyone intercepting an unencrypted `Basic`-authenticated request can trivially recover the actual plaintext password. `Digest` authentication instead sends a cryptographic hash derived from the password (combined with a server-provided nonce), never transmitting the actual password itself in any recoverable form.
+
+```http
+-- Basic -- Base64 is REVERSIBLE, NOT encryption -- the password is EFFECTIVELY plaintext to an interceptor
+Authorization: Basic dXNlcjpwYXNzd29yZA==   (trivially decodes to "user:password")
+
+-- Digest -- sends a HASH, derived from the password + a server NONCE -- NOT reversible to recover the password
+Authorization: Digest username="user", realm="example.com", nonce="dcd98b7...",
+               uri="/orders", response="6629fae49393a05397450978507c4ef1"
+```
+An attacker intercepting a `Digest`-authenticated request sees only a cryptographic hash value, computed from the password combined with a server-issued nonce — recovering the actual plaintext password from this hash is computationally infeasible (assuming a reasonably strong hash function), unlike `Basic`'s Base64 encoding, which any interceptor can trivially reverse in a single step.
+
+**Why `Digest` is nonetheless considered largely obsolete in modern practice, despite this real security advantage over `Basic`:** modern practice instead relies on TLS/HTTPS to encrypt the *entire* connection (protecting `Basic` credentials via transport-layer encryption rather than needing `Digest`'s more complex, hash-based scheme) — combined with `Basic`-over-HTTPS being simpler to implement correctly, most modern systems prefer `Basic` (or, more commonly today, token-based schemes like Bearer/OAuth) over TLS, rather than adopting `Digest`'s more complex hash-based approach.
+
+**Common Pitfall:** using `Basic` authentication over a genuinely unencrypted (plain HTTP, not HTTPS) connection — this transmits credentials in an effectively plaintext, trivially-recoverable form to anyone able to intercept the traffic; `Basic` authentication's security entirely depends on the underlying connection being encrypted via TLS/HTTPS, and should never be used over plain, unencrypted HTTP.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is HTTP's `Alt-Svc` (Alternative Services) header, and how does it let a server advertise that a BETTER protocol/endpoint is available (like HTTP/3 over QUIC) WITHOUT requiring the CURRENT request to use it, letting the CLIENT opportunistically switch on a FUTURE request?**
+
+`Alt-Svc` lets a server tell a client, via a response header, that an alternative (often better/faster) protocol or endpoint is available for future requests to the same resource — the current request/response completes using whatever protocol was already in use, but the client can then opportunistically attempt the advertised alternative for its *next* request to the same origin.
+
+```http
+HTTP/1.1 200 OK
+Alt-Svc: h3=":443"; ma=86400
+-- tells the client: "HTTP/3 (h3) is available on port 443, this advertisement is valid for 86400 seconds" --
+-- the CURRENT response was still delivered over WHATEVER protocol was ALREADY in use (e.g., HTTP/2) --
+```
+```text
+The client's NEXT request to this SAME origin can OPPORTUNISTICALLY attempt HTTP/3 directly,
+having learned from the Alt-Svc header that it's available -- WITHOUT needing to negotiate
+this discovery ALL OVER AGAIN via a slower, exploratory upgrade attempt
+```
+Because the current request/response already completed successfully over the existing protocol, there's no need to interrupt or renegotiate it mid-flight — `Alt-Svc` simply informs the client of a better option for *subsequent* requests, letting the switch to a faster protocol (HTTP/3, in this example) happen opportunistically and non-disruptively, rather than requiring the current, already-in-progress exchange to somehow switch protocols mid-request.
+
+**Why this specifically enables a smooth, incremental transition to newer protocols across the web at large:** a server can support multiple protocol versions simultaneously and let clients discover and opportunistically adopt the best one available, without requiring every client to already know in advance which protocols a given server supports — `Alt-Svc` is precisely the mechanism that lets the broader web incrementally, non-disruptively transition toward newer protocols (HTTP/3 adoption, historically) without requiring a coordinated, all-at-once cutover.
+
+**Common Pitfall:** assuming a server advertising `Alt-Svc: h3=...` means the CURRENT request/response used HTTP/3 — `Alt-Svc` only advertises availability for *future* requests; the current exchange already completed over whatever protocol was already established, and the actual switch to the advertised alternative only takes effect on a subsequent connection attempt, not retroactively applied to the request that carried the advertisement itself.
+
 ---

@@ -868,3 +868,91 @@ By default, a failed authorization check produces a bare `403 Forbidden` with no
 **Common Pitfall:** reimplementing the ENTIRE authorization result handling logic from scratch (including the success path) rather than delegating to the default handler for cases the custom logic doesn't specifically need to change — this risks subtly reimplementing framework behavior incorrectly; a custom `IAuthorizationMiddlewareResultHandler` should typically only override the specific outcome(s) it cares about, delegating everything else to the framework's own default implementation.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is MVC's `PartialViewResult`/`PartialView()` return value, and how does returning ONLY a fragment of HTML (rather than a full page) support AJAX-driven, dynamic page updates?**
+
+`PartialView()` renders only a fragment of HTML — no `<html>`/`<head>`/layout wrapper — suitable for AJAX-driven scenarios where JavaScript needs to swap out just one section of an already-loaded page, rather than the browser navigating to and rendering an entirely new, full page.
+
+```csharp
+[HttpGet]
+public IActionResult GetOrderSummary(int id)
+{
+    var order = _repository.Find(id);
+    return PartialView("_OrderSummary", order); // returns ONLY the fragment -- NO full page wrapper at all
+}
+```
+```javascript
+// Client-side JavaScript -- fetches the FRAGMENT and swaps it into an EXISTING page, no full navigation
+fetch(`/orders/summary/${orderId}`)
+    .then(response => response.text())
+    .then(html => document.getElementById('order-summary-container').innerHTML = html);
+```
+The response body contains only the specific fragment's markup — no full `<html>` document structure — making it directly suitable for JavaScript to insert into an already-loaded page's DOM, rather than needing to parse out a fragment from what would otherwise be a full, redundant page response.
+
+**Common Pitfall:** returning a full `View()` (including the entire layout/master page) for an endpoint specifically intended to be consumed via AJAX for a partial page update — this wastes bandwidth sending an entire redundant page structure the client only needs a small fragment from, and requires the client-side JavaScript to manually extract just the needed fragment from the full response rather than being able to use it directly as returned.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is MVC's `IValidatableObject` interface (as distinct from Data Annotations), and how does it let CROSS-PROPERTY validation logic (rules spanning MULTIPLE properties together) be expressed, which individual Data Annotation attributes cannot?**
+
+Data Annotation attributes (`[Required]`, `[Range]`) validate a single property in isolation — `IValidatableObject`'s `Validate` method lets a model express validation rules spanning MULTIPLE properties together, checking relationships between them that no single-property attribute could express on its own.
+
+```csharp
+public class DateRangeRequest : IValidatableObject
+{
+    public DateTime StartDate { get; set; }
+    public DateTime EndDate { get; set; }
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+    {
+        if (EndDate < StartDate) // a CROSS-PROPERTY rule -- NO single Data Annotation attribute could express THIS
+        {
+            yield return new ValidationResult("EndDate must be after StartDate", new[] { nameof(EndDate) });
+        }
+    }
+}
+```
+This validation runs automatically as part of MVC's normal model validation pipeline (integrating with `ModelState`, covered elsewhere), exactly like Data Annotation failures — but expresses a rule genuinely spanning two properties together (`EndDate` must be after `StartDate`), something no single, isolated `[Range]`/`[Required]` attribute applied to just one property could ever express on its own.
+
+**Why this integrates seamlessly with the SAME `ModelState`-based validation infrastructure, rather than being a completely separate mechanism:** because `IValidatableObject.Validate` results feed into the same `ModelState` structure Data Annotations populate, a controller's existing `if (!ModelState.IsValid) return BadRequest(ModelState);` check automatically catches both single-property Data Annotation failures AND multi-property `IValidatableObject` failures uniformly, with no separate handling logic needed for either kind.
+
+**Common Pitfall:** attempting to express a genuinely cross-property validation rule using only Data Annotation attributes (contorting a `[Range]` or a custom single-property attribute to somehow reference another property) — Data Annotations are fundamentally designed for single-property validation; a rule genuinely spanning multiple properties together is exactly the signal to reach for `IValidatableObject` instead, rather than forcing an awkward, single-property-oriented attribute to express a relationship it wasn't designed for.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is MVC's `ActionConstraint` (`IActionConstraint`), and how does it let MULTIPLE actions share the EXACT SAME route template, with routing selecting between them based on a runtime CONDITION beyond the route/HTTP-verb match alone?**
+
+`IActionConstraint` lets routing disambiguate between multiple actions that would otherwise match the exact same route template and HTTP verb, based on some additional runtime condition — useful when a route needs different handling depending on something not expressible in the route template itself (a specific header's value, a custom business condition).
+
+```csharp
+public class RequiresHeaderAttribute : Attribute, IActionConstraint
+{
+    private readonly string _headerName;
+    public RequiresHeaderAttribute(string headerName) => _headerName = headerName;
+    public int Order => 0;
+    public bool Accept(ActionConstraintContext context) =>
+        context.RouteContext.HttpContext.Request.Headers.ContainsKey(_headerName);
+}
+
+[HttpGet("products/{id}")]
+[RequiresHeader("X-Beta-Features")] // ONLY matches if THIS header is present
+public IActionResult GetProductBeta(int id) => Ok(GetBetaProductDetails(id));
+
+[HttpGet("products/{id}")] // the SAME route template -- but WITHOUT the constraint, matches OTHERWISE
+public IActionResult GetProduct(int id) => Ok(GetStandardProductDetails(id));
+```
+Both actions share the identical route template (`products/{id}`) and HTTP verb (`GET`) — routing uses `RequiresHeaderAttribute`'s `Accept` method to decide which one actually handles a given request, based on whether the `X-Beta-Features` header is present, a condition entirely outside what the route template or HTTP verb alone could express.
+
+**Why this differs from (and complements) ordinary route constraints (like the `{sku:sku}` custom constraint covered earlier):** ordinary route *parameter* constraints validate the shape of a specific URL segment — `IActionConstraint` operates at the level of choosing between entire *actions* sharing an identical route, based on broader runtime conditions (headers, custom business logic) that aren't tied to any specific URL segment's shape at all; the two mechanisms solve related but distinct disambiguation problems.
+
+**Common Pitfall:** reaching for `IActionConstraint` for a disambiguation need that a simpler mechanism (a different route template, or explicit `[Consumes]`/content-negotiation-based dispatch) would handle more directly — `IActionConstraint` is a genuinely powerful, flexible mechanism, but its flexibility comes with added indirection; simpler built-in disambiguation mechanisms should generally be preferred when they suffice, reserving custom action constraints for genuinely novel disambiguation conditions those simpler mechanisms can't express.
+
+---
+
+---

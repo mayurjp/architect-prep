@@ -1700,3 +1700,73 @@ A well-behaved client reads `Retry-After: 30` and waits the full 30 seconds befo
 **Common Pitfall:** implementing rate limiting that returns `429 Too Many Requests` without the accompanying `Retry-After` header — this leaves clients to implement their own guessed backoff strategy (commonly exponential backoff with jitter), which works reasonably well but is strictly less precise than the server simply telling clients exactly how long to wait, information the server itself already has direct knowledge of from its own rate-limiting configuration.
 
 ---
+
+## Beginner — Question 11
+
+**Q11: What is REST's convention of using QUERY PARAMETERS for filtering/sorting/pagination (`?status=pending&sort=date&page=2`) rather than encoding this same information into the URL PATH itself, and why does this distinction matter for what a URL's PATH is meant to represent?**
+
+REST convention reserves the URL path for identifying *which resource* (or collection) is being addressed, while query parameters express *how* to filter, sort, or paginate that same underlying resource/collection — keeping these two concerns cleanly separated rather than encoding filtering/sorting criteria into the path itself.
+
+```http
+GET /orders?status=pending&sort=-date&page=2&pageSize=20
+```
+```text
+-- INCONSISTENT WITH convention (mixing filtering criteria INTO the path itself) --
+GET /orders/pending/sorted-by-date/page-2
+```
+The path `/orders` clearly identifies "the orders collection" as the resource being addressed — the query string (`?status=pending&sort=-date&page=2`) separately expresses how that same collection should be filtered/sorted/paginated for this specific request, without changing what resource is fundamentally being addressed; encoding the same filtering logic into the path instead creates an unbounded, ad-hoc explosion of URL "shapes" for what's conceptually still just one single resource (the orders collection).
+
+**Why this specifically matters for caching and URL predictability:** a consistent, query-parameter-based approach means a client (or a generic caching layer) can predict how filtering/sorting/pagination will always be expressed for ANY resource in the API, without needing resource-specific knowledge of a bespoke path structure — encoding the same information into ad-hoc path segments instead requires memorizing (or discovering) each individual resource's own unique path conventions, undermining the predictability a consistent, convention-following API provides.
+
+**Common Pitfall:** encoding filtering, sorting, or pagination state directly into the URL path (`/orders/pending`, `/orders/page/2`) rather than using query parameters — this conflates "which resource" with "how to view/filter it," producing an unpredictable, resource-specific proliferation of path structures instead of one clean, consistent convention (query parameters) applicable uniformly across every resource in the API.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is the "Overloaded POST" anti-pattern (as distinct from a genuine resource-creation `POST`), and how does using `POST` for operations that AREN'T actually "create a new resource" undermine REST's use of HTTP verbs to convey MEANINGFUL semantics?**
+
+`POST` is conventionally meant to represent "create a new resource within this collection" — the Overloaded POST anti-pattern instead uses `POST` as a generic, catch-all verb for virtually every operation (searching, calculating, triggering an action), regardless of whether that operation actually creates anything, undermining HTTP verbs' role in conveying genuinely meaningful semantics about what an operation actually does.
+
+```http
+-- OVERLOADED POST -- used for operations that DON'T actually "create" anything at all --
+POST /api/calculateShippingCost    { "weight": 5, "destination": "NYC" }   -- NOT creating a resource
+POST /api/searchProducts            { "query": "keyboard" }                 -- NOT creating a resource
+POST /api/sendPasswordReset         { "email": "user@example.com" }         -- NOT creating a resource, EXACTLY
+
+-- MORE RESTFUL alternatives, using verbs/resources that convey MEANINGFUL semantics --
+GET /api/shipping-cost?weight=5&destination=NYC   -- a QUERY, appropriately using GET
+GET /api/products?q=keyboard                        -- a QUERY, appropriately using GET
+POST /api/password-reset-requests                    -- genuinely CREATES a "password reset request" RESOURCE
+```
+Using `POST` universally for every operation (regardless of whether it's genuinely a creation) discards the semantic information HTTP verbs are specifically meant to convey — a client (or intermediate cache/proxy) inspecting an Overloaded-POST-based API can no longer infer anything meaningful from the HTTP verb alone (is this safe to retry? is it cacheable? is it idempotent?), since every single operation looks identical (`POST`) regardless of its actual underlying nature.
+
+**Why this specifically undermines infrastructure-level assumptions built around HTTP verb semantics:** intermediate caches, proxies, and generic HTTP tooling make real, useful assumptions based on HTTP verb semantics (a `GET` is safe to cache and retry; a `POST` typically is not) — an API that overloads `POST` for genuinely safe, cacheable, idempotent operations (a search query) loses these infrastructure-level benefits entirely, forcing every single request through `POST`'s more conservative (non-cacheable, not-safe-to-blindly-retry) semantics regardless of the operation's actual, genuine nature.
+
+**Common Pitfall:** defaulting to `POST` for every single API operation regardless of its actual semantics, often to sidestep GET's limitations around request body size or the desire to avoid exposing search criteria in a URL — while there are legitimate edge cases where a `GET` with a very large or complex query genuinely doesn't fit cleanly in a URL, defaulting to `POST` universally, even for operations that are genuinely safe, cacheable, read-only queries, discards the real semantic and infrastructure benefits that correctly-used HTTP verbs are specifically designed to provide.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is "Content Negotiation for API Versioning via Media Type" (`Accept: application/vnd.myapi.v2+json`), and how does embedding the API version WITHIN the media type itself differ from (and philosophically align more closely with REST than) URL-path-based versioning?**
+
+Rather than embedding a version number in the URL path (`/api/v2/products`), Media-Type-based versioning embeds the version within a custom media type string sent via the `Accept` header — the URL itself stays completely stable and version-agnostic across every version, with content negotiation (covered earlier) determining which version's representation is actually returned.
+
+```http
+GET /api/products/5
+Accept: application/vnd.myapi.v2+json
+```
+```http
+GET /api/products/5
+Accept: application/vnd.myapi.v1+json
+```
+Both requests target the *exact same URL* (`/api/products/5`) — the specific version returned is determined entirely by the custom media type specified in the `Accept` header, rather than by which URL path segment was used; this means the URL genuinely represents one stable, canonical resource identity across all versions, with the *representation's version* negotiated separately, exactly mirroring how content negotiation determines JSON versus XML for the same underlying resource.
+
+**Why this philosophically aligns more closely with REST's principles than URL-path versioning:** REST's core idea is that a URL identifies a stable *resource* — under Media-Type versioning, `/api/products/5` genuinely remains one single, stable resource across every version, with version being purely a *representation* concern (exactly parallel to format negotiation, JSON vs. XML) — URL-path versioning (`/api/v1/products/5` vs `/api/v2/products/5`), by contrast, technically creates a *different URL* (and therefore, strictly, a different resource identity) for every version, arguably conflicting with REST's principle that one resource should have one stable, canonical URL.
+
+**Why URL-path versioning remains far more common in practice despite this philosophical argument:** Media-Type versioning requires clients to correctly construct and send custom `Accept` header values (easy to get wrong, harder to test by simply pasting a URL into a browser) — URL-path versioning is immediately visible, bookmarkable, and testable directly from a browser address bar, a significant practical convenience that often outweighs Media-Type versioning's stronger philosophical alignment with REST's resource-identity principle for many real-world API teams.
+
+**Common Pitfall:** dismissing URL-path versioning as "not truly RESTful" while ignoring the genuine practical trade-offs that make it the far more commonly adopted approach in real-world APIs — Media-Type versioning's philosophical purity doesn't automatically make it the better *practical* choice for every team; the decision should weigh genuine practical considerations (debuggability, client tooling convenience) against philosophical alignment with REST's resource-identity principle, rather than treating philosophical purity as automatically decisive.
+
+---
