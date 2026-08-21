@@ -936,4 +936,77 @@ Because Native AOT needs to know, at build time, exactly what code could ever po
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is the .NET `dotnet watch` command, and how does automatically rebuilding and restarting an application the moment a source file changes speed up the local inner development loop?**
+
+`dotnet watch` monitors a project's source files and automatically triggers a rebuild-and-restart the moment a change is saved — rather than a developer manually stopping the running application, rebuilding, and restarting it after every single code change, `dotnet watch` handles this cycle automatically, letting the developer simply save a file and see the updated behavior almost immediately.
+
+```bash
+dotnet watch run
+# starts the application, and KEEPS WATCHING the project's source files
+# the MOMENT any .cs file is saved with a change -- AUTOMATICALLY rebuilds and RESTARTS the application
+```
+```text
+Developer edits OrderController.cs, saves the file
+-> dotnet watch DETECTS the change IMMEDIATELY
+-> AUTOMATICALLY triggers: dotnet build -> restart the application
+-> developer can test the CHANGE within seconds, WITHOUT manually running ANY commands themselves
+```
+Without `dotnet watch`, a developer would need to manually stop the running process, re-run `dotnet build`, and restart the application after every single code change — `dotnet watch` automates this entire cycle, letting the developer focus purely on writing and testing code rather than manually managing the build/restart cycle themselves.
+
+**Why this matters most for tight, iterative development loops:** during active feature development, a developer might make dozens of small changes per hour, each needing to be tested — manually rebuilding/restarting after each one adds real, cumulative friction; `dotnet watch`'s automatic cycle removes this friction almost entirely, letting the developer stay focused on the actual code rather than the surrounding build/restart mechanics.
+
+**Common Pitfall:** using `dotnet run` (a one-time build-and-run, with no file watching) throughout active development, manually re-running it after every change — this works, but reintroduces exactly the repetitive, manual rebuild/restart friction `dotnet watch` is specifically designed to eliminate; `dotnet watch run` is generally the more efficient default for active, iterative local development specifically because of this automatic-restart behavior.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is .NET's `EventCounters`/`EventSource` mechanism, and how does it let a running application EXPOSE lightweight, low-overhead diagnostic metrics that external tools (`dotnet-counters`) can observe WITHOUT requiring the application to be restarted with special diagnostic flags?**
+
+`EventSource`/`EventCounters` let a .NET application emit lightweight diagnostic events and counters that external tools can attach to and observe on an already-running process, without needing that process restarted with any special diagnostic configuration or flags — the instrumentation is built into the .NET runtime itself and many common libraries, always available to observe on demand.
+
+```bash
+dotnet-counters monitor -p 12345   # attaches to an ALREADY-RUNNING process (PID 12345), NO RESTART needed
+```
+```text
+Live output, streaming in REAL TIME from the ALREADY-RUNNING process:
+  [System.Runtime]
+    CPU Usage (%)                    12
+    GC Heap Size (MB)                145
+    Gen 0 GC Count                   3
+    ThreadPool Thread Count          8
+    ThreadPool Queue Length          0
+```
+Because `EventCounters` are built into the runtime and many libraries by default, `dotnet-counters` can attach to an already-running production process at any moment and immediately start observing live metrics (GC activity, thread pool health, CPU usage) — no special startup flag, environment variable, or planned restart was needed ahead of time; the diagnostic capability is simply always available, ready to be attached to whenever actually needed.
+
+**Why this matters specifically for diagnosing a live PRODUCTION issue, where restarting the process might not be an option (or might make the problem disappear):** many production issues (a slow memory leak, thread pool starvation) are specifically characterized by their *ongoing, live* behavior — restarting the process to attach different diagnostic tooling could reset the exact condition you're trying to observe; `dotnet-counters`' ability to attach to an already-running process without restart is precisely what makes it useful for diagnosing exactly this class of live, ongoing production issue without disturbing the very condition being investigated.
+
+**Common Pitfall:** assuming diagnosing a running .NET application's health requires restarting it with special diagnostic/profiling flags enabled — `dotnet-counters` (and related tools like `dotnet-trace`, `dotnet-dump`) are specifically designed to attach to an already-running, unmodified process, precisely to avoid the problems that come with needing to restart (losing the exact live state you were trying to investigate, and the operational risk/downtime a restart implies in production).
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is .NET's `RuntimeHelpers.PrepareMethod`, and how does explicitly pre-JITting a specific method AHEAD of its first real invocation avoid a JIT-compilation latency spike occurring at exactly the WRONG moment (like a critical, first-ever real-time trade execution)?**
+
+Ordinarily, a method is JIT-compiled the very first time it's actually called — for most code, this one-time compilation cost is negligible and unnoticed, but for a genuinely latency-critical code path (a real-time trading system's order-execution logic), even this one-time JIT cost occurring at the exact moment of a critical first invocation could be unacceptable. `RuntimeHelpers.PrepareMethod` lets an application explicitly trigger JIT compilation for a specific method AHEAD of time, during a deliberate "warm-up" phase, so the first genuine invocation doesn't pay any JIT compilation cost at all.
+
+```csharp
+// During application STARTUP/WARM-UP -- deliberately PRE-JIT the critical method, BEFORE it's ever really needed
+var method = typeof(OrderExecutor).GetMethod(nameof(OrderExecutor.ExecuteCriticalTrade));
+RuntimeHelpers.PrepareMethod(method!.MethodHandle); // triggers JIT compilation RIGHT NOW, during warm-up
+
+// LATER, during the GENUINELY first REAL invocation:
+orderExecutor.ExecuteCriticalTrade(order); // ALREADY JIT-compiled -- NO compilation latency spike HERE
+```
+Without this explicit pre-warming step, the first genuine call to `ExecuteCriticalTrade` would incur the JIT's one-time compilation cost exactly when it matters least conveniently — by the time the application is fully started and ready to receive genuine, latency-critical trade requests, the critical method is already fully compiled from the earlier, deliberate warm-up call, meaning the first genuinely real invocation runs at full, already-optimized speed from the very start.
+
+**Why this matters specifically for a narrow category of extremely latency-sensitive applications, not general-purpose code:** for the vast majority of applications, a one-time JIT compilation cost on first invocation is genuinely negligible and never noticed — `PrepareMethod`'s explicit pre-warming is a specialized technique reserved for genuinely extreme-latency-sensitivity scenarios (real-time trading, real-time audio/control systems) where even a single, one-time compilation pause at the wrong moment could have real, unacceptable consequences.
+
+**Common Pitfall:** applying `RuntimeHelpers.PrepareMethod` broadly across an entire application's methods as a general "warm-up" practice, rather than reserving it specifically for the narrow set of genuinely latency-critical code paths where a first-call JIT pause would actually matter — for the vast majority of an application's methods, this adds unnecessary startup-time cost (pre-compiling methods that may never even be called, or where a one-time JIT pause on first genuine use would have been entirely unnoticeable anyway) without any corresponding benefit.
+
+---
+
 ---

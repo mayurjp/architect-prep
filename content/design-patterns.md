@@ -1156,3 +1156,100 @@ The first dispatch (`shape.Accept(visitor)`) resolves to the correct `Accept` ov
 **Common Pitfall:** reaching for the Visitor pattern for a class hierarchy expected to grow frequently with NEW shape/element types over time — since adding a new element type requires updating every existing Visitor implementation, Visitor is best suited for hierarchies that are relatively stable in their set of types but need frequent NEW operations added; for hierarchies expected to grow with new types frequently, Visitor's core trade-off works against that specific evolution pattern.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: What is the Template Method pattern, and how does a base class defining an ALGORITHM'S OVERALL SEQUENCE (while leaving specific STEPS to be filled in by subclasses) differ from a subclass overriding the ENTIRE algorithm from scratch?**
+
+Template Method defines an algorithm's overall structure/sequence in a base class method, with individual steps deferred to abstract methods that subclasses fill in — the overall sequence itself is fixed and shared, while only specific, individual steps vary per subclass, rather than each subclass needing to reimplement the entire algorithm's structure from scratch.
+
+```csharp
+public abstract class ReportGenerator
+{
+    public void Generate() // the OVERALL SEQUENCE -- FIXED, shared by EVERY subclass, NEVER overridden
+    {
+        FetchData();
+        var formatted = FormatData();
+        SaveToFile(formatted);
+    }
+    protected abstract string FetchData();       // subclasses fill in THIS specific step
+    protected abstract string FormatData();       // subclasses fill in THIS specific step
+    protected virtual void SaveToFile(string data) => File.WriteAllText("report.txt", data); // a DEFAULT, overridable
+}
+
+public class PdfReportGenerator : ReportGenerator
+{
+    protected override string FetchData() => "raw PDF data...";
+    protected override string FormatData() => "formatted AS PDF...";
+    // Generate()'s OVERALL SEQUENCE is INHERITED, UNCHANGED -- ONLY the individual STEPS are customized
+}
+```
+Every subclass shares the exact same overall sequence (`FetchData` → `FormatData` → `SaveToFile`, always in this order) — only the *individual steps'* specific implementation varies per subclass; this guarantees every report generator follows the identical overall structure, while still allowing each one to customize the specific details of how data is fetched and formatted.
+
+**Why this specifically prevents subclasses from accidentally getting the overall SEQUENCE wrong:** because `Generate()` itself is not `virtual` (it's a fixed, non-overridable method), no subclass can accidentally reorder the steps, skip one, or introduce an inconsistent sequence — the base class structurally guarantees the correct overall algorithm shape, while still leaving room for each subclass's specific step implementations to vary as needed.
+
+**Common Pitfall:** making the base class's overall algorithm method (`Generate()`) `virtual`, allowing subclasses to override and potentially completely replace the intended sequence — this defeats the Template Method pattern's core guarantee (a consistent, structurally-enforced overall sequence across every subclass); the overall algorithm method should remain non-virtual specifically so subclasses can only customize the designated individual steps, not the overall sequence itself.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the "Object Pool" pattern (as distinct from .NET's `ObjectPool<T>` API mechanics covered under performance), and how does the PATTERN's general structure (a fixed-size pool, `Acquire`/`Release` semantics) apply BEYOND just object allocation, to constrained, expensive, or limited resources generally?**
+
+At the pattern level (as distinct from the specific .NET API), Object Pool describes managing a fixed or bounded set of reusable, expensive-to-create resources — handed out via `Acquire`, returned via `Release` — the same general structure applies not just to plain in-memory objects, but to any genuinely limited/expensive resource: database connections, worker threads, even physical hardware resources.
+
+```csharp
+public class ConnectionPool // the GENERAL PATTERN, applied to DATABASE CONNECTIONS specifically
+{
+    private readonly Queue<IDbConnection> _available = new();
+    private readonly int _maxSize;
+
+    public IDbConnection Acquire()
+    {
+        if (_available.Count > 0) return _available.Dequeue(); // REUSE an existing, available connection
+        if (_currentCount < _maxSize) return CreateNewConnection(); // create ONE, if under the LIMIT
+        throw new InvalidOperationException("Pool exhausted -- wait or increase max size"); // ENFORCES the LIMIT
+    }
+
+    public void Release(IDbConnection connection) => _available.Enqueue(connection); // returns it for REUSE
+}
+```
+The exact same `Acquire`/`Release` structure that manages plain, expensive-to-construct objects (covered under performance) applies identically to managing a genuinely limited external resource (a database's own maximum concurrent connection limit) — the pattern's value here isn't just "avoid allocation cost," it's specifically enforcing a hard resource ceiling (the database genuinely cannot support unlimited concurrent connections) that unconstrained, ad-hoc resource creation would violate.
+
+**Why recognizing Object Pool as a GENERAL pattern (not just a .NET-specific performance API) matters:** connection pooling, thread pooling, and object pooling all share this exact same underlying structural pattern, even though each is often learned as a separate, unrelated, technology-specific mechanism — recognizing the shared "Acquire a limited resource, Release it back when done" structure underlying all of them provides a transferable mental model applicable to any genuinely limited/expensive resource a system needs to manage, not just the specific ones with a built-in .NET API.
+
+**Common Pitfall:** implementing ad-hoc, unbounded resource creation (opening a new database connection per request, with no pooling or limit enforcement at all) for a genuinely limited external resource — this risks exceeding the resource's actual hard capacity limit (the database's maximum connection count) under real load, precisely the failure mode the Object Pool pattern's `Acquire`/`Release` structure, with its built-in size limit, is specifically designed to prevent.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is the "Specification" pattern, and how does representing a business RULE as a first-class, COMPOSABLE object (rather than an inline boolean expression) let complex rules be combined (AND/OR/NOT) and REUSED across multiple, unrelated contexts?**
+
+The Specification pattern represents a business rule as its own object, exposing a method (typically `IsSatisfiedBy`) that evaluates whether a given candidate meets that rule — critically, Specifications can be combined using `And`/`Or`/`Not` operators to build up complex rules from simpler ones, and the same Specification object can be reused across different contexts (in-memory filtering, generating a database query) without duplicating the underlying rule logic.
+
+```csharp
+public interface ISpecification<T> { bool IsSatisfiedBy(T candidate); }
+
+public class ActiveCustomerSpec : ISpecification<Customer>
+{
+    public bool IsSatisfiedBy(Customer c) => c.IsActive;
+}
+public class HighValueCustomerSpec : ISpecification<Customer>
+{
+    public bool IsSatisfiedBy(Customer c) => c.TotalSpend > 10000;
+}
+
+// COMBINING simple specifications into a MORE COMPLEX rule, WITHOUT duplicating either rule's logic:
+var activeHighValueSpec = new AndSpecification<Customer>(new ActiveCustomerSpec(), new HighValueCustomerSpec());
+var qualifyingCustomers = allCustomers.Where(c => activeHighValueSpec.IsSatisfiedBy(c));
+```
+`ActiveCustomerSpec` and `HighValueCustomerSpec` can each be reused independently elsewhere in the codebase (checking "is this customer active" alone, in some entirely different context) — and combined together via `AndSpecification` to express "active AND high-value" without either individual rule's logic being duplicated or reimplemented; new combinations (active OR high-value, NOT active) can be built from the same reusable building blocks.
+
+**Why this specifically matters for business rules that need to be reused across genuinely DIFFERENT contexts (in-memory filtering vs. database queries):** a Specification object can potentially be translated into different execution contexts (an in-memory LINQ predicate, a SQL `WHERE` clause via Expression Trees) from the SAME underlying rule definition, avoiding the classic problem of "the business rule for what counts as a high-value customer" being defined and maintained separately (and potentially inconsistently) in multiple different places for different execution contexts.
+
+**Common Pitfall:** duplicating the same business rule logic as separate, inline boolean expressions scattered across multiple different places in the codebase (one inline check in a controller, another slightly-different inline check in a background job) — the Specification pattern specifically centralizes each rule as one reusable object, combinable with others, avoiding the drift and duplication risk of the same conceptual rule being independently (and potentially inconsistently) reimplemented in multiple separate places.
+
+---
+
+---

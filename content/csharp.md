@@ -917,4 +917,87 @@ Ordinary managed C# array access (`numbers[i]`) includes an automatic bounds che
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is the C# `is not null` pattern (as opposed to `!= null`), and how does its pattern-matching basis let it correctly handle a type that OVERLOADS the `!=` operator with unexpected behavior?**
+
+`is not null` uses C#'s pattern-matching machinery to check for null, rather than invoking the `!=` operator — this distinction matters specifically for types that have overloaded `==`/`!=` with custom (and potentially surprising) behavior, since `is not null` bypasses any such overload entirely, always performing a genuine, unambiguous null-identity check.
+
+```csharp
+public class Money
+{
+    public decimal Amount;
+    public static bool operator ==(Money? a, Money? b) => a?.Amount == b?.Amount; // CUSTOM overload
+    public static bool operator !=(Money? a, Money? b) => !(a == b);
+}
+
+Money? m = GetMoney();
+
+if (m != null) { ... }      // invokes the CUSTOM overloaded != operator -- behavior depends on ITS implementation
+if (m is not null) { ... }  // bypasses ANY overload entirely -- ALWAYS a genuine, unambiguous null check
+```
+If `Money`'s custom `!=` overload happens to have a subtle bug (or simply different semantics than a plain reference-null check), `m != null` inherits whatever behavior that overload actually implements — `m is not null`, by contrast, always performs a straightforward, unambiguous check for null, entirely independent of whatever operator overloads the type in question might define.
+
+**Why this specifically matters when working with types whose equality operators are unfamiliar or from external code:** for a type you don't control or aren't deeply familiar with, you can't always be certain its `==`/`!=` overloads behave exactly as a naive null-check would expect — `is not null` sidesteps this uncertainty entirely, which is precisely why modern C# style guidance generally recommends it over `!= null` as the more robust, unambiguous default.
+
+**Common Pitfall:** habitually using `!= null` out of long-standing convention, without considering that the type being checked might have a custom equality overload with unexpected behavior — `is not null` (or `is null` for the negative case) is the safer default specifically because it can never be affected by a type's own custom operator overloads, regardless of how that type happens to implement them.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is C#'s `in` parameter modifier, and how does passing a large struct by READ-ONLY REFERENCE avoid the copy cost of pass-by-value while still preventing the called method from modifying the caller's original data?**
+
+The `in` modifier passes an argument by reference (avoiding the cost of copying a large struct's entire contents) while still preventing the called method from modifying it — combining the performance benefit of pass-by-reference with the safety guarantee of pass-by-value's "the caller's data can't be changed" behavior.
+
+```csharp
+public readonly struct LargeVector // a big struct -- copying it is genuinely expensive
+{
+    public readonly double X, Y, Z, W, A, B, C, D; // MANY fields -- a full copy is non-trivial work
+}
+
+// WITHOUT 'in' -- the ENTIRE struct is COPIED into the method, every single call
+public double Magnitude(LargeVector v) => Math.Sqrt(v.X*v.X + v.Y*v.Y + /* ... */);
+
+// WITH 'in' -- passed by REFERENCE (NO copy), but the method CANNOT modify the caller's original data
+public double MagnitudeFast(in LargeVector v) => Math.Sqrt(v.X*v.X + v.Y*v.Y + /* ... */);
+// v.X = 999; -- WOULD BE A COMPILE ERROR here -- 'in' parameters are READ-ONLY within the method
+```
+Calling `MagnitudeFast` avoids copying `LargeVector`'s entire contents into the method's own stack frame (as a plain by-value parameter would require) — instead, only a reference to the caller's original struct is passed, while the compiler still enforces that the method cannot modify that original data through the `in` parameter, preserving the same "the caller's data is safe" guarantee ordinary pass-by-value provides, just without paying the copying cost.
+
+**Why this specifically matters only for genuinely large structs, not small ones:** for a small struct (a couple of `int` fields), the cost of copying is already negligible, and `in`'s reference-passing mechanism can occasionally introduce its own minor overhead (an extra level of indirection) that isn't worth the complexity for a copy that was already cheap; `in` earns its keep specifically for structs large enough that avoiding the copy provides a genuinely measurable benefit.
+
+**Common Pitfall:** applying `in` to small, cheap-to-copy structs as a reflexive "performance optimization," without verifying (via profiling) that the struct is actually large enough for the avoided-copy benefit to outweigh the modifier's own minor overhead — `in` is specifically valuable for large structs passed frequently in performance-sensitive code paths, not a blanket default to apply to every struct parameter regardless of size.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is C#'s `DynamicPGO` (Dynamic Profile-Guided Optimization), and how does the JIT collecting REAL, ACTUAL runtime profiling data (which branches are actually taken, which types actually appear) let Tier 1 compilation produce MORE aggressively optimized code than static analysis alone could achieve?**
+
+Building on Tiered Compilation (covered earlier) — Dynamic PGO has the JIT instrument Tier 0 code to collect real runtime profiling data (which branches of an `if` statement are actually taken most often, which concrete types actually flow through a generic/virtual call site) during a method's initial, unoptimized execution — this real, measured data then informs Tier 1's eventual re-compilation, letting the JIT make optimization decisions based on actual observed behavior rather than static, compile-time-only analysis.
+
+```csharp
+public void ProcessItem(IShape shape)
+{
+    if (shape is Circle circle) { /* ... */ }       // PGO OBSERVES: this branch is taken 95% of the time
+    else if (shape is Square square) { /* ... */ }   // PGO OBSERVES: this branch is taken only 5% of the time
+}
+```
+```text
+Tier 0 (initial, instrumented execution): collects REAL data -- "Circle appears 95% of the time here"
+
+Tier 1 re-compilation, INFORMED by this REAL data:
+  -- optimizes the CODE LAYOUT and BRANCH PREDICTION assuming Circle is BY FAR the common case --
+  -- may even SPECULATIVELY inline/optimize specifically for Circle, with a FALLBACK path for Square --
+  -- a STATIC compiler, with NO runtime data, would have NO WAY to know Circle is overwhelmingly more common --
+```
+Because Dynamic PGO's optimization decisions are grounded in actually-observed runtime behavior (which branch really is more common, which concrete type really does flow through a particular call site most often) rather than static heuristics or worst-case assumptions, Tier 1's re-compiled code can be optimized specifically for the patterns that genuinely occur in this specific application's actual execution, producing measurably better-optimized code than a purely static, ahead-of-time compiler (lacking any actual runtime observation) could achieve for the same source code.
+
+**Why this specifically requires the JIT/tiered-compilation model, and is NOT something achievable at all for Native AOT (covered earlier):** Dynamic PGO fundamentally depends on collecting real runtime data DURING actual execution and then RE-compiling based on it — Native AOT compiles everything once, ahead of time, with no runtime re-compilation step available at all, meaning it structurally cannot benefit from Dynamic PGO's specific optimization approach; this is one of the genuine trade-offs Native AOT's startup-time benefits come with, compared to the traditional JIT-based runtime's ability to progressively specialize code based on real observed behavior.
+
+**Common Pitfall:** assuming Native AOT strictly and unconditionally outperforms JIT-based execution in every scenario, given its faster startup — for long-running, steady-state workloads where Dynamic PGO's runtime-informed optimizations have had time to kick in and specialize hot code paths based on real, observed behavior, a traditional JIT-based deployment can sometimes outperform Native AOT's statically-compiled code for the exact same source, specifically because Native AOT never gets the benefit of this runtime-observed specialization; the right choice depends on the specific workload's actual startup-sensitivity versus steady-state-throughput priorities.
+
+---
+
 ---

@@ -961,3 +961,89 @@ Connascence of Name is comparatively low-risk: an IDE's rename-refactoring tool 
 **Common Pitfall:** treating all forms of coupling as equally concerning (or equally unconcerning), missing the specific insight Connascence provides — that some forms of coupling are safely tool-assisted (Name) while others can silently produce wrong behavior with zero compiler warning (Position, especially with same-typed parameters) — the specific, more dangerous forms of connascence (especially ones spanning module/service boundaries, where no single IDE rename-refactoring can safely fix both sides at once) deserve disproportionately more attention and active refactoring effort than the comparatively low-risk, tool-assisted forms.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: What is "You Aren't Gonna Need It" (YAGNI), and how does building a speculative, generalized abstraction for a requirement that DOESN'T YET EXIST typically cost more than simply adding it later, once it's actually needed?**
+
+YAGNI advises against building functionality or abstraction for a requirement that isn't actually needed yet, based purely on a guess that it "might be needed later" — the actual future requirement often turns out different from what was originally speculated, meaning the speculative abstraction built in advance frequently needs to be reworked anyway once the real requirement finally materializes.
+
+```csharp
+// SPECULATIVE, "just in case we need multiple payment providers someday" -- built BEFORE it's ACTUALLY needed
+public interface IPaymentProvider { /* an elaborate abstraction, built for a FUTURE need that MAY NEVER COME */ }
+public class PaymentProviderFactory { /* factory logic for CHOOSING among MULTIPLE speculative providers */ }
+// ... but the application has EXACTLY ONE payment provider, TODAY, and MAY NEVER actually need a second ...
+
+// YAGNI-ALIGNED -- solve the ACTUAL, CURRENT need directly, simply
+public class StripePaymentProcessor { public void Charge(decimal amount) { /* ... */ } }
+// IF a second payment provider is EVER actually needed LATER, introduce the abstraction THEN,
+// informed by the ACTUAL, REAL second provider's REAL requirements -- not a GUESS made in advance
+```
+Building the elaborate `IPaymentProvider` abstraction today, before a second payment provider is actually needed, adds real complexity and maintenance burden for a need that may never materialize — and if it eventually does, the abstraction built speculatively today is frequently found to not quite fit the real, second provider's actual requirements once they're genuinely known, requiring rework anyway.
+
+**Why YAGNI specifically targets speculative GENERALITY, not reasonable near-term planning:** YAGNI doesn't mean "never think ahead at all" — it specifically targets building abstraction/flexibility for a need that is purely speculative and not yet actually confirmed, as opposed to a genuinely near-certain, well-understood upcoming requirement; the distinction is between guessing at an uncertain future need versus planning for one that's already clearly and concretely known to be coming.
+
+**Common Pitfall:** building elaborate, generalized abstractions "to save time later" for requirements that are purely speculative, only to discover once the real requirement actually arrives that the abstraction doesn't quite fit its actual shape, requiring rework anyway — the time spent building and later reworking the speculative abstraction often exceeds what it would have cost to simply build the abstraction fresh, informed by the real requirement, once it was actually confirmed and understood.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the "Law of Demeter" ("only talk to your immediate friends"), and how does a chain of method calls reaching through MULTIPLE intermediate objects (`a.GetB().GetC().DoSomething()`) create fragility that a single, direct call doesn't?**
+
+The Law of Demeter advises that a method should only call methods on objects it directly holds a reference to (its "immediate friends") — not reach through a chain of intermediate objects to call a method several levels deep; violating this creates fragility, since the calling code becomes implicitly coupled to the *entire* chain's internal structure, not just the one object it actually needs something from.
+
+```csharp
+// VIOLATES the Law of Demeter -- reaches THROUGH multiple intermediate objects
+public void ProcessOrder(Order order)
+{
+    var city = order.GetCustomer().GetAddress().GetCity(); // reaches through THREE levels of intermediate objects
+}
+
+// FOLLOWS the Law of Demeter -- Order exposes what's ACTUALLY needed DIRECTLY
+public class Order
+{
+    public string GetCustomerCity() => Customer.Address.City; // Order itself ENCAPSULATES this internal traversal
+}
+public void ProcessOrder(Order order)
+{
+    var city = order.GetCustomerCity(); // ONE call, to an IMMEDIATE friend -- NO knowledge of Customer/Address needed
+}
+```
+The violating version's `ProcessOrder` method has implicit knowledge of `Order`'s entire internal structure (that it has a `Customer`, which has an `Address`, which has a `City`) — if `Order`'s internal structure ever changes (say, `Address` is refactored into a separate `ShippingAddress`/`BillingAddress` split), every piece of code with a similar chained call breaks; the Law-of-Demeter-compliant version encapsulates that internal traversal inside `Order` itself, so external code never needs to know or care about `Order`'s internal object graph at all.
+
+**Why this specifically matters for limiting the BLAST RADIUS of internal structural changes:** a long call chain reaching through several intermediate objects creates implicit coupling to every single object along that chain's internal structure — changing any one of those intermediate objects' own internals can break every external call site that happened to chain through it, whereas encapsulating the traversal inside a single, well-named method confines the impact of such internal changes to just that one encapsulating method.
+
+**Common Pitfall:** exposing a chain of nested properties/getters purely because "it's convenient right now," without considering how many external call sites will end up chaining through that same internal structure — each such chained call site becomes another place that must be found and fixed if the internal structure ever needs to change, whereas a single, well-named encapsulating method absorbs that internal-structure knowledge in one place, protecting external callers from needing to know about (or being broken by future changes to) the internal object graph.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is "Accidental Complexity" versus "Essential Complexity" (a distinction from Fred Brooks' "No Silver Bullet"), and why does recognizing which category a given piece of complexity falls into change how a team should respond to it?**
+
+Essential Complexity is complexity genuinely inherent to the problem being solved — it would exist in any correct solution, regardless of tools or approach (a tax-calculation system genuinely must handle the tax code's actual real-world complexity). Accidental Complexity is complexity introduced by the tools, technology choices, or implementation approach itself — complexity that a *better* tool or approach could eliminate entirely, since the underlying problem never actually required it.
+
+```text
+ESSENTIAL complexity example:
+  "Our tax calculation logic is complex because TAX LAW ITSELF is genuinely complex,
+   with many real, interacting rules, exceptions, and jurisdiction-specific variations"
+  -- THIS complexity would exist in ANY correct implementation, regardless of what
+     programming language, framework, or architecture was chosen --
+
+ACCIDENTAL complexity example:
+  "Our deployment process is complex because our BUILD SCRIPT requires 47 manual,
+   undocumented steps performed in a SPECIFIC, FRAGILE order, using tooling nobody
+   fully understands anymore"
+  -- THIS complexity is NOT inherent to the actual problem (deploying software) --
+     a BETTER, well-designed CI/CD PIPELINE could eliminate THIS complexity ENTIRELY --
+```
+The tax-calculation complexity cannot be engineered away by a better tool or architecture, since it directly reflects the genuine complexity of the real-world problem being solved — the deployment-process complexity, by contrast, exists purely because of how the current tooling/process happens to be built, and a better-designed pipeline could eliminate it entirely, since nothing about "deploying software" fundamentally requires 47 fragile manual steps.
+
+**Why this distinction changes how a team should respond to complexity encountered:** essential complexity should be *managed* (clearly modeled, well-organized, thoroughly tested) since it can't be eliminated — accidental complexity should be actively *attacked and removed*, since it represents pure, unnecessary overhead that better tooling, architecture, or process could eliminate entirely; conflating the two leads to either wastefully trying to "simplify away" complexity that's genuinely essential (impossible, and likely to produce an incorrect, oversimplified solution) or, worse, accepting accidental complexity as if it were an unavoidable, essential cost of the problem, when it actually isn't.
+
+**Common Pitfall:** treating all complexity encountered in a codebase as if it were essential and therefore unavoidable, without questioning whether some of it is actually accidental (introduced by a poor tool choice, an outdated process, or an unnecessarily convoluted implementation) and could genuinely be eliminated through better engineering — the valuable first step when facing significant complexity is asking "is this complexity genuinely inherent to the problem, or is it an artifact of how we happen to be solving it?"
+
+---
+
+---

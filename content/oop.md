@@ -1026,4 +1026,96 @@ anything.Fly(); // WORKS -- 'dynamic' just checks AT RUNTIME whether a Fly() met
 
 ---
 
+## Beginner — Question 10
+
+**Q10: What is "Object Composition" via a simple "has-a" field (as the most basic form of composition, before reaching for more formal patterns), and how does one class simply holding a reference to another achieve code reuse without any inheritance relationship at all?**
+
+The simplest form of Object Composition is just one class holding a field referencing an instance of another class — achieving code reuse and delegation purely through this "has-a" relationship, with zero inheritance involved at all.
+
+```csharp
+public class Engine
+{
+    public void Start() => Console.WriteLine("Engine starting...");
+}
+
+public class Car
+{
+    private readonly Engine _engine = new(); // Car HAS-A Engine -- pure composition, ZERO inheritance
+
+    public void Start()
+    {
+        Console.WriteLine("Car preparing to start...");
+        _engine.Start(); // DELEGATES to the composed Engine object
+    }
+}
+```
+`Car` reuses `Engine`'s `Start()` behavior simply by holding a reference to an `Engine` instance and delegating to it — there's no `class Car : Engine` inheritance relationship here at all, just one object holding and using another; this is the simplest possible form of the Composite Reuse Principle covered earlier, before reaching for more elaborate composition patterns (Strategy, Decorator) that add further flexibility on top of this basic idea.
+
+**Why this simple form is worth recognizing as the FOUNDATION every more elaborate composition pattern builds on:** patterns like Strategy, Decorator, and Dependency Injection (covered throughout this material) are all, at their core, more sophisticated variations of this same basic "one object holds and delegates to another" idea — recognizing plain field-based composition as the foundational building block helps demystify these more elaborate patterns as refinements of something fundamentally simple, rather than entirely separate concepts to learn independently from scratch.
+
+**Common Pitfall:** reaching immediately for inheritance whenever some object needs to use another object's behavior, without first considering whether a simple "has-a" field and delegation would suffice — for many everyday code-reuse needs, plain composition (a field, plus delegating method calls to it) is simpler, more flexible, and more appropriate than introducing an inheritance relationship purely to reuse behavior.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the "Extract Interface" refactoring, and how does introducing an interface RETROACTIVELY (after a concrete class already exists) let existing, tightly-coupled code become testable/swappable WITHOUT changing that class's own internal implementation at all?**
+
+Extract Interface is a common refactoring where an interface is created retroactively from an existing concrete class's public members — the concrete class then implements this newly-extracted interface, and callers are updated to depend on the interface rather than the concrete class directly, all without changing the concrete class's own internal implementation logic at all.
+
+```csharp
+// BEFORE refactoring -- callers depend DIRECTLY on the CONCRETE class
+public class EmailSender
+{
+    public void Send(string to, string subject, string body) { /* ... existing implementation, UNCHANGED ... */ }
+}
+public class OrderService
+{
+    private readonly EmailSender _emailSender = new(); // tightly coupled to the CONCRETE class
+}
+
+// AFTER "Extract Interface" -- an interface is introduced, the CONCRETE class's OWN CODE is UNCHANGED
+public interface IEmailSender { void Send(string to, string subject, string body); }
+public class EmailSender : IEmailSender // implements the NEWLY-EXTRACTED interface -- INTERNAL logic UNTOUCHED
+{
+    public void Send(string to, string subject, string body) { /* ... SAME implementation as before ... */ }
+}
+public class OrderService
+{
+    private readonly IEmailSender _emailSender; // NOW depends on the INTERFACE, not the concrete class
+    public OrderService(IEmailSender emailSender) => _emailSender = emailSender;
+}
+```
+`EmailSender`'s own internal `Send` method implementation never changes at all — the refactoring purely introduces a new interface and updates `OrderService` to depend on that interface instead of the concrete class directly, which is exactly what then makes `OrderService` unit-testable (substituting a test double for `IEmailSender`) and makes the underlying email implementation swappable later, all achieved without touching `EmailSender`'s actual working logic.
+
+**Why this specifically matters for retrofitting testability onto EXISTING, already-working code:** a large, existing codebase originally written without interfaces/DI in mind can be incrementally made more testable through exactly this refactoring, one class at a time, without a risky, wholesale rewrite — Extract Interface is specifically valuable as an incremental, low-risk path toward better testability/flexibility in a codebase that wasn't originally designed with these principles from the start.
+
+**Common Pitfall:** attempting a large, risky rewrite to introduce interfaces/DI throughout an entire existing codebase all at once, rather than applying Extract Interface incrementally, one class at a time, starting with the classes providing the most testing/flexibility value first — the incremental approach lets a team realize testability benefits progressively, with much lower risk than attempting to overhaul an entire codebase's dependency structure in one large, disruptive change.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is "Covariance" and "Contravariance" in C# generic interfaces (`out`/`in` on a generic type parameter), and how does declaring `IEnumerable<out T>` as covariant let an `IEnumerable<Dog>` be safely used wherever an `IEnumerable<Animal>` is expected?**
+
+Covariance (`out T`) lets a generic interface's type parameter vary in the "same direction" as an inheritance relationship — if `Dog` is an `Animal`, then `IEnumerable<Dog>` can be treated as an `IEnumerable<Animal>`, but ONLY because `IEnumerable<T>`'s design (T only ever appears in *output* positions, like return values) makes this substitution genuinely type-safe. Contravariance (`in T`) works in the opposite direction, safe specifically for interfaces where T only ever appears in *input* positions.
+
+```csharp
+IEnumerable<Dog> dogs = new List<Dog> { new Dog(), new Dog() };
+IEnumerable<Animal> animals = dogs; // ALLOWED -- IEnumerable<T> is declared 'out T' (COVARIANT)
+foreach (Animal a in animals) { a.MakeSound(); } // SAFE -- every Dog genuinely IS an Animal, reading is fine
+
+// CONTRAVARIANCE -- the OPPOSITE direction, safe for INPUT-only positions
+IComparer<Animal> animalComparer = new AnimalComparer();
+IComparer<Dog> dogComparer = animalComparer; // ALLOWED -- IComparer<T> is declared 'in T' (CONTRAVARIANT)
+// an IComparer<Animal> can SAFELY compare Dogs too, since Dogs ARE Animals -- it only ever RECEIVES T, never returns it
+```
+`IEnumerable<T>`'s single method, `GetEnumerator()`, only ever *produces* `T` values (an output position) — never accepts a `T` as an input parameter — this is precisely what makes covariance type-safe here: code consuming an `IEnumerable<Animal>` only ever *reads* `Animal`-typed values out of it, and reading a `Dog` where an `Animal` is expected is always safe, since every `Dog` genuinely satisfies the `Animal` contract.
+
+**Why the compiler enforces `out`/`in` positional restrictions strictly, rather than allowing variance on any generic interface:** if `IEnumerable<T>` had a hypothetical `Add(T item)` method (an input position) alongside covariance, treating an `IEnumerable<Dog>` as `IEnumerable<Animal>` would let calling code call `Add(new Cat())` on what's actually a `List<Dog>` underneath — a genuine type-safety violation; the compiler strictly enforces that a covariant (`out`) type parameter can ONLY appear in output positions, and a contravariant (`in`) type parameter only in input positions, specifically to prevent this class of unsound substitution from ever compiling.
+
+**Common Pitfall:** attempting to mark a generic interface's type parameter as covariant (`out T`) when the interface actually has a member accepting `T` as an input parameter anywhere — the C# compiler simply refuses to compile this, since allowing it would create exactly the unsound substitution scenario described above; understanding *why* the restriction exists (not just that it exists) helps recognize which interfaces can legitimately be variant and which fundamentally cannot, based purely on where their type parameter actually appears in their own member signatures.
+
+---
+
 ---
