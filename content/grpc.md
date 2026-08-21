@@ -745,3 +745,88 @@ Forcing a periodic, graceful reconnection (rather than letting a connection pers
 **Common Pitfall:** setting `MaxConnectionAge` far too short for a high-throughput service, causing frequent, disruptive reconnection overhead (TCP + TLS handshake cost, temporarily interrupting in-flight streaming calls) that outweighs the load-balancing benefit — the setting needs to be tuned to balance "connections rebalance reasonably often as the backend fleet changes" against "reconnecting too frequently reintroduces real handshake/connection-setup overhead," not simply set aggressively short by default.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is a gRPC "Status Code" (like `NOT_FOUND`, `PERMISSION_DENIED`, `UNAVAILABLE`), and how does its standardized, language-agnostic set of codes differ from HTTP status codes in terms of what it's designed to represent?**
+
+gRPC defines its own standardized set of status codes (`OK`, `NOT_FOUND`, `PERMISSION_DENIED`, `UNAVAILABLE`, `DEADLINE_EXCEEDED`, and others) representing the outcome of an RPC call — while gRPC runs over HTTP/2 under the hood, these status codes are a separate, RPC-level concept, specifically designed to represent outcomes meaningful to remote procedure calls across any language a gRPC client/server might be written in.
+
+```protobuf
+service OrderService {
+    rpc GetOrder (GetOrderRequest) returns (Order);
+}
+```
+```csharp
+public override Task<Order> GetOrder(GetOrderRequest request, ServerCallContext context)
+{
+    var order = _repository.Find(request.OrderId);
+    if (order is null)
+        throw new RpcException(new Status(StatusCode.NotFound, $"Order {request.OrderId} not found"));
+    return Task.FromResult(order);
+}
+```
+```csharp
+// Client-side -- catches the SAME status code, REGARDLESS of what language the SERVER was written in:
+try { var order = await client.GetOrderAsync(request); }
+catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound) { /* handle NOT FOUND */ }
+```
+Because `StatusCode.NotFound` is part of gRPC's own protocol specification (not tied to any specific language's exception types), a Python gRPC server and a C# gRPC client agree on exactly what "NotFound" means and how it's represented on the wire — this cross-language consistency is central to gRPC's whole design premise of enabling polyglot microservices to communicate through a shared, well-defined contract.
+
+**Common Pitfall:** conflating gRPC status codes with HTTP status codes as if they're the same thing — while gRPC does map its status codes onto HTTP/2 status/trailers under the hood for transport purposes, application code should reason about and handle gRPC's own `StatusCode` enum directly, not attempt to inspect or rely on the underlying HTTP-level representation, which is an implementation detail of how gRPC happens to be layered on HTTP/2.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is gRPC Server Reflection, and how does it let a generic tool (like `grpcurl`) discover and call a service's methods WITHOUT having the `.proto` file available locally?**
+
+Server Reflection is an optional gRPC service that, when enabled, lets a client query the server itself for its own service definition (which methods exist, what messages they expect) at runtime — rather than requiring the `.proto` file to be obtained and compiled separately ahead of time, a generic tool can discover a service's full API surface directly from the running server.
+
+```csharp
+// Enabling Server Reflection on the server:
+builder.Services.AddGrpcReflection();
+app.MapGrpcReflectionService();
+```
+```bash
+# A generic CLI tool, with NO .proto FILE available locally, discovers and calls the service directly:
+grpcurl -plaintext localhost:5000 list                          # lists ALL services the server exposes
+grpcurl -plaintext localhost:5000 describe OrderService          # describes ITS methods/message shapes
+grpcurl -plaintext -d '{"order_id": 5}' localhost:5000 OrderService/GetOrder  # CALLS it directly
+```
+Without Server Reflection, a tool like `grpcurl` would need the actual `.proto` file supplied explicitly to know what methods/messages exist at all — with Reflection enabled, the server itself answers "what can you do?" queries at runtime, letting ad-hoc debugging/exploration tools interact with a gRPC service the same way a browser's dev tools or Postman can interact with a REST API, without needing separate access to the service's source-level contract definition.
+
+**Why this is typically enabled in development/staging but often disabled in production:** exposing a service's full API surface (every method, every message shape) to anyone who can reach the endpoint is useful for debugging and exploration, but represents unnecessary information disclosure in a production environment where the API's consumers are already known and typically already have the `.proto` file through proper channels — Server Reflection is a convenience tool best reserved for environments where ad-hoc exploration/debugging genuinely adds value.
+
+**Common Pitfall:** leaving Server Reflection enabled in a production environment without a specific need for it — this makes a service's complete API surface trivially discoverable to anyone who can reach the endpoint, providing attackers a convenient way to enumerate available methods and message shapes without needing to obtain the `.proto` file through any other means; disabling it in production (enabling only in development/staging where its debugging convenience is actually needed) is the generally recommended practice.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is gRPC's `CallCredentials` (as distinct from `ChannelCredentials`), and how does attaching authentication PER-CALL (rather than per-channel) let a single, shared channel serve requests for MULTIPLE different users/identities?**
+
+`ChannelCredentials` secures the underlying transport connection itself (typically TLS) — `CallCredentials` attaches authentication metadata (like a bearer token) to an *individual call*, layered on top of the channel, letting a single, shared, expensive-to-establish channel be reused across many calls made on behalf of different, individual users, each with their own distinct per-call credentials.
+
+```csharp
+var channel = GrpcChannel.ForAddress("https://orders.example.com", new GrpcChannelOptions
+{
+    Credentials = ChannelCredentials.Create(new SslCredentials(), CallCredentials.FromInterceptor(
+        async (context, metadata) =>
+        {
+            var token = await GetTokenForCurrentUserAsync(); // a DIFFERENT token, PER INDIVIDUAL CALL
+            metadata.Add("Authorization", $"Bearer {token}");
+        }))
+});
+
+// The SAME shared channel is reused across MANY calls, each potentially for a DIFFERENT user:
+var client = new OrderService.OrderServiceClient(channel);
+await client.GetOrderAsync(request); // uses whichever user's token GetTokenForCurrentUserAsync() returns NOW
+```
+Because the actual bearer token is resolved fresh on each individual call (via the interceptor), the same underlying, expensive-to-establish TLS channel/connection can be shared across requests made on behalf of many different end users — rather than needing to establish a completely separate channel per user (which would be wasteful, given how expensive establishing a gRPC channel genuinely is), each call simply carries its own distinct authentication metadata layered on top of the one shared, reused transport connection.
+
+**Why this specifically matters for a server-side application making gRPC calls on behalf of many different end users:** a backend service handling many concurrent end-user requests, each needing its own downstream authentication, would be extremely wasteful if it had to establish a brand-new channel (with its own TCP/TLS handshake) for every single user — `CallCredentials`' per-call attachment lets one shared channel efficiently serve all of them, with only the lightweight per-call metadata varying, not the expensive underlying connection itself.
+
+**Common Pitfall:** creating a brand-new gRPC channel per individual user/request specifically to carry that user's distinct authentication token, when `CallCredentials` would let a single shared channel handle this far more efficiently — channels are relatively expensive to establish and are specifically designed to be long-lived and reused; using per-call credentials on a shared channel is almost always the more efficient approach compared to creating and tearing down channels per individual request.
+
+---

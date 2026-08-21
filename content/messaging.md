@@ -653,3 +653,80 @@ producer.Produce("order-events", new Message<string, OrderEvent> { Key = orderId
 **Common Pitfall:** assuming a topic guarantees strict ordering across ALL its messages, then being confused when events for different entities appear to interleave unpredictably — the correct mental model is "ordering is guaranteed per partition-key, not per topic"; if a specific entity's events need strict relative ordering, that entity's ID must be deliberately used as the partition key so all its events consistently land in the same partition, not left to whatever partition assignment the broker's default (often round-robin) behavior would otherwise produce.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is "Message Acknowledgment" (ack/nack), and how does a consumer explicitly acknowledging a message only AFTER successfully processing it (rather than immediately upon receipt) prevent message loss if the consumer crashes mid-processing?**
+
+A message broker holds a message as "in-flight, unacknowledged" until the consumer explicitly signals it has finished processing successfully (`ack`) — if the consumer crashes before sending that acknowledgment, the broker considers the message still unprocessed and redelivers it to another consumer, rather than assuming it was handled just because it was originally delivered.
+
+```text
+Auto-acknowledge (RISKY) -- broker considers a message "done" the MOMENT it's delivered:
+  Broker delivers message -> consumer receives it -> broker IMMEDIATELY marks it as processed
+  Consumer CRASHES while actually processing it -> message is LOST FOREVER, broker already
+  considered it successfully handled, despite the consumer never actually finishing the work
+
+Manual acknowledge (SAFE) -- broker waits for an EXPLICIT signal AFTER processing completes:
+  Broker delivers message -> consumer receives it -> consumer PROCESSES it -> consumer explicitly ACKs
+  Consumer CRASHES BEFORE acking -> broker sees NO ack -> REDELIVERS the message to another consumer
+  -- the message is NEVER lost, since the broker only considers it "done" after explicit confirmation --
+```
+By deferring acknowledgment until processing genuinely completes, the broker's notion of "done" tracks actual, verified completion rather than mere delivery — a consumer crash at any point before acknowledgment simply results in redelivery (consistent with the at-least-once delivery guarantee covered elsewhere), rather than silent, permanent message loss.
+
+**Common Pitfall:** acknowledging a message immediately upon receipt, before actually completing its processing (sometimes done to simplify code, or due to a framework's default auto-ack behavior) — this reintroduces the exact message-loss risk manual acknowledgment is meant to prevent, since a crash between the (premature) acknowledgment and actual completion of processing means the broker has already discarded its only record of that message needing to be handled, with no redelivery possible.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is a "Competing Consumers" pattern combined with Message Broker "Prefetch Count" (or "QoS"), and how does limiting how many UNACKNOWLEDGED messages a single consumer can hold prevent one slow consumer from being overwhelmed while others sit idle?**
+
+Competing Consumers has multiple consumer instances pulling from the same queue, each processing a share of the total messages — Prefetch Count limits how many messages the broker will deliver to a specific consumer *before* that consumer has acknowledged its previous ones, preventing one consumer from being handed a large backlog of work while other, faster consumers sit comparatively idle.
+
+```text
+WITHOUT a prefetch limit -- broker pushes MANY messages to whichever consumer connected FIRST:
+  Consumer A (SLOW): receives 1000 messages ALL AT ONCE, struggling to keep up, HUGE backlog
+  Consumer B (FAST, idle): receives ZERO messages, sits WAITING, despite being ready for MORE work
+
+WITH prefetch count = 10:
+  Consumer A: only ever holds AT MOST 10 unacknowledged messages at a time
+  Consumer A processes and ACKs one -> broker delivers ONE more to replace it
+  Consumer B: similarly limited to 10 unacknowledged AT A TIME -- but since B is FASTER,
+              B naturally acks its 10 QUICKER, so the broker delivers B MORE messages,
+              MORE OFTEN, than the slower Consumer A
+```
+By capping how many messages any single consumer can hold un-acknowledged at once, the broker naturally redistributes work toward whichever consumers are actually keeping up (acknowledging quickly, and therefore becoming eligible for more messages sooner) — a fixed, larger prefetch value would instead let one consumer accumulate a large backlog purely by having connected first, regardless of whether it's actually able to process that backlog efficiently.
+
+**Why setting prefetch too HIGH defeats fair load distribution, but too LOW hurts throughput:** an excessively high prefetch lets one consumer hoard a large batch of messages regardless of its actual processing speed, starving other consumers of work — an excessively low prefetch (like 1) can hurt overall throughput by not letting a fast consumer pull its next batch of work early enough, introducing avoidable round-trip latency between finishing one message and receiving the next; the right value balances fair distribution against per-message round-trip overhead for the specific workload's actual processing characteristics.
+
+**Common Pitfall:** leaving prefetch count at an unconsidered default (often unbounded, or very high) in a system with multiple consumers of varying processing speed — this can result in exactly the "one slow consumer hoards a backlog while faster consumers idle" scenario described above, silently underutilizing available processing capacity without any error or obvious symptom pointing directly at the prefetch setting as the actual root cause.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is "Change Data Capture" (CDC), and how does streaming a database's OWN internal write-ahead/transaction log directly into a message broker let events be published WITHOUT the application code needing to explicitly publish them itself?**
+
+Change Data Capture reads a database's own internal transaction/write-ahead log (the mechanism the database itself already uses for durability and replication) and streams every row-level change (insert/update/delete) as an event into a message broker — the application's own business logic never needs to explicitly call "publish an event" at all; every committed database write is automatically captured and streamed, derived directly from the database's own internal log.
+
+```text
+Traditional approach -- APPLICATION CODE explicitly publishes an event after writing:
+  Application: INSERT INTO Orders (...) -> Application: explicitly PUBLISHES "OrderCreated" event
+  -- requires the DEVELOPER to remember to publish an event for EVERY relevant write --
+  -- ALSO reintroduces the dual-write problem the Outbox pattern (covered earlier) exists to solve --
+
+CDC approach -- the DATABASE's OWN transaction log is streamed directly, AUTOMATICALLY:
+  Application: INSERT INTO Orders (...) -- JUST a normal database write, NOTHING else
+  CDC tool (e.g., Debezium) reads the database's OWN transaction log, notices the new row,
+  AUTOMATICALLY publishes a corresponding event to Kafka -- WITHOUT the application code
+  ever explicitly calling ANY "publish" method at all
+```
+Because CDC derives events directly from the database's own transaction log (which durably and atomically records every committed write as an inherent part of the database engine's own operation), there's no separate "did we remember to also publish an event" step for the application code to potentially forget — every committed write is automatically and reliably reflected as an event, sourced from the same durable, atomic mechanism the database already uses internally for its own consistency guarantees.
+
+**Why this is considered a structurally different (and in some ways more robust) solution to the dual-write problem than the Outbox pattern:** the Outbox pattern (covered earlier) still requires the application to explicitly write to an outbox table within its own transaction, plus a separate relay process publishing from that outbox — CDC instead requires no application-level participation in publishing at all, deriving events directly and automatically from whatever the database's transaction log already captured, at the cost of needing to run and maintain a CDC tool (like Debezium) with direct access to the database's internal transaction log.
+
+**Common Pitfall:** assuming CDC eliminates the need for any deliberate event-schema design — because CDC operates at the level of raw row-level database changes, the resulting events tend to closely mirror the database's own internal table structure, which may leak internal schema details or fail to capture higher-level business meaning (a single business operation touching multiple tables produces multiple, separate low-level CDC events, not one meaningful business event) — CDC solves the *reliable publishing* problem, but doesn't automatically produce well-designed, business-meaningful event schemas on its own.
+
+---
+
+---

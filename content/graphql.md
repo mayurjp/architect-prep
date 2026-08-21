@@ -765,3 +765,99 @@ Beyond the bandwidth savings (a short hash versus a potentially large query docu
 **Common Pitfall:** adopting Persisted Queries for bandwidth savings alone without also enabling the strict allowlist enforcement (rejecting non-registered query text outright) — without that enforcement, an attacker can still submit arbitrary, non-persisted query text directly alongside the persisted-query mechanism, gaining none of the security benefit while the legitimate clients merely enjoy a bandwidth optimization; the meaningful security improvement specifically requires the server to refuse execution of anything not matching a pre-registered hash, not merely support persisted queries as an optional convenience.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is a GraphQL "Enum" type, and how does restricting a field's possible values to an explicit, named set (rather than an arbitrary string) provide both compile-time-style safety and self-documentation?**
+
+A GraphQL Enum defines a field's value as one of a fixed, explicitly-named set of options — rather than accepting or returning an arbitrary string (where a typo like `"Pnding"` would silently pass through undetected), an Enum restricts the value to exactly one of the schema's explicitly declared options, with any other value rejected as invalid.
+
+```graphql
+enum OrderStatus {
+    PENDING
+    SHIPPED
+    DELIVERED
+    CANCELLED
+}
+
+type Order {
+    id: ID!
+    status: OrderStatus!   # can ONLY ever be one of the FOUR declared enum values -- nothing else
+}
+```
+```graphql
+query {
+    orders(status: PENDING) { id }   # valid -- PENDING is a declared enum value
+}
+```
+```graphql
+query {
+    orders(status: PENIDNG) { id }   # SCHEMA VALIDATION ERROR -- "PENIDNG" is not a declared value at all
+}
+```
+A typo like `PENIDNG` is caught immediately as a schema validation error, before the query even executes — a plain `String` field accepting the same value would have silently accepted the typo'd value as a valid (if meaningless) string, likely returning zero matching results with no indication that the actual problem was a typo rather than genuinely having no matching orders.
+
+**Why this also serves as built-in, self-enforcing documentation:** a client exploring the schema (via introspection or GraphQL tooling) can see the complete, explicit list of every valid `OrderStatus` value directly from the schema itself — there's no need for separate documentation listing "the possible status values," since the schema's own Enum declaration *is* that documentation, and it's mechanically enforced rather than merely descriptive.
+
+**Common Pitfall:** using a plain `String` type for a field that actually only ever takes one of a small, fixed set of values, missing the opportunity for both the validation and self-documentation benefits an Enum specifically provides — any field whose legitimate values are genuinely fixed and enumerable (a status, a category, a role) is a strong candidate for an Enum rather than a loosely-typed `String`.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is GraphQL's `@deprecated` directive, and how does it let a schema evolve (retiring an old field) WITHOUT immediately breaking existing clients still querying it?**
+
+The `@deprecated` directive marks a field as deprecated while it remains fully functional — existing clients querying the deprecated field continue to receive valid responses exactly as before, but tooling (GraphQL IDEs, schema documentation, introspection-aware clients) surfaces a deprecation warning, signaling that the field should be migrated away from ahead of an eventual, planned removal.
+
+```graphql
+type Product {
+    id: ID!
+    name: String!
+    price: Float! @deprecated(reason: "Use 'priceDetails.amount' instead. Will be removed in v3.")
+    priceDetails: PriceDetails!   # the NEW, replacement field
+}
+```
+Existing clients still querying the old `price` field continue to receive a valid, correct response — nothing breaks immediately — but any developer exploring the schema (via GraphQL Playground, GraphiQL, or their IDE's GraphQL plugin) sees the deprecation notice directly, along with guidance on what to migrate to instead, well ahead of the field's eventual actual removal.
+
+**Why this specifically matters for schema evolution without breaking existing clients, tying back to over/under-fetching flexibility covered earlier:** because GraphQL clients explicitly request only the fields they need (rather than always receiving a full, fixed response shape), a field can be deprecated and eventually removed without affecting clients that never asked for it in the first place — `@deprecated` provides an additional, graceful transition period specifically for the clients that *do* still use the old field, letting them migrate on their own schedule rather than facing an abrupt, breaking removal with no advance warning.
+
+**Common Pitfall:** removing a field directly from the schema without first deprecating it and providing a reasonable migration window — this immediately breaks every client still querying that field, with no advance warning; `@deprecated` combined with monitoring which clients are still actually querying the deprecated field (before finally removing it once usage has genuinely dropped to zero) is the safer, more graceful path for evolving a GraphQL schema over time without breaking existing consumers.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is GraphQL's `@defer` directive (an experimental/emerging feature), and how does it let a client receive a query's FAST fields immediately while SLOWER fields stream in afterward, within a SINGLE logical request?**
+
+`@defer` lets a client mark specific parts of a query as lower-priority, instructing the server to return the rest of the response immediately while streaming the deferred portion's data separately, once it becomes available — rather than the entire response waiting for the single slowest field to resolve before anything is returned at all.
+
+```graphql
+query {
+    product(id: "5") {
+        name          # FAST field -- resolves quickly
+        price         # FAST field -- resolves quickly
+        ... @defer {
+            reviews {   # SLOW field -- involves an expensive aggregation, resolves much later
+                rating
+                comment
+            }
+        }
+    }
+}
+```
+```text
+Response, PART 1 (arrives IMMEDIATELY):
+  { "data": { "product": { "name": "Keyboard", "price": 29.99 } } }
+
+Response, PART 2 (arrives LATER, once the slow "reviews" resolution actually finishes):
+  { "data": { "reviews": [...] }, "path": ["product", "reviews"] }
+```
+Without `@defer`, the entire response — including the fast `name`/`price` fields — would need to wait for the slow `reviews` aggregation to finish before ANY of it could be returned, even though `name` and `price` were ready to display much earlier; `@defer` lets the client render the fast, immediately-available parts of the UI right away, progressively filling in the slower parts as they arrive, rather than blocking the entire page on the single slowest piece of data.
+
+**Why this specifically addresses a gap Field-Level resolvers alone don't solve:** GraphQL's normal execution model already resolves fields independently/concurrently under the hood, but the *response* is still only sent once every requested field has finished resolving — `@defer` changes this by explicitly allowing the response itself to be split into multiple, separately-timed parts, letting genuinely fast fields reach the client without being held hostage by a slower field elsewhere in the same query.
+
+**Common Pitfall:** treating `@defer` as a universally-available, stable feature — being an experimental/emerging part of the GraphQL specification, `@defer` support varies across different GraphQL server implementations and client libraries; before relying on it for a genuinely important user-facing performance improvement, its availability and behavior should be explicitly verified against the specific GraphQL server/client stack actually being used, rather than assumed to be universally supported the way core, stable GraphQL features are.
+
+---
+
+---
