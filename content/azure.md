@@ -1008,4 +1008,72 @@ Because Traffic Manager's involvement ends the instant DNS resolution completes,
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is Azure Monitor / Application Insights, and how does it provide unified logging, metrics, and distributed tracing for an application out of the box, without stitching together several separate tools?**
+
+Azure Monitor is Azure's platform-wide observability service, and Application Insights is its application-performance-monitoring component specifically — together, they automatically collect logs, metrics (request rate, response time, failure rate), and distributed traces from an instrumented application, presenting them in one unified place rather than requiring a team to separately wire up and correlate several different tools.
+
+```csharp
+// Program.cs -- ONE line adds AUTOMATIC instrumentation for HTTP requests, dependencies, exceptions
+builder.Services.AddApplicationInsightsTelemetry();
+```
+```text
+WITHOUT any FURTHER code, Application Insights AUTOMATICALLY captures:
+  -- EVERY incoming HTTP request (duration, status code, route)
+  -- EVERY outgoing dependency call (a SQL query, an HTTP call to ANOTHER service) -- WITH ITS OWN duration
+  -- UNHANDLED exceptions, with FULL stack traces
+  -- these are AUTOMATICALLY CORRELATED into a SINGLE, END-TO-END transaction VIEW per request
+```
+Because request, dependency, and exception telemetry are all automatically correlated under one logical operation ID, a developer investigating one slow or failed request can see its *entire* story — the incoming request, every downstream dependency call it made, and any exception that occurred — in one unified view, rather than needing to manually cross-reference separate logs, metrics dashboards, and exception trackers maintained as entirely separate tools.
+
+**Common Pitfall:** wiring up several separate, disconnected tools (a custom logging framework, a separate APM tool, manual exception tracking) piecemeal, rather than adopting Application Insights' already-integrated, correlated telemetry model from the start — this typically results in a developer needing to manually cross-reference multiple, uncorrelated data sources during an incident, precisely the friction Application Insights' unified, auto-correlated approach is designed to eliminate.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is an Azure Proximity Placement Group, and how does colocating VMs physically closer together trade some Availability Zone redundancy for lower inter-VM network latency?**
+
+Availability Zones (covered earlier) deliberately spread VMs across physically separate datacenters within a region for fault tolerance — but that physical separation also adds a small amount of network latency between VMs in different zones. A Proximity Placement Group instead requests that Azure colocate a set of VMs as physically close together as possible, minimizing inter-VM latency, at the cost of losing the fault-isolation benefit that spreading them across zones would have provided.
+
+```text
+WITHOUT a Proximity Placement Group -- VMs MIGHT be spread ACROSS different Availability Zones:
+  VM A (Zone 1) <--- a FEW MILLISECONDS of INTER-ZONE network latency ---> VM B (Zone 2)
+  -- SURVIVES an ENTIRE zone/datacenter failure (covered earlier) -- but PAYS a small LATENCY cost
+
+WITH a Proximity Placement Group -- VMs are FORCED to be PHYSICALLY close together, SAME datacenter:
+  VM A <--- MINIMAL, SUB-MILLISECOND latency ---> VM B
+  -- MUCH lower latency -- but BOTH VMs are NOW in the SAME physical location -- LOSE the fault-isolation
+     benefit that spreading them across ZONES would have PROVIDED
+```
+For latency-sensitive workloads where every millisecond of inter-VM communication genuinely matters (a tightly-coupled, chatty distributed computation, a high-frequency trading system), a Proximity Placement Group's latency reduction can be worth deliberately sacrificing some of the fault-tolerance benefit Availability Zones would otherwise provide — a genuine, conscious trade-off, not a strictly "better" configuration.
+
+**Common Pitfall:** applying a Proximity Placement Group broadly, by default, without a genuine, measured latency-sensitivity requirement driving the decision — for the majority of workloads where inter-VM network latency isn't actually the bottleneck, the fault-tolerance benefit of spreading VMs across Availability Zones is generally the more valuable trade-off to keep, making Proximity Placement Groups a targeted tool for specifically latency-critical workloads, not a general-purpose default.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is Azure Arc, and how does it extend Azure's own management and governance tooling (Azure Policy, Azure Monitor) to servers and Kubernetes clusters running entirely outside Azure — on-premises or on other clouds?**
+
+Azure Arc projects non-Azure resources (an on-premises VM, a Kubernetes cluster running on AWS, a bare-metal server in a company's own datacenter) into Azure's own resource management plane — once "Arc-enabled," these external resources can be governed by the exact same Azure Policy rules, monitored via the exact same Azure Monitor pipeline, and organized alongside genuinely Azure-native resources, all from one consistent management surface.
+
+```text
+An ON-PREMISES Kubernetes cluster, running ENTIRELY in a company's OWN datacenter, with NO Azure
+compute involved AT ALL, gets CONNECTED to Azure via Arc:
+
+  On-Prem K8s Cluster ---(Arc agent, establishes a CONNECTION back to Azure)---> Azure Resource Manager
+  -- the CLUSTER now APPEARS as an Azure RESOURCE, ALONGSIDE genuinely Azure-native AKS clusters --
+  -- Azure POLICY rules (covered elsewhere) can be APPLIED to it, JUST like an Azure-native resource --
+  -- Azure MONITOR can COLLECT its METRICS/LOGS, into the SAME unified observability PIPELINE --
+```
+Because Arc projects the external resource's identity and management surface into Azure's own control plane, an organization running a genuine hybrid environment (some workloads on Azure, others on-premises for regulatory/legacy reasons, still others on a different cloud entirely) can apply one *consistent* set of governance policies and monitoring practices across all of them — directly parallel to GCP's Anthos (covered under that topic), addressing the exact same underlying multi-environment governance challenge from Azure's specific tooling perspective.
+
+**Why this specifically matters for organizations with a genuine, ongoing hybrid or multi-cloud requirement, rather than being broadly useful for every deployment:** an organization running entirely within Azure gains nothing from Arc, since there's no external, non-Azure resource needing to be "brought into" Azure's management plane at all — Arc earns its value specifically when genuine hybrid/multi-cloud governance consistency is a real, ongoing organizational need, the same narrow-applicability caveat covered for Anthos under GCP.
+
+**Common Pitfall:** adopting Azure Arc for an organization running entirely on Azure-native resources already, with no actual on-premises or other-cloud infrastructure needing to be governed consistently alongside them — Arc's value proposition specifically addresses the hybrid/multi-cloud governance gap; for a pure, single-cloud Azure deployment, standard Azure Policy and Monitor already apply directly, with no need for Arc's resource-projection layer at all.
+
+---
+
 ---

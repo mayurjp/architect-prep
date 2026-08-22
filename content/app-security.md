@@ -1183,4 +1183,94 @@ Modern authenticated encryption modes (AES-GCM, ChaCha20-Poly1305) verify the ci
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is Information Disclosure via exposed `.git`/`.env` files or verbose server banners, and how does a misconfigured deployment accidentally expose files that were never meant to be publicly servable?**
+
+A web server configured to serve static files from a directory will happily serve *anything* in that directory unless explicitly restricted — if a deployment accidentally leaves a `.git` folder (the entire repository history) or a `.env` file (containing secrets) inside the publicly-servable web root, anyone who guesses or discovers the right URL can simply download them directly.
+
+```text
+Accidentally publicly accessible, because they SIT INSIDE the web SERVER's servable ROOT directory:
+  https://example.com/.env              -- often contains DATABASE credentials, API keys, DIRECTLY
+  https://example.com/.git/config       -- reveals the REPOSITORY's remote URL, POTENTIALLY more
+  https://example.com/appsettings.json  -- an ASP.NET Core CONFIG file, POSSIBLY with CONNECTION strings
+```
+```http
+Server: Apache/2.4.29 (Ubuntu)
+-- a VERBOSE server banner REVEALS the EXACT software AND version -- an ATTACKER can look up
+   KNOWN vulnerabilities SPECIFICALLY affecting THIS exact version, NARROWING their attack effort
+```
+Because a static file server has no inherent concept of "this file is source-controlled but shouldn't be public" — it simply serves whatever files exist within its configured root directory — any sensitive file that ends up inside that directory (through a careless deployment script, a build process that copies more than intended) becomes trivially downloadable by anyone who requests its exact path, with no authentication check involved at all.
+
+**Common Pitfall:** relying on "security through obscurity" (assuming an attacker won't guess the exact path to a sensitive file) rather than ensuring sensitive files are never deployed into the publicly-servable directory in the first place — automated scanners routinely probe for exactly these well-known paths (`.env`, `.git/config`, common config filenames) across the entire internet, meaning "nobody will guess this exact URL" is not a realistic assumption to rely on for protecting genuinely sensitive files.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is Regular Expression Denial of Service (ReDoS), and how does a maliciously crafted input string exploit catastrophic backtracking in a poorly-written regex to consume exponential CPU time?**
+
+Certain regex patterns, when matched against a specifically crafted (but not necessarily long) input string, force the regex engine into "catastrophic backtracking" — trying an exponentially growing number of possible ways to match, consuming CPU time that grows exponentially with input length, effectively hanging the application on a single, cheap-looking request.
+
+```csharp
+// a VULNERABLE regex -- NESTED quantifiers, a CLASSIC catastrophic-backtracking pattern
+var pattern = @"^([a-zA-Z]+)*$"; // a GROUP that can repeat, CONTAINING a quantifier ITSELF -- DANGEROUS
+
+// an INNOCENT-LOOKING input that TRIGGERS exponential backtracking:
+var maliciousInput = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!";
+// -- a SINGLE trailing character that DOESN'T match FORCES the engine to try an EXPONENTIAL number
+//    of ways to BACKTRACK through the nested quantifiers before FINALLY giving up -- for a string
+//    of just 40-50 characters, THIS can take the regex engine MINUTES or HOURS of CPU time --
+Regex.IsMatch(maliciousInput, pattern); // HANGS -- consuming 100% CPU on WHATEVER thread ran this
+```
+Because the regex engine's naive backtracking algorithm tries combinatorially many ways to partition the input across the nested, repeating groups before concluding no match is possible, a relatively short, unremarkable-looking input string can force minutes or hours of CPU consumption — an attacker submitting such a string to any endpoint that validates input using a vulnerable regex pattern can tie up server threads/CPU with a single, cheap-to-send request, a genuine denial-of-service vector requiring no elevated privileges at all.
+
+**The fix — avoid vulnerable patterns, or bound execution with a timeout:**
+```csharp
+// SAFER -- an EXPLICIT timeout on the regex match itself -- BOUNDS the WORST-CASE CPU cost
+var regex = new Regex(pattern, RegexOptions.None, matchTimeout: TimeSpan.FromMilliseconds(500));
+// if matching takes LONGER than 500ms, a RegexMatchTimeoutException is thrown -- BOUNDING the DAMAGE
+```
+Setting an explicit `matchTimeout` bounds the worst-case CPU cost any single regex match can ever consume, regardless of how a specific pattern/input combination might interact — a genuinely more robust fix involves rewriting the vulnerable pattern itself to avoid nested, ambiguous quantifiers entirely, but a timeout provides an immediate, broadly-applicable safety net against the worst consequences even before every vulnerable pattern in a codebase has been individually identified and fixed.
+
+**Common Pitfall:** writing regex patterns for user-input validation without ever considering their backtracking behavior on adversarially-crafted input, and never setting an explicit match timeout — a regex that works perfectly and instantly for every normal, expected input can still harbor a catastrophic-backtracking vulnerability that only manifests against a specifically crafted malicious string, making this a genuinely easy-to-overlook vulnerability class that code review focused only on "does this regex correctly validate normal inputs" would never catch.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is Server-Side Template Injection (SSTI), and how does it differ fundamentally from XSS by letting an attacker's injected code execute on the SERVER during template rendering, rather than in the victim's browser?**
+
+XSS (covered extensively) injects a script that executes in a *victim's browser* — SSTI injects template syntax that a server-side templating engine (Jinja2, Handlebars, Razor in certain misuse patterns) evaluates and executes *on the server itself*, during the template-rendering process — a fundamentally more severe vulnerability class, since server-side code execution can lead directly to full remote code execution on the server, not merely a browser-side script running in one victim's session.
+
+```csharp
+// VULNERABLE -- user input is CONCATENATED DIRECTLY into a TEMPLATE STRING, then RENDERED SERVER-SIDE
+var template = $"Hello {userSuppliedName}, your order total is {{order.Total}}";
+var rendered = _templateEngine.Render(template); // the TEMPLATE ENGINE evaluates WHATEVER SYNTAX is present
+```
+```text
+An attacker submits userSuppliedName as: "{{ 7*7 }}"
+-- IF the template ENGINE evaluates THIS as TEMPLATE SYNTAX (rather than LITERAL text), the
+   RENDERED output CONTAINS "49" -- PROVING the attacker's INPUT is being EXECUTED AS TEMPLATE
+   CODE, ON THE SERVER, not merely DISPLAYED as TEXT --
+-- from THIS FOOTHOLD, MANY template engines expose ENOUGH POWER (file system access, ARBITRARY
+   CODE execution via the HOST LANGUAGE'S own reflection/introspection capabilities) that a
+   FULL remote code execution EXPLOIT can OFTEN be constructed FROM here --
+```
+Because the injected content is evaluated *by the template engine itself, on the server*, rather than merely being embedded as inert text later interpreted by a browser, a successful SSTI exploit operates with the server's own privileges — capable of reading server-side files, environment variables, or in the worst cases, achieving arbitrary code execution on the server itself, a categorically more severe outcome than XSS's browser-scoped, victim-session-limited impact.
+
+**The fix — never construct a template STRING by concatenating untrusted input; treat user input strictly as DATA passed into an already-compiled template, never as part of the template's own SYNTAX:**
+```csharp
+// SAFE -- the TEMPLATE ITSELF is a FIXED, TRUSTED string; USER input is passed ONLY as DATA, never as SYNTAX
+var template = "Hello {{name}}, your order total is {{total}}"; // FIXED, DEVELOPER-AUTHORED template
+var rendered = _templateEngine.Render(template, new { name = userSuppliedName, total = order.Total });
+// userSuppliedName is SUBSTITUTED as a plain DATA VALUE for the {{name}} PLACEHOLDER -- NEVER
+// INTERPRETED as TEMPLATE SYNTAX itself, EVEN IF it CONTAINS "{{ }}"-LOOKING characters
+```
+The safe pattern mirrors the exact same "separate code from data" principle covered for SQL Injection's parameterized queries — the template's actual *structure* (its syntax) comes entirely from trusted, developer-authored source, and untrusted input is only ever substituted in as a plain data value for a placeholder, never concatenated directly into the template text the engine will actually parse and evaluate as code.
+
+**Common Pitfall:** building a "dynamic email template" or "customizable report" feature that lets an admin user (or worse, an end user) supply a template string that's then rendered directly by the templating engine — even when the immediate user seems "trusted" (an internal admin), allowing arbitrary template syntax to be supplied and rendered opens exactly this SSTI vulnerability class; a genuinely safe customizable-template feature must strictly limit what syntax user-supplied templates can actually contain, or avoid letting users supply raw template syntax at all, restricting them to selecting from a fixed set of developer-authored templates with data substitution only.
+
+---
+
 ---

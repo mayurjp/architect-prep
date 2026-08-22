@@ -1068,4 +1068,85 @@ Because the comparison is quantitative and automated, a bad deployment gets roll
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is Infrastructure as Code (IaC), and how does declaring infrastructure in version-controlled files (Terraform, Bicep) differ fundamentally from manually clicking through a cloud provider's portal?**
+
+Infrastructure as Code means defining infrastructure (VMs, networks, databases) as declarative configuration files, checked into version control, rather than manually configuring resources by clicking through a cloud portal's UI — the same discipline applied to application code (version history, code review, repeatability) is applied to infrastructure itself.
+
+```hcl
+# Terraform -- infrastructure DECLARED as CODE, checked into VERSION CONTROL, just like APPLICATION code
+resource "azurerm_linux_web_app" "api" {
+  name                = "my-api"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  service_plan_id     = azurerm_service_plan.main.id
+}
+```
+```bash
+git commit -m "Add new web app for the reporting service"   # infrastructure CHANGES are REVIEWED, VERSIONED
+terraform apply                                               # APPLIES the change, REPRODUCIBLY
+```
+Because the infrastructure's definition lives in version control, every change has a full history (who changed what, when, and why, via a commit message), can be code-reviewed before being applied (exactly like an application code change), and can be reproduced identically in a different environment (staging, a disaster-recovery region) simply by applying the same configuration files — none of which is true for infrastructure manually clicked together through a portal, which leaves no automatic history and can't be reliably reproduced elsewhere.
+
+**Common Pitfall:** manually configuring critical production infrastructure through a cloud portal "just this once, to fix something quickly," alongside an otherwise IaC-managed environment — this creates exactly the configuration drift problem covered under Infrastructure Drift Detection, since the actual, live infrastructure no longer matches what the version-controlled IaC files declare, silently undermining the reproducibility and auditability IaC is meant to provide.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is the difference between a Monorepo and a Polyrepo strategy for organizing multiple services' source code, and what CI/CD-specific trade-off distinguishes them?**
+
+A Monorepo keeps every service's code in one single, shared repository — a Polyrepo gives each service its own separate repository. The core CI/CD trade-off is build/test scope-detection complexity (a Monorepo's CI must figure out *which* services actually changed) versus cross-service atomic commits (a Monorepo can commit a change spanning multiple services in one atomic commit; a Polyrepo cannot).
+
+```text
+MONOREPO -- ONE repository, containing MULTIPLE services' code TOGETHER:
+  /order-service/...
+  /shipping-service/...
+  /shared-libs/...
+  -- a SINGLE commit CAN atomically change BOTH order-service AND shared-libs TOGETHER --
+  -- BUT: CI must figure out WHICH specific service(s) actually CHANGED, to avoid REBUILDING/
+     RETESTING EVERY service on EVERY single commit, REGARDLESS of what ACTUALLY changed
+
+POLYREPO -- EACH service in its OWN, SEPARATE repository:
+  order-service.git
+  shipping-service.git
+  shared-libs.git
+  -- CI is SIMPLE: a commit to order-service.git ONLY ever triggers order-service's OWN pipeline --
+  -- BUT: a change SPANNING shared-libs AND order-service TOGETHER requires TWO SEPARATE commits,
+     across TWO SEPARATE repositories, COORDINATED (and VERSIONED/PUBLISHED) SEPARATELY
+```
+A Monorepo's CI pipeline needs explicit tooling (path-based change detection, a build-graph-aware tool like Bazel/Nx) to avoid wastefully rebuilding and retesting every single service on every commit, regardless of which ones actually changed — a Polyrepo sidesteps this complexity entirely (each repo's pipeline naturally only concerns itself with that one repo), but loses the ability to make a single, atomic commit spanning multiple services, instead requiring coordinated, separately-versioned changes across multiple repositories when a change genuinely needs to span more than one service.
+
+**Common Pitfall:** adopting a Monorepo without investing in the change-detection tooling needed to avoid rebuilding/retesting every single service on every commit — without this, CI pipeline time grows linearly (or worse) with the total number of services in the repo, regardless of how small any individual change actually was, a genuinely severe and worsening cost as a Monorepo accumulates more services over time without corresponding investment in scope-aware build tooling.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is Shadow (Mirrored) Traffic Testing, and how does duplicating production traffic to a new version — without ever returning that version's response to the real user — let a team validate a new version against genuine, real-world traffic with zero user-facing risk?**
+
+Shadow Traffic duplicates real, live production requests and sends a copy to a new version of a service running in parallel — the new version processes the duplicated request exactly as if it were live, but its response is simply discarded (or only recorded/compared for analysis), never actually returned to the real user, who continues receiving their response from the current, stable production version the entire time.
+
+```text
+REAL user request ──► Production version (v1) ──► response ACTUALLY returned to the USER
+
+              └──(DUPLICATED, shadowed copy)──► Candidate version (v2) ──► response DISCARDED/
+                                                                              RECORDED for analysis ONLY,
+                                                                              NEVER shown to the USER
+```
+```text
+The TEAM compares v2's SHADOWED responses/behavior/performance against v1's REAL, LIVE responses
+(same input, TWO parallel outputs) -- learning EXACTLY how v2 would have behaved against GENUINE
+PRODUCTION traffic patterns, WITHOUT the user EVER being exposed to v2's response AT ALL, EVEN IF
+v2 has a SEVERE, UNDISCOVERED bug -- since ITS OUTPUT is NEVER ACTUALLY RETURNED to ANYONE
+```
+Because the user only ever sees v1's response, a genuinely broken new version (v2) causes zero user-facing impact, no matter how badly it fails when handling the shadowed traffic — this provides a fundamentally *safer* validation mechanism than even a Canary deployment (covered elsewhere), since Canary still exposes a small percentage of *real* users to the new version's actual behavior, whereas Shadow Traffic exposes precisely zero real users to it at all.
+
+**Why Shadow Traffic is specifically valuable for validating against genuinely realistic traffic patterns that synthetic/staging tests often fail to replicate:** production traffic has real, messy characteristics (unusual input combinations, genuine user behavior patterns, actual data distributions) that a staging environment's synthetic test traffic rarely fully replicates — shadowing lets a new version be validated against these genuine characteristics before it ever serves a single real response, closing a gap that staging-environment testing alone often leaves open.
+
+**Common Pitfall:** shadowing traffic to a new version that has *write* side effects (not read-only), without ensuring those side effects are properly isolated/discarded (writing to a separate, shadow-specific database, or explicitly suppressing writes) — shadowing a version that genuinely writes to the *same* production database/downstream systems as the real, live version can cause real, unintended side effects (duplicate charges, doubled inventory decrements) despite the shadowed *response* never being shown to a user; the "duplicated but harmless" guarantee Shadow Traffic depends on requires deliberately ensuring the shadowed version's *actions*, not just its response, have no real-world effect.
+
+---
+
 ---

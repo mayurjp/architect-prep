@@ -1070,3 +1070,83 @@ Because the client's identity is verified as part of the TLS handshake itself (u
 **Common Pitfall:** treating mTLS as a complete substitute for application-layer authorization — mTLS proves *which service* is making a call (a strong identity guarantee at the connection level), but says nothing about *what that specific request is authorized to do* once the connection is established; genuine authorization (which specific resources/actions this particular authenticated service is permitted) still typically requires an additional, application-layer authorization check on top of mTLS's connection-level identity verification, the same layered "authentication proves who, authorization decides what" distinction covered at the very start of this topic.
 
 ---
+
+## Beginner — Question 12
+
+**Q12: What is "Social Login" (signing in via Google, Facebook, or a similar provider), and how does it technically work as a specific application of the Authorization Code flow covered earlier, with the social provider acting as the Identity Provider?**
+
+Social Login is simply OAuth 2.0/OpenID Connect's Authorization Code flow (covered earlier), applied with a well-known consumer identity provider (Google, Facebook, GitHub) playing the role of the Authorization Server/Identity Provider — the application never sees the user's actual Google/Facebook password at all; it receives a token proving the user successfully authenticated with that provider.
+
+```text
+1. User clicks "Sign in with Google" on YOUR application
+2. YOUR application redirects the user to GOOGLE's OWN login page (the AUTHORIZATION SERVER)
+3. User enters THEIR Google credentials -- DIRECTLY with GOOGLE -- YOUR application NEVER sees them AT ALL
+4. Google redirects BACK to your application WITH an authorization code (the SAME flow covered earlier)
+5. YOUR application EXCHANGES that code for an ID TOKEN (OpenID Connect) PROVING the user's Google identity
+6. YOUR application creates ITS OWN session for this user, based on the VERIFIED identity info in the token
+   (their email, name, a stable Google-assigned user ID) -- WITHOUT ever handling a PASSWORD directly
+```
+Because the entire credential-entry step happens on Google's own login page, never on the consuming application's own page, the consuming application never has the opportunity to see, mishandle, or accidentally log the user's actual Google password — it only ever receives a token *proving* successful authentication happened elsewhere, exactly the same trust-delegation model the Authorization Code flow (covered earlier) provides for any OAuth-based scenario, applied here specifically to a well-known, widely-trusted external identity provider.
+
+**Common Pitfall:** confusing "Social Login" with a fundamentally different mechanism from the OAuth flows already covered — it's not a separate protocol at all, just the Authorization Code flow (or OpenID Connect built on top of it) applied with a specific, widely-recognized provider as the Authorization Server; understanding it as "just OAuth, with Google/Facebook playing the Identity Provider role" demystifies it rather than treating it as an entirely separate authentication mechanism to learn from scratch.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is Claims Transformation in ASP.NET Core, and how does it let an application enrich or modify the claims received from an external identity provider's token, before authorization checks actually run?**
+
+An external identity provider's token (from Azure AD, a social login provider) carries whatever claims *that provider* chooses to include — often not exactly the shape an application's own authorization logic needs. Claims Transformation lets an application add, modify, or remove claims immediately after authentication succeeds, before any `[Authorize]` policy or controller code ever evaluates them.
+
+```csharp
+public class RoleClaimsTransformer : IClaimsTransformation
+{
+    public async Task<ClaimsPrincipal> TransformAsync(ClaimsPrincipal principal)
+    {
+        var identity = (ClaimsIdentity)principal.Identity;
+        var userId = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+
+        // the EXTERNAL provider's token has NO CONCEPT of THIS application's OWN internal roles --
+        // look THEM UP from OUR OWN database, and ADD them AS CLAIMS, RIGHT HERE
+        var appRoles = await _userRoleRepository.GetRolesForUserAsync(userId);
+        foreach (var role in appRoles)
+            identity.AddClaim(new Claim(ClaimTypes.Role, role));
+
+        return principal;
+    }
+}
+
+// Program.cs
+builder.Services.AddTransient<IClaimsTransformation, RoleClaimsTransformer>();
+```
+Because this transformation runs automatically after every successful authentication (for every single request, by default), any `[Authorize(Roles = "Admin")]` check anywhere in the application can rely on the enriched `Role` claims being present — even though the *external* identity provider's token itself never carried any concept of this application's own specific role system at all, since that mapping lives entirely in the application's own database.
+
+**Common Pitfall:** trying to authorize based on application-specific roles that don't exist on an external provider's token at all, without implementing Claims Transformation to bridge that gap — an `[Authorize(Roles = "Admin")]` check will simply never succeed if the incoming token has no `Role` claim, since the external identity provider has no knowledge of this application's own internal role system; Claims Transformation is precisely the mechanism that maps "who this external token says the user is" onto "what this application's own authorization logic actually needs to know."
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is the Backend for Frontend (BFF) Token Handler pattern as an OAuth/OIDC security architecture, and how does keeping tokens entirely server-side eliminate the class of token-theft-via-XSS risk that storing tokens in a SPA's own JavaScript-accessible storage carries?**
+
+A Single-Page Application traditionally stores its OAuth access/refresh tokens somewhere JavaScript can read them (memory, `localStorage`) — but any successful XSS vulnerability (covered under App Security) anywhere in that SPA can then read and exfiltrate those tokens directly. The BFF Token Handler pattern instead keeps every token entirely on the server side, in a confidential backend component, with the browser holding only an ordinary, `HttpOnly` session cookie that JavaScript can never read at all.
+
+```text
+TRADITIONAL SPA token storage -- tokens live WHERE JavaScript CAN read them:
+  Browser's JavaScript holds the ACCESS TOKEN directly (in memory or localStorage)
+  -- an XSS vulnerability ANYWHERE in the SPA can READ and EXFILTRATE this token DIRECTLY --
+
+BFF TOKEN HANDLER pattern -- tokens NEVER reach the BROWSER's JavaScript AT ALL:
+  Browser <--(HttpOnly session cookie ONLY -- JS CANNOT read this AT ALL)--> BFF (a CONFIDENTIAL backend)
+  BFF <--(the ACTUAL access/refresh tokens, held ENTIRELY server-side)--> Authorization Server / APIs
+  -- the BFF itself makes API calls ON THE BROWSER's BEHALF, attaching the REAL token SERVER-SIDE --
+  -- EVEN a SUCCESSFUL XSS exploit in the SPA CANNOT read an HttpOnly cookie, and there's NO
+     TOKEN sitting in JAVASCRIPT-accessible storage for it to STEAL IN THE FIRST PLACE --
+```
+Because the actual OAuth tokens never leave the server side at all — the browser only ever holds an ordinary session cookie, marked `HttpOnly` so JavaScript cannot read it even if an XSS payload executes — an attacker who successfully injects a script into the SPA gains no path to the actual access token, since it was never present in the browser's JavaScript-accessible memory or storage to begin with; the entire "steal the token via XSS" attack category, covered under App Security, has no target left to steal.
+
+**Why this reflects a genuine, evolving shift in OAuth-for-SPA best-practice guidance, connecting to the earlier discussion of confidential versus public OAuth clients:** a traditional SPA is a "public client" (it cannot keep a client secret confidential, since its entire code runs in the user's browser) — the BFF pattern effectively converts the security-critical parts of the OAuth flow into being handled by a genuinely confidential client (the server-side BFF), letting the browser-facing SPA portion carry none of the actual token-handling risk at all, which is precisely why current OAuth security guidance increasingly recommends this pattern over direct in-browser token storage for security-sensitive SPAs.
+
+**Common Pitfall:** implementing a SPA with tokens stored directly in browser JavaScript (memory or `localStorage`) purely because it's architecturally simpler (no separate BFF component needed), without weighing this against the very real, well-documented XSS-driven token-theft risk that architecture carries — for a genuinely security-sensitive application, the BFF Token Handler pattern's added architectural complexity (a server-side component brokering every token) is a deliberate, worthwhile trade against eliminating an entire, serious vulnerability category, not just an arbitrary added layer of complexity.
+
+---
