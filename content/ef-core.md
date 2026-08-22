@@ -1472,4 +1472,82 @@ Because each entity's configuration lives in its own file, adding a new entity m
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is EF Core's default table-naming convention, and how does `ToTable()` let you override it explicitly via the Fluent API?**
+
+By default, EF Core names a table after the pluralized form of the `DbSet<T>` property exposing that entity — `ToTable()` lets you override this convention explicitly, useful when a database's existing table naming doesn't match EF Core's pluralization convention (an existing legacy database, or a team naming convention that differs).
+
+```csharp
+public class AppDbContext : DbContext
+{
+    public DbSet<Product> Products { get; set; } // DEFAULT convention -- maps to table "Products"
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<Product>().ToTable("tbl_product"); // OVERRIDES the default -- maps to "tbl_product" instead
+    }
+}
+```
+
+Because the default pluralization convention is just a starting assumption EF Core makes (not a hard requirement), `ToTable()` lets a `Product` entity map to any actual table name a database already uses — essential when connecting EF Core to a pre-existing database whose naming doesn't follow EF Core's own default assumptions.
+
+**Common Pitfall:** assuming EF Core's default pluralization convention always correctly matches an existing database's actual table names (especially for irregular plurals or non-English naming) — silently relying on the default without verifying it can produce a "table not found" error at runtime that's actually just a naming mismatch, easily fixed with an explicit `ToTable()` call once identified.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: How does combining a Keyless Entity Type (covered earlier) with `FromSqlRaw` let EF Core execute a raw stored procedure and materialize its result set into typed C# objects?**
+
+A stored procedure's result set often doesn't map to any table with a primary key EF Core recognizes — defining a Keyless Entity Type (`.HasNoKey()`, covered earlier) specifically for that result shape, then calling the stored procedure via `FromSqlRaw`/`FromSqlInterpolated` (covered earlier), lets EF Core materialize the procedure's output rows into fully-typed C# objects, without needing an underlying table or key at all.
+
+```csharp
+public class SalesSummary // a KEYLESS entity type -- shape matches the STORED PROCEDURE's result set, NOT a table
+{
+    public string ProductName { get; set; } = "";
+    public decimal TotalRevenue { get; set; }
+}
+
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<SalesSummary>().HasNoKey().ToView(null); // NO underlying table/view -- purely for SHAPING
+}
+
+var results = await context.Set<SalesSummary>()
+    .FromSqlRaw("EXEC dbo.GetSalesSummary @StartDate = {0}", startDate)
+    .ToListAsync(); // materializes the STORED PROCEDURE's OUTPUT rows into typed SalesSummary objects
+```
+
+Because the Keyless Entity Type exists purely to describe the *shape* of data returned (not a real, queryable table), this combination lets a stored procedure's result set — which EF Core has no other native way to represent — be consumed with the same strongly-typed materialization EF Core provides for ordinary table queries, without EF Core needing to understand the procedure's own internal logic at all.
+
+**Common Pitfall:** attempting to call a stored procedure and materialize its result directly into a normal, keyed entity type that also maps to a real table — if the procedure's result set doesn't correspond to that table's full row shape (fewer columns, aggregated/computed values), EF Core's normal entity-materialization expectations don't apply cleanly; a dedicated Keyless Entity Type matching the *procedure's actual output shape* avoids this mismatch entirely.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is `ChangeTracker.AutoDetectChangesEnabled`, and how does temporarily disabling automatic change detection improve performance during a large, bulk in-memory entity-modification loop?**
+
+By default, EF Core calls `DetectChanges()` (covered earlier) automatically before many operations, including every time you access certain APIs during a loop — for a loop modifying thousands of tracked entities one at a time, this automatic re-detection on every iteration adds up; temporarily setting `AutoDetectChangesEnabled = false` and calling `DetectChanges()` manually just once, after the entire loop completes, avoids that repeated, wasted work.
+
+```csharp
+context.ChangeTracker.AutoDetectChangesEnabled = false; // DISABLE automatic detection for this BULK operation
+
+foreach (var order in ordersToUpdate) // potentially THOUSANDS of entities
+{
+    order.Status = "Archived"; // normally, EACH assignment MIGHT trigger unwanted DetectChanges() overhead
+}
+
+context.ChangeTracker.DetectChanges(); // ONE manual call, AFTER the entire loop -- detects ALL changes AT ONCE
+context.ChangeTracker.AutoDetectChangesEnabled = true; // RE-ENABLE for the REST of the DbContext's lifetime
+await context.SaveChangesAsync();
+```
+
+Because `DetectChanges()`'s cost scales with the number of currently-tracked entities, calling it implicitly on every iteration of a loop touching thousands of entities means that cost is paid thousands of times instead of once — disabling automatic detection for the duration of the bulk loop, then manually triggering a single detection pass afterward, avoids this repeated, compounding overhead while still correctly picking up every change before `SaveChangesAsync()` runs.
+
+**Common Pitfall:** disabling `AutoDetectChangesEnabled` and forgetting to manually call `DetectChanges()` before `SaveChangesAsync()` — since `SaveChangesAsync()` itself still relies on change detection having happened to know what to persist, forgetting the manual call (or forgetting to re-enable automatic detection afterward for the rest of the `DbContext`'s lifetime) can cause changes to silently not be saved, or cause change-detection surprises elsewhere in the same `DbContext`'s continued use.
+
+---
+
 ---

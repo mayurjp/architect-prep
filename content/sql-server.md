@@ -1310,4 +1310,94 @@ Because Query Store persists this history durably (surviving server restarts and
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is `IDENTITY_INSERT`, and why must it be explicitly turned ON before manually inserting an explicit value into an `IDENTITY` column?**
+
+An `IDENTITY` column (covered earlier) normally has SQL Server itself automatically generate each new row's value, refusing any explicit value supplied in an `INSERT` — `SET IDENTITY_INSERT table ON` temporarily lifts that restriction for one specific table, letting an `INSERT` statement supply its own explicit value for the identity column instead.
+
+```sql
+INSERT INTO Products (Id, Name) VALUES (5, 'Widget');
+-- FAILS by default: "Cannot insert explicit value for identity column in table 'Products'
+--  when IDENTITY_INSERT is set to OFF"
+
+SET IDENTITY_INSERT Products ON;
+INSERT INTO Products (Id, Name) VALUES (5, 'Widget'); -- NOW succeeds -- explicit Id = 5 accepted
+SET IDENTITY_INSERT Products OFF; -- turn it back OFF immediately afterward
+```
+
+```text
+IDENTITY_INSERT OFF (the DEFAULT): SQL Server itself GENERATES the next Id value -- an EXPLICIT
+  value supplied in the INSERT statement is REJECTED with an ERROR
+
+IDENTITY_INSERT ON: the INSERT statement's OWN explicit value is ACCEPTED and USED directly --
+  common when RESTORING/MIGRATING data that MUST preserve its ORIGINAL identity values EXACTLY
+```
+
+Because this override is scoped to exactly one table at a time, and only one table can have it enabled per session at once, it's typically used narrowly and temporarily — most commonly during a data migration or restore where preserving the *original* identity values (rather than letting SQL Server generate fresh ones) is essential for maintaining referential integrity with other tables referencing those same IDs.
+
+**Common Pitfall:** forgetting to turn `IDENTITY_INSERT` back `OFF` after a migration script finishes — leaving it enabled means any subsequent, ordinary `INSERT` without an explicit ID could accidentally succeed with an unintended, manually-supplied value (or worse, conflict with an ID SQL Server would otherwise have auto-generated), so it should always be explicitly disabled again immediately after the specific operation that needed it.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is the difference between running `sp_updatestats` (updating statistics for an entire database) versus a targeted `UPDATE STATISTICS` on one specific table, and when would you choose the narrower, targeted option?**
+
+`sp_updatestats` refreshes statistics (covered earlier) across every table in the current database — a targeted `UPDATE STATISTICS TableName` refreshes just one table's statistics; the targeted option is preferable when you know exactly which table's data changed significantly (a large bulk load into one specific table) and want to refresh just that table's stats without paying the cost of scanning every other, unaffected table in the database.
+
+```sql
+UPDATE STATISTICS dbo.Orders; -- refreshes ONLY the Orders table's statistics -- FAST, TARGETED
+
+EXEC sp_updatestats; -- refreshes EVERY table's statistics IN THE ENTIRE DATABASE -- SLOW, BROAD
+```
+
+```text
+Targeted UPDATE STATISTICS: appropriate AFTER a bulk load/large data change AFFECTING ONE
+  KNOWN table -- avoids the WASTED cost of rescanning EVERY OTHER, UNCHANGED table
+
+sp_updatestats: appropriate for a BROADER maintenance window (a NIGHTLY job) where you
+  want to REFRESH EVERYTHING, without needing to KNOW in advance WHICH specific tables changed
+```
+
+Because scanning and recomputing statistics has a real cost proportional to table size, refreshing every table in the database when only one actually needs it wastes time and resources — a targeted `UPDATE STATISTICS` on the specific table you know just received a large bulk load gets the same benefit (an accurate, up-to-date statistics object for the optimizer, covered earlier) far more cheaply.
+
+**Common Pitfall:** running a database-wide `sp_updatestats` immediately after every bulk-load operation, out of an abundance of caution, when only one specific table's data actually changed — this wastes time rescanning every other unaffected table's statistics; targeting the specific table that actually changed achieves the same query-optimizer benefit at a fraction of the cost.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is SQL Server's Always Encrypted feature, and how does it let sensitive column data remain encrypted even from database administrators, with decryption happening only on a trusted client?**
+
+Always Encrypted encrypts specific column values *before* they ever leave a properly-configured client application, and decrypts them only *after* they arrive back at that client — the database engine itself (and anyone with administrative access to it) only ever sees the encrypted ciphertext, never the plaintext value, since the encryption keys never live on the database server at all.
+
+```sql
+CREATE TABLE Customers (
+    Id INT PRIMARY KEY,
+    Ssn VARCHAR(11) COLLATE Latin1_General_BIN2
+        ENCRYPTED WITH (
+            COLUMN_ENCRYPTION_KEY = MyCEK,
+            ENCRYPTION_TYPE = Deterministic,
+            ALGORITHM = 'AEAD_AES_256_CBC_HMAC_SHA_256'
+        )
+);
+```
+
+```text
+A DBA running "SELECT Ssn FROM Customers" DIRECTLY against the database SEES only ENCRYPTED
+  CIPHERTEXT bytes -- NEVER the actual, PLAINTEXT social security number, EVEN with FULL
+  administrative access to the DATABASE SERVER itself
+
+A PROPERLY CONFIGURED CLIENT application (holding the CORRECT encryption key, typically stored
+  in a SEPARATE key vault/HSM) automatically ENCRYPTS the value BEFORE sending the query, and
+  DECRYPTS the RESULT after receiving it -- ALL transparently, via the CLIENT DRIVER itself
+```
+
+Because the encryption/decryption happens entirely on the client side, using keys the database server itself never has access to, Always Encrypted protects against a threat model most other encryption-at-rest features don't cover: a malicious or compromised database administrator (or an attacker who's gained administrative access to the database server) still cannot read the protected columns' actual values, since the server genuinely never possesses the key needed to decrypt them.
+
+**Common Pitfall:** assuming Transparent Data Encryption (TDE, encrypting the entire database file at rest) provides the same protection as Always Encrypted — TDE protects against someone stealing the physical database files, but a legitimate, authenticated query against a TDE-protected database still returns plaintext values to anyone with query access, including a DBA; Always Encrypted specifically addresses the different threat of protecting sensitive columns even from users/administrators who have legitimate query access to the database itself.
+
+---
+
 ---

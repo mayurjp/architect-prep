@@ -1557,3 +1557,82 @@ Because every source of real-world non-determinism (thread scheduling, network t
 **Common Pitfall:** assuming Deterministic Simulation Testing is simply "unit testing with extra steps" — building a genuine simulation harness (a virtual clock, simulated network partitions/delays, single-threaded actor scheduling standing in for real concurrency) is a substantial upfront engineering investment, usually undertaken only by teams building genuinely distributed, correctness-critical systems (databases, consensus protocols) where the payoff of deterministically reproducing rare distributed race conditions justifies that investment.
 
 ---
+
+## Beginner — Question 16
+
+**Q16: What is a Dummy object, the simplest member of the Test Double family (covered earlier), and how does it differ from a Stub by never being meaningfully used at all — just satisfying a required parameter?**
+
+A Dummy is passed into a method purely to satisfy a required parameter's *type* — the code under test never actually calls anything on it or reads any value from it; a Stub (covered earlier), by contrast, is genuinely used: it returns a canned value the test relies on.
+
+```csharp
+public interface ILogger { void Log(string message); }
+
+// Passing a DUMMY -- the method REQUIRES an ILogger parameter, but this TEST doesn't care about
+// LOGGING at all -- a Dummy just SATISFIES the required parameter, and is NEVER actually CALLED
+void CalculateTotal(Order order, ILogger logger) { /* doesn't use 'logger' for THIS calculation */ }
+
+CalculateTotal(testOrder, new DummyLogger()); // DummyLogger's methods are NEVER invoked in THIS test
+```
+
+```text
+Dummy: passed in PURELY to satisfy a REQUIRED parameter -- NEVER actually CALLED or INSPECTED
+Stub:  ACTUALLY called by the code under test, and RETURNS a canned value the TEST relies on
+```
+
+Because a Dummy is never actually exercised by the code path the test cares about, its implementation can be trivial (throwing `NotImplementedException` in every method is even a reasonable Dummy implementation, since hitting any of them would indicate the test's assumption was wrong) — this is what distinguishes it from every other Test Double, which are all genuinely exercised in some way during the test.
+
+**Common Pitfall:** implementing a "Dummy" with real, working behavior "just in case," when the test's whole point was to confirm that parameter is genuinely never used for this particular code path — a Dummy that throws on any actual method call, rather than quietly working, gives the test extra confidence: if it turns out the code path *does* call it, the test fails loudly, revealing an incorrect assumption rather than a passing test that happened to depend on unverified behavior.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is Characterization Testing, and how does writing tests that capture a legacy system's CURRENT (possibly buggy) behavior — rather than its intended, "correct" behavior — provide a safety net before refactoring code with no existing tests?**
+
+When refactoring a legacy codebase with zero test coverage, you often don't have (or can't easily obtain) a specification of what the code is *supposed* to do — Characterization Testing sidesteps this by writing tests that simply capture and lock in whatever the code *currently* does, bugs included, giving a safety net that immediately flags if refactoring accidentally changes any observable behavior, even behavior nobody would call "correct."
+
+```csharp
+// The LEGACY method has a KNOWN QUIRK: it returns -1 for a negative input, instead of throwing
+[Fact]
+public void CalculateDiscount_NegativeQuantity_ReturnsNegativeOne() // documents CURRENT behavior, NOT "correct" behavior
+{
+    var result = _legacyCalculator.CalculateDiscount(-5);
+    Assert.Equal(-1, result); // captures the EXISTING (arguably WRONG) behavior AS A BASELINE
+}
+```
+
+```text
+GOAL of Characterization Testing: "DOES my refactoring change ANY observable behavior AT ALL?"
+  NOT: "IS this behavior actually CORRECT?" -- those are TWO SEPARATE, DELIBERATELY separated questions
+
+Once a SAFETY NET of characterization tests EXISTS, refactoring can PROCEED with confidence that
+  ANY accidental behavior CHANGE will be CAUGHT -- and ANY genuine BUG FIX can be made LATER,
+  as an EXPLICIT, DELIBERATE, SEPARATELY-REVIEWED change, rather than an ACCIDENTAL side effect
+```
+
+Because the goal is explicitly "detect any change," not "verify correctness," a Characterization Test can (and often should) capture even clearly buggy behavior as its expected baseline — separating "refactor safely without changing behavior" from "fix the bug" into two distinct, deliberately sequenced steps, rather than risking an unreviewed behavior change slipping in silently during a refactor meant only to restructure code.
+
+**Common Pitfall:** treating a Characterization Test's captured baseline as validation that the behavior is actually correct, and never revisiting an obviously-buggy behavior it happened to lock in — the whole point of Characterization Testing is safety during refactoring, not an endorsement of the captured behavior; a known bug it captures should still be tracked and fixed deliberately, just not accidentally, as a side effect of unrelated refactoring work.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is Combinatorial Test Explosion, and how does Pairwise (All-Pairs) Testing provide a practical middle ground between exhaustively testing every input combination and testing too few?**
+
+Testing every possible combination of several independent input parameters grows multiplicatively — 5 parameters with 4 possible values each produce 4^5 = 1,024 combinations — quickly becoming impractical to actually test exhaustively; Pairwise Testing instead generates a much smaller set of test cases specifically chosen so that *every pair* of parameter values appears together in at least one test case, based on empirical research showing most real-world bugs are triggered by an interaction between just *two* parameters, not requiring all five to align simultaneously.
+
+```text
+5 parameters, 4 possible values EACH -- EXHAUSTIVE combinatorial testing: 4^5 = 1,024 TEST CASES
+
+Pairwise testing: a MUCH SMALLER set of test cases (often DOZENS, not THOUSANDS) chosen so that
+  EVERY possible PAIR of values (across ANY two parameters) appears TOGETHER in AT LEAST one
+  test case -- based on the empirical OBSERVATION that MOST real bugs are triggered by an
+  INTERACTION between JUST TWO parameters, RARELY requiring ALL FIVE to align SIMULTANEOUSLY
+```
+
+Because pairwise coverage specifically targets two-parameter interactions (empirically where the overwhelming majority of real interaction-driven bugs are actually found) rather than attempting the combinatorially-infeasible full cross-product, it provides meaningfully strong bug-detection coverage at a small fraction of the test-case count exhaustive testing would require — a genuinely practical trade-off for testing systems with many independent configuration dimensions.
+
+**Common Pitfall:** assuming pairwise testing provides the SAME guarantee as exhaustive testing — it specifically catches bugs caused by an interaction between any *two* parameters, but a bug that only manifests when three or more specific parameters align simultaneously could still slip through; pairwise testing is a pragmatic, evidence-based trade-off, not a mathematically complete substitute for full combinatorial coverage.
+
+---

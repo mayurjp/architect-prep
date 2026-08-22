@@ -1287,4 +1287,72 @@ Because only the specific range of the ring between the changed node and its imm
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is a Composite Key combining a Partition Key and a Sort (Range) Key, as used in DynamoDB-style databases, and how does the sort key let multiple related items share the same partition while still being individually queryable?**
+
+A partition key alone determines which physical partition an item lives on — adding a sort key lets many items share that *same* partition key (grouped together physically) while each still being uniquely identified and independently queryable via its own distinct sort key value, letting you efficiently retrieve "all items for this partition key" or narrow it down to a specific range within it.
+
+```text
+Partition Key: "CustomerId=42"    Sort Key: "OrderDate=2026-01-15"   -- ONE order, for customer 42
+Partition Key: "CustomerId=42"    Sort Key: "OrderDate=2026-03-02"   -- ANOTHER order, SAME customer
+Partition Key: "CustomerId=42"    Sort Key: "OrderDate=2026-06-20"   -- a THIRD order, SAME customer
+
+-- ALL THREE orders live on the SAME physical partition (SAME partition key) -- but each is
+   INDIVIDUALLY addressable via its OWN distinct sort key, and a QUERY can efficiently fetch
+   "ALL orders for CustomerId=42" OR narrow to "orders BETWEEN two specific dates" for THAT customer
+```
+
+Because every item sharing a partition key is physically co-located, querying "everything for this partition key" (optionally narrowed by a sort-key range) is efficient — a single, targeted lookup rather than a broader scan — making the Partition-Key-plus-Sort-Key combination the primary mechanism for modeling one-to-many relationships (a customer's many orders) in this style of NoSQL database.
+
+**Common Pitfall:** choosing a partition key granular enough that each partition holds only ever exactly one item — this defeats the purpose of the sort key entirely (there's nothing to sort or range-query within a partition of one), and usually indicates the partition key was chosen at too fine a granularity; the sort key's value comes specifically from grouping *multiple, related* items under one shared partition key.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is Write Amplification in an LSM-Tree-based storage engine (covered earlier), and how does the compaction process that merges SSTables together trade extra background I/O for faster individual writes?**
+
+An LSM-Tree's "always append, never modify in place" write strategy (covered earlier) means writes are fast, but the same logical row can end up scattered across many separate, immutable SSTable files over time — compaction periodically merges these files back together, removing obsolete/overwritten versions, but the *total* bytes written to disk during compaction (rewriting data that was already written once) can exceed the original write volume, a cost called Write Amplification.
+
+```text
+Original writes: 100 MB of NEW data, appended to the LSM-Tree's newest SSTable -- FAST
+
+COMPACTION (runs in the BACKGROUND, periodically): merges SEVERAL existing SSTables together,
+  discarding OBSOLETE/OVERWRITTEN versions of the SAME keys, producing ONE new, CONSOLIDATED
+  SSTable -- this REWRITES data that was ALREADY written once, MULTIPLE additional times, as
+  it gets MERGED across SEVERAL compaction PASSES over the SAME underlying data OVER TIME
+
+Write Amplification factor: TOTAL bytes actually written to DISK (original writes + ALL
+  compaction rewrites) DIVIDED by the ORIGINAL logical bytes written -- often SIGNIFICANTLY > 1
+```
+
+Because compaction rewrites the same logical data multiple times as it consolidates across levels/generations of SSTables, the actual total disk I/O over a dataset's lifetime is meaningfully higher than the raw logical write volume would suggest — this is the specific trade-off LSM-Tree engines accept in exchange for their fast, append-only *foreground* write path, deferring the "real" cost of organizing data efficiently to background compaction instead.
+
+**Common Pitfall:** benchmarking an LSM-Tree-based database's write throughput using only a short test run that never triggers meaningful compaction — a short benchmark can look deceptively fast, since compaction's write-amplification cost is a background, ongoing cost that compounds over the database's actual operational lifetime, not something a brief synthetic test necessarily surfaces.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is a CRDT (Conflict-Free Replicated Data Type), and how does it structurally guarantee that two concurrent, conflicting writes across a Multi-Region Active-Active deployment can always be merged deterministically, without a human or a Last-Write-Wins tiebreaker?**
+
+A CRDT is a data structure specifically designed so that merging two independently-modified replicas of it *always* produces the same, unambiguous result, regardless of the order the merges happen in — mathematically guaranteed by the data type's own merge operation being commutative, associative, and idempotent, rather than relying on an arbitrary tiebreaker (like Last-Write-Wins, covered earlier) that can silently discard one side's legitimate update.
+
+```text
+A "G-Counter" (Grow-only Counter) CRDT -- each REPLICA tracks its OWN increment count SEPARATELY:
+  Replica A: { A: 5, B: 0 }   (A has incremented 5 times, knows NOTHING yet about B's increments)
+  Replica B: { A: 0, B: 3 }   (B has incremented 3 times, knows NOTHING yet about A's increments)
+
+MERGE (element-wise MAXIMUM per replica's own counter): { A: 5, B: 3 } -- total value: 8 --
+  REGARDLESS of the ORDER the merge happens in, or how MANY times it's RE-merged, the RESULT
+  is ALWAYS the SAME -- NO data from EITHER side is ever SILENTLY DISCARDED or LOST
+```
+
+Because a CRDT's merge function is mathematically guaranteed to be conflict-free by construction (not merely "usually fine in practice"), two regions that each accepted writes during a network partition can later reconcile automatically, with NO possibility of the merge producing a different result depending on which side's update happened to arrive "last" — a structurally stronger guarantee than Last-Write-Wins, which can silently and irreversibly discard one side's legitimate update based purely on timestamp ordering.
+
+**Common Pitfall:** assuming CRDTs solve *every* Multi-Region Active-Active conflict scenario automatically — CRDTs exist for specific, well-defined data types (counters, sets, certain map structures) whose merge semantics can be made conflict-free; a genuinely arbitrary business object (two conflicting edits to unrelated fields of an order) may not map cleanly onto an existing CRDT type at all, and forcing an ill-fitting business object into a CRDT shape can produce a "correct by construction" merge that's nonetheless business-nonsensical.
+
+---
+
 ---

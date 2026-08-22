@@ -1317,3 +1317,84 @@ Because the operating system's virtual memory subsystem (the same mechanism unde
 **Common Pitfall:** using a Memory-Mapped File for genuinely sequential, whole-file processing (reading a file start-to-finish exactly once) where an ordinary buffered `FileStream` would perform just as well with far less complexity — memory-mapped files earn their added complexity specifically for large-file *random-access* patterns (jumping to arbitrary offsets repeatedly), not as a universal replacement for straightforward sequential file I/O.
 
 ---
+
+## Beginner — Question 16
+
+**Q16: What is a "Warm-up" phase in a benchmark or load test, and why does excluding the first several requests/iterations from measured results avoid skewing them with JIT-compilation and cache-population costs?**
+
+The very first few executions of any code path pay one-time costs that don't reflect the application's actual steady-state performance — the JIT compiling a method for the first time (covered elsewhere, Tiered Compilation), a cache being empty and needing to be populated, a connection pool having no warm connections yet — a warm-up phase deliberately runs (and discards the results of) enough initial iterations to get past these one-time costs before actually measuring.
+
+```text
+Iteration 1: 850ms  <-- JIT compiling this method for the FIRST time, cache EMPTY -- NOT representative
+Iteration 2: 120ms  <-- STILL warming up -- caches PARTIALLY populated
+Iteration 3: 12ms   <-- STEADY STATE reached -- THIS is what actually MATTERS
+Iteration 4: 11ms
+Iteration 5: 12ms
+
+-- a benchmark AVERAGING all 5 iterations would report a MISLEADING "~201ms average," when the
+   ACTUAL steady-state performance (what MATTERS for a LONG-RUNNING production service) is ~12ms
+```
+
+Because a long-running production service spends the overwhelming majority of its life in the "steady state" (long past any one-time JIT/cache-population costs), a benchmark that includes those one-time costs in its average produces a number that doesn't actually reflect real-world, sustained performance — discarding a deliberate warm-up period's results (as tools like BenchmarkDotNet, covered earlier, do automatically) produces a far more representative measurement.
+
+**Common Pitfall:** running a "quick and dirty" performance test with only a handful of iterations and no explicit warm-up period, then drawing conclusions from an average that's heavily skewed by one-time startup costs — this can make a genuinely fast steady-state operation look artificially slow (or vice versa, mask a real regression that only shows up after the JIT has fully optimized the hot path); a proper warm-up phase before measurement is essential for a representative result.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is `SocketsHttpHandler.PooledConnectionLifetime`, and how does forcing periodic connection recycling avoid the DNS-staleness problem covered earlier for a long-lived, reused `HttpClient`?**
+
+Reusing one long-lived `HttpClient` (covered earlier as the fix for socket exhaustion) avoids creating a new connection per request, but a connection held open indefinitely never re-resolves DNS — if the target's IP address changes (a failover, a DNS-based load balancer shifting traffic), that connection keeps talking to the *old*, possibly now-defunct address; `PooledConnectionLifetime` forces a connection to be discarded and re-established (re-resolving DNS in the process) after a configured maximum lifetime, even if it's otherwise healthy.
+
+```csharp
+var handler = new SocketsHttpHandler
+{
+    PooledConnectionLifetime = TimeSpan.FromMinutes(5) // FORCE a fresh connection (and DNS re-resolution)
+};                                                       // at least every 5 minutes, EVEN IF the OLD one is still healthy
+var client = new HttpClient(handler); // reused as a SINGLETON, as usual
+```
+
+```text
+WITHOUT PooledConnectionLifetime: a connection established ONCE, at application STARTUP, could
+  stay OPEN and REUSED for the ENTIRE application lifetime -- NEVER re-resolving DNS -- if the
+  TARGET's IP changes LATER (a failover), this client KEEPS talking to the STALE, OLD address
+
+WITH PooledConnectionLifetime: EVERY connection is FORCIBLY recycled after the configured
+  duration -- the NEXT request after recycling RE-RESOLVES DNS FRESH, picking up ANY IP change
+```
+
+Because this setting forces periodic connection renewal regardless of the connection's own health, it directly closes the DNS-staleness gap that a naively-reused singleton `HttpClient` (covered earlier as the fix for the *opposite* extreme — creating a fresh client per request) would otherwise have — giving you the socket-reuse benefit of a long-lived client while still eventually picking up DNS changes, rather than an all-or-nothing choice between the two problems.
+
+**Common Pitfall:** reusing a single, long-lived `HttpClient`/`SocketsHttpHandler` instance forever with no `PooledConnectionLifetime` configured, correctly avoiding socket exhaustion but reintroducing the DNS-staleness risk the naive "one client per request" anti-pattern's fix was originally meant to avoid trading for — `IHttpClientFactory` (covered earlier) actually configures a sensible default lifetime automatically, which is one of the concrete reasons it's recommended over manually managing a raw `HttpClient` singleton.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is Thread-Local Storage (`[ThreadStatic]`/`ThreadLocal<T>`), and how does giving each thread its own independent copy of a variable eliminate contention without any locking at all, at what specific trade-off?**
+
+Thread-Local Storage gives each thread its own private, independent instance of a variable — since no thread ever shares that storage with any other thread, there's no possibility of contention or a race condition on it at all, eliminating the need for any lock; the trade-off is that the variable's value is genuinely per-thread, meaning you lose the ability to see (or aggregate) a single, unified value across all threads without additional coordination.
+
+```csharp
+private static readonly ThreadLocal<Random> _random = new(() => new Random());
+// EACH thread gets its OWN INDEPENDENT Random instance -- NO shared state, NO locking needed,
+// NO risk of the SAME underlying Random instance being used unsafely from MULTIPLE threads at once
+
+int value = _random.Value.Next(100); // 'Value' -- THIS thread's OWN, PRIVATE instance
+```
+
+```text
+WITHOUT Thread-Local Storage: ONE shared Random instance, accessed from MULTIPLE threads --
+  REQUIRES a LOCK to avoid CORRUPTING its internal state under CONCURRENT access -- LOCK CONTENTION
+
+WITH Thread-Local Storage: EACH thread has its OWN COMPLETELY SEPARATE Random instance --
+  ZERO contention possible, ZERO locking needed -- but AGGREGATING data ACROSS all threads
+  (like a TOTAL COUNT) now requires EXPLICITLY collecting each thread's OWN separate value
+```
+
+Because each thread's copy is entirely private and independent, Thread-Local Storage completely sidesteps the need for synchronization on that specific piece of state — genuinely useful for per-thread scratch space or state that doesn't need to be shared or aggregated (a thread-specific `Random` instance, a per-thread parsing buffer) — but for state that genuinely does need a unified, cross-thread view (a running total, a shared cache), the "no sharing at all" property that makes it contention-free is exactly what makes it unsuitable.
+
+**Common Pitfall:** reaching for `[ThreadStatic]`/`ThreadLocal<T>` for state that actually needs to be shared or aggregated across threads (a running total counter meant to reflect all threads' combined work) — since each thread's copy is completely isolated, this doesn't give you a coordinated shared value at all; a proper aggregation step (summing each thread's own thread-local value, or using `Interlocked`, covered earlier, on genuinely shared state instead) is needed for that use case.
+
+---
