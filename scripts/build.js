@@ -175,6 +175,14 @@ function loadTopics() {
   return JSON.parse(fs.readFileSync(topicsPath, "utf8"));
 }
 
+function snippetFromHtml(html) {
+  const text = html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > 200 ? `${text.slice(0, 200).trim()}…` : text;
+}
+
 function main() {
   const topics = loadTopics();
   const knownIds = new Set(topics.map((t) => t.id));
@@ -212,9 +220,42 @@ function main() {
   }
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  const questionsDir = path.join(DATA_DIR, "questions");
+  fs.mkdirSync(questionsDir, { recursive: true });
+  const byTopic = new Map();
+  for (const q of allQuestions) {
+    if (!byTopic.has(q.topic)) byTopic.set(q.topic, []);
+    byTopic.get(q.topic).push(q);
+  }
+  for (const [topicId, qs] of byTopic) {
+    fs.writeFileSync(
+      path.join(questionsDir, `${topicId}.json`),
+      JSON.stringify(qs, null, 2)
+    );
+  }
+
+  const searchIndex = allQuestions
+    .filter((q) => q.status === "answered")
+    .map((q) => ({
+      id: q.id,
+      topic: q.topic,
+      level: q.level,
+      question: q.question,
+      snippet: snippetFromHtml(q.answerHtml),
+    }));
   fs.writeFileSync(
-    path.join(DATA_DIR, "questions.json"),
-    JSON.stringify(allQuestions, null, 2)
+    path.join(DATA_DIR, "search-index.json"),
+    JSON.stringify(searchIndex, null, 2)
+  );
+
+  const questionIds = {};
+  for (const [topicId, qs] of byTopic) {
+    questionIds[topicId] = qs.map((q) => q.id);
+  }
+  fs.writeFileSync(
+    path.join(DATA_DIR, "question-ids.json"),
+    JSON.stringify(questionIds, null, 2)
   );
 
   const topicsWithCounts = topics.map((t) => ({

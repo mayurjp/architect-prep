@@ -37,6 +37,7 @@
     </a>
   </div>
   <nav>
+    <a href="topics.html">Topics</a>
     <a href="search.html">Search</a>
     <button id="theme-toggle" type="button" aria-label="Toggle theme"></button>
   </nav>
@@ -53,10 +54,10 @@ const LEVEL_ORDER = ["beginner", "intermediate", "advanced", "scenario"];
 async function init() {
   const params = new URLSearchParams(location.search);
   const topicId = params.get("t") || location.hash.substring(1);
-  const cb = Date.now();
+  const deepLinkId = params.get("q");
   const [questions, topics] = await Promise.all([
-    fetch(`data/questions.json?v=${cb}`).then((r) => r.json()),
-    fetch(`data/topics.json?v=${cb}`).then((r) => r.json()),
+    fetch(`data/questions/${topicId}.json`).then((r) => (r.ok ? r.json() : [])),
+    fetch(`data/topics.json`).then((r) => r.json()),
   ]);
 
   const topic = topics.find((t) => t.id === topicId);
@@ -69,7 +70,7 @@ async function init() {
   document.getElementById("topic-desc").textContent = topic.description;
 
   const byLevel = {};
-  for (const q of questions.filter((q) => q.topic === topicId)) {
+  for (const q of questions) {
     (byLevel[q.level] = byLevel[q.level] || []).push(q);
   }
   for (const lvl of Object.keys(byLevel)) byLevel[lvl].sort((a, b) => a.seq - b.seq);
@@ -83,7 +84,9 @@ async function init() {
     return;
   }
 
-  let activeLevel = availableLevels[0];
+  const deepLinkQuestion = deepLinkId ? questions.find((q) => q.id === deepLinkId) : null;
+  let activeLevel = deepLinkQuestion ? deepLinkQuestion.level : availableLevels[0];
+  const openIds = new Set(deepLinkQuestion ? [deepLinkQuestion.id] : []);
 
   window.toggleMastered = (id) => {
     const m = JSON.parse(localStorage.getItem("architect_mastered") || "[]");
@@ -114,6 +117,23 @@ async function init() {
     document.body.style.overflow = "";
   };
 
+  window.toggleExpand = (id) => {
+    if (openIds.has(id)) openIds.delete(id);
+    else openIds.add(id);
+    render();
+    if (openIds.has(id)) {
+      const el = document.getElementById(`q-${id}`);
+      const body = el && el.querySelector(".answer-body");
+      if (body) body.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
+    }
+  };
+
+  window.expandAll = () => {
+    byLevel[activeLevel].forEach((q) => { if (q.status !== "planned") openIds.add(q.id); });
+    render();
+    listEl.querySelectorAll(".answer-body pre code").forEach((el) => hljs.highlightElement(el));
+  };
+
   function render() {
     tabsEl.innerHTML = "";
     for (const lvl of availableLevels) {
@@ -124,20 +144,30 @@ async function init() {
       tabsEl.appendChild(btn);
     }
 
+    const expandAllBtn = document.createElement("button");
+    expandAllBtn.textContent = "Expand all";
+    expandAllBtn.className = "expand-all-btn";
+    expandAllBtn.onclick = () => window.expandAll();
+    tabsEl.appendChild(expandAllBtn);
+
     listEl.innerHTML = "";
     byLevel[activeLevel].forEach((q, i) => {
       const block = document.createElement("div");
       const delayClass = `delay-${(i % 10) + 1}`;
       const isMastered = JSON.parse(localStorage.getItem("architect_mastered") || "[]").includes(q.id);
+      const isOpen = openIds.has(q.id);
+      block.id = `q-${q.id}`;
       block.className = `card question-block ${isMastered ? "is-mastered" : ""} ${delayClass}`;
-      const followUpsHtml = (q.followUps || [])
-        .map(
-          (f) => `<div class="followup">
-            <p class="question-text">${escapeHtml(f.question)}</p>
-            <div class="answer-body">${f.answerHtml}</div>
-          </div>`
-        )
-        .join("");
+      const followUpsHtml = isOpen
+        ? (q.followUps || [])
+            .map(
+              (f) => `<div class="followup">
+                <p class="question-text">${escapeHtml(f.question)}</p>
+                <div class="answer-body">${f.answerHtml}</div>
+              </div>`
+            )
+            .join("")
+        : "";
       if (q.status === "planned") {
         block.innerHTML = `
           <span class="badge planned">Planned</span>
@@ -150,16 +180,21 @@ async function init() {
             ${isMastered ? "Mastered ✓" : "Mark Mastered"}
           </button>
           <button class="focus-btn" onclick="openFocus('${q.id}')">Focus Mode ⛶</button>
-          <p class="question-text">${escapeHtml(q.question)}</p>
-          <div class="answer-body">${q.answerHtml}</div>
-          ${followUpsHtml}`;
+          <button class="q-toggle" onclick="toggleExpand('${q.id}')" style="display:block;width:100%;text-align:left;background:none;border:none;cursor:pointer;padding:0">
+            <p class="question-text">${isOpen ? "▾" : "▸"} ${escapeHtml(q.question)}</p>
+          </button>
+          ${isOpen ? `<div class="answer-body">${q.answerHtml}</div>${followUpsHtml}` : ""}`;
       }
       listEl.appendChild(block);
     });
-    hljs.highlightAll();
   }
 
   render();
+  if (deepLinkQuestion) {
+    const body = document.getElementById(`q-${deepLinkQuestion.id}`)?.querySelector(".answer-body");
+    if (body) body.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
+    document.getElementById(`q-${deepLinkQuestion.id}`)?.scrollIntoView({ block: "center" });
+  }
 }
 
 function escapeHtml(s) {

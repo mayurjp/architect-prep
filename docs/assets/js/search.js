@@ -1,4 +1,4 @@
-// Plain client-side substring/keyword filter over the built questions.json index.
+// Plain client-side substring/keyword filter over the lightweight search-index.json.
 // No backend — the whole index ships as one static JSON file.
 
 function filterQuestions(questions, queryRaw) {
@@ -13,7 +13,7 @@ function filterQuestions(questions, queryRaw) {
       " " +
       q.level +
       " " +
-      (q.followUps || []).map((f) => f.question).join(" ")
+      (q.snippet || "")
     ).toLowerCase();
     return terms.every((t) => haystack.includes(t));
   });

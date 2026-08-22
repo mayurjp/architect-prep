@@ -20,6 +20,7 @@
     </a>
   </div>
   <nav>
+    <a href="topics.html">Topics</a>
     <a href="search.html">Search</a>
     <button id="theme-toggle" type="button" aria-label="Toggle theme"></button>
   </nav>
@@ -30,22 +31,21 @@
 </main>
 <script>
 async function init() {
-  const cb = Date.now();
-  const [topics, questions] = await Promise.all([
-    fetch(`data/topics.json?v=${cb}`).then((r) => r.json()),
-    fetch(`data/questions.json?v=${cb}`).then((r) => r.json())
+  const [topics, questionIds] = await Promise.all([
+    fetch(`data/topics.json`).then((r) => r.json()),
+    fetch(`data/question-ids.json`).then((r) => r.json())
   ]);
   const mastered = JSON.parse(localStorage.getItem("architect_mastered") || "[]");
   const masteredSet = new Set(mastered);
-  
+
   topics.sort((a, b) => a.order - b.order);
   const grid = document.getElementById("topic-grid");
-  
+
   topics.forEach((topic, i) => {
-    const topicQuestions = questions.filter(q => q.topic === topic.id);
-    const masteredCount = topicQuestions.filter(q => masteredSet.has(q.id)).length;
-    
-    const total = topicQuestions.length;
+    const topicIds = questionIds[topic.id] || [];
+    const masteredCount = topicIds.filter(id => masteredSet.has(id)).length;
+
+    const total = topicIds.length;
     const pct = total ? Math.round((masteredCount / total) * 100) : 0;
     
     const levelBadges = Object.entries(topic.counts.byLevel || {})

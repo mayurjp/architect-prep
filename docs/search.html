@@ -20,6 +20,7 @@
     </a>
   </div>
   <nav>
+    <a href="topics.html">Topics</a>
     <a href="search.html">Search</a>
     <button id="theme-toggle" type="button" aria-label="Toggle theme"></button>
   </nav>
@@ -33,18 +34,26 @@
 <script>
 let questions = [];
 let topicsById = {};
+let visibleCount = 20;
+const PAGE_SIZE = 20;
+let debounceTimer = null;
 
 async function init() {
-  const cb = Date.now();
   const [q, topics] = await Promise.all([
-    fetch(`data/questions.json?v=${cb}`).then((r) => r.json()),
-    fetch(`data/topics.json?v=${cb}`).then((r) => r.json()),
+    fetch(`data/search-index.json`).then((r) => r.json()),
+    fetch(`data/topics.json`).then((r) => r.json()),
   ]);
   questions = q;
   topicsById = Object.fromEntries(topics.map((t) => [t.id, t]));
 
   const input = document.getElementById("q");
-  input.addEventListener("input", () => render(input.value));
+  input.addEventListener("input", () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      visibleCount = PAGE_SIZE;
+      render(input.value);
+    }, 180);
+  });
   render("");
 }
 
@@ -54,22 +63,35 @@ function render(query) {
     results.innerHTML = '<p class="empty-state">Start typing to search the question bank.</p>';
     return;
   }
-  const matches = filterQuestions(questions, query).slice(0, 50);
-  if (matches.length === 0) {
+  const allMatches = filterQuestions(questions, query);
+  if (allMatches.length === 0) {
     results.innerHTML = '<p class="empty-state">No matches.</p>';
     return;
   }
-  results.innerHTML = matches
+  const matches = allMatches.slice(0, visibleCount);
+  const cardsHtml = matches
     .map((q, i) => {
       const topic = topicsById[q.topic];
       const delayClass = `delay-${(i % 10) + 1}`;
-      return `<a class="card ${delayClass}" style="display:block" href="topic.html?t=${q.topic}#${q.topic}">
-        <span class="badge ${q.status === "planned" ? "planned" : q.level}">${q.status === "planned" ? "planned" : q.level}</span>
+      return `<a class="card ${delayClass}" style="display:block" href="topic.html?t=${q.topic}&q=${q.id}">
+        <span class="badge ${q.level}">${q.level}</span>
         <span class="muted" style="margin-left:0.5rem">${topic ? topic.title : q.topic}</span>
         <p class="question-text">${escapeHtml(q.question)}</p>
+        <p class="muted">${escapeHtml(q.snippet || "")}</p>
       </a>`;
     })
     .join("");
+  const remaining = allMatches.length - matches.length;
+  const moreBtn = remaining > 0
+    ? `<button id="show-more" class="expand-all-btn" style="margin-top:1rem">Show ${Math.min(remaining, PAGE_SIZE)} more</button>`
+    : "";
+  results.innerHTML = cardsHtml + moreBtn;
+  if (remaining > 0) {
+    document.getElementById("show-more").onclick = () => {
+      visibleCount += PAGE_SIZE;
+      render(query);
+    };
+  }
 }
 
 function escapeHtml(s) {
