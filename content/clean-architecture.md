@@ -1472,3 +1472,95 @@ Loading Order #5 doesn't read a single stored row reflecting its current state a
 **Common Pitfall:** adopting Event Sourcing as an assumed, automatic requirement simply because a system already uses CQRS and Domain Events, without a genuine, specific need for Event Sourcing's particular benefits (a complete audit history, temporal "as of" queries) that would justify its added complexity — Event Sourcing is a significant, independent architectural commitment with real ongoing costs (rehydration performance, event schema evolution over time, needing periodic snapshots for aggregates with very long histories), not a natural or required consequence of simply having adopted CQRS and Domain Events elsewhere in the same system.
 
 ---
+
+## Beginner — Question 14
+
+**Q14: What is a MediatR `INotification` (as distinct from `IRequest`), and how does publishing a notification let multiple, independent handlers all react to the same event, without the publisher needing to know about any of them?**
+
+`IRequest<T>` (covered earlier for Commands/Queries) is handled by exactly *one* handler, which returns a result — `INotification` is fundamentally different: publishing one can trigger *any number* of independent handlers, each reacting in its own way, with no result returned to the publisher at all — the actual mechanism behind dispatching Domain Events (covered earlier) to their various interested handlers.
+
+```csharp
+public record OrderPlacedNotification(int OrderId) : INotification; // a NOTIFICATION, not a REQUEST
+
+// MULTIPLE, COMPLETELY INDEPENDENT handlers -- ALL react to the SAME notification
+public class SendConfirmationEmailHandler : INotificationHandler<OrderPlacedNotification>
+{
+    public Task Handle(OrderPlacedNotification n, CancellationToken ct) { /* sends an email */ return Task.CompletedTask; }
+}
+public class UpdateInventoryHandler : INotificationHandler<OrderPlacedNotification>
+{
+    public Task Handle(OrderPlacedNotification n, CancellationToken ct) { /* updates inventory */ return Task.CompletedTask; }
+}
+
+// the PUBLISHER -- has NO IDEA how MANY handlers exist, or WHAT they actually DO
+await _mediator.Publish(new OrderPlacedNotification(order.Id));
+// -- BOTH handlers ABOVE (and ANY future ones added LATER) run AUTOMATICALLY, WITHOUT this
+//    PUBLISHING code EVER needing to CHANGE, or even KNOW they EXIST at ALL --
+```
+Because the publisher simply calls `Publish()` without specifying or even knowing which handlers exist, adding a *third* handler later (a `LogAuditEntryHandler`, say) requires zero changes to the publishing code at all — it's automatically picked up and invoked the next time the notification fires, exactly the same decoupling benefit the Observer pattern (covered under Design Patterns) provides, here implemented concretely via MediatR's own notification-dispatch mechanism.
+
+**Common Pitfall:** using `IRequest`/`Send()` (intended for exactly-one-handler Commands/Queries) for something that's conceptually "an event other parts of the system might want to react to" — this forces a design where only one handler can ever exist for that concept, precisely the limitation `INotification`/`Publish()` is designed to remove; recognizing "is this one specific operation with one result, or an event multiple independent parts of the system might want to react to" is the deciding factor for which MediatR mechanism actually fits.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What are the Input Boundary and Output Boundary (from Uncle Bob's original Clean Architecture terminology), and how do they relate to the "Command/Query plus Handler" terminology already used throughout this topic?**
+
+Clean Architecture's original terminology describes a Use Case's *Input Boundary* (an interface defining how the outside world invokes the use case) and *Output Boundary* (an interface defining how the use case reports its result back out) — in the more commonly-used CQRS-flavored terminology already used throughout this topic, these map directly onto the Command/Query object (the input) and the returned result/DTO (the output), just expressed through Uncle Bob's original naming.
+
+```csharp
+// UNCLE BOB's original terminology -- explicit INPUT and OUTPUT BOUNDARY interfaces
+public interface IPlaceOrderInputBoundary { void Handle(PlaceOrderInputData input); }
+public interface IPlaceOrderOutputBoundary { void Present(PlaceOrderOutputData output); }
+
+// the SAME underlying concept, in the MORE COMMONLY-USED CQRS/MediatR terminology (used THROUGHOUT this topic)
+public record PlaceOrderCommand(int CustomerId, List<OrderItem> Items) : IRequest<PlaceOrderResult>; // the INPUT BOUNDARY
+public class PlaceOrderCommandHandler : IRequestHandler<PlaceOrderCommand, PlaceOrderResult> { /* ... */ } // the USE CASE ITSELF
+// 'PlaceOrderResult' (the RETURNED value) IS the OUTPUT BOUNDARY's DATA, just RETURNED DIRECTLY
+// rather than PASSED to a SEPARATE "Present()" method
+```
+Both describe the exact same architectural idea — a Use Case has a well-defined "shape" of what goes in and what comes out, decoupled from any specific delivery mechanism (a Web API controller, a console command) — the CQRS/MediatR-flavored version simply expresses the Output Boundary as an ordinary *returned value* rather than Uncle Bob's original, more elaborate "pass the output to a separate Presenter object" style (covered in the next question).
+
+**Why recognizing this terminology mapping matters when reading original Clean Architecture material versus more modern, MediatR-based codebases:** a developer who has only ever worked with the CQRS/MediatR-flavored version of these concepts (as used throughout most of this topic) can otherwise find Uncle Bob's original book/diagrams confusingly different, when they're actually describing the identical underlying architectural idea — recognizing "Input Boundary = Command/Query, Output Boundary = the result" bridges the two vocabularies directly, rather than treating them as two unrelated things to learn separately.
+
+**Common Pitfall:** treating Uncle Bob's original Input/Output Boundary terminology and the more common CQRS/MediatR terminology as two different architectural approaches requiring separate understanding — they describe the same underlying structural idea; the practical difference is mainly in *how* the output is delivered (a returned value directly, versus an explicit Presenter object, covered in the next question), not in the fundamental concept of a Use Case having a well-defined input and output shape.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is a Presenter (from Uncle Bob's original Clean Architecture terminology), and how does it transform a Use Case's output into a view-specific format without the Use Case itself knowing anything about how its result will be displayed?**
+
+A Presenter sits between a Use Case's raw output and whatever specific format a particular UI/delivery mechanism needs to actually display it — the Use Case produces plain, UI-agnostic output data, and a Presenter (a piece of the outer, Presentation layer) transforms that into exactly the shape a specific view needs, keeping the Use Case itself completely unaware of *how* its result will ultimately be rendered.
+
+```csharp
+// the USE CASE -- produces PLAIN, UI-AGNOSTIC output data -- KNOWS NOTHING about HOW it will be DISPLAYED
+public class GetOrderSummaryOutputData
+{
+    public int OrderId; public decimal Total; public DateTime PlacedAtUtc; // PLAIN, RAW data
+}
+
+// a PRESENTER -- TRANSFORMS the RAW output into a VIEW-SPECIFIC format -- ONE per DELIVERY MECHANISM
+public class WebOrderSummaryPresenter
+{
+    public OrderSummaryViewModel Present(GetOrderSummaryOutputData output) => new()
+    {
+        FormattedTotal = output.Total.ToString("C"),              // WEB-specific: a FORMATTED currency STRING
+        PlacedAtLocal = output.PlacedAtUtc.ToLocalTime().ToString("g") // WEB-specific: LOCALIZED, FORMATTED date
+    };
+}
+
+public class CliOrderSummaryPresenter // a COMPLETELY DIFFERENT presenter, for a DIFFERENT delivery MECHANISM
+{
+    public string Present(GetOrderSummaryOutputData output) =>
+        $"Order #{output.OrderId}: {output.Total:C} placed at {output.PlacedAtUtc:u}"; // a PLAIN TEXT line, for a CLI
+}
+```
+Because the Use Case itself only ever produces the plain `GetOrderSummaryOutputData`, it remains completely reusable across an unlimited number of different delivery mechanisms — a web UI, a CLI tool, a mobile app's API response — each with its *own* Presenter transforming that same raw output into whatever specific format *that* particular delivery mechanism actually needs, without the Use Case itself ever needing to change or know anything about any of them.
+
+**Why this specifically differs from (and is a more elaborate version of) simply returning a DTO directly, as most MediatR-based code in this topic typically does:** the more common, lighter-weight approach (a Command/Query Handler simply returning a result DTO directly, covered throughout this topic) conflates the Use Case's raw output with a reasonably display-ready shape in one step — the full, original Clean Architecture Presenter pattern separates these into two explicit steps (raw output, then a dedicated Presenter transforming it per delivery mechanism), a more elaborate separation that's genuinely valuable when the *same* Use Case output needs to be presented very differently across multiple, meaningfully different delivery mechanisms, but often unnecessary overhead when there's really only one delivery mechanism (a single Web API) ever consuming that Use Case's result.
+
+**Common Pitfall:** introducing a full, explicit Presenter layer for every single Use Case regardless of whether multiple, meaningfully different delivery mechanisms actually consume its output — for the common case of a single Web API being the only consumer, this adds a genuine extra layer of indirection (a separate Presenter class, translating output data that's already close to what the API needs) without a correspondingly clear benefit; the full Presenter pattern earns its complexity specifically when a Use Case's output genuinely needs to be presented in meaningfully different ways across multiple, distinct delivery mechanisms.
+
+---

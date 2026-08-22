@@ -1296,4 +1296,106 @@ WITH failurePolicy: Ignore -- IF the webhook becomes UNREACHABLE:
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is a Namespace's default ServiceAccount, and why might you want to disable automatic ServiceAccount token mounting for a Pod that never needs to call the Kubernetes API?**
+
+Every Pod, by default, automatically gets a token for its Namespace's default `ServiceAccount` mounted into its filesystem — intended to let application code call the Kubernetes API itself if needed, but for the large fraction of Pods that never actually call the Kubernetes API at all, this default token is an unnecessary credential sitting inside the container, one an attacker who compromises that container could potentially misuse.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-api
+spec:
+  automountServiceAccountToken: false  # this Pod NEVER calls the Kubernetes API -- NO token needed AT ALL
+  containers:
+    - name: my-api
+      image: my-api:latest
+```
+```text
+WITHOUT explicitly disabling it -- EVERY Pod gets a Kubernetes API token MOUNTED into its
+FILESYSTEM by DEFAULT, WHETHER or NOT the application ACTUALLY ever calls the Kubernetes API
+-- an ATTACKER who COMPROMISES the CONTAINER (via an UNRELATED application vulnerability) could
+POTENTIALLY use THIS token to CALL the Kubernetes API ITSELF, if the ServiceAccount HAPPENS to
+carry ANY meaningful PERMISSIONS AT ALL
+```
+Because most ordinary application Pods (a typical web API, a background worker with no Kubernetes-API-calling logic) never actually need this token at all, disabling automatic mounting for them removes a credential that provides no functional benefit but represents genuine, if often overlooked, attack surface — directly following the Principle of Least Privilege (covered under App Security) by not granting a capability (Kubernetes API access) a given Pod was never actually going to use.
+
+**Common Pitfall:** leaving every Pod's default ServiceAccount token auto-mounted, "just in case," without evaluating whether the specific application actually needs to call the Kubernetes API at all — for the (typically large) fraction of Pods that genuinely don't, `automountServiceAccountToken: false` is a simple, low-effort hardening step that removes an unnecessary credential from the container's filesystem entirely.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is a Toleration's `effect` field (`NoSchedule`/`PreferNoSchedule`/`NoExecute`), and how does `NoExecute` specifically evict already-running Pods that don't tolerate a taint added after they were already scheduled?**
+
+A Taint's `effect` (covered earlier alongside Tolerations) determines exactly how strictly it's enforced — `NoSchedule` only prevents *new* Pods from being scheduled onto the tainted node (Pods already running there are left alone); `NoExecute` goes further, actively *evicting* already-running Pods that don't tolerate the taint, even if they were scheduled onto that node before the taint was ever added.
+
+```yaml
+# a NODE gets tainted, e.g. because it's being DRAINED for maintenance
+kubectl taint nodes node-1 maintenance=true:NoExecute
+```
+```text
+NoSchedule    -- NEW Pods CANNOT be scheduled onto THIS node -- but Pods ALREADY RUNNING there
+                 are LEFT COMPLETELY ALONE, UNAFFECTED, CONTINUING to run NORMALLY
+
+PreferNoSchedule -- a SOFT version of NoSchedule -- the scheduler TRIES to AVOID this node, but
+                    WILL still schedule a Pod THERE if NO OTHER node is AVAILABLE
+
+NoExecute     -- ACTIVELY EVICTS any ALREADY-RUNNING Pod that DOESN'T explicitly TOLERATE this
+                 taint -- EVEN IF that Pod was HAPPILY running there BEFORE the taint was EVER ADDED
+```
+```yaml
+# a Pod EXPLICITLY tolerating this SPECIFIC taint -- survives the EVICTION, CONTINUES running
+tolerations:
+  - key: "maintenance"
+    operator: "Equal"
+    value: "true"
+    effect: "NoExecute"
+    tolerationSeconds: 300  # tolerates it for UP TO 300 SECONDS, THEN is EVICTED anyway, EVEN with a TOLERATION
+```
+Because `NoExecute` actively evicts non-tolerating Pods rather than merely blocking new scheduling, it's the mechanism used for scenarios genuinely requiring existing workloads to be moved off a node (draining a node for maintenance, or automatically evicting Pods from a node that's become unreachable) — a Pod can even tolerate `NoExecute` only *temporarily* (`tolerationSeconds`), letting it finish in-flight work for a bounded grace period before ultimately being evicted anyway.
+
+**Common Pitfall:** assuming any taint automatically evicts already-running Pods, without checking its specific `effect` — only `NoExecute` actually triggers eviction of existing Pods; `NoSchedule` and `PreferNoSchedule` only ever affect *future* scheduling decisions, leaving Pods that are already running on the node completely undisturbed, a distinction that matters significantly for correctly predicting a taint's actual operational impact.
+
+---
+
+## Advanced — Question 14
+
+**Q14: How does a Kubernetes `PriorityClass` interact with the Cluster Autoscaler, and how does a pending, high-priority Pod trigger the autoscaler to provision a new node, even while lower-priority pending Pods are ignored?**
+
+The Cluster Autoscaler (covered earlier) provisions new nodes in response to Pods stuck `Pending` due to insufficient capacity — but not every pending Pod triggers this equally: a lower-priority Pod that's pending specifically because a *higher-priority* Pod's scheduling requirements haven't been met yet won't trigger new-node provisioning on its own behalf, while a genuinely high-priority Pod unable to be scheduled anywhere will.
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: high-priority }
+value: 1000000
+---
+apiVersion: v1
+kind: Pod
+metadata: { name: critical-billing-job }
+spec:
+  priorityClassName: high-priority  # a HIGH-PRIORITY Pod -- covered earlier, alongside PREEMPTION
+```
+```text
+CLUSTER is AT FULL capacity -- a LOW-priority Pod is PENDING (no capacity available) --
+  the CLUSTER AUTOSCALER may DELAY or DEPRIORITIZE provisioning NEW capacity FOR this LOW-priority
+  Pod specifically, if OTHER, HIGHER-priority WORK is ALSO competing for ATTENTION
+
+a HIGH-priority Pod BECOMES pending (e.g., "critical-billing-job" NEEDS to run, but NO node HAS capacity):
+  -- the SCHEDULER FIRST attempts PREEMPTION (evicting LOWER-priority PODS, covered earlier) --
+  -- IF PREEMPTION ALONE still ISN'T enough to FIT the high-priority POD -- the CLUSTER AUTOSCALER
+     is TRIGGERED to PROVISION an ENTIRELY NEW NODE, SPECIFICALLY to ACCOMMODATE this HIGH-PRIORITY,
+     PENDING work -- WITH GENUINE URGENCY, since IT'S a HIGH-PRIORITY WORKLOAD
+```
+Because the Cluster Autoscaler is aware of Pod priority when deciding what to provision capacity for, a genuinely critical, high-priority workload can trigger both preemption of lower-priority Pods *and*, if that alone isn't sufficient, provisioning of entirely new node capacity — while a lower-priority pending Pod might simply continue waiting, since the autoscaler (and the scheduler's own preemption logic) prioritizes ensuring the more critical workload actually gets to run first.
+
+**Why this two-layer interaction (Priority/Preemption plus Cluster Autoscaler) provides a more nuanced response to capacity pressure than either mechanism alone:** Preemption (covered earlier) can immediately free up *existing* capacity by evicting lower-priority Pods, without waiting for a new node to actually be provisioned (which takes real time) — the Cluster Autoscaler is triggered specifically when even preemption isn't enough, providing a second, slower-but-more-substantial layer of response specifically reserved for when existing capacity, even after eviction, genuinely isn't sufficient.
+
+**Common Pitfall:** assuming every pending Pod triggers Cluster Autoscaler node provisioning equally, regardless of priority — a cluster under sustained capacity pressure from many competing, differently-prioritized pending Pods can end up with lower-priority ones waiting indefinitely while the autoscaler and scheduler's preemption logic prioritize provisioning/evicting specifically on behalf of higher-priority workloads first, a nuance worth understanding when diagnosing why some pending Pods seem to get capacity far faster than others.
+
+---
+
 ---

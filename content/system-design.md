@@ -1689,4 +1689,76 @@ Because even a perfectly healthy, fully-connected distributed system still has t
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is the CDN Cache Invalidation/Purge challenge, and how does invalidating a specific cached object across thousands of geographically distributed edge nodes differ from invalidating one single, centralized cache?**
+
+Invalidating an entry in a single, centralized cache (covered under Performance) is straightforward — remove one entry from one place. A CDN (covered elsewhere) replicates cached content across potentially thousands of geographically distributed edge locations worldwide; purging a specific object means propagating that invalidation instruction to every single one of those distributed edge nodes, a fundamentally more involved operation than a single-cache delete.
+
+```text
+SINGLE, CENTRALIZED cache -- invalidation is TRIVIAL:
+  DELETE key "product:5" -- ONE operation, against ONE cache -- IMMEDIATELY effective, EVERYWHERE
+
+CDN, with THOUSANDS of geographically DISTRIBUTED edge NODES -- invalidation must REACH EVERY ONE:
+  "Purge /products/5" -- must be PROPAGATED to EVERY SINGLE edge location WORLDWIDE that MIGHT
+  have CACHED this OBJECT -- this PROPAGATION itself takes GENUINE TIME (seconds, sometimes
+  LONGER) -- DURING that PROPAGATION WINDOW, DIFFERENT users, served by DIFFERENT edge NODES,
+  can SEE INCONSISTENT results -- SOME already PURGED and SERVING fresh content, OTHERS STILL
+  serving the OLD, now-STALE cached VERSION, UNTIL the PURGE fully PROPAGATES to THEM too
+```
+Because a purge instruction itself must travel across a distributed network of edge nodes (rather than executing instantaneously against one single location), there's an inherent propagation delay during which different users, served by different edge nodes, can genuinely see different (stale versus fresh) versions of the same content simultaneously — a fundamentally different consistency challenge than a single-cache invalidation, which is always immediately, uniformly effective the instant it executes.
+
+**Why most CDNs mitigate this with short TTLs combined with cache-busting URLs, rather than relying purely on explicit purge operations:** because purge propagation isn't instantaneous, many production systems avoid depending on it for time-critical updates at all — instead using short cache TTLs (bounding how long any staleness can persist) combined with cache-busting techniques (embedding a version/hash directly in the URL, so a genuinely new version is simply a *different* URL the CDN has never cached before, sidestepping the need to purge the old one at all).
+
+**Common Pitfall:** relying on an explicit CDN purge operation as if it were instantaneous and immediately, uniformly effective everywhere, for content where even a brief window of inconsistency (some users seeing stale content, others fresh) would be unacceptable — for genuinely time-critical updates, cache-busting via versioned URLs (avoiding the need to purge stale content at all, since the "new" content simply has a different URL) is typically the more reliable technique than depending on purge propagation speed across a globally-distributed edge network.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is Read Replica Lag, and how does a client reading from a replica immediately after writing to the primary risk seeing stale data — the "read-your-own-writes" problem, applied to the common relational read-replica scaling pattern?**
+
+A read replica (covered elsewhere, for scaling reads) receives its data via asynchronous replication from the primary — meaning there's always some window, however small, during which the replica's data lags behind the primary's actual, current state. A client that writes to the primary and then immediately reads from a replica can land inside that lag window, seeing data that doesn't yet reflect the write it just made.
+
+```text
+t=0ms:   Client WRITES "Balance = 50" to the PRIMARY database -- the PRIMARY now HAS this value
+t=5ms:   the SAME client IMMEDIATELY reads "Balance" -- but this READ is ROUTED to a READ REPLICA
+t=5ms:   the REPLICA hasn't YET received the REPLICATED update from the PRIMARY (REPLICATION LAG,
+         perhaps ONLY 20-50ms typically, but NON-ZERO) -- the CLIENT sees the OLD value, "Balance = 100"
+         -- EVEN THOUGH IT JUST, ITSELF, wrote "Balance = 50" MOMENTS EARLIER --
+```
+This is the exact same "read-your-own-writes" consistency concern covered under NoSQL's eventual-consistency discussion, here manifesting in the extremely common relational database read-replica scaling pattern — a client can, quite disorientingly, fail to see the effect of its own, very recent write, simply because its subsequent read happened to be routed to a replica that hadn't yet caught up.
+
+**Common mitigations, mirroring the NoSQL consistency-tuning techniques covered elsewhere:** routing a specific user's *own* subsequent reads back to the primary for some bounded window after they write (a "read-your-own-writes" session-affinity technique), or having the application explicitly wait for replication to catch up before reading from a replica — the same fundamental trade-offs (read-your-own-writes consistency versus read-scaling throughput) covered under NoSQL's consistency-level discussion apply identically here, just in the context of an ordinary relational read-replica setup rather than a purpose-built NoSQL database.
+
+**Common Pitfall:** routing every read indiscriminately to read replicas for load-balancing purposes, without special-casing the specific, common scenario of a user reading data they *just* wrote themselves — this produces a confusing, hard-to-reproduce user experience ("I just saved my profile, but it shows my old information!") caused entirely by replication lag, not any actual data-loss bug, and is precisely why many production systems route a user's own immediately-following read back to the primary specifically after they've just written.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Anycast routing, and how does it let multiple geographically distributed servers share the exact same IP address, with the network itself routing a client to the nearest one?**
+
+Anycast is a network-routing technique where the *same* IP address is announced from multiple, geographically distributed physical locations simultaneously — the underlying network routing protocol (BGP) automatically directs each client's traffic to whichever announcing location is "nearest" from that specific client's own position in the network topology, all without the client needing any awareness that multiple physical servers even exist behind that one IP address.
+
+```text
+ORDINARY (Unicast) -- ONE IP address, ONE specific physical SERVER/location:
+  1.2.3.4  ->  ALWAYS routes to the EXACT SAME physical DATACENTER, REGARDLESS of WHERE
+                the CLIENT making the request is ACTUALLY located
+
+ANYCAST -- the SAME IP address, ANNOUNCED from MULTIPLE geographically DISTRIBUTED locations:
+  1.2.3.4  is ANNOUNCED from: New York, London, Singapore, Sydney -- SIMULTANEOUSLY
+  -- a CLIENT in EUROPE, connecting to 1.2.3.4, gets ROUTED (via BGP's OWN routing decisions)
+     to the LONDON announcement -- the NEAREST one, in NETWORK terms
+  -- a CLIENT in ASIA, connecting to the EXACT SAME 1.2.3.4, gets ROUTED to SINGAPORE instead
+  -- NEITHER client NEEDED to KNOW MULTIPLE locations even EXIST -- the NETWORK ITSELF handled it
+```
+Because the routing decision happens at the network layer itself (via BGP, before any application-level logic like DNS-based routing, covered under Azure's Traffic Manager discussion, is ever even involved), Anycast provides extremely fast, connection-time proximity routing with no DNS resolution/caching delay at all — this is precisely the underlying mechanism behind Azure Front Door's "Split TCP" architecture (covered earlier) and most major CDNs' edge-routing behavior, letting a client's very first packet already land at a nearby physical location.
+
+**Why this differs fundamentally from DNS-based geo-routing (covered under Azure's Traffic Manager discussion):** DNS-based routing makes its "nearest region" decision once, at DNS resolution time, with the result then cached by the client/resolver for the DNS record's TTL duration — Anycast's routing decision happens at the network (BGP) layer, for every single connection, with no DNS caching lag at all, which is exactly why Anycast-based systems (Front Door, most CDNs) can react to a failing location's withdrawal from the Anycast announcement almost immediately, without waiting on any DNS TTL to expire.
+
+**Common Pitfall:** conflating Anycast-based routing with DNS-based geo-routing as though they were the same underlying mechanism, simply because both aim at directing a client to a "nearby" server — they operate at genuinely different layers of the network stack (BGP-level routing versus DNS resolution), with meaningfully different failover characteristics (Anycast's near-instant re-routing when a location withdraws its announcement, versus DNS's TTL-bound caching delay, covered under Azure's Traffic Manager discussion) that matter significantly when reasoning about a system's actual failover speed.
+
+---
+
 ---

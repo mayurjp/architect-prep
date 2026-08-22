@@ -1137,4 +1137,76 @@ Because Capabilities operate at a finer granularity than the simple root-versus-
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is a Docker Build Context, and how does the directory you run `docker build` from determine which files are available to `COPY`/`ADD` instructions — and why does an unnecessarily large build context slow down every build?**
+
+The Build Context is the entire directory (and everything beneath it) that gets sent to the Docker daemon when a build starts — every `COPY`/`ADD` instruction can only reference files within this context, and the *entire* context is transferred to the daemon before the build even begins, regardless of which specific files any individual instruction actually ends up copying.
+
+```bash
+docker build -t myapi .
+# the "." means: "the CURRENT directory is the BUILD CONTEXT" -- EVERYTHING in it (INCLUDING
+# node_modules/, .git/, LOG files, ANYTHING else sitting in THAT directory TREE) gets SENT to
+# the Docker daemon FIRST, BEFORE the build's FIRST INSTRUCTION even RUNS
+```
+```dockerfile
+COPY . /app  # can ONLY copy files that WERE PART OF the build CONTEXT sent ABOVE --
+             # a file OUTSIDE the build context DIRECTORY simply CANNOT be referenced AT ALL
+```
+If the build context directory happens to contain a large `.git` folder, gigabytes of accumulated log files, or a bloated `node_modules` directory that isn't actually needed for the image, all of that gets transferred to the daemon on *every single build*, even though none of it is ever actually copied into the resulting image — a `.dockerignore` file (covered elsewhere) excludes such directories from the context entirely, keeping builds meaningfully faster by avoiding this wasted transfer.
+
+**Common Pitfall:** running `docker build` from a directory containing large, irrelevant files/folders (a full `.git` history, build artifacts, log files) without a `.dockerignore` file excluding them — every single build pays the cost of transferring this unnecessary data to the daemon, even though it's never actually used by any `COPY`/`ADD` instruction, a straightforward, easily-fixed source of unnecessarily slow build times.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is a Docker Compose Profile, and how does it let you define services that only start when a specific profile is explicitly activated — such as debug-only tooling services?**
+
+Compose Profiles let you tag specific services in a `docker-compose.yml` file with one or more named profiles — those services only start when their profile is explicitly requested, letting a single Compose file define both a "normal" set of services and additional, optional ones (debugging tools, an admin UI) that stay dormant unless specifically needed.
+
+```yaml
+services:
+  api:
+    image: myapi:latest
+    # NO profile specified -- ALWAYS starts, REGARDLESS of ANY profile being activated
+
+  pgadmin:
+    image: dpage/pgadmin4
+    profiles: ["debug"]  # ONLY starts if the "debug" PROFILE is EXPLICITLY activated
+```
+```bash
+docker compose up                    # starts ONLY 'api' -- 'pgadmin' stays DORMANT, NOT started AT ALL
+docker compose --profile debug up    # starts BOTH 'api' AND 'pgadmin' -- the DEBUG profile was ACTIVATED
+```
+Because `pgadmin` only starts when the `debug` profile is explicitly requested, everyday development (or CI) runs stay lean, without needing to start (and consume resources for) an admin UI or debugging tool nobody's actually using right now — while still keeping that tooling's definition conveniently available in the exact same Compose file, ready to activate with a single flag whenever it's actually needed.
+
+**Common Pitfall:** maintaining two entirely separate `docker-compose.yml` files (one lean, "everyday" version and a separate, "with debugging tools" version) to achieve the same effect Profiles provide natively — this duplicates the shared service definitions across both files, risking them drifting out of sync; Profiles let one single Compose file serve both purposes, without any duplication at all.
+
+---
+
+## Advanced — Question 15
+
+**Q15: How does a Multi-Stage Build's `COPY --from=<image>` referencing an external, third-party image directly (not just a previous build stage) let you copy a pre-built artifact from a published image without building it yourself?**
+
+Multi-stage builds (covered earlier) typically copy artifacts *between the build's own stages* — but `COPY --from` can also reference an entirely separate, already-published image directly, letting you pull a specific file or tool out of someone else's published image without needing to build that tool from source yourself at all.
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+
+# COPY a specific, PRE-BUILT binary DIRECTLY from a THIRD-PARTY, ALREADY-PUBLISHED image --
+# NOT a PREVIOUS stage of THIS Dockerfile -- an ENTIRELY SEPARATE, EXTERNALLY published image
+COPY --from=grafana/grafana:latest /usr/share/grafana/bin/grafana /usr/local/bin/grafana
+
+# ANOTHER common example -- copying a HEALTH-CHECK utility from a DEDICATED, THIRD-PARTY image
+COPY --from=docker/dockerfile:1 /some-tool /usr/local/bin/some-tool
+```
+Because `grafana/grafana:latest` already contains a fully-built Grafana binary, referencing it directly via `COPY --from` avoids needing to install a build toolchain, clone Grafana's source, and compile it yourself just to obtain that one binary — the already-published, pre-built image serves as a ready-made source for exactly the file(s) actually needed, without pulling in that image's entire runtime as a base layer of your own image at all.
+
+**Why this specifically differs from simply using that image as your own `FROM` base:** using `grafana/grafana:latest` as your actual base image would inherit its *entire* filesystem/runtime as part of your image — `COPY --from` instead extracts just the one specific file(s) you actually need from it, keeping your own final image's base (`aspnet:8.0`, in the example) as the actual foundation, with only a narrow, specific artifact borrowed from the other image.
+
+**Common Pitfall:** installing a build toolchain and compiling a tool from source inside your own Dockerfile, when a pre-built, official image already publishes exactly the binary you need — `COPY --from=<published-image>` avoids the added complexity, build time, and image bloat of building that tool yourself, when the artifact you actually need is already available, pre-built, in a third-party image's own filesystem.
+
+---
+
 ---

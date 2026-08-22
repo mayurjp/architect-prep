@@ -1874,4 +1874,80 @@ Because the mesh's proxies make this routing decision at the request level (not 
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a Service-Level Indicator (SLI), and how does it relate to the Service-Level Objective (SLO, covered earlier) as the actual, measured metric an SLO is built on top of?**
+
+An SLI is the specific, concrete metric actually being measured (request latency, error rate) — an SLO (covered earlier) is a target *threshold* built on top of that SLI ("99% of requests measured by this SLI complete in under 200ms"). Without a well-defined SLI, an SLO has no actual metric to be measured against at all.
+
+```text
+SLI (the METRIC ITSELF, PRECISELY defined):
+  "Request Latency" = the TIME from when the SERVER receives a REQUEST to when it SENDS the
+  FIRST byte of the RESPONSE, MEASURED at the LOAD BALANCER, EXCLUDING requests to the /health endpoint
+
+SLO (a TARGET THRESHOLD, BUILT ON TOP of the SLI ABOVE, covered EARLIER):
+  "99% of requests (as MEASURED by the Latency SLI ABOVE) complete in UNDER 200ms, over a
+  ROLLING 30-day WINDOW"
+
+ERROR BUDGET (covered EARLIER, DERIVED from the SLO):
+  "1% of requests are ALLOWED to EXCEED 200ms BEFORE the SLO itself is CONSIDERED violated"
+```
+Because the SLI precisely defines *what* is actually being measured (down to exactly where the measurement is taken, and what's excluded), teams can avoid a common, subtle failure mode: two teams agreeing on an SLO's numeric target ("99% under 200ms") while silently measuring completely different things (one measuring at the load balancer, another measuring inside the application, producing genuinely different numbers for what's nominally "the same" SLO) — the SLI is what actually pins down that ambiguity.
+
+**Common Pitfall:** setting an SLO target (a percentage and a threshold) without first precisely defining the underlying SLI — two teams can genuinely disagree about whether an SLO is being met, not because of an actual dispute about performance, but because they're measuring completely different things under the same vague label ("latency"), a confusion that a precisely-defined SLI is specifically meant to eliminate.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is Dual Writing as an anti-pattern during a Strangler-Fig-style migration, and why does writing to both the old and new data stores directly from application code — rather than via CDC/Outbox (covered under Messaging) — risk the two stores silently diverging?**
+
+During a migration from a legacy monolith's database to a new microservice's own store, a tempting shortcut is having application code write to *both* stores directly, in the same code path — Dual Writing is the name for this anti-pattern, and it carries the exact same "two writes, no shared transaction" risk covered under the Outbox Pattern's original motivation: if the second write fails after the first succeeds, the two stores silently diverge, with no automatic mechanism catching the inconsistency.
+
+```csharp
+// DUAL WRITING -- an ANTI-PATTERN -- writes to BOTH stores DIRECTLY, from APPLICATION code
+public async Task UpdateCustomerAddress(int customerId, Address newAddress)
+{
+    await _legacyDb.UpdateAddressAsync(customerId, newAddress);   // WRITE 1 -- the OLD, legacy STORE
+    await _newMicroserviceDb.UpdateAddressAsync(customerId, newAddress); // WRITE 2 -- the NEW STORE
+    // -- IF the APPLICATION CRASHES, or WRITE 2 FAILS, RIGHT BETWEEN these TWO calls --
+    // -- the LEGACY store and the NEW store are NOW SILENTLY, PERMANENTLY OUT OF SYNC --
+}
+```
+This is precisely the same fundamental problem the Outbox Pattern (covered under Messaging) was introduced specifically to solve — two separate writes with no shared transaction spanning both are inherently vulnerable to a partial failure leaving them permanently inconsistent, and Dual Writing during a migration is simply this exact anti-pattern reappearing in a new context (migrating data between an old and new store) rather than its original one (publishing an event alongside a database write).
+
+**Why CDC (covered under Messaging) is the standard, safer alternative for exactly this migration scenario:** rather than application code explicitly writing to both stores, Change Data Capture taps the *legacy* database's own transaction log, automatically propagating every committed change to the new store asynchronously — the legacy write only ever needs to succeed against its own, single database (no dual-write risk at the application level at all), with CDC's own, separately-engineered reliability mechanisms handling propagation to the new store, rather than relying on ad-hoc application-level dual-write code to keep both stores in sync.
+
+**Common Pitfall:** implementing Dual Writing as a seemingly simple, quick way to keep a legacy and a new store synchronized during a migration, without recognizing it reintroduces the exact same "two writes, no shared transaction" risk the Outbox Pattern (covered under Messaging) exists specifically to solve — CDC-based synchronization (tapping the legacy database's own transaction log) is the standard, more reliable alternative specifically for this migration scenario, avoiding the silent-divergence risk Dual Writing carries.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is the Bulkhead pattern, and how does isolating separate resource pools per downstream dependency prevent one failing dependency from exhausting resources needed by calls to other, unrelated dependencies?**
+
+Named after a ship's watertight bulkheads (a hull breach in one compartment doesn't flood the entire ship), the Bulkhead pattern isolates the resources (thread pool slots, connection pool capacity) used to call one specific downstream dependency from the resources used to call every *other* dependency — so a single failing/slow dependency can only ever exhaust *its own* allotted resources, never starving calls to unrelated, healthy dependencies of the resources they need.
+
+```csharp
+// WITHOUT bulkheads -- ALL downstream calls SHARE ONE SINGLE, COMMON resource POOL
+// -- a SLOW/HANGING PaymentService call can CONSUME EVERY available THREAD/CONNECTION,
+//    STARVING calls to a COMPLETELY UNRELATED, HEALTHY InventoryService of ANY resources AT ALL
+
+// WITH bulkheads -- SEPARATE, ISOLATED resource POOLS, PER DOWNSTREAM dependency
+services.AddHttpClient("PaymentService")
+    .AddPolicyHandler(Policy.BulkheadAsync<HttpResponseMessage>(maxParallelization: 10)); // ITS OWN, ISOLATED pool
+
+services.AddHttpClient("InventoryService")
+    .AddPolicyHandler(Policy.BulkheadAsync<HttpResponseMessage>(maxParallelization: 10)); // a SEPARATE, ISOLATED pool
+// -- PaymentService HANGING can ONLY EVER exhaust ITS OWN 10-SLOT pool -- InventoryService calls
+//    CONTINUE to have THEIR OWN, SEPARATE 10 slots AVAILABLE, COMPLETELY UNAFFECTED --
+```
+Because each downstream dependency has its own dedicated, bounded resource allocation, a failure mode specific to one dependency (a hanging connection, exhausted retries) is contained entirely within that dependency's own bulkhead — directly preventing the exact cascading-failure scenario covered under an earlier scenario (`OrderService`'s database exhaustion cascading into `CartService`/`CatalogService` crashing), which is precisely the class of failure Bulkheads are specifically designed to contain.
+
+**Why this specifically complements (rather than replaces) Circuit Breakers and Timeouts, covered earlier as part of the same resilience-pattern family:** a Circuit Breaker stops calling an *already-known-to-be-failing* dependency — a Bulkhead limits the *blast radius* of a dependency that's failing right now, in a way not yet detected/tripped by its circuit breaker; the two patterns are complementary layers of the same overall resilience strategy, often deployed together, each addressing a different aspect of containing a downstream failure's impact.
+
+**Common Pitfall:** sharing one single, common connection/thread pool across calls to every downstream dependency, relying solely on Circuit Breakers/Timeouts (covered earlier) for resilience — without Bulkhead-style resource isolation, even a Circuit Breaker that eventually trips can't undo the resource exhaustion that already occurred *before* it tripped, since a shared pool lets one dependency's problems directly consume resources every *other* dependency's calls also need, precisely the cascading-failure scenario covered under an earlier scenario that Bulkhead isolation specifically exists to prevent.
+
+---
+
 ---
