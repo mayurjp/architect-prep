@@ -1621,4 +1621,101 @@ Because establishing a new stream/connection has real overhead (a TLS handshake,
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is a `.proto` file's `import` statement, and how does splitting a large API's message/service definitions across multiple files avoid one single, unwieldy monolithic `.proto` file?**
+
+`import` lets one `.proto` file reference message/service types defined in a *different* `.proto` file — letting a large API's schema be organized into multiple, logically-grouped files (common types in one, order-related messages in another) rather than accumulating everything into a single, ever-growing file.
+
+```protobuf
+// common.proto
+syntax = "proto3";
+message Money { int64 amountCents = 1; string currency = 2; }
+
+// orders.proto
+syntax = "proto3";
+import "common.proto"; // IMPORTS the "Money" type DEFINED in a DIFFERENT file
+
+message Order {
+  int32 id = 1;
+  Money total = 2; // REUSES the shared "Money" type, WITHOUT redefining it HERE
+}
+```
+
+```text
+WITHOUT import: EVERY .proto file that needs "Money" would need to REDEFINE it ITSELF --
+  DUPLICATED definitions, RISKING them DRIFTING out of SYNC with each OTHER over TIME
+
+WITH import: "Money" is defined ONCE, in common.proto -- EVERY OTHER file that needs it
+  simply IMPORTS it -- ONE single, SHARED, CONSISTENT definition, REUSED EVERYWHERE
+```
+
+Because `import` lets shared, commonly-reused types be defined exactly once and referenced from many files, a large API's schema can be organized modularly (by domain area, by team ownership) rather than forcing every message definition into one increasingly unwieldy monolithic file — directly analogous to how splitting a large C# codebase into multiple files/namespaces avoids one giant, unmanageable source file.
+
+**Common Pitfall:** duplicating a commonly-shared message type's definition independently across multiple `.proto` files instead of defining it once and importing it — this risks the duplicated definitions silently drifting apart from each other over time as one file's copy is updated without the others being kept in sync, reintroducing exactly the "single source of truth" problem `.proto`'s shared-schema approach (covered elsewhere) is meant to solve.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: How does `grpc.ChainUnaryInterceptor` compose multiple interceptors in a defined order, and why does explicit ordering matter when one interceptor's behavior (authentication) must run before another's (logging the authenticated user)?**
+
+Chaining multiple interceptors together executes them in the exact order they're registered — each one wrapping the next, similar to a middleware pipeline (covered under ASP.NET Core) — meaning an interceptor that needs information another interceptor produces (a logging interceptor wanting to record *which user* made a call) must be registered *after* the interceptor that actually establishes that information (an authentication interceptor).
+
+```csharp
+services.AddGrpc(options =>
+{
+    options.Interceptors.Add<AuthenticationInterceptor>(); // MUST run FIRST -- establishes WHO the caller is
+    options.Interceptors.Add<LoggingInterceptor>();          // runs SECOND -- can NOW log the AUTHENTICATED user's identity
+});
+```
+
+```text
+WRONG order: LoggingInterceptor registered BEFORE AuthenticationInterceptor -- by the TIME
+  logging RUNS, authentication HASN'T happened YET -- the LOG entry has NO IDEA who the
+  ACTUAL authenticated caller IS
+
+CORRECT order: AuthenticationInterceptor FIRST -- establishes the caller's IDENTITY -- THEN
+  LoggingInterceptor runs, and CAN NOW correctly LOG "user X called THIS method"
+```
+
+Because each interceptor in the chain executes wrapping the next (mirroring exactly how ASP.NET Core middleware ordering, covered elsewhere, determines which middleware's logic runs before another's), getting the registration order right is essential whenever one interceptor's cross-cutting concern genuinely depends on another's having already run — an authentication check must precede anything downstream that assumes the caller's identity is already known.
+
+**Common Pitfall:** registering interceptors in an order that doesn't reflect their actual logical dependencies (a logging interceptor registered before an authentication interceptor it implicitly relies on) — this produces subtly incorrect behavior (logs missing the authenticated user's identity) that's easy to overlook until specifically investigated, since the interceptor chain still executes without any error, just with the wrong ordering of cross-cutting concerns.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is gRPC's Retry Throttling, and how does capping the overall retry rate — rather than just a per-call retry count — prevent a widespread, transient outage from being made worse by every client's retries combining into a retry storm?**
+
+A per-call retry policy (covered earlier) limits how many times *one specific call* retries — but during a genuine, widespread outage, *every* client making *every* call might simultaneously be retrying, and the combined volume of all those retries together can itself overwhelm a downstream service that's already struggling, making the outage worse rather than better. Retry Throttling caps the *aggregate* rate of retries a client is willing to make across all its calls combined, backing off from retrying altogether once that aggregate budget is exhausted, rather than each individual call retrying in isolation with no awareness of how many other calls are also currently retrying.
+
+```csharp
+var retryThrottling = new RetryThrottlingPolicy
+{
+    MaxTokens = 10,        // a "token bucket" (covered under System Design) for RETRIES specifically
+    TokenRatio = 0.1        // EACH retry consumes TOKENS -- EACH SUCCESS replenishes them SLIGHTLY
+};
+// once the TOKEN bucket is EXHAUSTED (too MANY retries HAPPENING, too FEW successes), FURTHER
+// retries are SUPPRESSED ENTIRELY, REGARDLESS of any INDIVIDUAL call's own retry policy allowing MORE
+```
+
+```text
+WITHOUT retry throttling: DURING a widespread outage, EVERY client's EVERY call retries
+  INDEPENDENTLY, per ITS OWN policy -- the COMBINED volume of ALL these retries, ACROSS ALL
+  clients, can ITSELF overwhelm the ALREADY-struggling downstream service -- MAKING the
+  outage WORSE, a "RETRY STORM"
+
+WITH retry throttling: the AGGREGATE retry RATE, ACROSS all calls FROM a given client, is
+  CAPPED -- once TOO MANY retries are HAPPENING relative to SUCCESSES, FURTHER retries are
+  SUPPRESSED -- REDUCING the ADDED load on an ALREADY-struggling downstream SERVICE
+```
+
+Because a per-call retry policy alone has no visibility into how many *other* calls are simultaneously also retrying, it can't prevent a system-wide retry storm during a genuinely widespread outage — Retry Throttling's aggregate, token-bucket-based limit specifically addresses this system-level concern, complementing (rather than replacing) the per-call retry policy's own individual-call-level logic.
+
+**Common Pitfall:** configuring a generous per-call retry policy (several retries, exponential backoff) without also configuring Retry Throttling at the aggregate level — during an isolated, single-call failure this works fine, but during a genuinely widespread outage affecting many concurrent calls simultaneously, the combined retry volume across all of them (each individually "well-behaved" per its own policy) can still collectively overwhelm an already-struggling downstream service, exactly the retry-storm scenario Retry Throttling exists to prevent.
+
+---
+
 ---

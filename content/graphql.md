@@ -1707,4 +1707,94 @@ Because both published variants derive automatically from one single, maintained
 
 ---
 
+## Beginner — Question 17
+
+**Q17: How does the placement of the `!` non-null marker in `[String!]!` versus `[String]` precisely control what can and cannot be null at each level of a list field?**
+
+Each `!` applies specifically to whatever it immediately follows — `[String!]!` means the list itself can never be null (the outer `!`) *and* no individual element inside it can be null either (the inner `!`), while `[String]` means both the list itself *and* any individual element within it are allowed to be null.
+
+```graphql
+type Query {
+  tags: [String!]!    # the LIST itself is NEVER null, AND no individual STRING inside it is EVER null
+  categories: [String]  # the LIST itself MIGHT be null, AND individual elements MIGHT ALSO be null
+}
+```
+
+```text
+[String!]!  -- outer "!" -> the LIST itself CANNOT be null (an EMPTY list [] is FINE, but NOT null)
+             -- inner "!" -> NO element WITHIN the list can be null (e.g. ["a", null, "c"] is INVALID)
+
+[String]    -- NEITHER "!" present -- the ENTIRE list CAN be null, AND/OR individual elements
+               WITHIN it CAN ALSO be null (e.g. null, or ["a", null, "c"], are BOTH valid)
+```
+
+Because each `!` operates independently at its own specific position, a schema author can precisely express exactly which combination of nullability guarantees a field actually provides — `[String!]` (list nullable, but elements never null) and `[String]!` (list never null, but elements can be) are both valid, meaningfully different combinations beyond just the two extremes shown above.
+
+**Common Pitfall:** treating a single `!` as applying to "the whole field" rather than understanding it operates precisely at the specific syntactic position it appears — misreading `[String!]!` as somehow different from what its two independent `!` markers actually specify can lead to writing client code that doesn't correctly handle a genuinely possible `null` (or incorrectly assumes one is possible when the schema guarantees otherwise).
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is the distinction between a GraphQL Interface and a Union type specifically in terms of whether the possible member types are required to share any common fields at all?**
+
+An Interface (covered earlier) requires every implementing type to include *all* of the interface's declared fields — a Union has no such requirement at all; its member types can be completely unrelated, sharing zero fields in common, since a Union simply says "this field returns one of these listed types," without any shared-field contract between them.
+
+```graphql
+interface Vehicle { id: ID!, name: String! }  # EVERY implementing type MUST include BOTH "id" AND "name"
+type Car implements Vehicle { id: ID!, name: String!, wheels: Int! }
+type Boat implements Vehicle { id: ID!, name: String!, displacement: Float! }
+
+union SearchResult = Product | Order | Customer  # these THREE types share ZERO common fields --
+                                                    # a Union imposes NO shared-field requirement AT ALL
+```
+
+```text
+Interface: implementing types MUST share a COMMON set of fields -- a QUERY can select those
+  SHARED fields DIRECTLY, without an inline fragment, since EVERY possible type GUARANTEES them
+
+Union: member types can be COMPLETELY UNRELATED -- a QUERY MUST use inline fragments
+  (`... on Product { ... }`) for EVERY field, since there's NO guaranteed COMMON field AT ALL
+  (not even an "id") UNLESS a query EXPLICITLY selects the SAME field NAME across MULTIPLE
+  inline fragments for DIFFERENT types
+```
+
+Because a Union makes no assumption that its member types have anything structurally in common, it's the right choice for a genuinely heterogeneous "one of several, unrelated types" field (a search result spanning entirely different entity kinds) — while an Interface is the right choice when multiple types genuinely *do* share a meaningful common shape (several vehicle types all having an `id` and `name`) that a query might want to select without needing type-specific inline fragments for those shared fields.
+
+**Common Pitfall:** using a Union type for a set of types that actually share substantial common fields, forcing every query against it to write repetitive inline fragments just to select those shared fields for every possible type — when types genuinely share meaningful common structure, an Interface (letting shared fields be selected once, directly) is the better-fitting, less repetitive choice.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What are GraphQL Federation Entity Interfaces — interfaces spanning across multiple subgraphs — and how do they let a query return a mix of entity types contributed by different subgraphs, all satisfying one shared interface?**
+
+An ordinary GraphQL Interface (covered earlier) is defined and fully resolved within a single schema — a Federation Entity Interface extends this concept across subgraph boundaries: multiple different subgraphs can each contribute their own Entity type implementing a shared interface, and a query against that interface field returns a properly-typed mix of entities from *different* subgraphs, all satisfying the same interface contract.
+
+```graphql
+# Subgraph A defines the interface itself
+interface Media @key(fields: "id") { id: ID!, title: String! }
+
+# Subgraph A also contributes one implementing Entity
+type Book implements Media @key(fields: "id") { id: ID!, title: String!, author: String! }
+
+# Subgraph B, an ENTIRELY DIFFERENT subgraph, contributes ANOTHER implementing Entity
+type Movie implements Media @key(fields: "id") { id: ID!, title: String!, director: String! }
+```
+
+```text
+A CLIENT queries: "{ search(term: "space") { id title ... on Book { author } ... on Movie { director } } }"
+
+The GATEWAY's query plan FETCHES matching Books from Subgraph A AND matching Movies from
+  Subgraph B -- BOTH satisfy the SHARED "Media" interface -- the CLIENT receives ONE combined,
+  correctly-typed LIST mixing BOTH entity KINDS, EACH contributed by a COMPLETELY DIFFERENT
+  subgraph, as if they came from ONE single, UNIFIED graph
+```
+
+Because the interface contract spans subgraph boundaries rather than being confined to one schema, Federation Entity Interfaces let a genuinely distributed system (where different teams own different entity types) still present a single, coherent polymorphic field to clients — extending the single-subgraph Interface concept (covered earlier) to work correctly across the multi-subgraph composition Federation itself is built around.
+
+**Common Pitfall:** assuming an ordinary, single-subgraph Interface (covered earlier) automatically works the same way once multiple subgraphs each try to implement it independently — Federation requires the interface itself (and each implementing type) to be explicitly declared with Federation-specific directives (`@key`, and the interface's own federation-aware declaration) for the Gateway to correctly compose results across subgraphs; simply defining the same interface name in multiple subgraphs without this explicit federation wiring doesn't automatically produce the correct cross-subgraph composition.
+
+---
+
 ---

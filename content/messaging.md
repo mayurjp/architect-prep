@@ -1480,4 +1480,84 @@ Because the transaction spans both the "produce this new message" and "commit th
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is the difference between a Message Header and the Message Body, and how does putting routing/metadata information in headers let a broker or consumer make decisions without needing to deserialize the entire body first?**
+
+The Body carries the actual business payload (an order's details, a JSON document) — Headers carry metadata *about* the message (its type, a correlation ID, routing information) that a broker or an early-stage consumer can inspect cheaply, without needing to parse or deserialize the full body just to make a routing or filtering decision.
+
+```csharp
+var properties = channel.CreateBasicProperties();
+properties.Headers = new Dictionary<string, object>
+{
+    { "messageType", "OrderCreated" }, // a BROKER-level routing DECISION can be made from THIS header alone
+    { "correlationId", "abc-123" }
+};
+channel.BasicPublish(exchange: "orders", routingKey: "order.created",
+    basicProperties: properties, body: orderJsonBytes); // the ACTUAL payload -- POTENTIALLY large, EXPENSIVE to parse
+```
+
+```text
+A broker/router INSPECTING "messageType" from the HEADER can decide WHICH queue(s) to route
+  to WITHOUT ever needing to PARSE the (potentially large, complex) JSON body AT ALL --
+  MUCH CHEAPER than deserializing the ENTIRE payload JUST to make a ROUTING decision
+```
+
+Because headers are typically small, structured, and cheap to read compared to a potentially large, arbitrarily-shaped body, routing/filtering logic (at the broker level, or in an early-stage consumer that needs to quickly decide "is this message relevant to me") benefits from checking headers first — avoiding the cost of fully deserializing a body that might turn out to be irrelevant to that specific check.
+
+**Common Pitfall:** embedding routing/filtering-relevant information only inside the message body, requiring every routing decision to first fully deserialize the entire payload — for large or complex payloads, this adds unnecessary parsing overhead to what should be a cheap, header-based routing decision; metadata genuinely needed for routing/filtering purposes belongs in headers, reserving the body for the actual business payload.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is RabbitMQ's Quorum Queue, as a modern replacement for the older Classic Mirrored Queue, and how does its Raft-consensus-based replication provide stronger data-safety guarantees during a broker node failure?**
+
+Classic Mirrored Queues replicate a queue's data across multiple nodes, but their replication protocol has known edge cases where data can be lost or duplicated during certain failure scenarios (a network partition, an unclean node restart) — Quorum Queues instead use the Raft consensus protocol (the same class of algorithm covered under System Design's leader-election discussion) to replicate data, providing a much stronger, formally-proven consistency guarantee during node failures.
+
+```bash
+# Declaring a Quorum Queue (rather than a Classic queue)
+channel.QueueDeclare(queue: "orders-queue", durable: true, arguments:
+    new Dictionary<string, object> { { "x-queue-type", "quorum" } });
+```
+
+```text
+Classic Mirrored Queue: replication has KNOWN edge cases where, during CERTAIN failure
+  scenarios (a NETWORK partition, an UNCLEAN restart), data can be LOST or DUPLICATED --
+  the REPLICATION protocol itself is NOT built on a FORMALLY-proven consensus algorithm
+
+Quorum Queue: uses RAFT consensus (covered under System Design) -- a WRITE is only
+  considered SUCCESSFUL once a MAJORITY (QUORUM) of replicas have DURABLY recorded it --
+  a FORMALLY-PROVEN, STRONGER consistency guarantee during NODE failures
+```
+
+Because Raft's majority-quorum-based replication is a well-established, formally analyzed consensus algorithm (directly analogous to how it underlies leader election in other distributed systems, covered under System Design), Quorum Queues provide meaningfully stronger data-safety guarantees during broker failures than Classic Mirrored Queues' older replication mechanism — which is why RabbitMQ's own documentation now recommends Quorum Queues as the default choice for genuinely important, durability-sensitive data.
+
+**Common Pitfall:** continuing to use Classic Mirrored Queues for genuinely critical, durability-sensitive workloads out of familiarity or legacy configuration, unaware that Quorum Queues provide meaningfully stronger, better-understood consistency guarantees during broker node failures — for new deployments (and increasingly for existing ones being modernized), Quorum Queues are the recommended default specifically because of this stronger, Raft-backed guarantee.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is Kafka's Tiered Storage, and how does offloading older log segments to cheaper, remote object storage — while keeping recent segments on fast local disk — let a topic retain data for much longer without proportionally increasing broker-local disk cost?**
+
+Ordinarily, a Kafka broker must keep an entire topic's retained data on its own local disks — Tiered Storage instead automatically moves older log segments to cheaper, remote object storage (like S3 or Azure Blob), while keeping only the most recent, actively-read segments on the broker's fast local disk, letting retention windows extend to weeks or months without requiring proportionally more expensive local broker storage.
+
+```text
+WITHOUT Tiered Storage: retaining a topic's data for 90 DAYS requires 90 DAYS worth of
+  LOCAL BROKER DISK, for EVERY broker replica -- EXPENSIVE, FAST local disk, PROPORTIONAL
+  to the ENTIRE retention WINDOW
+
+WITH Tiered Storage: ONLY the MOST RECENT, actively-accessed segments (say, the LAST FEW
+  HOURS/DAYS) stay on FAST LOCAL disk -- OLDER segments are AUTOMATICALLY offloaded to
+  CHEAPER remote OBJECT storage -- a consumer NEEDING to read OLDER data STILL CAN (fetched
+  TRANSPARENTLY from remote storage), just with SOMEWHAT HIGHER latency than a LOCAL read
+```
+
+Because the overwhelming majority of real-world Kafka reads target *recent* data (a consumer processing the live stream, not replaying months-old history), Tiered Storage's design correctly optimizes for the common case (recent data stays fast, on local disk) while still supporting the rarer case (reading old, historical data) at a modest latency cost and dramatically lower storage cost — letting retention policies extend far longer than would be economically practical if every retained byte had to live on expensive, local broker disk.
+
+**Common Pitfall:** assuming Tiered Storage means data offloaded to remote storage becomes meaningfully slower or unavailable for genuinely infrequent, historical reads — the trade-off is specifically calibrated so that recent-data access (the overwhelming majority of real read traffic) remains just as fast as before, while historical reads (a much rarer access pattern) incur a modest, usually acceptable latency increase in exchange for the large storage-cost savings across the topic's extended retention window.
+
+---
+
 ---
