@@ -1248,4 +1248,91 @@ Because each pipeline stage's output is cached and keyed against its own specifi
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a C# `record struct` (C# 10), and how does it combine a `record`'s value-based equality with a `struct`'s stack-allocation, no-GC-pressure characteristics?**
+
+A `record class` (the default `record`) gives value-based equality but is still a reference type, allocated on the heap — a `record struct` gives that same automatically-generated value-based equality (and `ToString()`), while remaining a genuine value type, copied by value and eligible for stack allocation exactly like an ordinary `struct`.
+
+```csharp
+public record struct Point(int X, int Y); // a VALUE TYPE, WITH record's auto-generated equality/ToString
+
+var p1 = new Point(1, 2);
+var p2 = new Point(1, 2);
+Console.WriteLine(p1 == p2); // True -- VALUE-based equality, JUST like a record class
+
+Point[] points = new Point[1000]; // an ARRAY of 1000 VALUE-TYPE structs -- allocated as ONE CONTIGUOUS
+// block of MEMORY, NO separate heap allocation PER element -- unlike an array of 'record class' REFERENCES
+```
+Because `Point` here is a genuine value type, an array of 1,000 `Point` instances is one single contiguous memory block (exactly like an array of `int`s) rather than 1,000 separate heap-allocated objects referenced by pointers — for a scenario needing many small, equality-comparable, value-semantic objects at scale, `record struct` avoids the per-instance heap allocation and GC pressure a `record class` array of the same size would incur, while keeping the same convenient, auto-generated equality behavior.
+
+**Common Pitfall:** using `record struct` for a type that's frequently passed around and copied in ways that would be expensive for a larger struct (covered under the general struct-vs-class performance discussion) — `record struct` inherits all of an ordinary struct's copy-semantics trade-offs; it's best suited for small, genuinely value-like data, not as a blanket replacement for `record class` regardless of the type's actual size or usage pattern.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is a C# 8 `using` declaration (`using var x = ...;`, without braces), and how does it defer calling `Dispose()` until the end of the enclosing scope, rather than a narrower, explicitly-braced block?**
+
+A traditional `using` *statement* wraps a block in braces, calling `Dispose()` at the end of that specific block — a `using` *declaration* (no braces at all) instead defers disposal until the end of whatever *enclosing* scope the variable was declared in (the containing method, or block), letting multiple disposable resources be declared without progressively deeper nesting.
+
+```csharp
+// OLDER using STATEMENT -- requires NESTED braces, one level PER resource
+public void ProcessFile(string path)
+{
+    using (var reader = new StreamReader(path))
+    {
+        using (var writer = new StreamWriter("output.txt"))
+        {
+            // BOTH resources are disposed at the END of their OWN nested braces
+        }
+    }
+}
+
+// C# 8 using DECLARATION -- NO braces -- disposal is DEFERRED to the END of the ENCLOSING method
+public void ProcessFile(string path)
+{
+    using var reader = new StreamReader(path);       // disposed at the END of THIS METHOD
+    using var writer = new StreamWriter("output.txt"); // ALSO disposed at the END of THIS METHOD
+    // ... use BOTH, WITHOUT any nested braces AT ALL ...
+} // BOTH Dispose() calls happen HERE, in REVERSE declaration order, automatically
+```
+Because both `reader` and `writer` are disposed automatically at the closing brace of the *method itself* (not a narrower nested block), the code avoids the "staircase" of progressively-indented nested `using` blocks that using several resources with the older syntax would otherwise require — while still guaranteeing disposal happens (in reverse declaration order) no matter how the method actually exits, including via an exception.
+
+**Common Pitfall:** using a `using` declaration when a resource genuinely needs to be disposed *before* the rest of the method continues executing (releasing a file lock partway through a long method, for instance, before other, unrelated work in the same method proceeds) — a `using` declaration defers disposal to the *entire* enclosing scope's end, which is the wrong tool when earlier, more targeted disposal timing is actually required; the traditional braced `using` statement remains the right choice whenever disposal needs to happen at a specific, narrower point before the method's end.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is a `ref readonly` return, and how does it differ from an ordinary `ref return` by letting a method return a reference to internal data while preventing the caller from modifying it through that reference?**
+
+An ordinary `ref return` (returning a reference directly to an internal field, avoiding a copy) lets the *caller* freely modify the original data through that returned reference — `ref readonly` returns the same kind of direct reference (still avoiding a copy), but the compiler prevents the caller from assigning through it, giving read-only, no-copy access to the underlying data.
+
+```csharp
+public struct LargeMatrix
+{
+    private readonly double[,] _data;
+
+    // ORDINARY ref return -- the CALLER can FREELY modify the underlying array THROUGH this reference
+    public ref double GetElement(int row, int col) => ref _data[row, col];
+
+    // ref readonly return -- SAME no-copy access, but the CALLER CANNOT modify it THROUGH this reference
+    public ref readonly double GetElementReadOnly(int row, int col) => ref _data[row, col];
+}
+
+var matrix = new LargeMatrix();
+matrix.GetElement(0, 0) = 5.0;             // ALLOWED -- ordinary ref return permits MODIFICATION
+// matrix.GetElementReadOnly(0, 0) = 5.0;  -- COMPILE ERROR -- ref readonly FORBIDS modification THROUGH it
+```
+Because `ref readonly` still avoids copying the potentially-large `double` value (the entire point of using `ref` in the first place, for a large struct/value type, covered under the earlier struct-performance discussions) while structurally preventing the caller from mutating the original data through the returned reference, it lets an API expose fast, no-copy read access to internal data without also accidentally granting mutation rights the API author never intended to provide.
+
+**Common Pitfall:** using an ordinary `ref return` when the intent is only ever to provide fast, read-only access to internal data — without `readonly`, nothing in the type system stops a caller from mutating the returned reference's target directly, potentially corrupting internal state in ways the API was never designed to allow; `ref readonly` is the correct tool specifically when the performance benefit of avoiding a copy is wanted, but mutation through the reference should be structurally prevented, not just discouraged by convention or documentation.
+
+---
+
+---
+
+---
+
 ---

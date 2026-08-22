@@ -1583,4 +1583,96 @@ The Transparent variant lets client code treat every component completely unifor
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is a "Simple Factory" (not technically one of the 23 GoF patterns), and how does it differ from the true Factory Method pattern (covered earlier), which relies on inheritance and polymorphism?**
+
+A Simple Factory is a single static (or instance) method that creates and returns different concrete objects based on a parameter — a common, genuinely useful technique, but distinct from the actual Factory Method *pattern*, which specifically relies on *subclassing* a creator class to vary which concrete product gets created, through polymorphism rather than a parameter-driven `switch`.
+
+```csharp
+// SIMPLE FACTORY -- ONE method, a SWITCH/if-else DECIDING which CONCRETE type to CREATE, based on a PARAMETER
+public static class ShapeFactory
+{
+    public static IShape Create(string type) => type switch
+    {
+        "circle" => new Circle(),
+        "square" => new Square(),
+        _ => throw new ArgumentException("Unknown shape type")
+    };
+}
+
+// TRUE Factory Method PATTERN -- relies on INHERITANCE -- a SUBCLASS decides WHICH concrete product to create
+public abstract class ShapeCreator { public abstract IShape CreateShape(); } // the FACTORY METHOD itself
+public class CircleCreator : ShapeCreator { public override IShape CreateShape() => new Circle(); }
+public class SquareCreator : ShapeCreator { public override IShape CreateShape() => new Square(); }
+```
+The Simple Factory centralizes object creation in one convenient place, but adding a new shape type still requires modifying the *existing* factory method's `switch` statement (a direct Open/Closed Principle violation, covered elsewhere) — the true Factory Method pattern instead adds a new shape type by creating an entirely *new* subclass (`TriangleCreator`), without modifying any existing class at all, genuinely honoring OCP in a way the Simple Factory's centralized `switch` structurally cannot.
+
+**Common Pitfall:** calling any method that creates objects based on a parameter "the Factory Method pattern," regardless of whether it actually uses inheritance/polymorphism at all — Simple Factory is a perfectly legitimate, commonly-used technique in its own right, but it's a genuinely different thing from the GoF Factory Method pattern specifically; using the terms interchangeably muddies design-pattern vocabulary and can mislead someone expecting the OCP-friendly extensibility the *true* Factory Method pattern specifically provides.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is the Extension Object pattern, and how does it let new behavior be added to an object dynamically, per-instance, without modifying its class or relying on inheritance at all?**
+
+The Extension Object pattern lets a specific *instance* of an object acquire additional capabilities at runtime, by attaching a separate "extension" object implementing some additional interface — rather than every instance of a class gaining new behavior through a class-wide inheritance change, only the specific instances that actually need the extra capability carry it.
+
+```csharp
+public interface IExtension { }
+public interface IAuditableExtension : IExtension { void RecordAudit(string action); }
+
+public class Document
+{
+    private readonly Dictionary<Type, IExtension> _extensions = new();
+    public void AddExtension<T>(T extension) where T : IExtension => _extensions[typeof(T)] = extension;
+    public T GetExtension<T>() where T : IExtension => (T)_extensions.GetValueOrDefault(typeof(T));
+}
+
+var regularDoc = new Document(); // an ORDINARY document -- NO extra capabilities
+var auditedDoc = new Document();
+auditedDoc.AddExtension<IAuditableExtension>(new AuditLogger()); // THIS SPECIFIC instance GAINS auditing capability
+
+auditedDoc.GetExtension<IAuditableExtension>()?.RecordAudit("Document viewed"); // ONLY works on the EXTENDED instance
+regularDoc.GetExtension<IAuditableExtension>()?.RecordAudit("..."); // returns null -- this instance was NEVER extended
+```
+Because the extra capability is attached to one *specific instance* at runtime (rather than baked into the class definition itself), two objects of the exact same `Document` class can have genuinely different capabilities — one carrying an auditing extension, another not — without needing separate subclasses for "auditable documents" versus "ordinary documents," and without every single `Document` instance needing to carry the overhead of a capability it doesn't actually use.
+
+**Why this differs meaningfully from simply using inheritance to add the capability to a subclass:** an inheritance-based approach (`AuditableDocument : Document`) fixes the capability at the *type* level — every instance of `AuditableDocument` has it, and switching a specific document between "auditable" and "not" would require actually changing its type; Extension Object instead lets the *same* underlying type gain or lose capabilities dynamically, per-instance, at runtime, which is precisely the flexibility inheritance's static, compile-time nature cannot provide.
+
+**Common Pitfall:** reaching for a growing hierarchy of subclasses (`AuditableDocument`, `AuditableEncryptedDocument`, `EncryptedDocument`, ...) to represent every possible *combination* of optional capabilities a class might need — this suffers from combinatorial explosion as more optional capabilities are added; the Extension Object pattern (or, relatedly, favoring composition over inheritance more generally, covered under Design Principles) avoids this explosion by attaching capabilities independently and dynamically, per instance, rather than needing a dedicated subclass for every possible combination.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is the Visitor pattern's well-known limitation when the object hierarchy itself changes frequently, and how does this represent the exact opposite trade-off from the ease with which Visitor lets you add new operations?**
+
+Visitor (covered earlier) makes adding a *new operation* over an existing class hierarchy easy — write one new Visitor implementation, and every existing element class already has the `Accept` method needed to dispatch to it, with no existing class needing modification. But the reverse is true for adding a *new element type* to the hierarchy: every single existing Visitor implementation must be updated to handle the new type, since each Visitor's interface enumerates every concrete element type it needs a `Visit` method for.
+
+```csharp
+public interface IShapeVisitor
+{
+    void Visit(Circle circle);
+    void Visit(Square square);
+    // adding a NEW shape type (Triangle) means EVERY visitor implementing THIS interface
+    // MUST be updated to ALSO handle Triangle -- EVERY SINGLE existing Visitor, WITHOUT EXCEPTION
+}
+
+public class AreaCalculatorVisitor : IShapeVisitor
+{
+    public void Visit(Circle circle) { /* ... */ }
+    public void Visit(Square square) { /* ... */ }
+    // MUST ADD: public void Visit(Triangle triangle) { /* ... */ } -- or this WON'T EVEN COMPILE anymore
+}
+// -- REPEAT this SAME required update for EVERY OTHER existing Visitor implementation TOO --
+```
+Adding `Triangle` to the hierarchy breaks compilation for every existing `IShapeVisitor` implementation until each one is updated with a new `Visit(Triangle)` method — this is the precise, well-documented mirror-image trade-off of Visitor's own core value proposition: it optimizes specifically for "new operations are easy, new element types are hard," the exact opposite of a simpler polymorphic-method approach (adding behavior directly to each element class), which instead makes "new element types are easy, new operations are hard" (each new operation requires touching every existing element class instead).
+
+**Why this makes Visitor specifically well-suited only for hierarchies that are stable in their element types but need frequent new operations:** Visitor is the right tool when the object hierarchy's *concrete types* are essentially fixed and rarely change, but the *operations* performed over that hierarchy are expected to grow frequently (an AST of a stable set of node types, with new compiler analysis passes added regularly) — for a hierarchy where new *element types* are added frequently, Visitor's own core trade-off works directly against that need, and a different approach (ordinary virtual methods on each element class) is usually the better fit instead.
+
+**Common Pitfall:** adopting Visitor for a class hierarchy that's still actively growing new concrete element types, attracted by its "easy to add new operations" benefit, without recognizing the hierarchy's own volatility directly conflicts with Visitor's core trade-off — every new element type added forces updating every existing Visitor implementation across the entire codebase, a maintenance burden that grows worse the more Visitor implementations have already accumulated, precisely the scenario Visitor is specifically ill-suited for despite its genuine strengths elsewhere.
+
+---
+
 ---

@@ -1331,4 +1331,82 @@ The deciding factor isn't "does this code theoretically vary" (almost anything t
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is the "Rule of Three," and how does it provide a practical heuristic for WHEN to actually apply DRY (covered earlier), rather than abstracting away duplication the moment it first appears?**
+
+The Rule of Three suggests waiting until a piece of logic has been duplicated a *third* time before extracting it into a shared abstraction — the first occurrence is simply code; the second occurrence *might* be a coincidence (covered under the earlier discussion of DRY applying to genuine shared knowledge, not superficially similar-looking code); only the third occurrence provides reasonably strong evidence that a genuine, reusable pattern actually exists worth abstracting.
+
+```csharp
+// FIRST occurrence -- just CODE, no abstraction NEEDED yet
+public decimal CalculateUsOrderTax(Order order) => order.Subtotal * 0.08m;
+
+// SECOND occurrence -- MIGHT be a coincidence, MIGHT be genuine duplication -- TOO EARLY to be CONFIDENT
+public decimal CalculateUkOrderTax(Order order) => order.Subtotal * 0.20m;
+
+// THIRD occurrence -- NOW there's a genuine, RECOGNIZABLE PATTERN worth EXTRACTING
+public decimal CalculateEuOrderTax(Order order) => order.Subtotal * 0.19m;
+
+// ONLY NOW, having seen THREE instances, extract the ACTUAL shared abstraction:
+public decimal CalculateTax(Order order, decimal taxRate) => order.Subtotal * taxRate;
+```
+Extracting an abstraction after seeing only two occurrences risks guessing wrong about what's *actually* varying between them (as the earlier DRY discussion's username/product-code example illustrated) — waiting for a third occurrence provides meaningfully more evidence about what the *real*, generalizable pattern actually is, reducing the risk of abstracting around a coincidental similarity that later needs to be un-abstracted once a third, genuinely different case reveals the first two weren't actually the same thing after all.
+
+**Common Pitfall:** treating the Rule of Three as a rigid, universal law requiring exactly three occurrences before any abstraction is ever justified — it's a practical heuristic guarding against premature abstraction, not a strict rule; a genuinely obvious, well-understood pattern might reasonably be abstracted after just two occurrences, while a subtle, easily-miscategorized one might warrant waiting even longer than three — the underlying point is exercising judgment and gathering sufficient evidence, not mechanically counting to exactly three every time.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is the Common Closure Principle (one of Robert Martin's package-cohesion principles), and how does it complement the Stable Dependencies Principle (covered earlier) by addressing what belongs together WITHIN a package, rather than which direction dependencies between packages should point?**
+
+The Common Closure Principle states that classes which tend to change *for the same reason, at the same time* should be packaged together — while the Stable Dependencies Principle (covered earlier) addresses the *direction* dependencies should point between packages, Common Closure addresses a different, complementary question: what should even *be* grouped into the same package in the first place.
+
+```text
+VIOLATING Common Closure -- classes that CHANGE TOGETHER are SCATTERED across SEPARATE packages:
+  Package "Domain":      OrderValidationRules.cs
+  Package "Infrastructure": OrderPricingRules.cs
+  Package "Api":          OrderShippingRules.cs
+  -- a SINGLE business change ("update the ENTIRE order-processing RULESET for a NEW REGULATION")
+     requires touching THREE SEPARATE packages, each with its OWN build/deploy/versioning CYCLE
+
+FOLLOWING Common Closure -- classes that CHANGE TOGETHER are PACKAGED together:
+  Package "OrderRules": OrderValidationRules.cs, OrderPricingRules.cs, OrderShippingRules.cs
+  -- the SAME business change now touches ONLY ONE package -- ONE build, ONE deploy, ONE version bump
+```
+When classes that genuinely change together for the same underlying reason are scattered across separate packages, a single logical change ripples across multiple packages' own independent build/versioning/deployment cycles — grouping them together means that same change stays contained within one package's boundary, directly reducing the coordination overhead a cross-cutting change would otherwise require.
+
+**Why this specifically complements (rather than duplicates) the Stable Dependencies Principle covered earlier:** Stable Dependencies addresses *which direction* a dependency between two already-existing packages should point (toward stability) — Common Closure addresses an earlier, more fundamental question: *what should be grouped into a package at all*, based on classes' shared reasons for changing; a well-designed package structure needs to get both decisions right — sensible internal grouping (Common Closure) *and* a sensible dependency direction between the resulting packages (Stable Dependencies).
+
+**Common Pitfall:** organizing packages purely by technical *layer* (all "Models" together, all "Services" together, regardless of which business capability each one belongs to) rather than by what actually changes together — this is precisely the kind of grouping Common Closure argues against, since a single business-driven change (a new regulation affecting order processing) ends up scattered across every technical-layer package instead of being contained within one, business-capability-aligned package.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is the Acyclic Dependencies Principle, and why does a circular dependency between two packages make independently versioning or releasing either one genuinely impossible?**
+
+The Acyclic Dependencies Principle states that the dependency graph between packages must never contain a cycle — Package A depending on Package B, which in turn depends back on Package A, creates a situation where neither package can genuinely be built, versioned, or released independently of the other, since each one requires the other to already exist first.
+
+```text
+A CYCLE -- Package A depends on Package B, WHICH ITSELF depends BACK on Package A:
+  Package A ──depends on──► Package B ──depends on──► Package A  (BACK to WHERE it STARTED)
+  -- to BUILD Package A, you FIRST need Package B -- but Package B ITSELF needs Package A FIRST --
+  -- NEITHER package can be BUILT, VERSIONED, or RELEASED INDEPENDENTLY of the OTHER AT ALL --
+  -- they are, EFFECTIVELY, ONE SINGLE, TANGLED unit, DESPITE being NOMINALLY "TWO SEPARATE packages" --
+
+BREAKING the CYCLE -- EXTRACT the SHARED, MUTUALLY-NEEDED piece into a THIRD, LOWER-LEVEL package:
+  Package A ──depends on──► Package C (shared)
+  Package B ──depends on──► Package C (shared)
+  -- NEITHER A NOR B depends on the OTHER ANYMORE -- BOTH depend DOWNWARD, on the SHARED Package C --
+  -- the CYCLE is ELIMINATED -- A and B CAN NOW be built/versioned/released INDEPENDENTLY of EACH OTHER --
+```
+Because a cycle means each package's build genuinely requires the other to already exist, tooling that expects a clean, one-directional dependency graph (most build systems, package managers) either fails outright or requires special-case handling to cope with the cycle — the standard fix is extracting whatever the two packages mutually depend on into a *third*, lower-level shared package that both A and B depend on downward, eliminating the cycle entirely and letting each of the original packages be built, tested, and released independently again.
+
+**Why this specifically matters for microservices' independent-deployability goal (covered under Microservices), not just monolithic package structure:** a circular dependency between two *services* (Service A calling Service B, which calls back into Service A for some other purpose) undermines the core microservices promise of independent deployability in exactly the same way — neither service can genuinely be deployed, tested, or reasoned about in isolation from the other, effectively making them one tightly-coupled unit masquerading as two separate ones, precisely the "Distributed Monolith" anti-pattern covered under Microservices.
+
+**Common Pitfall:** allowing a circular dependency to develop gradually, one small addition at a time (Package A's team adds a small dependency on Package B for convenience; later, Package B's team adds a seemingly-unrelated small dependency back on Package A) — cycles rarely appear as one deliberate decision; they typically accumulate through several individually-reasonable-looking additions, which is exactly why automated dependency-cycle detection tooling (checked as part of a build or CI pipeline) is valuable for catching a forming cycle early, before it becomes an entrenched, hard-to-untangle part of the codebase's actual structure.
+
+---
+
 ---

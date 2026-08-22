@@ -1388,4 +1388,93 @@ By exposing `IReadOnlyList<OrderLine>` instead of the mutable `List<OrderLine>` 
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is a C# Nested Class (a class defined inside another class), and when does using one genuinely make more sense than defining two separate, top-level classes?**
+
+A Nested Class lives entirely inside another class's own definition — it makes sense specifically when the nested type is a genuine implementation detail of the outer class, with no meaningful existence or usefulness outside that specific context, rather than a general-purpose type other, unrelated code might reasonably want to use independently.
+
+```csharp
+public class LinkedList<T>
+{
+    private Node _head;
+
+    // a NESTED class -- "Node" has NO meaningful existence OUTSIDE of implementing LinkedList ITSELF
+    private class Node
+    {
+        public T Value;
+        public Node Next;
+    }
+
+    public void Add(T value) { /* creates and links Node instances INTERNALLY */ }
+}
+```
+Because `Node` only ever makes sense as an internal implementation detail of `LinkedList<T>` — no other code anywhere in the application would reasonably want to create or reference a bare `Node` independently — nesting it directly inside `LinkedList<T>` (and marking it `private`) communicates this relationship explicitly, and prevents any other code from depending on `Node` directly, keeping it a genuinely private implementation detail rather than an oddly-named top-level public type.
+
+**Common Pitfall:** nesting a class purely for superficial "organizational" reasons, when the nested type actually represents a genuinely independent, reusable concept that other code might legitimately want to reference on its own — a nested class that's actually a general-purpose, standalone concept (not merely an internal implementation detail of its containing class) should usually be a top-level class instead, since nesting it artificially restricts its own discoverability and reuse for no genuine benefit.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is the Fluent Interface as a general API-design style (method chaining that returns `this`), and how does it differ from the Builder pattern specifically — a style versus a pattern?**
+
+A Fluent Interface is a *style* of API design — chaining method calls together, each returning the object itself (or a related object) so calls can be strung together in a single, readable expression — the Builder pattern (covered earlier) is a specific, named *design pattern* solving the problem of complex object construction, which *happens* to commonly use a Fluent Interface as its calling convention, but the two concepts are not the same thing.
+
+```csharp
+// FLUENT INTERFACE style -- APPLIED to something that has NOTHING to do with object CONSTRUCTION AT ALL
+public class QueryFilter
+{
+    public QueryFilter Where(string condition) { /* ... */ return this; }
+    public QueryFilter OrderBy(string column) { /* ... */ return this; }
+    public QueryFilter Take(int count) { /* ... */ return this; }
+}
+var results = filter.Where("Active = 1").OrderBy("Name").Take(10); // FLUENT CHAINING -- NOT building an OBJECT
+
+// BUILDER pattern -- SPECIFICALLY solves COMPLEX OBJECT CONSTRUCTION -- OFTEN happens to USE a fluent STYLE
+var pc = new PcBuilder().WithCpu("i9").WithRam(32).WithGpu("RTX 4090").Build(); // CONSTRUCTS a complex OBJECT
+```
+`QueryFilter` uses the fluent, chained-call *style* for an entirely different purpose (progressively refining a query, not constructing a complex object) — LINQ's own method syntax (`.Where().OrderBy().Take()`) is itself a real-world example of Fluent Interface style applied to querying, not object construction; Builder is specifically the *pattern* that solves "constructing a complex object step by step," which frequently (but not necessarily) *also* happens to use method chaining as its actual calling convention.
+
+**Why conflating the two leads to confused pattern vocabulary:** describing *any* method-chaining API as "using the Builder pattern" overextends Builder's actual, specific meaning (solving complex object construction) to any code merely written in a fluent *style* — LINQ's fluent query syntax, a fluent validation-rule API, or a fluent HTTP-request-configuration API are all genuinely using the Fluent Interface *style* without necessarily being instances of the Builder *pattern* at all, since none of them is specifically about constructing one complex object step by step.
+
+**Common Pitfall:** calling any API using method chaining "a Builder," regardless of what that chaining is actually accomplishing — precise pattern vocabulary matters for communicating design intent clearly; reserving "Builder" specifically for the object-construction pattern, and using "Fluent Interface" for the broader stylistic technique of chained, `this`-returning method calls, keeps these two related but genuinely distinct concepts from being conflated.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is the difference between Structural Equality and Referential Equality as the two fundamental equality models in OOP, and how does overriding `Equals`/`GetHashCode` switch a class from the default referential model to a structural one?**
+
+Referential Equality asks "are these two references pointing to the *exact same object in memory*?" — Structural Equality instead asks "do these two objects (possibly entirely separate instances) have the *same content*?" Every C# reference type defaults to Referential Equality unless it explicitly overrides `Equals`/`GetHashCode` to switch to Structural Equality instead.
+
+```csharp
+public class Point
+{
+    public int X, Y;
+}
+
+var p1 = new Point { X = 1, Y = 2 };
+var p2 = new Point { X = 1, Y = 2 }; // a SEPARATE instance, but with IDENTICAL CONTENT
+Console.WriteLine(p1 == p2); // False -- DEFAULT (Referential) equality -- DIFFERENT OBJECTS in MEMORY
+
+// OVERRIDING Equals/GetHashCode SWITCHES the class to STRUCTURAL equality INSTEAD
+public class StructuralPoint
+{
+    public int X, Y;
+    public override bool Equals(object obj) => obj is StructuralPoint p && p.X == X && p.Y == Y;
+    public override int GetHashCode() => HashCode.Combine(X, Y);
+}
+var sp1 = new StructuralPoint { X = 1, Y = 2 };
+var sp2 = new StructuralPoint { X = 1, Y = 2 };
+Console.WriteLine(sp1.Equals(sp2)); // True -- STRUCTURAL equality -- SAME CONTENT, DIFFERENT instances
+```
+By default, `Point`'s inherited `Equals` (from `object`) compares references — two separate instances with identical field values are still considered "not equal," since they're different objects in memory; overriding `Equals`/`GetHashCode` (exactly as `record` types, covered elsewhere, do automatically) switches the comparison to genuinely inspect and compare the objects' *content* instead, which is precisely the mechanism underlying `record` types' auto-generated value-based equality, distinguishing it from an ordinary class's default referential behavior.
+
+**Why choosing the right equality model matters for correctness, not just convenience:** using a type with Referential Equality as a dictionary key or in a `HashSet`, expecting "equal content" lookups to work, silently fails — two structurally-identical-but-referentially-distinct keys are treated as entirely different entries, since the default equality model never actually inspects their content at all; this is precisely why value-like types (a `Money` amount, a coordinate) generally need Structural Equality (via an override, or by being a `record`), while genuinely identity-based types (an `Order` entity tracked by a specific database row) are usually correct to keep the default Referential model.
+
+**Common Pitfall:** using an ordinary class with default (referential) equality as a key in a `Dictionary<TKey, TValue>` or `HashSet<T>`, expecting lookups to match based on the key's *content* — without an `Equals`/`GetHashCode` override providing structural equality, two keys with identical field values are treated as entirely distinct, silently causing lookups that "should" match (by content) to fail, a subtle bug that only becomes visible once someone actually inspects why an expected dictionary lookup unexpectedly returns nothing.
+
+---
+
 ---

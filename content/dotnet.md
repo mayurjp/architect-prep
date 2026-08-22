@@ -1239,4 +1239,90 @@ Because modern .NET applications typically bundle their own dependencies in a pe
 
 ---
 
+## Beginner — Question 14
+
+**Q14: How is `Nullable<T>` implemented internally, and why does boxing a `Nullable<T>` that currently holds no value produce an actual `null` reference, rather than a boxed struct?**
+
+`Nullable<T>` is itself an ordinary struct internally, holding two fields — a `T` value and a `bool HasValue` flag — but the runtime gives it special treatment specifically when boxing: boxing a `Nullable<T>` with `HasValue == false` produces a genuine `null` reference, not a boxed instance of the struct, which is different from how boxing any other struct behaves.
+
+```csharp
+public struct Nullable<T> where T : struct  // roughly HOW it's actually implemented, INTERNALLY
+{
+    private readonly bool hasValue;
+    internal T value;
+    public bool HasValue => hasValue;
+    public T Value => hasValue ? value : throw new InvalidOperationException();
+}
+
+int? x = null;
+object boxed = x; // SPECIAL runtime behavior -- boxed is ACTUALLY null, NOT a boxed Nullable<int> struct!
+Console.WriteLine(boxed == null); // True -- GENUINELY null, NOT "a boxed struct that happens to represent null"
+
+int? y = 5;
+object boxedY = y; // boxes as an ORDINARY boxed 'int' (42) -- NOT a boxed Nullable<int> wrapper AT ALL
+Console.WriteLine(boxedY.GetType()); // System.Int32 -- NOT System.Nullable<Int32>
+```
+The CLR specifically special-cases `Nullable<T>` boxing: a `Nullable<T>` with `HasValue == true` boxes as an ordinary boxed `T` (not a boxed `Nullable<T>` wrapper), and one with `HasValue == false` boxes as an actual `null` reference — without this special treatment, `object boxed = (int?)null` would produce a non-null boxed struct instance, breaking the intuitive expectation that a "null" nullable value should genuinely behave like `null` once boxed to `object`.
+
+**Common Pitfall:** assuming `typeof(int?)` and a boxed `int?` holding a value report the same runtime type — `((int?)5).GetType()` actually reports `System.Int32`, not `System.Nullable<Int32>`, precisely because of this special boxing behavior; code that uses reflection to inspect a boxed nullable value's runtime type needs to account for this, since the boxed representation genuinely loses the "nullable-ness" once it holds an actual value.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is `CancellationTokenSource.CreateLinkedTokenSource`, and how does it let you combine multiple independent cancellation sources into one single token that cancels if any of them fires?**
+
+An operation sometimes needs to respect *multiple* independent reasons for cancellation simultaneously — a per-request timeout, *and* the overall application shutting down — `CreateLinkedTokenSource` combines several existing `CancellationToken`s into one new, linked token that becomes canceled the moment *any* of the original tokens is canceled, without the calling code needing to manually check each one separately.
+
+```csharp
+public async Task<Data> FetchDataAsync(CancellationToken requestTimeout, CancellationToken appShutdown)
+{
+    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(requestTimeout, appShutdown);
+    // 'linkedCts.Token' becomes CANCELED the MOMENT EITHER 'requestTimeout' OR 'appShutdown' fires --
+    // WHICHEVER happens FIRST
+
+    return await _httpClient.GetFromJsonAsync<Data>("/data", linkedCts.Token);
+    // the DOWNSTREAM call only needs to accept ONE token -- it AUTOMATICALLY respects BOTH
+    // original cancellation SOURCES, WITHOUT the caller needing to check EACH one SEPARATELY
+}
+```
+Because the linked token fires the instant *either* source cancels, downstream code (the HTTP call in this example) only needs to accept and check a single `CancellationToken` parameter, while still correctly responding to both a per-request timeout expiring *and* an application-wide shutdown signal — without needing custom logic to poll or combine multiple separate tokens manually.
+
+**Common Pitfall:** forgetting to `Dispose()` the `CancellationTokenSource` returned by `CreateLinkedTokenSource` (it implements `IDisposable`, and not disposing it can leak resources, particularly under high-throughput scenarios creating many linked sources) — wrapping it in a `using` statement/declaration (covered elsewhere), exactly as shown above, ensures it's properly cleaned up regardless of how the method exits.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What are .NET Hardware Intrinsics (`System.Runtime.Intrinsics`, e.g. `Vector256<T>`), and how do they let C# code directly issue SIMD CPU instructions for data-parallel operations, beyond what the JIT's own automatic vectorization provides?**
+
+Modern CPUs can perform a single instruction on *multiple* data elements simultaneously (SIMD — Single Instruction, Multiple Data) — the JIT compiler can automatically vectorize certain simple loops on its own, but Hardware Intrinsics let a developer directly, explicitly issue these SIMD instructions from C# code, for cases where the JIT's automatic vectorization doesn't kick in or isn't aggressive enough for a genuinely performance-critical hot path.
+
+```csharp
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
+
+public static void AddArrays(float[] a, float[] b, float[] result)
+{
+    int i = 0;
+    int vectorSize = Vector256<float>.Count; // e.g., 8 floats processed PER SINGLE CPU instruction (AVX2)
+
+    for (; i <= a.Length - vectorSize; i += vectorSize)
+    {
+        var va = Vector256.Create(a, i);
+        var vb = Vector256.Create(b, i);
+        var sum = Avx.Add(va, vb); // ONE CPU instruction, adding 8 PAIRS of floats SIMULTANEOUSLY
+        sum.CopyTo(result, i);
+    }
+    for (; i < a.Length; i++) result[i] = a[i] + b[i]; // handle any REMAINING elements NOT evenly divisible by 8
+}
+```
+Because `Avx.Add` issues a single CPU instruction that processes 8 floating-point additions simultaneously (rather than the CPU executing 8 separate, individual add instructions one after another), a hot loop rewritten this way can process data significantly faster than the equivalent scalar, element-by-element loop — the exact mechanism underlying high-performance numerical/scientific computing libraries, image processing, and similar data-parallel workloads written in C#.
+
+**Why this requires runtime CPU-capability checks, since not every CPU supports every instruction set:** code using `Avx.Add` directly would crash on a CPU lacking AVX2 support — robust use of Hardware Intrinsics checks `Avx2.IsSupported` (or an equivalent capability flag) at runtime first, falling back to a scalar implementation on CPUs lacking the specific instruction set being targeted, since unlike ordinary C# code, Hardware Intrinsics compile down to CPU-specific instructions that aren't universally available across every processor.
+
+**Common Pitfall:** writing Hardware Intrinsics code without checking the relevant `IsSupported` flag first, assuming the deployment target will always have the needed CPU capability — this works fine in development (on a modern development machine) but can crash outright on older or different hardware in production; robust intrinsics-based code always includes a capability check with a scalar fallback path for hardware lacking the specific SIMD instruction set being used.
+
+---
+
 ---
