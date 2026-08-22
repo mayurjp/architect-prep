@@ -1578,4 +1578,80 @@ Similarly, EF Core's LINQ abstraction (covered extensively) mostly lets a develo
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is "Premature Optimization" as a design-level caution, and how does optimizing a system's structure before its actual requirements are well understood risk over-engineering?**
+
+Premature Optimization (the design-level cousin of the performance-focused caution covered under Performance) refers to investing effort making a design more flexible, generalized, or "efficient" for requirements that aren't actually confirmed yet — designing an elaborate plugin architecture for "future extensibility" nobody has actually asked for, before the real, concrete requirements are even known, often produces a more complex design than the simpler one that would have naturally emerged from just solving the actual, current problem.
+
+```text
+PREMATURE: "We MIGHT need to support multiple payment providers someday" -- so we build a
+  full Strategy pattern with an abstract PaymentProvider interface, a Factory, and
+  configuration-driven provider selection -- BEFORE we've EVER actually needed a SECOND provider
+
+SIMPLER, for the ACTUAL current requirement (ONE payment provider): a single, direct,
+  concrete PaymentService class -- ADD the abstraction LATER, WHEN (and IF) a genuine second
+  provider requirement actually materializes
+```
+
+Because requirements that seem likely often never actually materialize (or materialize very differently from how they were originally imagined), building structural flexibility for them speculatively tends to add real complexity for a benefit that may never be realized — this connects directly to YAGNI (covered elsewhere), but specifically frames the caution around *structural/design* decisions rather than merely "don't write code you don't need yet."
+
+**Common Pitfall:** justifying an elaborate, generalized design purely by appeal to hypothetical future requirements ("we might need this someday") rather than actual, current ones — the described flexibility often doesn't even match what the eventual real requirement turns out to need, meaning the speculative complexity was paid for nothing; a simpler design solving today's actual problem, refactored later once a genuine new requirement is confirmed, usually costs less overall.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: How does the Single Responsibility Principle apply at the level of a single method's parameter list — specifically, a method accepting several boolean "flag" parameters that each control different, unrelated behavior — and why does this violate SRP the same way an overloaded class does?**
+
+A method with several unrelated boolean flags (`ProcessOrder(bool sendEmail, bool applyDiscount, bool logToAudit)`) is effectively several different methods merged into one, with the flags acting as a crude way to select which combination of unrelated behaviors runs — exactly the same "too many unrelated responsibilities in one place" problem SRP describes at the class level, just manifesting in a single method's signature instead.
+
+```csharp
+// VIOLATES SRP at the METHOD level -- ONE method, SEVERAL unrelated behavioral axes, toggled by FLAGS
+void ProcessOrder(Order order, bool sendEmail, bool applyDiscount, bool logToAudit)
+{
+    if (applyDiscount) order.Total *= 0.9m;
+    if (sendEmail) _emailService.Send(order);
+    if (logToAudit) _auditLog.Record(order);
+    // the CALLER must UNDERSTAND every FLAG's exact MEANING, and EVERY combination becomes a
+    // DISTINCT, IMPLICIT code path -- 3 booleans -> 8 POSSIBLE combinations, MANY untested
+}
+
+// SEPARATE, single-purpose methods -- each with ONE clear responsibility
+void ProcessOrder(Order order) { /* just processes the order */ }
+void ApplyDiscount(Order order) { order.Total *= 0.9m; }
+void SendConfirmationEmail(Order order) { _emailService.Send(order); }
+```
+
+Because each boolean flag effectively multiplies the number of distinct behavioral combinations the single method can produce (three independent flags create eight possible execution paths through the same method body), the method accumulates the same kind of unrelated, tangled responsibility SRP warns against at the class level — splitting it into separate, single-purpose methods (composed by the caller as needed) makes each individual piece's responsibility, and its test coverage, far clearer.
+
+**Common Pitfall:** adding "just one more boolean parameter" to an already-flag-heavy method rather than recognizing the accumulating flags as a genuine SRP violation at the method level — each additional flag doubles the number of possible behavioral combinations through that one method, and testing every meaningful combination becomes increasingly impractical, exactly the same combinatorial-complexity problem a class accumulating unrelated responsibilities produces.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is the Interface Segregation Principle's relationship to generic Covariance/Contravariance (covered under OOP/C#), and how does a narrowly-scoped interface make safe variance annotations more achievable than a broad, "fat" interface would?**
+
+Covariance (`out T`) is only safe for a generic parameter used exclusively in *output* positions (return types) — Contravariance (`in T`) is only safe for one used exclusively in *input* positions (parameters); a broad interface mixing both input and output usages of the same type parameter can't be marked variant at all, while a narrowly-scoped interface (the outcome ISP already recommends) is far more likely to use its type parameter in only one direction, making a variance annotation possible in the first place.
+
+```csharp
+// A FAT interface MIXING input and output usage of T -- CANNOT be marked covariant OR contravariant
+public interface IRepository<T>
+{
+    T GetById(int id);         // T in an OUTPUT position
+    void Save(T item);         // T in an INPUT position -- MIXING both DISALLOWS variance annotations ENTIRELY
+}
+
+// NARROWLY-SCOPED interfaces (the ISP outcome) -- EACH uses T in only ONE direction -- BOTH CAN be variant
+public interface IReader<out T> { T GetById(int id); }      // ONLY output positions -- COVARIANT is VALID
+public interface IWriter<in T> { void Save(T item); }        // ONLY input positions -- CONTRAVARIANT is VALID
+```
+
+Because a type parameter used in both input and output positions within the same interface structurally cannot be marked either covariant or contravariant (the compiler would reject it, since neither direction's safety guarantee could hold), splitting a fat interface into narrower, single-direction ones — precisely what ISP already recommends for its own, independent reasons (covered earlier) — has the additional benefit of making each resulting piece eligible for a variance annotation that the original combined interface never could have supported.
+
+**Common Pitfall:** wanting to mark a generic interface as covariant or contravariant for convenience, without recognizing that the interface's own mixed input/output usage of the type parameter structurally prevents it — the fix isn't a special-case workaround, but genuinely splitting the interface along ISP's usual lines (separating read-only usage from write usage), which happens to unlock variance as a direct side benefit of that same underlying restructuring.
+
+---
+
 ---

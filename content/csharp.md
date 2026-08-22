@@ -1486,4 +1486,84 @@ Because the expression tree exposes the lambda's logic as inspectable data rathe
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is the C# null-conditional operator (`?.`), and how does it let you safely access a member on a possibly-null reference without an explicit, separate `if` check?**
+
+`?.` short-circuits to `null` the moment the expression on its left is `null`, skipping the member access entirely rather than throwing a `NullReferenceException` — letting a chain of member accesses be written compactly, without a separate guard clause for every possibly-null step along the way.
+
+```csharp
+string? city = customer?.Address?.City; // if customer OR Address is null, 'city' is simply null -- NO exception
+
+// equivalent, WITHOUT the null-conditional operator:
+string? city2 = null;
+if (customer != null && customer.Address != null) city2 = customer.Address.City;
+```
+
+```text
+customer is null           -> customer?.Address        -> null (short-circuits IMMEDIATELY)
+customer.Address is null   -> customer?.Address?.City   -> null (short-circuits at THIS step)
+BOTH non-null              -> customer?.Address?.City   -> the ACTUAL city string
+```
+
+Because `?.` short-circuits the *entire remaining chain* the moment any link is null, it avoids not just one `NullReferenceException` but an entire cascade of nested `if` checks that would otherwise be needed to safely navigate several levels of possibly-null references.
+
+**Common Pitfall:** combining `?.` with a subsequent method call that assumes a non-null result without also considering that the *result itself* can be `null` — `customer?.GetOrders().Count` still throws if `GetOrders()` itself can return `null`, since `?.` only guards the *left-hand side of that specific operator*, not every subsequent access in the chain unless each one also uses `?.`.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is a C# `with` expression for `record` types, and how does it create a new, independent copy with only specific properties changed, rather than mutating the original?**
+
+`with` performs non-destructive mutation: it copies every property from the source record into a brand-new instance, except for the properties you explicitly specify, which take the new values you provide — the original record is left completely untouched.
+
+```csharp
+public record Order(int Id, string Status, decimal Total);
+
+var original = new Order(5, "Pending", 99.99m);
+var shipped = original with { Status = "Shipped" }; // a NEW Order -- Id and Total COPIED, Status CHANGED
+
+Console.WriteLine(original.Status); // "Pending" -- UNCHANGED
+Console.WriteLine(shipped.Status);  // "Shipped" -- the NEW copy
+```
+
+Because `with` always produces a distinct new instance rather than mutating in place, it pairs naturally with a record's default immutability (covered elsewhere) — code holding a reference to `original` can rely on it never silently changing just because some other code somewhere called `with` on a copy of the same data.
+
+**Common Pitfall:** assuming `with` performs a deep copy of every referenced object — it performs a shallow, member-wise copy; if a record contains a mutable reference-type property (a `List<T>`), the new copy produced by `with` shares that *same* underlying list instance with the original, and mutating the list through either reference affects both.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is `[module: SkipLocalsInit]`/`[MethodImpl(MethodImplOptions.SkipLocalsInit)]`, and how does skipping the runtime's default zero-initialization of local variables/stackalloc buffers trade away a safety guarantee for a small performance gain?**
+
+By default, the CLR guarantees every local variable (including a `stackalloc` buffer) starts life zeroed out — this guarantee costs a small amount of CPU time to actually perform the zeroing, which `SkipLocalsInit` opts out of for a specific method, letting whatever garbage bytes happen to already be sitting in that stack memory show through instead, in exchange for avoiding the zeroing cost.
+
+```csharp
+[System.Runtime.CompilerServices.SkipLocalsInit]
+void ProcessBuffer()
+{
+    Span<byte> buffer = stackalloc byte[256]; // NOT automatically zeroed -- contains WHATEVER was
+                                                // previously on the stack at this memory location
+    // the CODE must now EXPLICITLY initialize whatever portion of 'buffer' it actually reads from
+}
+```
+
+```text
+WITHOUT SkipLocalsInit: the RUNTIME zeroes the ENTIRE stackalloc'd buffer BEFORE your code runs --
+  a SMALL but MEASURABLE cost, PAID on EVERY call, REGARDLESS of whether your code actually
+  READS any of that memory BEFORE writing to it itself
+
+WITH SkipLocalsInit: that ZEROING is SKIPPED -- a HOT-PATH method calling stackalloc VERY
+  FREQUENTLY can measurably benefit -- but your OWN code MUST now correctly initialize
+  EVERY byte it actually reads, or risk reading UNINITIALIZED, POTENTIALLY SENSITIVE data
+```
+
+Because skipping zero-initialization means a bug that reads a stackalloc'd buffer before fully writing to it could leak whatever unrelated data happened to previously occupy that stack memory (potentially including a previous, unrelated method call's sensitive local variables), this attribute is specifically reserved for narrow, performance-critical hot paths where the code has been carefully verified to always fully initialize what it reads, not applied broadly as a general performance habit.
+
+**Common Pitfall:** applying `SkipLocalsInit` broadly across a codebase "for performance" without auditing every affected method for a code path that might read a stackalloc'd buffer before writing to all of it — this reintroduces a genuine class of bug (reading uninitialized, potentially sensitive stack memory) the runtime's default zero-initialization exists specifically to prevent, for a performance gain that's usually only measurable in the narrowest, most allocation-heavy hot paths.
+
+---
+
 ---

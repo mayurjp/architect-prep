@@ -1654,3 +1654,89 @@ Before C# 9, an overriding method was required to return the *exact same* type t
 **Common Pitfall:** conflating Covariant Return Types with generic interface covariance simply because both involve the word "covariant" and both relate to substitutability — they solve different problems in different contexts (method override signatures versus generic type parameter variance), and confusing the two can lead to expecting one mechanism's rules (interface variance's `out`/`in` positional restrictions, covered earlier) to apply to the other (method return-type overriding), when they're actually governed by entirely separate language rules.
 
 ---
+
+## Beginner — Question 17
+
+**Q17: What is the precise difference between a Class and an Object in OOP terms, and why is "instance" the more precise word for what a class actually produces at runtime?**
+
+A Class is a blueprint/template — it exists once, at compile time, describing what properties and behavior every object of that type will have. An Object (more precisely, an *instance*) is a concrete, individual thing created from that blueprint at runtime — many distinct objects can be created from the same one class, each with its own independent state.
+
+```csharp
+public class Dog // the CLASS -- ONE blueprint, defined ONCE
+{
+    public string Name { get; set; } = "";
+}
+
+var dog1 = new Dog { Name = "Rex" };   // an INSTANCE -- one CONCRETE object
+var dog2 = new Dog { Name = "Fido" };  // a DIFFERENT instance -- SEPARATE, independent state
+```
+
+```text
+Class "Dog"     -- ONE definition, exists ONCE, at COMPILE time
+dog1 (instance) -- a SEPARATE, CONCRETE object, with its OWN "Name" value ("Rex")
+dog2 (instance) -- ANOTHER separate object, with its OWN "Name" value ("Fido") -- INDEPENDENT of dog1
+```
+
+Because "object" is sometimes used loosely (even to refer to the class itself in casual conversation), "instance" is the more precise term specifically emphasizing that it's one particular, concrete realization of the class's blueprint — `dog1` and `dog2` are two *instances* of the *same* class, each with independent state, which "object" alone doesn't always make as clear.
+
+**Common Pitfall:** using "object" and "class" interchangeably in technical discussion or documentation — this creates genuine ambiguity about whether a statement refers to the blueprint (shared, one definition) or a specific instance (individual, with its own state); being precise about "class" versus "instance" avoids this confusion, especially when discussing static members (which belong to the class itself) versus instance members (which belong to each individual object).
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is a Template Method "hook" — a virtual method with an empty default body that a subclass MAY optionally override — and how does it differ from an abstract method that every subclass MUST override?**
+
+A hook provides a default (often no-op) implementation, making an override entirely optional — an abstract method provides no implementation at all, forcing every non-abstract subclass to supply one; both fit into the Template Method pattern (covered under Design Patterns), but a hook lets a subclass selectively customize just the specific step it cares about, ignoring the rest.
+
+```csharp
+public abstract class ReportGenerator
+{
+    public void Generate() // the TEMPLATE method -- defines the OVERALL sequence
+    {
+        LoadData();
+        FormatReport();
+        OnBeforeSave(); // a HOOK -- OPTIONAL to override, does NOTHING by default
+        SaveReport();
+    }
+
+    protected abstract void LoadData();     // MUST be implemented -- no default behavior at all
+    protected abstract void FormatReport();  // MUST be implemented
+    protected virtual void OnBeforeSave() { } // a HOOK -- subclasses MAY override, but DON'T have to
+    protected abstract void SaveReport();
+}
+```
+
+Because a hook has a working (if empty) default implementation, a subclass that doesn't need to customize that particular step simply inherits the no-op behavior silently — an abstract method, by contrast, forces every single subclass to provide *some* implementation, even a trivial one, whether or not that subclass actually needs custom behavior at that step.
+
+**Common Pitfall:** making every customizable step of a Template Method abstract, even ones most subclasses will never need to override — this forces every new subclass to write boilerplate overrides for steps it doesn't actually care about; using a hook (virtual, with a sensible empty/default implementation) for genuinely optional customization points reduces this unnecessary burden on subclasses that don't need to touch them.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is the difference between Parametric Polymorphism (Generics) and Subtype Polymorphism (inheritance/interface-based), and how do they solve the "write once, work for many types" problem via genuinely different mechanisms?**
+
+Subtype Polymorphism achieves "one piece of code, many types" by having many different types share a common base type/interface, with the calling code working against that shared abstraction — Parametric Polymorphism instead achieves it by parameterizing the code itself over a type placeholder (`T`), producing genuinely type-specialized code for whatever concrete type is substituted in, without those types needing any shared inheritance relationship at all.
+
+```csharp
+// SUBTYPE polymorphism -- Dog and Cat share a COMMON base type "Animal" -- the METHOD works via THAT shared type
+void MakeSound(Animal a) => a.Speak(); // works for ANY type DERIVING from Animal
+
+// PARAMETRIC polymorphism -- List<T> works for Dog, Cat, int, string -- NONE of which share ANY common base type
+List<Dog> dogs = new();
+List<int> numbers = new(); // int and Dog have NOTHING in common -- yet List<T> works for BOTH, identically
+```
+
+```text
+Subtype polymorphism:   REQUIRES a shared base type/interface -- the ABSTRACTION lives in that SHARED type
+Parametric polymorphism: REQUIRES NO shared relationship AT ALL between the types -- the ABSTRACTION
+                          lives in the GENERIC CODE itself, which works IDENTICALLY REGARDLESS of
+                          what CONCRETE, UNRELATED type is substituted in for T
+```
+
+Because Parametric Polymorphism doesn't require the substituted types to share any common ancestor, it achieves genuine reuse across types that have absolutely nothing to do with each other (a `List<int>` and a `List<Dog>` share zero inheritance relationship) — Subtype Polymorphism, by contrast, specifically requires and relies on a designed-in shared type hierarchy, making it the right tool when types genuinely *do* share conceptual behavior, while Generics are the right tool when the same logic needs to apply uniformly regardless of the type's own identity at all.
+
+**Common Pitfall:** reaching for inheritance/interfaces (Subtype Polymorphism) to solve a problem that's actually about writing the same algorithm generically over any type, forcing unrelated types into an artificial shared interface just to satisfy a method signature — when the actual need is "this logic works identically no matter what the type is, with no shared behavior required," Generics (Parametric Polymorphism) is usually the more natural, less artificially-coupled solution.
+
+---

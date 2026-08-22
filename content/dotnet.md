@@ -1484,4 +1484,82 @@ Because the internal, optimized lookup structure is built exactly once (when `Se
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is the difference between `Console.WriteLine` and `Debug.WriteLine`/`Trace.WriteLine`, and when does each actually produce visible output?**
+
+`Console.WriteLine` always writes to standard output, visible in any console/terminal running the application — `Debug.WriteLine` only produces output in a `Debug` build (compiled out entirely in `Release`), and `Trace.WriteLine` runs in both `Debug` and `Release` builds but writes to configured trace listeners rather than the console, which by default may not be visible at all unless a listener is explicitly configured.
+
+```csharp
+Console.WriteLine("Always visible in the terminal");       // ALWAYS runs, ANY build configuration
+System.Diagnostics.Debug.WriteLine("Only in Debug builds"); // COMPILED OUT entirely in a Release build
+System.Diagnostics.Trace.WriteLine("Runs in Debug AND Release, but needs a listener to be seen");
+```
+
+```text
+Debug build:   Debug.WriteLine RUNS -- visible in Visual Studio's "Output" window (a default listener)
+Release build: Debug.WriteLine calls are COMPILED OUT ENTIRELY -- the STATEMENTS THEMSELVES don't exist
+               in the compiled Release binary at all -- NOT merely "silently skipped at runtime"
+```
+
+Because `Debug.WriteLine` calls are conditionally compiled based on the `DEBUG` preprocessor symbol (present by default in Debug configuration, absent in Release), they add zero overhead to a Release build — genuinely useful for verbose diagnostic logging during development that you don't want shipping in the production binary at all, as opposed to `Console.WriteLine`, which always runs and always has a real runtime cost.
+
+**Common Pitfall:** using `Debug.WriteLine` for diagnostic output that's actually needed in production troubleshooting — since it's compiled out entirely in Release builds, any logging genuinely needed to diagnose a production issue should use a real logging framework (`ILogger`, covered under ASP.NET Core), not `Debug.WriteLine`, which simply won't exist at all in the deployed binary.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is `IProgress<T>`, and how does it let a long-running asynchronous operation report progress back to its caller without the caller needing to poll for updates?**
+
+`IProgress<T>` defines a single `Report(T value)` method — the long-running operation calls it periodically with progress updates, and the caller supplies an implementation (commonly `Progress<T>`) whose callback fires on whatever synchronization context captured it, letting UI code update a progress bar without manually marshaling back to the UI thread itself.
+
+```csharp
+async Task DownloadFileAsync(string url, IProgress<int> progress)
+{
+    for (int i = 0; i <= 100; i += 10)
+    {
+        await Task.Delay(100); // simulates DOWNLOAD progress
+        progress.Report(i);    // reports the CURRENT percentage
+    }
+}
+
+// Caller (e.g., in a UI application)
+var progressHandler = new Progress<int>(percent => progressBar.Value = percent); // callback runs on the UI thread
+await DownloadFileAsync(url, progressHandler);
+```
+
+Because `Progress<T>` captures the current `SynchronizationContext` at the moment it's constructed and marshals its callback back onto that context automatically, UI code can safely update UI elements from the progress callback without an explicit `Dispatcher.Invoke`/`InvokeRequired` check — the plumbing that would otherwise be needed to safely cross from a background thread back to the UI thread is handled transparently.
+
+**Common Pitfall:** trying to update a UI element directly from inside the long-running async method itself (rather than through an injected `IProgress<T>`) — if that method is running on a background thread, directly touching UI elements from it throws a cross-thread-access exception; `IProgress<T>`/`Progress<T>` exists specifically to decouple the long-running operation from any assumption about which thread is allowed to receive its progress updates.
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is `GCSettings.LatencyMode`, and how does `SustainedLowLatency` mode change the Garbage Collector's willingness to perform blocking Gen 2 collections?**
+
+`GCSettings.LatencyMode` lets application code hint to the GC how aggressively it should avoid pausing the application — `SustainedLowLatency` specifically asks the GC to avoid *blocking* (fully pausing) full Gen 2 collections for as long as possible, favoring smaller, less disruptive collections instead, at the cost of potentially higher overall memory usage while it defers the larger collection.
+
+```csharp
+GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+// ... perform a latency-sensitive operation (rendering a frame, processing a real-time trade) ...
+GCSettings.LatencyMode = GCLatencyMode.Interactive; // restore the DEFAULT mode afterward
+```
+
+```text
+Default (Interactive) mode: the GC performs a BLOCKING Gen 2 collection whenever it decides
+  one is NEEDED, PAUSING the application for its DURATION -- POTENTIALLY at the WORST possible moment
+
+SustainedLowLatency mode: the GC AVOIDS a blocking Gen 2 collection for AS LONG AS POSSIBLE,
+  favoring smaller Gen 0/1 collections instead -- TRADING higher MEMORY usage (garbage
+  accumulates LONGER before a full collection FINALLY happens) for FEWER, SMALLER pauses
+```
+
+Because deferring a full Gen 2 collection means garbage that would otherwise have been reclaimed keeps accumulating, this mode trades increased memory usage for reduced pause frequency/duration — appropriate for a genuinely latency-sensitive section of code (a real-time audio/video pipeline, a trading system's critical path) where an occasional larger memory footprint is preferable to an unpredictable pause, but inappropriate as a permanent, application-wide default given its memory cost.
+
+**Common Pitfall:** setting `SustainedLowLatency` globally for an entire application's lifetime rather than scoping it narrowly to the specific latency-sensitive operation that actually needs it — left on indefinitely, memory usage can grow considerably as full Gen 2 collections keep getting deferred; the mode is meant to be toggled on for a specific critical section and back off immediately afterward, not left permanently active.
+
+---
+
 ---

@@ -1868,4 +1868,87 @@ Because `GuestCustomer` implements the exact same `ICustomer` interface as `Regi
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is the simplest possible form of a "Factory Method" — a single static factory method directly on the class itself (`Product.Create()`) — and how does it differ from the full GoF Factory Method pattern's separate creator hierarchy?**
+
+The full GoF Factory Method pattern involves a whole hierarchy: an abstract creator class declaring the factory method, with subclasses each overriding it to produce a different concrete product — a simple static factory method is a much lighter-weight variant: just one static method on the product's own class, encapsulating some construction logic (validation, choosing between constructors) without any of the separate creator-hierarchy machinery.
+
+```csharp
+public class Order
+{
+    private Order() { } // PRIVATE constructor -- forces callers through the factory method
+
+    public static Order CreateStandard(int customerId) =>
+        new Order { CustomerId = customerId, Priority = "Standard" };
+
+    public static Order CreateExpress(int customerId) =>
+        new Order { CustomerId = customerId, Priority = "Express" };
+    // NO separate creator class/hierarchy -- just TWO clearly-named static methods, right on Order itself
+}
+```
+
+Because this simple form needs no separate creator class hierarchy at all, it's appropriate when the *only* goal is a more expressive, self-documenting way to construct an object (`Order.CreateExpress(5)` reads more clearly than a constructor call with an unclear boolean flag) — the full GoF pattern's separate hierarchy earns its added complexity specifically when *subclasses* need to determine which concrete product gets created, not merely when a single class wants clearer, named construction options.
+
+**Common Pitfall:** calling any static factory method "the Factory Method pattern" regardless of whether it actually involves the GoF pattern's defining structure (an overridable creator method, with subclasses choosing the concrete product) — the simple static-method form is a genuinely useful, lightweight technique in its own right, but it's a different, simpler thing than the full pattern, and conflating the two can create confusion when discussing which one a design actually needs.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is the Iterator pattern's distinction between an External Iterator and an Internal Iterator, and how does C#'s `foreach` represent an External Iterator model specifically?**
+
+An External Iterator gives the *client code* control over when to advance to the next element (calling `MoveNext()` explicitly, or implicitly via `foreach`) — an Internal Iterator instead takes a callback/function and applies it to each element *internally*, without the client ever explicitly stepping through the sequence itself (LINQ's `.ForEach()` on `List<T>` is a rare internal-iterator-style example in .NET).
+
+```csharp
+// EXTERNAL iterator -- the CLIENT (via foreach, or MoveNext() directly) controls advancing
+foreach (var item in collection) { Process(item); } // the CLIENT decides WHEN to move to the NEXT item
+
+// INTERNAL iterator -- the COLLECTION itself controls iteration, the CLIENT just supplies a callback
+collection.ForEach(item => Process(item)); // the CLIENT never explicitly "advances" anything itself
+```
+
+```text
+External Iterator: CLIENT code holds the "current position" concept -- it can PAUSE, BREAK early,
+  or interleave iteration with OTHER unrelated logic between elements, since IT controls advancing
+
+Internal Iterator: the COLLECTION drives the ENTIRE iteration internally -- the CLIENT has LESS
+  control (can't easily "pause" mid-iteration to do something else), but the CALLING code is
+  often MORE CONCISE for the COMMON case of "just do X to EVERY element"
+```
+
+Because C#'s `foreach` (and the underlying `IEnumerator<T>`/`MoveNext()` machinery it compiles down to) puts the client in control of advancing through the sequence — including the ability to `break` early, or interleave other logic between iterations — it's specifically an External Iterator, which is why .NET's iteration model overwhelmingly favors `foreach`/`IEnumerable<T>` over an internal, callback-driven iteration style for general-purpose collection traversal.
+
+**Common Pitfall:** assuming LINQ's `.ForEach()`-style methods represent .NET's primary iteration model — `List<T>.ForEach()` is a narrow, somewhat unusual internal-iterator-style method that most other collection types don't even expose; `foreach`/`IEnumerable<T>`'s External Iterator model is the actual, pervasive default throughout the language and BCL, and understanding this distinction clarifies why `foreach` allows `break`/`continue` in a way a callback-based `.ForEach()` call fundamentally cannot.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is the Type Object pattern, and how does it let new "kinds" of an entity be added at runtime, via data, rather than requiring a new subclass at compile time for each kind?**
+
+Rather than creating a new subclass for every distinct "kind" of something (a `Goblin` class, an `Orc` class, a `Dragon` class, each hardcoded at compile time), the Type Object pattern represents each kind as *data* — an instance of a separate "type object" class describing that kind's specific attributes/behavior — letting a game designer or configuration file add an entirely new monster kind without writing or compiling any new C# class at all.
+
+```csharp
+// WITHOUT Type Object -- a NEW SUBCLASS is needed for EVERY new monster KIND, at COMPILE time
+public class Goblin : Monster { public override int Health => 10; }
+public class Orc : Monster { public override int Health => 30; }
+// adding a NEW monster kind ("Troll") REQUIRES writing, COMPILING, and DEPLOYING a NEW class
+
+// WITH Type Object -- ONE single Monster class, PARAMETERIZED by a "MonsterType" DATA object
+public class MonsterType { public string Name = ""; public int Health; public int Damage; }
+public class Monster { public MonsterType Type; public int CurrentHealth; }
+
+var goblinType = new MonsterType { Name = "Goblin", Health = 10, Damage = 2 };
+var newTrollType = new MonsterType { Name = "Troll", Health = 80, Damage = 15 }; // a NEW "kind" --
+                                                                                  // NO new C# CLASS needed at ALL
+var monster = new Monster { Type = newTrollType, CurrentHealth = newTrollType.Health };
+```
+
+Because each "kind" is now just an instance of `MonsterType` (ordinary data, potentially loaded from a config file or database at runtime) rather than a compiled C# subclass, new kinds can be added, tuned, or removed entirely through data changes — without touching, recompiling, or redeploying any application code — directly useful for a game (or any system) whose set of "kinds" needs to be extensible by non-programmers or adjustable without a full deployment cycle.
+
+**Common Pitfall:** defaulting to a deep subclass hierarchy (one class per "kind") for a domain where the actual SET of kinds is expected to change frequently or be configured by non-developers — this forces every new kind to go through a full code-change-and-deployment cycle; the Type Object pattern trades some of inheritance's compile-time type safety for the ability to introduce new kinds as pure data, which is the more appropriate trade-off specifically when kinds genuinely need to be added/adjusted without redeploying code.
+
+---
+
 ---
