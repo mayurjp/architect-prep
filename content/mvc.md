@@ -1255,4 +1255,89 @@ Because the provider returns `null` for any type it doesn't specifically want to
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is a Razor `@section`, and how does it let a child view inject content into a specific, named placeholder defined in its shared Layout page?**
+
+A Layout page (Razor's equivalent of a master page) can declare named "sections" — placeholders a specific child view can optionally fill with its own content — letting the shared layout control the overall page structure while individual views inject page-specific content (like a page-specific script reference) into a designated spot within that shared structure.
+
+```html
+<!-- _Layout.cshtml -- the SHARED layout, defining a NAMED PLACEHOLDER -->
+<html>
+<body>
+    @RenderBody() <!-- the CHILD view's main content renders HERE -->
+    @RenderSection("Scripts", required: false) <!-- a NAMED placeholder -- child views OPTIONALLY fill THIS -->
+</body>
+</html>
+```
+```html
+<!-- SomeView.cshtml -- INJECTS content into the Layout's "Scripts" placeholder, SPECIFICALLY -->
+@section Scripts {
+    <script src="~/js/this-view-specific-script.js"></script>
+}
+```
+Because `@RenderSection("Scripts", required: false)` marks the section as optional, a view that doesn't need any page-specific scripts simply omits the `@section Scripts { }` block entirely, and the layout renders without it — while a view that *does* need one supplies its content, which gets rendered exactly where the layout declared the `Scripts` placeholder should appear, letting each individual view control page-specific additions without needing to alter the shared layout itself.
+
+**Common Pitfall:** declaring a section as `required: true` in the layout, then having a specific view forget to actually define that section — this throws a runtime exception the moment that view is rendered, since the layout expects every view using it to supply that section's content; sections genuinely optional for some views should be marked `required: false`, reserving `required: true` specifically for content every view using that layout must always provide.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What was `HtmlHelper` (`@Html.MyCustomHelper()`), and why did the ecosystem shift toward Tag Helpers (covered extensively) as the preferred modern way to write reusable, server-rendered HTML-generation logic?**
+
+Before Tag Helpers existed, reusable HTML-generation logic in Razor views was typically written as `HtmlHelper` extension methods, called via C#-style method-call syntax embedded directly in markup — Tag Helpers later replaced this as the preferred approach specifically because their HTML-like syntax reads far more naturally within a view that's otherwise almost entirely markup.
+
+```csharp
+// OLDER approach -- an HtmlHelper EXTENSION method, called with C#-style METHOD-CALL syntax
+public static class HtmlHelperExtensions
+{
+    public static IHtmlContent StatusBadge(this IHtmlHelper html, string status) =>
+        new HtmlString($"<span class='badge badge-{status.ToLower()}'>{status}</span>");
+}
+```
+```html
+<!-- CALLING it -- METHOD-CALL syntax, EMBEDDED awkwardly within OTHERWISE markup-heavy Razor -->
+@Html.StatusBadge(order.Status)
+
+<!-- the MODERN Tag Helper equivalent (covered earlier) -- reads like ORDINARY HTML -->
+<status-badge status="@order.Status"></status-badge>
+```
+The `HtmlHelper` approach's C#-method-call syntax stands out awkwardly against the surrounding HTML-like markup a Razor view is otherwise composed of — Tag Helpers' HTML-element-like syntax blends in naturally, and additionally integrate with Razor's own tooling (IntelliSense for custom attributes) in a way `HtmlHelper` extension methods, being ordinary C# method calls, generally don't provide as richly.
+
+**Common Pitfall:** continuing to write new `HtmlHelper` extension methods for new reusable markup-generation needs in a modern ASP.NET Core codebase, out of familiarity with the older pattern — Tag Helpers are the current, recommended approach specifically for this purpose, and mixing both styles inconsistently across a codebase (some reusable markup via `@Html.X()`, other via `<x-tag>`) creates a less coherent, harder-to-learn authoring experience than consistently adopting Tag Helpers for new reusable markup-generation logic.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is the `[ModelBinder(BinderType = typeof(X))]` attribute, and how does it apply a custom model binder to one specific action parameter, as distinct from a global `IModelBinderProvider` (covered earlier) applying to every occurrence of a type?**
+
+An `IModelBinderProvider` (covered earlier) applies its custom binder to *every* parameter/property of a matching type, throughout the entire application — `[ModelBinder(BinderType = typeof(X))]` instead applies a specific binder to just *one* specific parameter, letting the exact same type be bound differently in different contexts depending on which specific parameter is actually being bound.
+
+```csharp
+// a CUSTOM binder for a SPECIFIC, NARROW use case
+public class CommaSeparatedIntBinder : IModelBinder
+{
+    public Task BindModelAsync(ModelBindingContext bindingContext)
+    {
+        var value = bindingContext.ValueProvider.GetValue(bindingContext.ModelName).FirstValue;
+        var ids = value?.Split(',').Select(int.Parse).ToList() ?? new List<int>();
+        bindingContext.Result = ModelBindingResult.Success(ids);
+        return Task.CompletedTask;
+    }
+}
+
+// applied to ONLY this ONE SPECIFIC parameter -- NOT globally, to EVERY List<int> parameter in the ENTIRE app
+public IActionResult GetProducts([ModelBinder(BinderType = typeof(CommaSeparatedIntBinder))] List<int> ids)
+{
+    // 'ids' is populated from a COMMA-SEPARATED query string value, e.g. ?ids=1,2,3 -- SPECIFICALLY HERE
+}
+```
+Because the attribute is applied directly to this one action parameter, only *this specific* `List<int>` parameter uses the comma-separated-parsing binder — any *other* `List<int>` parameter elsewhere in the application continues using the framework's ordinary default binding behavior, letting the same underlying .NET type be bound completely differently depending on the specific parameter's own, deliberately-attributed context, rather than a global `IModelBinderProvider` forcing the custom behavior onto every occurrence of that type throughout the entire application.
+
+**Common Pitfall:** implementing a global `IModelBinderProvider` for a binding behavior that's actually only needed for one or two specific parameters, inadvertently changing the binding behavior for every *other* occurrence of that same type elsewhere in the application too — when a custom binding need is genuinely narrow and parameter-specific, `[ModelBinder(BinderType = ...)]` is the more precisely-scoped tool, avoiding unintended side effects on unrelated parameters of the same type that were never meant to use the custom binding logic at all.
+
+---
+
 ---

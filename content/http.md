@@ -1095,3 +1095,87 @@ bytes it has NO IDEA how to DECOMPRESS, since it NEVER indicated it could handle
 **Common Pitfall:** enabling response compression (covered elsewhere) without ensuring `Vary: Accept-Encoding` is correctly set on the compressed responses — most modern web servers/frameworks handle this automatically when their built-in compression middleware is used correctly, but a custom or manually-configured compression setup can easily omit it, creating exactly the cache-serves-wrong-variant failure mode this header exists specifically to prevent, especially painful because it may only manifest intermittently, depending on which specific client happens to populate a shared cache first.
 
 ---
+
+## Beginner — Question 14
+
+**Q14: What is the `Age` response header, and how does it tell a client how long a cached response has already been sitting in an intermediate cache — distinct from `Cache-Control`'s `max-age`?**
+
+`Cache-Control: max-age` (covered elsewhere) states how long a response is *allowed* to be cached for — `Age` is different: it's added by an intermediate cache (a CDN, a shared proxy) reporting how long *this specific cached copy* has *already* been sitting in that cache before being served to the current client.
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: max-age=3600    <-- this response MAY be cached for UP TO 3600 seconds (the RULE)
+Age: 1200                       <-- this SPECIFIC cached copy has ALREADY been sitting for 1200 seconds (the FACT)
+```
+```text
+A CLIENT receiving BOTH headers together can calculate: "this response is ALLOWED to be cached for
+3600 seconds TOTAL, and it's ALREADY been sitting for 1200 of those seconds -- so it has 2400
+seconds of FRESHNESS remaining before a CACHE would need to RE-VALIDATE or RE-FETCH it"
+```
+Because `max-age` alone doesn't tell a client anything about how *old* the specific cached response it just received actually is, `Age` fills that gap — letting a client (or a downstream cache) compute the response's actual remaining freshness by subtracting `Age` from `max-age`, rather than assuming a freshly-received response is necessarily freshly generated.
+
+**Common Pitfall:** confusing `Age` with `max-age` as though they were the same concept expressed differently — `max-age` is a rule the *origin server* sets about how long caching is *permitted*; `Age` is a fact an *intermediate cache* reports about how long *this particular cached copy* has actually existed; conflating the two leads to miscalculating how much longer a specific cached response actually remains valid.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is the difference between date-based conditional requests (`If-Modified-Since`/`If-Unmodified-Since`) and ETag-based ones (`If-None-Match`/`If-Match`, covered extensively), and why is ETag-based validation generally considered more precise?**
+
+Both conditional-request mechanisms let a client avoid re-downloading (or overwriting) a resource that hasn't actually changed — `If-Modified-Since`/`If-Unmodified-Since` compare a resource's last-modified *timestamp*, while `If-None-Match`/`If-Match` compare an opaque `ETag` value; ETags are generally considered more precise because timestamps have limited resolution and can't always distinguish between genuinely different content.
+
+```http
+-- DATE-based conditional request
+GET /products/5
+If-Modified-Since: Mon, 21 Aug 2026 10:00:00 GMT
+-- the SERVER compares this against the resource's OWN Last-Modified timestamp
+
+-- ETag-based conditional request (covered extensively elsewhere)
+GET /products/5
+If-None-Match: "v3-abc123"
+-- the SERVER compares this against the resource's CURRENT, actual ETag value
+```
+```text
+WHY ETags are generally MORE PRECISE:
+  -- Most systems' Last-Modified timestamps have ONLY 1-SECOND resolution -- TWO genuinely
+     DIFFERENT versions of a resource, saved WITHIN the SAME SECOND, would be INDISTINGUISHABLE
+     to a DATE-based check, but WOULD have DIFFERENT ETags (computed from ACTUAL CONTENT, covered
+     elsewhere) -- ETags can DISTINGUISH content changes DATE-based checks GENUINELY CANNOT
+  -- ETags can ALSO be computed to be STABLE across representation-preserving changes (e.g., a
+     RE-SAVE that doesn't ACTUALLY change content) -- WHEREAS a Last-Modified TIMESTAMP updates
+     EVERY time the FILE is touched, EVEN IF the CONTENT is BYTE-FOR-BYTE IDENTICAL afterward
+```
+Because ETags can be computed directly from a resource's actual content (a hash, or a database concurrency token, covered under EF Core), they can express "this exact content" with much finer precision than a timestamp's inherently coarser resolution allows, and they don't necessarily change just because a file was re-saved without any actual content change — a genuinely more reliable signal for "has this resource's actual content changed" than a last-modified date alone provides.
+
+**Common Pitfall:** relying solely on `Last-Modified`/`If-Modified-Since` for a resource that can genuinely change more than once per second, or where a timestamp update doesn't reliably correlate with an actual content change — this can cause a client to either miss a genuine change (two updates within the same second) or unnecessarily re-fetch unchanged content (a timestamp bump with no real content difference); ETags avoid both failure modes when computed correctly from the resource's actual content.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What was HTTP/2's Stream Priority mechanism, and why has its actual usefulness been largely superseded in practice, despite being part of the original HTTP/2 specification?**
+
+HTTP/2's original design let a client attach a priority weight and dependency hint to each multiplexed stream, signaling to the server "please serve this particular request before that one" — in principle, letting a browser tell the server which of many concurrent, multiplexed requests (a page's critical CSS versus a low-priority background image) should be transmitted first over the shared connection.
+
+```text
+HTTP/2 Stream Priority (ORIGINAL design) -- a CLIENT could ATTACH weight/dependency HINTS PER stream:
+  Stream 1 (critical CSS):     weight = 256, depends on: (root)
+  Stream 3 (background image): weight = 16,  depends on: Stream 1
+  -- SIGNALING: "please prioritize stream 1 well ABOVE stream 3" -- the SERVER decides HOW to actually HONOR this
+```
+```text
+WHY this has been LARGELY SUPERSEDED in PRACTICE:
+  -- the PRIORITY SIGNAL was only ever a HINT -- SERVERS were NOT required to honor it, and MANY
+     server/proxy IMPLEMENTATIONS handled it INCONSISTENTLY or IGNORED it ENTIRELY
+  -- the ACTUAL prioritization SCHEME (weighted DEPENDENCY TREES) proved GENUINELY COMPLEX to
+     implement CORRECTLY and CONSISTENTLY across DIFFERENT server/proxy IMPLEMENTATIONS
+  -- a NEWER, SIMPLER scheme ("Extensible Prioritization," RFC 9218) has since been introduced,
+     using a MUCH SIMPLER, flatter URGENCY value INSTEAD of the ORIGINAL weighted-dependency-tree model
+```
+Because the original priority scheme's dependency-tree model proved difficult to implement consistently and was only ever advisory rather than mandatory, its real-world impact fell well short of its original design intent — the IETF has since standardized a simpler, more broadly and consistently implementable alternative (RFC 9218's Extensible Prioritization scheme, using a flat, simple urgency value) as the current recommended approach for expressing this same kind of prioritization hint.
+
+**Why this is a useful, honest example of a well-intentioned protocol feature not fully achieving its original real-world impact:** HTTP/2's Stream Priority remains part of the historical spec and understanding it explains why browsers/servers behaved the way they did for years, but its practical, consistent effectiveness never fully matched the original design's ambition — a genuinely useful lesson in how a protocol feature's *specified* behavior and its *actual, consistent, cross-implementation* real-world impact aren't automatically the same thing.
+
+**Common Pitfall:** assuming HTTP/2's original stream priority hints reliably and consistently control server-side transmission order across any server/proxy combination — given the scheme's advisory nature and inconsistent real-world implementation, relying on it for genuinely critical prioritization behavior is unreliable; the newer, simpler Extensible Prioritization scheme (RFC 9218) is the more current, broadly-consistent mechanism for applications that genuinely need this kind of prioritization signal today.
+
+---

@@ -1341,4 +1341,77 @@ Without explicitly configuring shared key storage, each server instance defaults
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is `app.MapGroup()` (Minimal API Route Groups, .NET 7+), and how does it let a set of related endpoints share a common route prefix and cross-cutting configuration, without a Controller class at all?**
+
+Route Groups let a set of related Minimal API endpoints share a common URL prefix and apply shared configuration (authorization, filters, OpenAPI metadata) to all of them at once — providing Minimal APIs with an organizational structure similar in spirit to what a Controller class groups together, without needing a class at all.
+
+```csharp
+var orders = app.MapGroup("/orders").RequireAuthorization(); // a SHARED prefix AND shared AUTH requirement
+
+orders.MapGet("/{id}", (int id) => GetOrder(id));      // actually maps to: GET /orders/{id}
+orders.MapPost("/", (Order order) => CreateOrder(order)); // actually maps to: POST /orders
+// BOTH endpoints AUTOMATICALLY require AUTHORIZATION, WITHOUT repeating '.RequireAuthorization()' on EACH ONE
+```
+Because every endpoint mapped through the `orders` group automatically inherits its prefix and its `.RequireAuthorization()` call, adding a fifth or tenth related endpoint under `/orders` requires no repeated boilerplate for the shared prefix or shared cross-cutting configuration — exactly the same organizational benefit a Controller class's shared route prefix and class-level `[Authorize]` attribute provide, but expressed through Minimal API's functional style instead.
+
+**Common Pitfall:** repeating the same prefix string and the same cross-cutting configuration (`RequireAuthorization()`, a common filter) individually on every single `MapGet`/`MapPost` call in a Minimal API application with many related endpoints — this duplicates configuration that's identical across all of them and risks one endpoint being accidentally missed; `MapGroup` centralizes exactly this shared configuration in one place, the Minimal API equivalent of a Controller's shared, class-level configuration.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What are ASP.NET Core Output Caching's Cache Tags, and how do they let you invalidate a specific group of cached entries programmatically, rather than waiting for their natural expiration?**
+
+Output Caching (covered earlier) normally expires cached entries based on a configured duration — Cache Tags let you label cached responses with one or more tags at cache-time, then explicitly evict every entry sharing a specific tag on demand, the moment underlying data actually changes, rather than waiting for a time-based expiration that might leave stale data cached for longer than acceptable.
+
+```csharp
+app.MapGet("/products/{id}", GetProduct)
+    .CacheOutput(policy => policy.Tag("products")); // TAGGED -- lets THIS ENTRY be evicted by TAG, later
+
+// LATER, when a PRODUCT is actually UPDATED -- EVICT every CACHED response TAGGED "products" IMMEDIATELY
+app.MapPut("/products/{id}", async (int id, Product updated, IOutputCacheStore cache) =>
+{
+    await _repository.UpdateAsync(id, updated);
+    await cache.EvictByTagAsync("products", default); // INVALIDATES every "products"-tagged CACHE entry, RIGHT NOW
+});
+```
+Because the update endpoint explicitly evicts every cache entry tagged `"products"` the instant an actual product update succeeds, a client requesting `/products/{id}` immediately afterward gets fresh, up-to-date data — rather than potentially seeing a stale, cached response for however long the entry's natural expiration window still had remaining, directly addressing the Cache Invalidation problem (covered under Performance) with a concrete, programmatic mechanism.
+
+**Common Pitfall:** relying purely on a short cache duration to bound staleness, rather than explicitly evicting by tag when the underlying data genuinely changes — a short duration limits *how long* staleness can last but still guarantees some window of potentially-stale responses after every update; tag-based eviction closes that window immediately, the moment a write actually happens, rather than merely bounding it to a fixed, tolerable duration.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What configuration does Kestrel need to serve HTTP/3 (over QUIC, covered under HTTP) alongside HTTP/1.1/2 on the same endpoint, and why can't a server simply "turn on" HTTP/3 without any additional setup?**
+
+Unlike HTTP/2 (which can be negotiated automatically via ALPN over an existing TLS connection, covered elsewhere), HTTP/3 runs over QUIC, which itself runs over UDP rather than TCP — this is a fundamentally different transport, requiring Kestrel to be explicitly configured to also listen for UDP-based QUIC traffic on the same port, alongside its existing TCP-based HTTP/1.1/2 listener.
+
+```csharp
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.ListenAnyIP(443, listenOptions =>
+    {
+        listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3; // EXPLICITLY opt IN to HTTP/3 too
+        listenOptions.UseHttps();
+    });
+});
+```
+```text
+Kestrel now LISTENS on port 443 for BOTH:
+  -- ORDINARY TCP-based connections (HTTP/1.1, HTTP/2, negotiated via ALPN over TLS, as BEFORE)
+  -- UDP-based QUIC connections (HTTP/3) -- a GENUINELY DIFFERENT transport PROTOCOL, requiring its
+     OWN listening SETUP, since QUIC ISN'T simply "HTTP/2 but a bit newer" -- it's BUILT on an
+     ENTIRELY DIFFERENT transport LAYER (UDP) than HTTP/1.1/2's TCP FOUNDATION
+```
+Because HTTP/3 requires an entirely separate underlying transport (UDP-based QUIC, rather than TCP), Kestrel must be explicitly told to also listen for this different kind of traffic — a server simply upgrading to a newer .NET/Kestrel version doesn't automatically start serving HTTP/3 without this explicit protocol configuration, and the server also needs to advertise its HTTP/3 availability via the `Alt-Svc` header (covered under HTTP) so clients already connected via HTTP/1.1/2 know they can opportunistically switch on a subsequent connection.
+
+**Why HTTP/3 support also depends on the underlying OS/network environment, not just application configuration:** QUIC's reliance on UDP means it can be blocked or degraded by network infrastructure (some corporate firewalls/proxies restrict UDP traffic more aggressively than TCP) in ways HTTP/1.1/2 traffic typically isn't — this is precisely why HTTP/3 is generally deployed as an *addition* alongside HTTP/1.1/2 (via `Alt-Svc`'s opportunistic-upgrade mechanism, covered under HTTP) rather than a wholesale replacement, letting clients that can't successfully use QUIC in their specific network environment gracefully continue using HTTP/1.1/2 instead.
+
+**Common Pitfall:** enabling `Http3` in Kestrel's protocol configuration without also correctly configuring TLS/certificates and the `Alt-Svc` advertising mechanism — HTTP/3 requires TLS 1.3 specifically (no plaintext HTTP/3 equivalent to `h2c`, covered under gRPC, is broadly supported), and clients need the `Alt-Svc` header to actually discover that HTTP/3 is available at all; simply flipping on the protocol flag without these accompanying pieces correctly configured won't result in clients actually using HTTP/3.
+
+---
+
 ---

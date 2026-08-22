@@ -2020,3 +2020,91 @@ Rather than a client needing three separate HTTP round-trips (two `POST /orders`
 **Common Pitfall:** exposing a generic batch endpoint as the *default*, primary way to interact with a resource collection, rather than reserving it specifically for the narrow scenarios that genuinely need it — for ordinary, everyday client interactions, individual resource-per-request endpoints remain simpler to reason about, cache, and secure; introducing batch endpoints prematurely, before the round-trip cost has actually been shown to be a real problem, adds real complexity (a bespoke request/response envelope format, non-standard per-operation status handling) without a correspondingly clear benefit.
 
 ---
+
+## Beginner — Question 15
+
+**Q15: When is it appropriate for a client to create a resource via `PUT` with a client-specified ID, rather than the more common `POST`-based creation with a server-generated ID?**
+
+`POST /orders` (server assigns the new resource's ID, returning it in the response) is the more common creation pattern — but `PUT /widgets/{clientGeneratedId}` is also valid REST, specifically appropriate when the *client* is the natural authority for choosing the resource's identifier, rather than the server.
+
+```http
+-- SERVER-GENERATED id -- the CLIENT doesn't know the id UNTIL the server ASSIGNS and RETURNS it
+POST /orders
+{ "customerId": 5, "items": [...] }
+-- Response: 201 Created, Location: /orders/8842   <-- the SERVER decided "8842"
+
+-- CLIENT-SPECIFIED id -- the CLIENT ALREADY knows/OWNS the identifier BEFORE creating the resource
+PUT /widgets/sku-ABC123
+{ "name": "Blue Widget", "price": 9.99 }
+-- Response: 201 Created (if it DIDN'T exist yet) -- the CLIENT chose "sku-ABC123" ITSELF
+```
+A `PUT`-based creation is idempotent by nature (covered extensively elsewhere) — sending the identical `PUT` request twice creates the resource once, then simply updates it identically the second time, which fits naturally when the client already has a stable, meaningful identifier in mind (a product SKU, a username) — `POST`-based creation is more natural specifically when the server itself is the appropriate authority for assigning a new, previously-unknown identifier (an auto-incrementing order number).
+
+**Common Pitfall:** using `POST` for creation even when the client genuinely already possesses the natural, stable identifier for the resource being created (a user picking their own username, a well-known external SKU) — forcing a server-generated ID onto a resource that already has a perfectly good, client-known identifier adds an unnecessary layer of indirection; `PUT`-based creation is the more natural fit specifically for this scenario, letting the resource's URL directly reflect the identifier the client already had in hand.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is the `202 Accepted` status code combined with a `Location` header pointing to a status-check endpoint, and how does this "polling" pattern let a REST API handle long-running, asynchronously-processed operations?**
+
+Some operations (generating a large report, processing a bulk import) take too long to complete within a single synchronous HTTP request/response cycle — `202 Accepted` tells the client "I've accepted your request and started processing it, but it's not done yet," with a `Location` header pointing to a separate endpoint the client can poll to check progress and eventually retrieve the actual result.
+
+```http
+POST /reports
+{ "type": "annual-sales" }
+
+-- the SERVER immediately RESPONDS, WITHOUT waiting for the REPORT to actually FINISH generating:
+HTTP/1.1 202 Accepted
+Location: /reports/status/abc123
+```
+```http
+-- the CLIENT POLLS this SEPARATE status endpoint, PERIODICALLY, to CHECK progress:
+GET /reports/status/abc123
+
+HTTP/1.1 200 OK
+{ "status": "processing", "progressPercent": 45 }
+
+-- EVENTUALLY, ONCE the report is ACTUALLY done:
+GET /reports/status/abc123
+HTTP/1.1 303 See Other
+Location: /reports/abc123/download   <-- REDIRECTS the client to the ACTUAL, FINISHED result
+```
+Because the client immediately gets a `202` response (rather than the connection staying open for however long the report actually takes to generate), the client is free to do other work while periodically checking the status endpoint — this pattern directly avoids the problems covered under Performance's earlier discussion of a slow, synchronous endpoint tying up a connection/thread for an extended duration, instead giving the client an immediate acknowledgment and a way to check back later.
+
+**Common Pitfall:** returning `200 OK` immediately for a long-running operation that hasn't actually finished yet, without a status-checking mechanism at all — the client has no standardized way to know whether the operation actually succeeded, is still processing, or failed, and no URL to check back at; `202 Accepted` combined with a `Location`-pointed status endpoint is the standard, discoverable way to communicate "accepted, but not yet complete" rather than either blocking the original request indefinitely or returning a premature, misleading success response.
+
+---
+
+## Advanced — Question 15
+
+**Q15: How does combining `If-Match`/ETag-based optimistic concurrency (covered earlier for `PUT`) with a partial JSON Merge Patch body let a `PATCH` operation avoid a lost-update race, the same way `If-Match` protects a full `PUT`?**
+
+`PATCH`'s partial-update model (covered earlier) doesn't inherently protect against two concurrent clients both patching the same resource based on stale data — but exactly the same `If-Match`/ETag mechanism covered for `PUT`-based optimistic concurrency applies equally well to `PATCH`, letting a partial update be conditionally rejected if the resource has changed since the client last read it.
+
+```http
+GET /products/5
+ETag: "v3-abc123"
+{ "id": 5, "name": "Keyboard", "price": 29.99, "stock": 100 }
+
+-- a CLIENT wants to UPDATE just the price, but ONLY if NOBODY ELSE has changed the resource SINCE it was READ
+PATCH /products/5
+If-Match: "v3-abc123"
+Content-Type: application/merge-patch+json
+
+{ "price": 34.99 }
+```
+```text
+IF ANOTHER client ALREADY updated product 5 (e.g., changing stock) BETWEEN this client's GET and PATCH:
+  -> the RESOURCE's CURRENT ETag is now DIFFERENT (say, "v4-def456") -- NO LONGER matches "v3-abc123"
+  -> the SERVER REJECTS this PATCH with 412 Precondition Failed -- the PARTIAL price update is NEVER applied
+  -> the CLIENT must RE-FETCH the CURRENT state and DECIDE how to proceed, rather than BLINDLY
+     applying a PARTIAL update ON TOP of data it NO LONGER accurately reflects
+```
+Without `If-Match`, a `PATCH` request could apply its partial change on top of a resource state that's already been superseded by someone else's concurrent update — silently succeeding, but based on stale assumptions about the resource's other fields — combining `If-Match` with `PATCH` closes this gap exactly the way it closes the equivalent gap for `PUT`, rejecting the partial update outright if the resource has genuinely changed since the client last observed it.
+
+**Why this matters specifically for `PATCH` even though it only modifies a SUBSET of fields:** one might assume a partial update is inherently "safer" than a full `PUT` replacement, since it only touches the fields it explicitly mentions — but the *decision* to apply that specific partial change might itself have been made based on now-stale context (a client deciding to apply a discount specifically because it read a certain stock level, which has since changed) — `If-Match` protects against acting on stale context, not merely against overwriting fields the client didn't intend to touch.
+
+**Common Pitfall:** assuming `PATCH`'s partial-update nature makes it inherently immune to lost-update races, and therefore skipping `If-Match` entirely for `PATCH` endpoints while still using it for `PUT` — a `PATCH` operation can be just as vulnerable to acting on stale, superseded context as a full `PUT`, and deserves the exact same `If-Match`-based optimistic concurrency protection whenever the operation's correctness genuinely depends on the resource's state not having changed since it was last read.
+
+---

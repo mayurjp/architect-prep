@@ -1261,4 +1261,91 @@ Because these headers appear on *every* actual response from the deprecated endp
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is ASP.NET Core's built-in Rate Limiting Concurrency Limiter algorithm, and how does it limit based on how many requests are currently being processed simultaneously, rather than a count over a time window?**
+
+The Concurrency Limiter caps how many requests can be *actively being processed at once* — distinct from a Fixed/Sliding Window limiter (which counts requests over a time period), it directly bounds simultaneous in-flight work, rejecting or queuing new requests once that concurrency ceiling is already reached, regardless of how much time has elapsed.
+
+```csharp
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddConcurrencyLimiter("heavy-report", opt =>
+    {
+        opt.PermitLimit = 5;      // AT MOST 5 requests processing SIMULTANEOUSLY -- NOT "5 per minute"
+        opt.QueueLimit = 10;      // UP TO 10 ADDITIONAL requests can WAIT in a queue for a SLOT to FREE UP
+    });
+});
+
+app.MapGet("/reports/heavy", GenerateHeavyReport).RequireRateLimiting("heavy-report");
+```
+Unlike a time-window-based limiter (which might allow a burst of 100 requests in the first second of a minute, then block everything else for the rest of that minute), the Concurrency Limiter directly protects against too much simultaneous, resource-intensive work happening at once — well suited specifically for expensive endpoints (a report generator, a heavy computation) where the actual concern is "how many of these can genuinely run at the same time without exhausting server resources," not "how many total requests arrive within a given time period."
+
+**Common Pitfall:** applying a time-window-based rate limiter (Fixed/Sliding Window) to an endpoint whose actual concern is genuinely about simultaneous resource contention, not request *frequency* — a time-window limiter would still allow many resource-intensive requests to pile up and run concurrently as long as they arrive within the same window, providing no protection against the server being overwhelmed by too much simultaneous, heavy work; the Concurrency Limiter is the correctly-scoped tool specifically for that concern.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: How does API Explorer's GroupName-based versioning let multiple API versions be documented and browsed separately in one Swagger UI, rather than mixing every version's endpoints together in one undifferentiated list?**
+
+Combining API Versioning (covered earlier) with API Explorer's `GroupName` lets Swashbuckle generate a *separate* OpenAPI document per API version, each with its own dropdown entry in Swagger UI — rather than a single, undifferentiated document listing every version's endpoints mixed together, potentially confusing a developer browsing which specific version a given endpoint actually belongs to.
+
+```csharp
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo { Title = "My API", Version = "v1" });
+    options.SwaggerDoc("v2", new OpenApiInfo { Title = "My API", Version = "v2" });
+});
+
+app.UseSwaggerUI(options =>
+{
+    options.SwaggerEndpoint("/swagger/v1/swagger.json", "My API v1"); // a SEPARATE dropdown ENTRY
+    options.SwaggerEndpoint("/swagger/v2/swagger.json", "My API v2"); // ANOTHER separate dropdown ENTRY
+});
+```
+Because each API version gets its own separate generated document (filtered by its `GroupName`, tied to its version via API Explorer, covered earlier), a developer browsing Swagger UI can switch between versions via the dropdown and see *only* that version's actual endpoints — rather than a single combined document where a v1-only endpoint and a v2-only endpoint sit side by side, ambiguously, with no clear separation communicating which version each one actually belongs to.
+
+**Common Pitfall:** generating a single, combined Swagger document covering every API version's endpoints together, relying on inconsistent naming conventions or ad-hoc descriptions to communicate which version each endpoint belongs to — this becomes genuinely confusing once an API has accumulated several versions with overlapping or renamed endpoints; per-version document generation (as shown above) keeps each version's documentation cleanly separated and immediately unambiguous.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is a Custom `OutputFormatter`/`InputFormatter` in ASP.NET Core Web API, and how does registering one let an action return or accept an entirely custom content type, beyond the built-in JSON formatter?**
+
+ASP.NET Core's content negotiation (covered earlier) relies on a set of registered formatters, each capable of serializing/deserializing a specific content type — the built-in `SystemTextJsonOutputFormatter` handles JSON by default, but a Custom `OutputFormatter`/`InputFormatter` lets an application add support for an entirely different format (CSV, a custom binary protocol) that the framework has no built-in support for at all.
+
+```csharp
+public class CsvOutputFormatter : TextOutputFormatter
+{
+    public CsvOutputFormatter()
+    {
+        SupportedMediaTypes.Add("text/csv");
+        SupportedEncodings.Add(Encoding.UTF8);
+    }
+
+    protected override bool CanWriteType(Type type) => typeof(IEnumerable<Product>).IsAssignableFrom(type);
+
+    public override async Task WriteResponseBodyAsync(OutputFormatterWriteContext context, Encoding encoding)
+    {
+        var products = (IEnumerable<Product>)context.Object;
+        var csv = string.Join("\n", products.Select(p => $"{p.Id},{p.Name},{p.Price}"));
+        await context.HttpContext.Response.WriteAsync(csv, encoding);
+    }
+}
+
+// Program.cs
+builder.Services.AddControllers(options => options.OutputFormatters.Add(new CsvOutputFormatter()));
+```
+```http
+GET /products
+Accept: text/csv
+```
+Because the custom formatter is registered alongside the built-in JSON one, content negotiation (covered earlier) now genuinely has a choice between JSON and CSV based on the client's `Accept` header — a client requesting `text/csv` receives a properly-formatted CSV response, generated by this custom formatter, while a client requesting `application/json` continues receiving the ordinary JSON response, both served by the exact same action method without any conditional logic in the action itself.
+
+**Common Pitfall:** manually constructing a CSV (or other custom-format) string directly inside an action method and returning it as a raw `ContentResult`, rather than implementing a proper `OutputFormatter` — this bypasses the framework's content-negotiation pipeline entirely, meaning the action can only ever return that one hardcoded format regardless of what the client's `Accept` header actually requests, losing the genuine content-negotiation flexibility a properly-registered formatter provides across every action that returns the relevant type.
+
+---
+
 ---
