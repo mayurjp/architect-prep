@@ -1493,4 +1493,89 @@ The interface itself doesn't change regardless of which specific persistence tec
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What does it mean for a variable to violate "single responsibility at the variable level" by being repurposed for a different meaning partway through a method, and why does this make code genuinely harder to follow?**
+
+Just as a class or method should have one clear responsibility (covered extensively), a single variable should represent one clear, unchanging concept throughout its scope — reusing an existing variable to hold a *different*, unrelated meaning partway through the same method (rather than declaring a new one) forces a reader to mentally track "what does this variable actually mean *right now*, at this specific line," rather than being able to trust its meaning stays constant throughout.
+
+```csharp
+// the SAME variable, "result," is REPURPOSED for TWO ENTIRELY DIFFERENT MEANINGS, PARTWAY through
+public string ProcessOrder(Order order)
+{
+    var result = ValidateOrder(order);       // HERE, "result" means "a VALIDATION outcome"
+    if (!result.IsValid) return result.ErrorMessage;
+
+    result = CalculateShippingLabel(order);  // NOW, THE SAME VARIABLE means something ENTIRELY DIFFERENT
+    return result.LabelText;                  // a READER must MENTALLY TRACK "what does 'result' mean HERE?"
+}
+
+// EACH variable represents EXACTLY ONE THING, for its ENTIRE scope -- MUCH easier to FOLLOW
+public string ProcessOrder(Order order)
+{
+    var validationResult = ValidateOrder(order);
+    if (!validationResult.IsValid) return validationResult.ErrorMessage;
+
+    var shippingLabel = CalculateShippingLabel(order);
+    return shippingLabel.LabelText;
+}
+```
+In the first version, a reader encountering `result` partway through the method cannot rely on its meaning being consistent with where it was first introduced — they must trace backward to see it was reassigned to something conceptually unrelated; in the second version, `validationResult` and `shippingLabel` each mean exactly one thing for their entire, clearly-scoped lifetime, letting a reader trust a variable's meaning without needing to re-verify it at every subsequent use.
+
+**Common Pitfall:** reusing a generically-named variable (`result`, `temp`, `data`) for several conceptually unrelated purposes within the same method, purely to avoid declaring additional variables — this trades a trivial amount of typing for a genuine, ongoing readability cost every future reader of the method pays, since they can no longer trust a variable's meaning stays fixed throughout its scope; giving each distinct concept its own, specifically-named variable is a small effort that pays for itself the moment the code is read again by anyone (including the original author, months later).
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What does it mean to explicitly "Design for Testability" by building seams into a system from the start, as distinct from Dependency Injection's testability benefit covered under Testing?**
+
+A "seam" (a term from Michael Feathers' work on legacy code) is a place in a system where behavior can be altered *without editing the source code at that exact point* — Dependency Injection (covered under Testing) is one specific, common way to create seams, but "Design for Testability" as a broader principle means deliberately identifying and creating such seams throughout a design *proactively*, rather than only adding them reactively once a specific piece of code turns out to be hard to test.
+
+```csharp
+// NO SEAM -- the SPECIFIC LOGIC is HARD-WIRED, DIRECTLY, with NO POINT to ALTER it WITHOUT EDITING THIS CODE
+public class ReportGenerator
+{
+    public string Generate() => $"Report generated at {DateTime.Now}"; // DateTime.Now -- NO seam AT ALL
+}
+
+// a SEAM -- a DELIBERATE POINT where behavior CAN be ALTERED, WITHOUT touching THIS class's OWN source
+public class ReportGenerator
+{
+    private readonly Func<DateTime> _clock; // a SEAM -- injected, letting behavior be ALTERED EXTERNALLY
+    public ReportGenerator(Func<DateTime> clock) => _clock = clock;
+    public string Generate() => $"Report generated at {_clock()}"; // a TEST can SUPPLY a FIXED, KNOWN time HERE
+}
+```
+Because `_clock` is a genuine seam, a test can supply a fixed, predictable time without ever needing to modify `ReportGenerator`'s own source code — Dependency Injection is precisely the *mechanism* used to create this particular seam, but "Design for Testability" as a principle is the broader mindset of proactively identifying *where* such seams are needed throughout a design (not just for external dependencies, but for anything non-deterministic or hard to control in a test — time, randomness, file I/O) before those specific pain points are ever actually hit.
+
+**Why thinking about seams proactively, during initial design, differs meaningfully from retrofitting testability later:** a system designed with seams in mind from the start naturally ends up with clean extension points wherever genuinely needed — retrofitting testability into an already-built, seam-less system (the exact scenario covered under Testing's Humble Object pattern and DI-based testability discussions) is markedly harder, often requiring invasive refactoring to introduce seams the original design never anticipated needing at all.
+
+**Common Pitfall:** treating testability purely as "whatever Dependency Injection happens to provide," without proactively considering *other* sources of hard-to-test behavior (the system clock, random number generation, direct file/network I/O) that DI alone doesn't automatically address unless those specific dependencies are also deliberately wrapped and injected as their own seams — Design for Testability is a broader mindset encompassing DI as one tool among several, not synonymous with DI itself.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Joel Spolsky's "Law of Leaky Abstractions," and how does it temper the expectation that a well-designed abstraction completely hides its underlying implementation?**
+
+The Law of Leaky Abstractions observes that all non-trivial abstractions, to some degree, "leak" details of their underlying implementation — no abstraction, however well-designed, can completely and permanently hide every detail of what it's actually built on top of, and understanding this tempers the otherwise-appealing expectation that a good abstraction should let you *never* need to think about what's underneath it.
+
+```csharp
+// TCP/IP is a CLASSIC leaky abstraction -- it PROMISES a "reliable, ordered BYTE STREAM"
+using var client = new TcpClient();
+await client.ConnectAsync("api.example.com", 443);
+// -- MOST of the TIME, this ABSTRACTION holds: you get a RELIABLE stream, WITHOUT thinking about PACKETS
+// -- but UNDER a POOR network CONNECTION, the ABSTRACTION "LEAKS": SUDDEN, UNEXPLAINED LATENCY SPIKES,
+//    TIMEOUTS, and RETRANSMISSION BEHAVIOR all SURFACE, FORCING a developer to UNDERSTAND the ACTUAL
+//    UNDERLYING PACKET-based, UNRELIABLE-NETWORK reality the ABSTRACTION was SUPPOSED to HIDE ENTIRELY
+```
+Similarly, EF Core's LINQ abstraction (covered extensively) mostly lets a developer write ordinary-looking C# without thinking about SQL — until an N+1 query problem (covered extensively) or an untranslatable expression forces them to understand exactly what SQL is actually being generated underneath; the abstraction genuinely helps the vast majority of the time, but "leaks" its underlying reality specifically when something goes wrong or performs unexpectedly.
+
+**Why this is a tempering observation, not an argument against using abstractions at all:** the Law doesn't say abstractions are worthless — EF Core's LINQ abstraction still provides enormous genuine value the vast majority of the time — it specifically warns against the *stronger*, unrealistic expectation that a good abstraction means never needing to understand what's underneath it at all; a developer who understands the underlying reality (SQL, the network stack, the file system) can diagnose the inevitable leaks quickly, while one who's only ever learned the abstraction itself gets genuinely stuck the moment reality leaks through.
+
+**Common Pitfall:** treating deep familiarity with an abstraction's *underlying* implementation as unnecessary, "since the abstraction is supposed to handle that" — this leaves a developer without any recourse the moment that abstraction inevitably leaks (a performance problem, an edge-case failure) in some situation the abstraction wasn't actually able to fully hide; genuinely effective use of a powerful abstraction (LINQ, ORM, a cloud SDK) still benefits from understanding what it actually sits on top of, specifically for the moments its abstraction inevitably, if only occasionally, leaks.
+
+---
+
 ---

@@ -1572,3 +1572,85 @@ Code written correctly against `FileRepository`'s documented contract (catch `Fi
 **Common Pitfall:** overriding a base class method and introducing a new, broader category of exception (a checked-exception-equivalent the base method's own documented contract never mentioned) without updating that documented contract, or without the new exception type actually deriving from something the base contract already covers — callers relying on the base class's original, narrower documented exception contract have no reason to expect (or catch) the new exception type, precisely the substitutability break LSP is meant to prevent.
 
 ---
+
+## Beginner — Question 16
+
+**Q16: What is a C# property with a private setter (`{ get; private set; }`), and how does it let a class expose a read-only-from-outside value that it can still freely modify internally?**
+
+A private setter restricts assignment to code *inside the class itself* — external code can read the property freely but cannot assign to it directly at all, while the class's own methods retain full ability to update it as part of their own internal logic (incrementing a counter, recalculating a derived value).
+
+```csharp
+public class ShoppingCart
+{
+    public decimal Total { get; private set; } // READABLE from ANYWHERE -- but ONLY SETTABLE from INSIDE this class
+
+    public void AddItem(decimal price)
+    {
+        Total += price; // the CLASS'S OWN method CAN freely modify it INTERNALLY
+    }
+}
+
+var cart = new ShoppingCart();
+cart.AddItem(29.99m);
+Console.WriteLine(cart.Total); // READING is FINE, from ANYWHERE
+// cart.Total = 500;          -- COMPILE ERROR -- EXTERNAL code CANNOT assign to it DIRECTLY, AT ALL
+```
+Because only `AddItem` (and any other method inside `ShoppingCart` itself) can actually change `Total`, external code can never bypass the class's own business logic (adding an item's price properly) to set an arbitrary, unvalidated total directly — this is a narrower, more targeted form of encapsulation than a fully read-only property (settable only in the constructor), letting the class maintain and update its own invariant over its entire lifetime, not just at construction time.
+
+**Common Pitfall:** exposing a fully public setter for a property the class itself is supposed to be the sole authority over calculating/maintaining (a running total, a computed status) — this lets any external code silently overwrite the value with something inconsistent with the class's own internal state, entirely bypassing whatever logic (`AddItem`, in this example) was supposed to be the only legitimate way to change it; a private setter closes off exactly this bypass while still allowing convenient, direct property reads from anywhere.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is a `sealed override` method, and how does it let a derived class stop further overriding of one specific virtual method, without sealing the entire class?**
+
+`sealed` on an entire class (covered earlier) prevents *any* further inheritance from it at all — `sealed` applied specifically to an *override* instead only prevents that *one particular method* from being overridden any further down the inheritance chain, while every other virtual member (and the class itself) remains freely inheritable and overridable.
+
+```csharp
+public class Shape { public virtual double CalculateArea() => 0; }
+
+public class Circle : Shape
+{
+    public sealed override double CalculateArea() => Math.PI * Radius * Radius; // SEALS just THIS override
+    public double Radius { get; set; }
+}
+
+public class SpecialCircle : Circle
+{
+    // public override double CalculateArea() => ...; -- COMPILE ERROR -- CANNOT override a SEALED override
+    public virtual void SomeOtherMethod() { } // EVERYTHING ELSE remains FREELY inheritable/overridable
+}
+```
+Because only `CalculateArea`'s override is sealed, `SpecialCircle` (and any further subclass) can still freely add new members, override *other* virtual methods `Circle` might have, and otherwise participate normally in the inheritance hierarchy — just without ever being able to further override this one, specific, deliberately-finalized calculation, which the `Circle` class's author has decided should never be altered by any further subclass.
+
+**Why this is more surgically targeted than sealing the entire class:** sealing the whole `Circle` class (covered earlier) would prevent `SpecialCircle` from existing at all — `sealed override` instead allows the class to remain a perfectly good, extensible base for further subclassing, while protecting just the *one specific piece of behavior* (the area calculation) that the author has genuine reason to guarantee will never be altered further down the chain (perhaps because other code relies on `Circle`'s area calculation always following a specific, verified formula).
+
+**Common Pitfall:** sealing an entire class purely to prevent one specific method from being overridden further, when `sealed override` on just that one method would achieve the identical protective goal while still allowing the class to be extended in every other respect — reaching for the broader, class-level `sealed` when only one specific member genuinely needs that protection unnecessarily restricts the class's overall extensibility.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What are Covariant Return Types (C# 9+), and how do they differ from the generic interface covariance (`out T`) covered earlier?**
+
+Covariant Return Types let an overriding method return a *more derived* type than its base method declares — distinct from generic covariance (`out T`, covered earlier), which concerns whether a generic interface's *type parameter* can safely vary; this instead concerns an overriding *method's own return type* varying, directly at the override site.
+
+```csharp
+public class Animal { public virtual Animal Reproduce() => new Animal(); }
+
+public class Dog : Animal
+{
+    // C# 9+ COVARIANT return type -- overrides "Animal Reproduce()" but returns the MORE DERIVED "Dog" instead
+    public override Dog Reproduce() => new Dog(); // a DOG, DIRECTLY -- NOT merely an "Animal" REFERENCE to one
+}
+
+Dog puppy = someDog.Reproduce(); // NO CAST needed -- 'Reproduce()' on a Dog GENUINELY returns a Dog DIRECTLY
+```
+Before C# 9, an overriding method was required to return the *exact same* type the base method declared (`Animal`, in this example) — even though the override's actual implementation always produced a `Dog`, callers would need an explicit cast to treat the result as a `Dog` directly. Covariant Return Types let the override's signature itself declare the more specific, more useful `Dog` return type, removing the need for that cast entirely, while still satisfying the base class's contract (a `Dog` is always usable anywhere an `Animal` is expected).
+
+**Why this is a genuinely different mechanism from generic interface covariance (`out T`, covered earlier):** `out T` covariance concerns a generic *interface's type parameter* (`IEnumerable<out T>`, letting `IEnumerable<Dog>` be used as `IEnumerable<Animal>`) — Covariant Return Types instead concern a specific *overriding method's own declared return type* varying from its base method's declared return type; both relate to substitutability and "more derived types being usable where less derived ones are expected," but they apply to entirely different language constructs (a generic type parameter's variance annotation, versus a method override's own return type declaration).
+
+**Common Pitfall:** conflating Covariant Return Types with generic interface covariance simply because both involve the word "covariant" and both relate to substitutability — they solve different problems in different contexts (method override signatures versus generic type parameter variance), and confusing the two can lead to expecting one mechanism's rules (interface variance's `out`/`in` positional restrictions, covered earlier) to apply to the other (method return-type overriding), when they're actually governed by entirely separate language rules.
+
+---

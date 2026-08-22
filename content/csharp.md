@@ -1400,6 +1400,90 @@ Because the UTF-8 bytes are computed once, at compile time, and embedded directl
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is a C# Indexer (`this[]`), and how does it let a class be accessed using array-like syntax (`obj[key]`)?**
+
+An Indexer lets a custom class define its own behavior for the `obj[key]` syntax, exactly the way a built-in array or `List<T>` supports `list[0]` — internally, it's simply a specially-named property accepting a parameter, letting a class expose collection-like access without actually being a real array or implementing a full collection interface.
+
+```csharp
+public class WeeklySchedule
+{
+    private readonly string[] _days = new string[7];
+
+    public string this[DayOfWeek day] // an INDEXER -- lets THIS class be accessed AS "schedule[DayOfWeek.Monday]"
+    {
+        get => _days[(int)day];
+        set => _days[(int)day] = value;
+    }
+}
+
+var schedule = new WeeklySchedule();
+schedule[DayOfWeek.Monday] = "Team meeting"; // READS almost like ARRAY access -- but it's a CUSTOM CLASS
+Console.WriteLine(schedule[DayOfWeek.Monday]);
+```
+Because the indexer is just a specially-named property with a `get`/`set` accepting a parameter, `WeeklySchedule` doesn't need to actually be an array or implement any particular collection interface to support this convenient, array-like syntax — the class defines exactly what "indexing into it" should mean for its own specific domain concept (a day of the week, in this example), rather than an integer position.
+
+**Common Pitfall:** defining an ordinary method (`GetDay(DayOfWeek day)`/`SetDay(DayOfWeek day, string value)`) when an indexer would communicate the exact same "look this up by key" semantic more naturally and concisely — for a class conceptually representing "a collection of things accessible by some key," an indexer often reads more naturally at call sites than an equivalent pair of explicitly-named getter/setter methods.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is a C# `Deconstruct` method, and how does it let a custom type be unpacked via tuple-like deconstruction syntax (`var (x, y) = point;`)?**
+
+Deconstruction (built into C# for tuples) lets a single value be unpacked into several separate variables in one statement — a custom type can opt into this exact same syntax by defining its own `Deconstruct` method, specifying exactly which of its members get assigned to which position in the deconstruction.
+
+```csharp
+public class Point
+{
+    public int X { get; }
+    public int Y { get; }
+    public Point(int x, int y) { X = x; Y = y; }
+
+    public void Deconstruct(out int x, out int y) // OPTS INTO deconstruction SYNTAX
+    {
+        x = X;
+        y = Y;
+    }
+}
+
+var point = new Point(3, 4);
+var (x, y) = point; // DECONSTRUCTS 'point' DIRECTLY into TWO separate variables, in ONE statement
+Console.WriteLine($"{x}, {y}"); // "3, 4"
+```
+Because `Point` defines its own `Deconstruct` method, `var (x, y) = point;` works exactly the same way it would for a built-in tuple, even though `Point` is an ordinary, custom class — a type can even define *multiple* overloads of `Deconstruct` with different numbers of `out` parameters, letting callers deconstruct into however many pieces make sense for a given context (a two-part deconstruction, or a three-part one including some additional property).
+
+**Common Pitfall:** writing separate, individually-named properties/methods to extract a type's constituent parts one at a time (`point.GetX()`, `point.GetY()`, called separately) when a single `Deconstruct` method would let callers unpack the entire relevant set of values in one, more concise statement — `Deconstruct` is specifically useful for types that are conceptually "a small bundle of related values," letting calling code destructure them naturally in one line rather than several separate property/method accesses.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What are C# Expression Trees (`Expression<Func<T>>`), and how do they let code be represented as inspectable data rather than compiled, executable IL — the mechanism underlying EF Core's own LINQ-to-SQL translation?**
+
+An ordinary lambda assigned to a `Func<T>` compiles directly into executable IL — a lambda assigned to an `Expression<Func<T>>` instead compiles into a *data structure* describing the lambda's logic as an inspectable tree of nodes (a binary operation, a method call, a constant), which code can walk and translate into something else entirely, rather than simply executing it as compiled code.
+
+```csharp
+Func<Product, bool> compiledDelegate = p => p.Price > 100; // ORDINARY delegate -- COMPILED, EXECUTABLE IL
+bool result = compiledDelegate(product); // just RUNS it, DIRECTLY
+
+Expression<Func<Product, bool>> expressionTree = p => p.Price > 100; // an EXPRESSION TREE -- INSPECTABLE DATA
+// 'expressionTree' is NOT executable code AT ALL -- it's a TREE of NODES DESCRIBING the LOGIC:
+//   a BinaryExpression (">") with a LEFT side (a MemberExpression, "p.Price") and a RIGHT side
+//   (a ConstantExpression, "100") -- CODE can WALK and INSPECT this STRUCTURE PROGRAMMATICALLY
+
+var binaryExpr = (BinaryExpression)expressionTree.Body;
+Console.WriteLine(binaryExpr.NodeType);   // GreaterThan
+Console.WriteLine(binaryExpr.Left);       // p.Price
+Console.WriteLine(binaryExpr.Right);      // 100
+```
+Because the expression tree exposes the lambda's logic as inspectable data rather than opaque, already-compiled code, EF Core's LINQ provider can walk this exact tree structure and translate it into an entirely different representation — a SQL `WHERE` clause — rather than ever actually *executing* the C# lambda locally at all; this is precisely the mechanism (covered throughout the EF Core topic) that lets `.Where(p => p.Price > 100)` become `WHERE Price > 100` in generated SQL, rather than EF Core needing to load every row into memory and run the lambda against each one in .NET.
+
+**Why LINQ-to-Objects and LINQ-to-Entities (EF Core) use fundamentally different underlying mechanisms despite identical-looking C# syntax:** `IEnumerable<T>`'s LINQ methods accept ordinary `Func<T>` delegates (compiled, executable code, run directly in-process against in-memory objects) — `IQueryable<T>`'s LINQ methods (which EF Core's `DbSet<T>` implements) instead accept `Expression<Func<T>>` trees specifically so the *query provider* (EF Core) can inspect and translate the logic into a different target (SQL) instead of executing it directly as .NET code, which is exactly why the same-looking `.Where(p => p.Price > 100)` syntax behaves so differently depending on whether it's operating against an in-memory `List<T>` or an EF Core `DbSet<T>`.
+
+**Common Pitfall:** writing a `.Where()` predicate against an `IQueryable<T>` (EF Core) that calls an arbitrary, non-translatable C# method (a custom, non-trivial helper method) — since the expression tree must be translatable into SQL by the query provider, calling something SQL has no equivalent for inside the predicate typically throws a runtime translation exception; understanding that `IQueryable<T>` predicates are *expression trees*, not ordinary executable delegates, explains why some perfectly valid-looking C# inside a `.Where()` clause against EF Core fails at runtime in a way the identical code would never fail against an in-memory `List<T>`.
+
 ---
 
 ---

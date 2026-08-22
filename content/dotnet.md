@@ -1409,4 +1409,79 @@ Because R2R-compiled methods still run on the ordinary .NET runtime (rather than
 
 ---
 
+## Beginner — Question 16
+
+**Q16: How does `System.Text.Json`'s `JsonNamingPolicy.CamelCase` bridge C#'s PascalCase property convention with JSON's typical camelCase convention, without renaming the actual C# properties?**
+
+C# convention names properties in PascalCase (`FirstName`) — JSON convention (and most JavaScript-consuming clients) expects camelCase (`firstName`) — `JsonNamingPolicy.CamelCase`, applied globally via serializer options, translates between the two automatically during serialization/deserialization, letting C# code keep its own natural naming convention while still producing/accepting JSON in the convention its clients actually expect.
+
+```csharp
+public class Customer
+{
+    public string FirstName { get; set; } // ORDINARY, IDIOMATIC C# PascalCase -- UNCHANGED, in the SOURCE code
+    public string LastName { get; set; }
+}
+
+var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+var json = JsonSerializer.Serialize(customer, options);
+// { "firstName": "Alice", "lastName": "Smith" } -- CAMELCASE in the JSON, DESPITE PascalCase in the C# SOURCE
+```
+Because the naming policy is applied uniformly at the serializer level, every property across every serialized type automatically follows the same translation rule — the C# codebase never needs individual `[JsonPropertyName("firstName")]` attributes scattered across every single property just to achieve camelCase JSON output, and ASP.NET Core Web API (covered elsewhere) actually applies this exact policy by default for its own JSON responses.
+
+**Common Pitfall:** manually annotating every single property with `[JsonPropertyName("camelCaseName")]` to achieve camelCase JSON output, rather than simply configuring `JsonNamingPolicy.CamelCase` once, globally — the attribute-per-property approach is appropriate specifically for the rare property that needs to deviate from the *otherwise-uniform* naming policy, not as the default mechanism for achieving a naming convention that should apply consistently across an entire codebase.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is `BoundedChannelOptions.FullMode`, and how does it let a bounded `Channel<T>` (covered earlier) decide what happens when a producer tries to write while the channel is already full?**
+
+A bounded `Channel<T>` (covered earlier) has a fixed capacity — `FullMode` determines exactly what happens when a producer attempts to write once that capacity is already reached: wait for space to free up, silently drop the newest item being written, or drop the oldest item already sitting in the channel to make room.
+
+```csharp
+var channel = Channel.CreateBounded<int>(new BoundedChannelOptions(capacity: 100)
+{
+    FullMode = BoundedChannelFullMode.Wait // DEFAULT -- the WRITER simply WAITS (asynchronously) for SPACE
+});
+
+var dropOldestChannel = Channel.CreateBounded<int>(new BoundedChannelOptions(capacity: 100)
+{
+    FullMode = BoundedChannelFullMode.DropOldest // a NEW write EVICTS the OLDEST item ALREADY in the channel
+});
+```
+```text
+Wait          -- the WRITER'S call to WriteAsync SIMPLY WAITS until a CONSUMER reads SOMETHING,
+                 FREEING UP space -- provides genuine BACKPRESSURE (covered under System Design)
+DropWrite     -- the NEW item being WRITTEN is SIMPLY DISCARDED, IMMEDIATELY, if the channel is FULL
+DropOldest    -- the OLDEST item CURRENTLY in the channel is EVICTED to make ROOM for the NEW one
+DropNewest    -- the MOST RECENTLY-added item CURRENTLY in the channel is EVICTED, INSTEAD of the OLDEST
+```
+Choosing `Wait` provides genuine backpressure (covered under System Design) — the producer is naturally slowed down to match the consumer's actual processing rate, since it can't get ahead by more than the channel's capacity — choosing a `Drop*` mode instead prioritizes the producer never blocking, at the cost of silently losing data whenever the channel fills up, appropriate specifically for scenarios where losing some data (a live metrics stream, where only the most recent values genuinely matter) is preferable to ever slowing down or blocking the producer.
+
+**Common Pitfall:** choosing a `Drop*` mode for data where every single item genuinely matters (an order, a financial transaction) purely to avoid the producer ever blocking — this silently discards data whenever the channel fills up, which is only an acceptable trade-off for data where losing some items is genuinely tolerable (sampled metrics, non-critical telemetry); for data where every item matters, `Wait` (accepting genuine backpressure) is almost always the correct choice instead.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is `SearchValues<T>` (.NET 8+), and how does pre-processing a set of characters/values to search for make repeated `IndexOfAny`-style searches significantly faster than the ordinary, un-preprocessed overload?**
+
+Ordinary `string.IndexOfAny(char[])` re-examines the entire set of characters being searched for on every single call — `SearchValues<T>` instead lets you pre-process that set *once*, into an internally optimized representation (using vectorized/SIMD-friendly lookup structures, covered under Hardware Intrinsics), reused across every subsequent search without re-paying that setup cost each time.
+
+```csharp
+// ORDINARY IndexOfAny -- RE-PROCESSES the character SET on EVERY SINGLE call
+char[] delimiters = { ',', ';', '|' };
+int index = text.IndexOfAny(delimiters); // RE-ANALYZES 'delimiters' EVERY TIME this LINE executes
+
+// SearchValues<T> -- the SET is PRE-PROCESSED ONCE, REUSED across MANY subsequent searches
+private static readonly SearchValues<char> Delimiters = SearchValues.Create(",;|"); // BUILT ONCE
+
+int index = text.AsSpan().IndexOfAny(Delimiters); // REUSES the PRE-BUILT, OPTIMIZED structure, EVERY TIME
+```
+Because the internal, optimized lookup structure is built exactly once (when `SearchValues.Create` is called) rather than being reconstructed on every single search call, a hot code path performing the same kind of search repeatedly (parsing many lines of text, each checked against the same fixed set of delimiter characters) benefits significantly — the one-time setup cost is amortized across every subsequent call, and the actual search itself can additionally leverage vectorized instructions more effectively than a naive, per-call linear scan.
+
+**Common Pitfall:** creating a new `SearchValues<T>` instance inside a hot loop, on every iteration, rather than creating it once (as a `static readonly` field) and reusing it across every call — this defeats the entire benefit `SearchValues<T>` provides, since the expensive one-time setup work would then be repeated on every iteration instead of being amortized across many searches; `SearchValues<T>` earns its keep specifically when the same fixed set of values is searched for repeatedly, with the instance itself built once and reused.
+
+---
+
 ---

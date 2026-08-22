@@ -1771,4 +1771,101 @@ Every handler in this chain runs unconditionally for every notification — `Ema
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is the Curiously Recurring Template Pattern (CRTP)'s C# equivalent — a generic self-referencing base class (`class Derived : Base<Derived>`) — and how does it let a base class's methods return the derived type without the derived class needing to override anything?**
+
+A generic base class parameterized by its own derived type lets the base class's methods return `TSelf` (the derived type itself) rather than the base type — every derived class automatically gets correctly-typed return values from inherited methods, without needing to override a single one of them just to fix up the return type.
+
+```csharp
+public abstract class Entity<TSelf> where TSelf : Entity<TSelf>
+{
+    public int Id { get; set; }
+
+    public TSelf WithId(int id) // returns "TSelf" -- the DERIVED type itself -- NOT the BASE "Entity<TSelf>"
+    {
+        Id = id;
+        return (TSelf)this;
+    }
+}
+
+public class Order : Entity<Order> { public decimal Total { get; set; } } // "Order" is ITS OWN GENERIC ARGUMENT
+
+var order = new Order().WithId(5); // 'order' is TYPED as "Order" DIRECTLY -- NO CAST needed, NO OVERRIDE written
+order.Total = 99.99m; // WORKS DIRECTLY -- 'WithId' returned an ACTUAL "Order," NOT merely an "Entity<Order>"
+```
+Because `Order` supplies *itself* as the generic argument to its own base class, `WithId`'s return type resolves to `Order` directly for any code calling it on an `Order` instance — without `Order` needing to override `WithId` at all just to fix up its return type, a pattern especially valuable for fluent, chainable base-class methods (covered under the Fluent Interface style discussion) that need to return "the actual derived type" rather than the less-specific base type.
+
+**Common Pitfall:** overriding every single base-class method in every derived class purely to adjust its return type from the base type to the derived type — CRTP's self-referencing generic base class achieves this automatically, for every method the base class defines, without any of that repetitive per-derived-class override boilerplate being written at all.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is Martin Fowler's Money pattern, and why does representing monetary values as a dedicated value type — with both an amount and a currency — avoid the risk of a plain `decimal` mixing different currencies together incorrectly?**
+
+A plain `decimal` representing a price carries no information about *which currency* it's actually denominated in — two `decimal` values, one genuinely USD and one genuinely EUR, can be added, compared, or subtracted by ordinary arithmetic with no compiler warning at all, silently producing a meaningless result. The Money pattern wraps an amount *together with* its currency in one dedicated type, making such a mismatched operation a compile-time or runtime-checkable error instead.
+
+```csharp
+// PLAIN decimal -- carries NO currency information AT ALL -- MIXING currencies COMPILES FINE, SILENTLY WRONG
+decimal usdPrice = 100m;
+decimal eurPrice = 85m;
+decimal total = usdPrice + eurPrice; // COMPILES -- but "185" is MEANINGLESS -- WHICH currency IS this EVEN in?
+
+// the MONEY pattern -- BUNDLES amount AND currency TOGETHER, ENFORCING a CHECK on MIXED-currency operations
+public readonly record struct Money(decimal Amount, string Currency)
+{
+    public static Money operator +(Money a, Money b)
+    {
+        if (a.Currency != b.Currency)
+            throw new InvalidOperationException($"Cannot add {a.Currency} and {b.Currency}"); // CAUGHT, EXPLICITLY
+        return new Money(a.Amount + b.Amount, a.Currency);
+    }
+}
+
+var usd = new Money(100m, "USD");
+var eur = new Money(85m, "EUR");
+var total = usd + eur; // THROWS immediately -- the MISTAKE is CAUGHT, RATHER than SILENTLY PRODUCING GARBAGE
+```
+Because `Money`'s own `+` operator explicitly checks that both operands share the same currency before combining them, an accidental attempt to add USD and EUR amounts together fails loudly and immediately, exactly where the mistake occurs — a plain `decimal`-based approach would have silently produced a numerically "valid" but semantically meaningless result, with no error anywhere to signal that anything went wrong at all.
+
+**Common Pitfall:** representing monetary amounts as plain `decimal` fields throughout a codebase, with currency tracked (if at all) as a separate, disconnected field elsewhere — this makes it entirely possible for a bug (comparing or combining amounts from two different currencies) to compile and run without any error at all, silently producing financially meaningless results; the Money pattern's bundling of amount-and-currency into one indivisible type structurally prevents this specific class of mistake from ever compiling or running unchecked.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Martin Fowler's Special Case pattern, and how does it generalize the Null Object Pattern (covered earlier) to any "special" variant needing its own distinct behavior, not just the null/absent case specifically?**
+
+The Null Object Pattern (covered earlier) provides a "do-nothing" implementation specifically for the *absent*/null case — Special Case generalizes this same underlying idea to *any* special, distinct scenario that would otherwise require scattered conditional checks throughout calling code, not merely "this value is missing," but any conceptually distinct variant (a guest user, an unregistered customer, a canceled order) that deserves its own dedicated behavior rather than an `if` check sprinkled everywhere it's used.
+
+```csharp
+public interface ICustomer { string GetDisplayName(); decimal GetLoyaltyDiscount(); }
+
+public class RegisteredCustomer : ICustomer
+{
+    public string GetDisplayName() => Name;
+    public decimal GetLoyaltyDiscount() => LoyaltyTier switch { "Gold" => 0.15m, "Silver" => 0.05m, _ => 0m };
+}
+
+// a SPECIAL CASE -- NOT "null," but a GENUINELY DISTINCT scenario (an UNREGISTERED, GUEST customer)
+// with ITS OWN well-defined BEHAVIOR, RATHER than SCATTERED "if (customer == null || customer.IsGuest)"
+// checks THROUGHOUT calling CODE
+public class GuestCustomer : ICustomer
+{
+    public string GetDisplayName() => "Guest";
+    public decimal GetLoyaltyDiscount() => 0m; // GUESTS simply NEVER get a LOYALTY discount -- ENCODED HERE, ONCE
+}
+
+// calling code NEVER needs a SPECIAL "is this a guest?" CHECK -- it JUST calls the INTERFACE, UNIFORMLY
+decimal discount = customer.GetLoyaltyDiscount(); // WORKS IDENTICALLY, REGARDLESS of WHICH concrete TYPE it IS
+```
+Because `GuestCustomer` implements the exact same `ICustomer` interface as `RegisteredCustomer`, calling code never needs a special conditional check for "is this actually a guest" scattered throughout the codebase — the guest-specific behavior (no loyalty discount, a generic display name) is encoded once, in `GuestCustomer` itself, exactly the same structural benefit the Null Object Pattern provides for the specifically-null case, generalized here to a genuinely distinct, named business scenario instead.
+
+**Why recognizing this as a generalization of Null Object (rather than an entirely separate pattern) matters:** once a codebase already uses Null Object for the absent case, recognizing that the *same underlying technique* (a dedicated implementation encapsulating "what should happen in this special scenario," rather than scattered conditional checks) applies equally well to *other* special scenarios (guests, canceled orders, trial-expired accounts) extends a technique already proven useful, rather than needing an entirely new pattern learned from scratch for each new special case that comes up.
+
+**Common Pitfall:** handling a distinct, recurring special scenario (a guest user, a canceled subscription) via scattered `if` checks throughout calling code, rather than recognizing it as a genuine "Special Case" deserving its own dedicated implementation of the shared interface — this is precisely the same structural mistake covered under Null Object Pattern (scattering null-checks instead of providing a do-nothing implementation), just applied to a named, non-null special scenario instead of the specifically-absent case.
+
+---
+
 ---
