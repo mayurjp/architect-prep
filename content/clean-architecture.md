@@ -1175,3 +1175,89 @@ In the layered approach, a single feature's related code is scattered across man
 **Common Pitfall:** treating Vertical Slice Architecture and Clean Architecture as mutually exclusive, forced-choice alternatives — they answer different questions (Vertical Slices: "how should files be organized on disk, to minimize cross-feature folder-hopping for a single change?" versus Clean Architecture: "which direction may source-code dependencies point, regardless of folder structure?") and are frequently combined in practice, rather than needing to pick exactly one architectural philosophy to the total exclusion of the other.
 
 ---
+
+## Beginner — Question 11
+
+**Q11: What is the Infrastructure Layer in Clean Architecture, and what specifically belongs there as the outermost layer, farthest from the Domain?**
+
+The Infrastructure Layer contains every concrete, technology-specific implementation detail — the actual EF Core `DbContext` and repository implementations, HTTP clients for calling external APIs, file system access, email-sending code — everything the inner layers *depend on abstractly* (via interfaces defined in the Application/Domain layers, covered elsewhere) but never reference directly by concrete type.
+
+```csharp
+// INFRASTRUCTURE layer -- the CONCRETE, EF-Core-SPECIFIC implementation of an interface DEFINED in the INNER layer
+public class EfOrderRepository : IOrderRepository // the INTERFACE lives in the APPLICATION/DOMAIN layer
+{
+    private readonly AppDbContext _db; // EF Core's DbContext -- a CONCRETE, INFRASTRUCTURE-SPECIFIC detail
+    public async Task<Order> GetByIdAsync(int id) => await _db.Orders.FindAsync(id);
+}
+
+// ALSO Infrastructure -- an HTTP client calling an EXTERNAL payment gateway
+public class StripePaymentGateway : IPaymentGateway
+{
+    private readonly HttpClient _httpClient; // ANOTHER concrete, EXTERNAL-facing technology detail
+}
+```
+Every one of these classes implements an interface defined in an *inner* layer, but the concrete implementation itself — knowing specifically about EF Core, HTTP, Stripe's particular API shape — lives entirely in Infrastructure, the outermost layer, meaning a change to *which* database or *which* payment provider is used only ever requires changing Infrastructure-layer code, never the Domain or Application layers that depend on the interfaces alone.
+
+**Common Pitfall:** letting a supposedly "Infrastructure" class also contain genuine business logic (a validation rule, a business calculation) rather than purely technical, plumbing-level concerns — Infrastructure should be limited strictly to *how* to talk to a specific external technology (a database, an API, a file system); any actual business rule embedded there is business logic escaping the inner layers where the Dependency Rule (covered earlier) says it actually belongs, becoming invisible to and untestable independently of whatever specific technology the Infrastructure class happens to wrap.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: Why does a transaction boundary typically get demarcated at the Application layer's Command/Query Handler level (wrapping a Unit of Work), rather than in the Controller or the Repository?**
+
+A single business use case (a Command Handler, covered earlier) often needs to make *several* related changes that must all succeed or all fail together — the Handler is the layer that knows the full scope of "everything this one use case needs to do," making it the natural place to open and commit (or roll back) a single transaction spanning all of it, rather than the Controller (which shouldn't know about transactions at all) or an individual Repository (which typically only knows about one specific entity type, not the full scope of a multi-entity use case).
+
+```csharp
+public class PlaceOrderCommandHandler : IRequestHandler<PlaceOrderCommand, Result>
+{
+    private readonly AppDbContext _db; // represents the UNIT OF WORK for THIS handler's scope
+
+    public async Task<Result> Handle(PlaceOrderCommand command, CancellationToken ct)
+    {
+        var order = new Order(command.CustomerId, command.Items);
+        _db.Orders.Add(order);
+
+        var inventoryUpdate = _inventoryRepository.ReserveStock(command.Items);
+        _db.InventoryReservations.Add(inventoryUpdate);
+
+        await _db.SaveChangesAsync(ct); // ONE transaction, covering BOTH the order AND the inventory reservation
+        // if EITHER piece fails, EF Core's SaveChanges wraps BOTH in ONE atomic COMMIT/ROLLBACK
+        return Result.Success();
+    }
+}
+```
+Because the Handler is the one place that knows this specific use case needs *both* the new `Order` and the inventory reservation to succeed or fail *together*, it's the natural, correctly-scoped boundary for the transaction — a Controller demarcating the transaction would need to know implementation details about which repositories/entities are involved (a layering violation, since Controllers shouldn't know about persistence details at all), and a single Repository demarcating its own transaction would have no visibility into the *other* repository's changes that also need to be part of the same atomic unit.
+
+**Why this connects directly to the "one transaction, one Aggregate" DDD guidance covered elsewhere:** when a use case's Handler naturally needs to span *multiple* Aggregates in one transaction (as the example above touches both `Order` and `InventoryReservation`), that's often a signal — per the earlier DDD discussion of Aggregate boundaries and Sagas — that the use case might be better modeled as a Saga with separate, per-Aggregate transactions and compensation logic, rather than forcing multiple Aggregates into one single database transaction, which can work for a small, single-database monolith but becomes genuinely impossible once those Aggregates live in separate microservices with separate databases.
+
+**Common Pitfall:** demarcating the transaction boundary inside an individual Repository method (each Repository call opening and committing its own separate transaction) — this makes it structurally impossible for a Handler to atomically coordinate multiple repositories' changes together as one unit, since each one's transaction is already independently committed by the time the Handler's own method returns, precisely the coordination failure that placing the transaction boundary at the Handler level (spanning the full Unit of Work) is specifically designed to avoid.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is the "client-owned interface" convention for the Repository pattern (Dependency Inversion Principle, covered earlier), and how does this specific ownership DIRECTION differ from a naive "just define interfaces wherever seems convenient" approach?**
+
+The Dependency Inversion Principle doesn't just say "use interfaces" — it specifically says the *interface* should be owned by (defined in) the layer that *consumes* it (the Application/Domain layer), with the concrete *implementation* living in the outer Infrastructure layer that depends inward on that interface — a specific, deliberate direction, not merely "put an interface somewhere near the class."
+
+```text
+NAIVE approach -- the interface DEFINED alongside its IMPLEMENTATION, in the INFRASTRUCTURE layer:
+  Infrastructure/EfOrderRepository.cs   -- the CONCRETE implementation
+  Infrastructure/IOrderRepository.cs    -- the INTERFACE, defined RIGHT NEXT TO its implementation
+  -- the APPLICATION layer must now REFERENCE the INFRASTRUCTURE project JUST to see this interface --
+  -- this ACCIDENTALLY makes Application DEPEND ON Infrastructure, VIOLATING the Dependency Rule --
+
+CLIENT-OWNED interface -- the interface DEFINED where it's CONSUMED (Application), NOT where it's IMPLEMENTED:
+  Application/IOrderRepository.cs        -- the INTERFACE -- OWNED by the CONSUMING layer
+  Infrastructure/EfOrderRepository.cs    -- implements Application's interface -- DEPENDS INWARD on it
+  -- Infrastructure REFERENCES Application (to implement its interface) -- Application NEVER references
+     Infrastructure AT ALL -- the DEPENDENCY ARROW correctly points INWARD, exactly as the Dependency Rule requires
+```
+By defining `IOrderRepository` inside the Application layer's own project (rather than alongside its EF Core implementation in Infrastructure), the Application layer never needs a project reference to Infrastructure at all — Infrastructure is the one that references Application, in order to implement the interface Application defined and consumes, which is precisely what keeps the Dependency Rule's inward-pointing arrow structurally enforced at the project-reference level, not merely as a convention someone has to remember to follow.
+
+**Why "just put the interface wherever seems natural" quietly reintroduces the exact coupling Clean Architecture exists to prevent:** an interface defined next to its concrete implementation (the seemingly natural, common convention outside of Clean Architecture) forces every *consumer* of that interface to take a project reference to wherever the implementation happens to live — even though the consumer only ever uses the *interface*, not the concrete class, the mere act of referencing "the project containing the interface" pulls in a dependency on the *implementation's* entire layer, exactly the inward-pointing-dependency violation the Dependency Rule is meant to prevent.
+
+**Common Pitfall:** defining repository/service interfaces in the Infrastructure project "because that's where the implementation naturally lives," then being surprised that the Application layer ends up needing a project reference to Infrastructure after all — this specific, easy-to-overlook detail (which project physically contains the interface's `.cs` file) is precisely what determines whether the Dependency Rule is genuinely enforced at compile time by the project reference graph, or merely hoped for as an unenforced convention that a future change could silently violate.
+
+---

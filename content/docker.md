@@ -919,4 +919,82 @@ Because the OOM Killer acts specifically *within* the container's own cgroup bou
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is a Docker Anonymous Volume, and how does Docker auto-generate one with a random, machine-assigned name when a Dockerfile's `VOLUME` instruction declares a path without a corresponding named volume?**
+
+When a Dockerfile (or a base image) declares `VOLUME /var/lib/data`, Docker ensures that path is backed by a volume rather than the container's own writable layer — if no *named* volume is explicitly specified at `docker run` time, Docker automatically creates an Anonymous Volume, given a random, auto-generated identifier rather than a human-chosen name.
+
+```dockerfile
+FROM postgres:16
+VOLUME /var/lib/postgresql/data   # declares this path MUST be backed by a VOLUME
+```
+```bash
+docker run postgres:16
+# Docker CREATES an ANONYMOUS volume automatically, since NONE was explicitly specified:
+docker volume ls
+# DRIVER    VOLUME NAME
+# local     a3f8c9e2b1d4...    <-- a RANDOM, auto-generated NAME -- NOT human-chosen at ALL
+```
+```bash
+# a NAMED volume -- EXPLICITLY specified, human-readable, and REUSABLE by NAME across container recreations
+docker run -v postgres-data:/var/lib/postgresql/data postgres:16
+```
+An Anonymous Volume still persists data exactly like a Named Volume, surviving container removal (unless `docker run --rm -v` or an explicit `docker volume rm` cleans it up) — but because its name is a random identifier rather than something meaningful, it's much harder to intentionally reuse or reference again later, and anonymous volumes are far easier to accidentally accumulate and forget about over time (`docker volume prune` is often needed to clean up orphaned anonymous volumes nobody remembers creating).
+
+**Common Pitfall:** relying on a Dockerfile's `VOLUME` instruction alone, without also specifying an explicit named volume at `docker run` time, then being confused when container recreation seems to "lose" data — the data isn't actually lost; it's sitting in an anonymous volume with a random name that the *new* container instance has no way of automatically reconnecting to, since nothing tells Docker "use that same specific anonymous volume again" the way an explicit named volume reference would.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is Docker's `COPY --chown` flag, and how does setting file ownership directly as part of the `COPY` instruction avoid needing a separate `RUN chown` step (and the extra image layer it would add)?**
+
+`COPY --chown=user:group` sets the ownership of copied files as part of the copy operation itself — without it, achieving the same result requires a separate `RUN chown` instruction afterward, which not only adds an extra image layer but temporarily duplicates the file data (once at its originally-copied ownership, then again reflected in the layer produced by the ownership-changing `RUN` step).
+
+```dockerfile
+# WITHOUT --chown -- requires a SEPARATE RUN step, adding an EXTRA LAYER
+COPY app.dll /app/
+RUN chown appuser:appuser /app/app.dll   # a SECOND, SEPARATE layer, JUST to fix ownership
+
+# WITH --chown -- ownership is set AS PART OF the COPY itself -- ONE layer, NOT two
+COPY --chown=appuser:appuser app.dll /app/
+```
+Because `--chown` sets ownership during the copy operation itself, no separate `RUN` instruction (and the additional image layer it would create, covered under layer caching) is needed at all — this keeps the resulting image both smaller (avoiding a redundant layer) and simpler to reason about, with one fewer instruction in the Dockerfile doing what could otherwise require two.
+
+**Common Pitfall:** running a container as a non-root user (a security best practice, covered under App Security's principle of least privilege) but forgetting that files copied via a plain `COPY` (without `--chown`) are typically owned by `root` by default — the non-root user then lacks permission to read/write those files at runtime, a common and confusing source of "permission denied" errors that `COPY --chown` avoids by correctly setting ownership to the intended non-root user from the very first layer that copies the files in.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is Docker's "Rootless Mode" (running the Docker daemon itself without root privileges), and how does it reduce the impact of a container escape vulnerability compared to the traditional root-owned Docker daemon?**
+
+Docker traditionally runs its daemon as `root` — meaning a sufficiently severe container escape vulnerability (a bug letting malicious code inside a container break out to the underlying host) could, in the worst case, grant an attacker root access to the entire host machine, since that's the privilege level the daemon managing all containers already runs at. Rootless Mode runs the Docker daemon itself as an ordinary, unprivileged user, so even a successful escape lands the attacker in a far less privileged context.
+
+```bash
+# Traditional Docker -- the DAEMON itself runs as ROOT
+ps aux | grep dockerd
+# root   1234  /usr/bin/dockerd   <-- the DAEMON managing EVERY container is ITSELF root
+
+# Rootless Docker -- the DAEMON runs as an ORDINARY, UNPRIVILEGED user
+dockerd-rootless-setuptool.sh install
+ps aux | grep dockerd
+# appuser 5678  /usr/bin/rootlesskit dockerd   <-- the DAEMON runs as a NORMAL, NON-ROOT user
+```
+```text
+IF a container escape vulnerability is exploited, WITH a traditional ROOT-owned daemon:
+  -- the ATTACKER potentially gains ROOT access to the ENTIRE HOST machine
+WITH Rootless Mode:
+  -- the ATTACKER lands in the CONTEXT of whatever UNPRIVILEGED user the daemon itself runs as --
+  -- SIGNIFICANTLY more LIMITED blast radius, even in the WORST-CASE escape scenario
+```
+Rootless Mode achieves this using Linux user namespaces, mapping the "root" user *inside* a container to an unprivileged, ordinary user *outside* it on the host — from inside the container, processes still believe they're running as root (many container images assume this), but that apparent root identity has no actual elevated privilege on the host system itself.
+
+**Why this specifically complements (rather than replaces) running the *application inside* the container as non-root (covered elsewhere):** running the *containerized application* as a non-root user protects against certain in-container privilege-escalation risks — Rootless Mode instead protects against a fundamentally different threat: a flaw in the container runtime/daemon *itself* that would otherwise let an attacker escape the container boundary entirely; the two hardening measures address genuinely different layers of the same overall attack surface, and a thoroughly-hardened deployment applies both simultaneously.
+
+**Common Pitfall:** assuming that running the *application* as a non-root user *inside* the container is sufficient security hardening on its own, without also considering the privilege level of the Docker daemon *managing* that container — a container-escape vulnerability bypasses the in-container user entirely, breaking out to the host at whatever privilege level the daemon itself runs at, which is precisely the risk Rootless Mode specifically targets and a non-root in-container user does nothing to mitigate.
+
+---
+
 ---

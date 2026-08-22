@@ -1448,4 +1448,89 @@ The mathematical guarantee comes purely from pigeonhole reasoning: if a write's 
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is a Single Point of Failure (SPOF), and how does systematically identifying every SPOF in an architecture diagram help prioritize where redundancy investment actually matters?**
+
+A Single Point of Failure is any single component whose failure alone brings down the entire system (or a critical part of it) — no other component compensates for its loss. Systematically walking through an architecture diagram asking "if THIS one box disappeared right now, what breaks?" for every single box is a concrete, actionable way to find exactly where redundancy is actually needed, rather than guessing.
+
+```text
+A simple architecture, with SPOFs CIRCLED:
+
+  [Load Balancer] ──► [App Server] ──► [Database]
+        │                                    │
+   (if THIS one              (if THIS one SINGLE
+    instance dies,             instance dies, the
+    EVERYTHING is               ENTIRE system loses
+    UNREACHABLE)                 ALL its DATA access)
+   -- BOTH are SPOFs --      -- BOTH are SPOFs --
+```
+```text
+The SAME architecture, with REDUNDANCY added SPECIFICALLY at each identified SPOF:
+
+  [Load Balancer (redundant PAIR)] ──► [App Server (MULTIPLE replicas)] ──► [Database (PRIMARY + REPLICA)]
+  -- NO single box's failure ALONE brings down the ENTIRE system ANYMORE --
+```
+Systematically going component-by-component and asking "what happens if exactly this one thing fails?" surfaces every SPOF explicitly, rather than relying on a vague, general sense that "the system is probably resilient enough" — each identified SPOF then becomes a concrete, specific candidate for redundancy investment (a load balancer pair instead of one instance, a database replica instead of a single primary), prioritized by how critical and how likely that specific component's failure actually is.
+
+**Common Pitfall:** eliminating SPOFs at the compute/application layer (running multiple app server replicas) while leaving an equally critical SPOF unaddressed elsewhere (a single database instance, a single DNS provider, a single message broker) — genuinely comprehensive SPOF analysis requires walking through *every* component in the architecture, not just the ones that are easiest or most obvious to make redundant, since a system is only as resilient as its least-redundant genuinely critical component.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What are the "Read-Through" and "Write-Through" caching strategies, and how do they differ from Cache-Aside (covered under NoSQL) and Write-Behind (covered earlier) in terms of who — the application or the cache itself — owns the responsibility of loading and persisting data?**
+
+In Cache-Aside and Write-Behind, the *application* explicitly manages the cache (checking it, populating it on a miss, writing to it and separately to the database) — Read-Through and Write-Through instead push that responsibility *into the caching layer itself*, so the application simply talks to the cache as if it were the only data store, with the cache internally handling the underlying database on the application's behalf.
+
+```text
+CACHE-ASIDE (covered under NoSQL) -- the APPLICATION explicitly manages BOTH the cache AND the database:
+  App: check cache -> MISS -> App QUERIES the database ITSELF -> App POPULATES the cache ITSELF -> returns
+
+READ-THROUGH -- the CACHE itself handles the database MISS, TRANSPARENTLY, the App NEVER touches the DB directly:
+  App: ask the CACHE for the value
+  Cache: (internally) MISS -> the CACHE ITSELF queries the DATABASE -> POPULATES itself -> returns to the App
+  -- the APPLICATION CODE never explicitly wrote any "query database on cache miss" logic AT ALL --
+
+WRITE-THROUGH -- the CACHE itself writes to BOTH itself AND the database, SYNCHRONOUSLY, as ONE operation:
+  App: write a value TO THE CACHE
+  Cache: (internally) writes to ITSELF, AND synchronously writes to the DATABASE too, BEFORE returning
+  -- the APPLICATION never explicitly issued a SEPARATE database write call AT ALL --
+```
+Because the cache itself (via its own configured "loader"/"writer" logic, a feature some caching systems provide directly) handles the database interaction transparently, application code becomes simpler — it only ever talks to one interface (the cache), never needing to explicitly coordinate "check cache, then database, then populate cache" logic itself the way Cache-Aside requires.
+
+**Why this trades application-code simplicity for less direct control, unlike Write-Behind's async trade-off (covered earlier):** Write-Through is still *synchronous* (unlike Write-Behind, which defers the database write asynchronously for lower write latency at the cost of a durability window) — Write-Through's actual trade-off is architectural: it requires a caching layer that specifically *supports* this loader/writer integration pattern, coupling the cache more tightly to the database than the more universally-applicable, framework-agnostic Cache-Aside pattern, which works with virtually any cache and any data store since the application itself handles all the coordination.
+
+**Common Pitfall:** assuming every caching library/service supports Read-Through/Write-Through out of the box — these patterns specifically require the caching layer itself to be configured with knowledge of how to load from and write to the underlying data store (a "cache loader" callback, in systems that support this) — a generic key-value cache with no such integration only supports the application-managed Cache-Aside pattern, and attempting to use it as if it were Read-Through/Write-Through without that integration simply won't work as expected.
+
+---
+
+## Advanced — Question 12
+
+**Q12: How does a Saga (covered extensively elsewhere) handle a step that never responds at all — neither succeeding nor explicitly failing — given that a Saga can't simply wait forever for a step that might never actually come back?**
+
+Every Saga step needs an explicit timeout — a maximum duration the orchestrator (or, in Choreography, the waiting participant) will wait for a step's completion before treating the *absence* of a response as equivalent to a failure, triggering the same compensation logic a genuine, explicit failure would trigger, rather than the Saga hanging indefinitely on a step that might never actually respond.
+
+```text
+Saga: Reserve Inventory -> Charge Payment -> Ship Order
+
+Step 2 ("Charge Payment") is invoked -- but the PaymentService is UNRESPONSIVE (crashed, network
+partition, or simply catastrophically slow) -- it NEVER explicitly returns SUCCESS or FAILURE at all
+
+WITHOUT a timeout: the Saga orchestrator WAITS INDEFINITELY -- the Order remains STUCK, FOREVER,
+  in a "Payment Pending" limbo state -- the RESERVED inventory (from Step 1) stays LOCKED FOREVER TOO
+
+WITH an EXPLICIT timeout (e.g., 30 seconds): after 30 seconds with NO response AT ALL,
+  the orchestrator treats the ABSENCE of a response AS a FAILURE, and triggers the SAME
+  COMPENSATION logic a genuine explicit failure would have triggered:
+  -> Compensating action: "Release Reserved Inventory" (undoing Step 1) -> Saga marked FAILED, cleanly
+```
+Because the timeout treats "no response within the configured window" identically to "an explicit failure response," the Saga's compensation logic doesn't need any special-case handling for the unresponsive scenario at all — it's simply funneled into the exact same failure-handling path already built for genuine, explicit failures, keeping the Saga's overall design uniform regardless of *why* a step didn't succeed.
+
+**Why this introduces a genuine, unavoidable risk the design must explicitly accept: the step might ACTUALLY still complete later, AFTER the timeout already triggered compensation:** if `PaymentService` was merely slow (not actually crashed) and the charge *does* eventually succeed, arriving after the orchestrator already timed out and compensated — the system now has a charge that succeeded on a Saga the orchestrator already believes failed and compensated; this is precisely why the idempotent-consumer and reconciliation patterns (covered under Messaging) matter here too, since a late, "surprise" success arriving after a timeout-triggered compensation needs its own handling (a reconciliation job that detects and refunds an unexpected late charge, for instance) rather than assuming a timeout definitively and permanently means "this never happened."
+
+**Common Pitfall:** setting a Saga step's timeout without any specific reasoning tied to that step's actual expected duration under realistic conditions — too short a timeout triggers unnecessary compensations for steps that were merely slow but would have genuinely succeeded given a bit more time; too long a timeout leaves resources (reserved inventory, in the example) locked for an uncomfortably long time before the Saga finally gives up and compensates; the timeout should be derived from the step's actual observed latency distribution, mirroring the same reasoning covered for setting gRPC deadlines appropriately.
+
+---
+
 ---

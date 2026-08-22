@@ -1595,4 +1595,76 @@ Because the SLO is a specific, agreed-upon, *measured* number (not a vague "we t
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is the fundamental availability trade-off between Synchronous and Asynchronous communication between microservices, at a conceptual level?**
+
+Synchronous communication (a direct HTTP/gRPC call, covered earlier) has the caller block, waiting for the callee to respond right now — the caller's own availability becomes directly dependent on the callee's availability at that exact moment. Asynchronous communication (a message published to a queue, covered under Messaging) decouples the two in time — the caller can proceed immediately, regardless of whether the eventual consumer is available right now or only becomes available later.
+
+```text
+SYNCHRONOUS -- Service A's OWN availability is DIRECTLY TIED to Service B's availability, RIGHT NOW:
+  Service A ──(HTTP call, WAITS for a response)──► Service B
+  -- IF Service B is DOWN or SLOW, Service A's OWN request HANGS or FAILS, RIGHT NOW, TOO --
+
+ASYNCHRONOUS -- Service A's availability is DECOUPLED from WHEN Service B actually processes it:
+  Service A ──(publishes a message, RETURNS IMMEDIATELY)──► Message Queue ──(WHENEVER B is ready)──► Service B
+  -- Service B being DOWN does NOT affect Service A's OWN ability to RESPOND to ITS OWN caller RIGHT NOW --
+  -- the message simply WAITS in the QUEUE until Service B is ABLE to process it, LATER --
+```
+Because the queue sits between the two services, Service A's own request can complete successfully (having simply enqueued the message) *regardless* of whether Service B happens to be available at that exact instant — the trade-off is that Service A can no longer immediately know the *result* of Service B's eventual processing, only that the request was successfully handed off, which is precisely why asynchronous communication pairs naturally with the eventual-consistency-accepting patterns (Saga, covered extensively elsewhere) rather than a design expecting an immediate, synchronous answer.
+
+**Common Pitfall:** defaulting to synchronous, direct service-to-service calls for every interaction purely because it's conceptually simpler to reason about (a request, then immediately a response) — for any interaction where the caller doesn't genuinely need an immediate answer to proceed (a "please also update the analytics dashboard" side effect, not a "give me the current price so I can display it" genuine need), synchronous coupling needlessly ties the caller's own availability to a dependency that could instead be decoupled entirely via asynchronous messaging.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What are the "Fallacies of Distributed Computing," and how does silently assuming even one of them holds true lead to fragile microservices designs?**
+
+The Fallacies of Distributed Computing are a well-known list of assumptions developers commonly (and incorrectly) make about a distributed system, each one false in practice — a microservices architecture, being fundamentally a distributed system, is directly exposed to every one of these fallacies, and designs that implicitly assume any of them away tend to break in exactly the ways the list predicts.
+
+```text
+THE FALLACIES (assumptions that are ALL FALSE, in a REAL distributed system):
+  1. The network is RELIABLE           -- it ISN'T -- packets get DROPPED, connections get RESET
+  2. LATENCY is zero                   -- it ISN'T -- EVERY network call takes REAL, non-zero TIME
+  3. BANDWIDTH is infinite              -- it ISN'T -- large payloads GENUINELY cost REAL time/money to transfer
+  4. The network is SECURE              -- it ISN'T -- covered EXTENSIVELY under App Security
+  5. TOPOLOGY doesn't change            -- it DOES -- services get REDEPLOYED, IPs CHANGE, nodes come and GO
+  6. There is ONE administrator          -- there ISN'T -- MULTIPLE teams own DIFFERENT services INDEPENDENTLY
+  7. Transport cost is ZERO             -- it ISN'T -- SERIALIZATION/DESERIALIZATION genuinely COSTS CPU time
+  8. The network is HOMOGENEOUS         -- it ISN'T -- DIFFERENT services run DIFFERENT tech stacks, protocols
+```
+A design that implicitly assumes "the network is reliable" (fallacy #1) skips implementing retries/timeouts/circuit breakers (covered extensively elsewhere) entirely — a design that assumes "latency is zero" (fallacy #2) makes many chatty, fine-grained synchronous calls without considering their cumulative latency cost (directly connecting to the Chattiness problem covered under REST); each fallacy, if silently assumed true, leads directly to a *specific*, predictable category of production fragility once the false assumption inevitably gets violated in practice.
+
+**Why this list is specifically valuable as a design REVIEW CHECKLIST, not just interesting historical trivia:** when reviewing a proposed microservices design, explicitly checking it against each of the eight fallacies ("does this design assume the network never fails? does it assume near-zero latency for this chain of calls? does it assume every team involved coordinates changes together?") surfaces concrete, specific risks that a more general "is this resilient?" review question might miss — the list's value is precisely its specificity, naming exactly which false assumptions tend to silently creep into distributed system designs.
+
+**Common Pitfall:** designing a microservices architecture with patterns and assumptions that would only be valid for calls *within a single process* (assuming a call to another service is "basically free" and always succeeds, the way an in-process method call effectively always does) — this is the single most common root cause connecting back to nearly every fallacy on the list, and is precisely why treating a network call to another microservice with the same casual assumptions as an in-process method call reliably leads to exactly the fragility the fallacies describe.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is the "sidecar-less" service mesh trend (using eBPF, as implemented by projects like Cilium), and how does moving mesh functionality into the kernel avoid the per-Pod resource overhead the traditional sidecar-based mesh (covered earlier) requires?**
+
+The traditional Service Mesh (covered earlier) injects a separate sidecar proxy container into *every single Pod* — each sidecar consumes its own CPU/memory, and every request passes through an additional network hop (application → sidecar → network → remote sidecar → remote application). An eBPF-based, sidecar-less mesh instead implements the equivalent traffic-management logic (routing, mTLS, observability) directly in the Linux kernel itself, shared across every Pod on a node, without a dedicated sidecar container per Pod at all.
+
+```text
+TRADITIONAL sidecar-based mesh -- ONE separate PROXY CONTAINER, PER POD:
+  Pod A: [App Container] + [Sidecar Proxy Container]  -- sidecar CONSUMES its OWN CPU/memory
+  Pod B: [App Container] + [Sidecar Proxy Container]  -- ANOTHER separate sidecar, ANOTHER CPU/memory cost
+  -- EVERY Pod PAYS this SAME per-Pod resource overhead, MULTIPLIED across POTENTIALLY THOUSANDS of Pods --
+
+eBPF-based, SIDECAR-LESS mesh -- mesh LOGIC runs ONCE, IN THE KERNEL, SHARED across EVERY Pod on the NODE:
+  Node: [Kernel-level eBPF programs, handling MESH logic for EVERY Pod's traffic on THIS node]
+  Pod A: [App Container ONLY]  -- NO separate sidecar container AT ALL
+  Pod B: [App Container ONLY]  -- SAME -- the KERNEL handles mesh logic for BOTH, WITHOUT per-Pod duplication
+```
+Because the traffic-management logic runs once in the kernel (via eBPF programs attached at the networking layer) rather than being duplicated as a separate userspace process inside every single Pod, a node hosting many Pods pays this overhead *once*, shared across all of them — rather than the sidecar model's cost scaling linearly with the number of Pods, each needing its own dedicated proxy process.
+
+**Why this specifically matters at scale, where sidecar overhead becomes genuinely significant:** for a cluster running a modest number of Pods, sidecar overhead might be a minor, easily-absorbed cost — for a cluster running thousands of Pods, the cumulative CPU/memory consumed by thousands of individual sidecar containers (each one, individually small, but multiplied by a very large Pod count) becomes a genuinely significant portion of total cluster resource consumption, which is precisely the overhead eBPF-based approaches are specifically designed to eliminate at scale.
+
+**Common Pitfall:** assuming eBPF-based service mesh technology is a strict, drop-in replacement for every capability a traditional sidecar mesh provides — some sidecar-based mesh features (certain application-layer-specific request transformations, for instance) are more naturally implemented in a userspace proxy with full visibility into application-layer protocols than in kernel-level eBPF code; evaluating an eBPF-based mesh requires checking it actually covers the *specific* mesh capabilities a given architecture genuinely needs, not assuming feature parity by default simply because both solve "service mesh" in some general sense.
+
+---
+
 ---
