@@ -1209,4 +1209,90 @@ Because `grafana/grafana:latest` already contains a fully-built Grafana binary, 
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a Dockerfile's `WORKDIR` instruction, and why is setting it explicitly preferable to relying on relative paths tied to whatever directory a shell happens to default to?**
+
+`WORKDIR` sets the working directory for every subsequent instruction in the Dockerfile (`RUN`, `CMD`, `COPY`'s destination), creating the directory if it doesn't already exist — using it explicitly means every instruction's relative paths are anchored to a known, deliberate location, rather than depending on whatever directory the base image happens to default to.
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app          # every instruction BELOW this line runs relative to /app
+
+COPY . .              # copies into /app, NOT whatever the base image's default directory happened to be
+CMD ["dotnet", "MyApi.dll"]  # runs from /app -- MyApi.dll is found relative to WORKDIR
+```
+
+```text
+WITHOUT an explicit WORKDIR, instructions run relative to WHATEVER directory the base image
+happens to default to (often "/") -- a base image UPDATE that changes its own default directory
+could SILENTLY change where YOUR files end up, entirely OUTSIDE your Dockerfile's own control
+```
+
+Because `WORKDIR` is declared explicitly in the Dockerfile itself rather than inherited implicitly from the base image, it makes the image's file layout self-documenting and immune to a base image update silently changing the effective working directory — an explicit `WORKDIR` is one line of insurance against a base-image-level assumption changing out from under you.
+
+**Common Pitfall:** relying on the base image's default working directory rather than declaring `WORKDIR` explicitly — this works fine until a base image update changes that default, at which point `COPY`/`RUN` instructions silently start operating against a different directory than before, producing a confusing build or runtime failure that has nothing to do with anything the Dockerfile author actually changed.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is a Docker Multi-Stage Build's basic `AS builder` naming combined with `COPY --from=builder`, and how does it let a final image contain only the compiled artifacts, not the entire SDK/toolchain used to produce them?**
+
+A Multi-Stage Build defines multiple `FROM` sections within one Dockerfile, each an independent build stage — an early stage (using a large SDK image with the full compiler toolchain) builds the application, and a later, final stage (using a small runtime-only base image) copies *only the compiled output* from the earlier stage, discarding everything else that stage's image contained.
+
+```dockerfile
+# STAGE 1 -- named "builder" -- uses the FULL SDK image (large, has compilers/build tools)
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS builder
+WORKDIR /src
+COPY . .
+RUN dotnet publish -c Release -o /app/publish
+
+# STAGE 2 -- the FINAL image -- uses a SMALL runtime-only base image
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+COPY --from=builder /app/publish .   # copies ONLY the compiled output from Stage 1
+ENTRYPOINT ["dotnet", "MyApi.dll"]
+```
+
+```text
+Stage 1 ("builder") image size: ~800MB (full SDK, compilers, NuGet cache, source code)
+Stage 2 (FINAL, shipped) image size: ~110MB (JUST the runtime + published DLLs -- NOTHING from Stage 1
+                                             survives into the final image EXCEPT what COPY --from explicitly took)
+```
+
+Because only the files an explicit `COPY --from=builder` instruction names actually make it into the final image, the entire SDK, compiler toolchain, intermediate build artifacts, and source code from the "builder" stage are completely discarded — producing a final image containing only what's actually needed to *run* the application, dramatically smaller than one containing the full build toolchain as well.
+
+**Common Pitfall:** building and shipping a single-stage image using the full SDK base image (needed to *compile* the application) as the final, deployed image as well — this ships an image containing an entire compiler toolchain, build caches, and often source code into production, unnecessarily bloating image size and increasing attack surface for capabilities the running application never actually needs at runtime.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is Docker's `--memory-swap` flag interacting with `--memory`, and how does a container's swap allowance affect whether it gets `OOMKilled` immediately or merely slows down first?**
+
+`--memory` caps a container's RAM usage; `--memory-swap` caps the *combined* RAM-plus-swap usage — setting `--memory-swap` equal to `--memory` disables swap entirely for that container (any memory beyond the RAM limit triggers an immediate OOM kill), while setting it higher than `--memory` allows the container to spill into swap space once RAM is exhausted, trading a hard failure for degraded (much slower) performance instead.
+
+```bash
+docker run --memory=512m --memory-swap=512m myapp   # NO swap allowed -- exceeding 512MB RAM -> IMMEDIATE OOMKilled
+docker run --memory=512m --memory-swap=1g myapp      # ADDITIONAL 512MB of SWAP allowed beyond the RAM limit --
+                                                       # exceeding 512MB RAM spills into swap FIRST, DEGRADING
+                                                       # performance severely, rather than being killed immediately
+```
+
+```text
+--memory=512m, --memory-swap=512m  (swap DISABLED):
+  RAM usage hits 512MB -> IMMEDIATE OOMKilled -- a FAST, CLEAR failure signal
+
+--memory=512m, --memory-swap=1g  (512MB of ADDITIONAL swap ALLOWED):
+  RAM usage hits 512MB -> SPILLS into swap -- container KEEPS RUNNING, but MUCH SLOWER
+  (swap I/O is ORDERS OF MAGNITUDE slower than RAM) -- NO immediate kill, but SEVERELY degraded performance
+```
+
+Because allowing swap trades a fast, unambiguous failure (OOMKilled, which orchestration tooling like Kubernetes can detect and react to by restarting the Pod) for a much slower, silently-degrading container that stays technically "alive" while performing far worse, most production container deployments deliberately disable swap (`--memory-swap` equal to `--memory`) so that exceeding the memory budget produces a clear, actionable signal rather than a confusing, hard-to-diagnose slowdown.
+
+**Common Pitfall:** enabling generous swap for a container assuming it provides a helpful safety margin against occasional memory spikes — in practice, a container that's spilling into swap is usually performing so poorly that it's effectively non-functional anyway, just without the clear, immediately-actionable `OOMKilled` signal that would have let an orchestrator restart it promptly; disabling swap (the Docker default when `--memory-swap` is left unset actually still allows some swap unless explicitly matched to `--memory`) is usually the more diagnosable, production-appropriate choice.
+
+---
+
 ---

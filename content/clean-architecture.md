@@ -1564,3 +1564,91 @@ Because the Use Case itself only ever produces the plain `GetOrderSummaryOutputD
 **Common Pitfall:** introducing a full, explicit Presenter layer for every single Use Case regardless of whether multiple, meaningfully different delivery mechanisms actually consume its output — for the common case of a single Web API being the only consumer, this adds a genuine extra layer of indirection (a separate Presenter class, translating output data that's already close to what the API needs) without a correspondingly clear benefit; the full Presenter pattern earns its complexity specifically when a Use Case's output genuinely needs to be presented in meaningfully different ways across multiple, distinct delivery mechanisms.
 
 ---
+
+## Beginner — Question 15
+
+**Q15: What role does a Clean Architecture Controller (the actual Web API controller class) play, and why should it stay as thin as possible — just translating an HTTP request into a Use Case call?**
+
+The Controller's job is narrowly mechanical: read the incoming HTTP request, map it onto the input a Use Case expects, invoke that Use Case, and translate its result back into an HTTP response — it should contain essentially no business logic of its own, since any business rule embedded directly in a controller becomes invisible to (and untestable from) anything other than an actual HTTP request.
+
+```csharp
+[HttpPost]
+public async Task<IActionResult> CreateOrder(CreateOrderRequest request)
+{
+    var command = new CreateOrderCommand(request.CustomerId, request.Items); // translate HTTP -> Use Case input
+    var result = await _mediator.Send(command);                              // invoke the Use Case
+    return result.IsSuccess ? Ok(result.Value) : BadRequest(result.Error);    // translate result -> HTTP response
+    // NO business logic here at all -- just translation in, translation out
+}
+```
+
+Because the controller contains no business logic, that logic (which actually lives in the Use Case/Handler, covered elsewhere) can be tested directly without spinning up an HTTP pipeline at all — and the same business logic remains reachable from an entirely different delivery mechanism (a CLI tool, a message-queue consumer) without duplicating it inside a second, HTTP-specific implementation.
+
+**Common Pitfall:** letting a controller action accumulate real business logic over time (a validation rule "just added quickly" directly in the action, a conditional branch implementing an actual business decision) — this logic becomes reachable only via an actual HTTP request, invisible to a unit test targeting the Use Case directly, and unavailable to any other delivery mechanism that might need the same rule applied.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: How does a MediatR Pipeline Behavior (covered earlier for cross-cutting concerns generally) apply FluentValidation to a Command *before* it reaches its Handler, keeping the Handler itself free of validation logic?**
+
+Rather than each individual Handler manually checking whether its incoming Command is valid, a validation-specific Pipeline Behavior intercepts *every* Command flowing through MediatR, runs any registered FluentValidation validator for that Command's type, and short-circuits with a failure result *before* the Handler's own logic ever executes if validation fails.
+
+```csharp
+public class ValidationBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+{
+    private readonly IEnumerable<IValidator<TRequest>> _validators;
+
+    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken ct)
+    {
+        var failures = _validators
+            .Select(v => v.Validate(request))
+            .SelectMany(r => r.Errors)
+            .Where(f => f != null)
+            .ToList();
+
+        if (failures.Any()) throw new ValidationException(failures); // SHORT-CIRCUITS -- Handler NEVER runs
+        return await next(); // validation PASSED -- proceed to the actual Handler
+    }
+}
+```
+
+Because this single Behavior is registered once and applies to *every* Command that has a matching `IValidator<T>` registered, individual Handlers never need to call `ModelState.IsValid`-style checks (or hand-roll their own validation) themselves — each Handler can assume, by the time its own code runs, that the incoming Command has already passed validation, keeping the Handler's body focused purely on business logic.
+
+**Common Pitfall:** duplicating validation logic inside individual Handlers "just to be safe" even after a validation Pipeline Behavior is already registered globally — this both duplicates effort and risks the two validation layers silently drifting out of sync over time; once a global validation Behavior exists, individual Handlers should trust that a request reaching them has already passed validation, rather than re-checking the same rules defensively.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Invariant Enforcement via a private setter plus public behavior methods on an Aggregate, and how does it prevent external code from putting the Aggregate into an invalid state by directly mutating its fields?**
+
+If an Aggregate's properties have public setters, any external code can assign them directly, bypassing whatever business rules should govern a valid state transition entirely — making setters private (or `init`-only where appropriate) and exposing only intention-revealing public *methods* forces every state change to go through code that can enforce the Aggregate's own invariants.
+
+```csharp
+public class Order
+{
+    public OrderStatus Status { get; private set; } // PRIVATE setter -- can't be assigned directly from OUTSIDE
+    private readonly List<OrderLine> _lines = new();
+    public IReadOnlyList<OrderLine> Lines => _lines.AsReadOnly();
+
+    public void Cancel()
+    {
+        if (Status == OrderStatus.Shipped)
+            throw new InvalidOperationException("Cannot cancel an order that has already shipped."); // ENFORCED here
+        Status = OrderStatus.Cancelled;
+    }
+}
+
+// EXTERNAL code CANNOT do this at all -- the setter is private:
+// order.Status = OrderStatus.Cancelled;  // COMPILE ERROR -- forces going through Cancel() instead
+order.Cancel(); // the ONLY way to change Status -- and the invariant check ALWAYS runs
+```
+
+Because the *only* way to change `Status` is through the `Cancel()` method (or similarly-named behavior methods for other transitions), it's structurally impossible for any external code to skip the business-rule check and force the Aggregate into an invalid state (like cancelling an already-shipped order) — the invariant is enforced by the type system itself, not merely by convention or code-review discipline that could be forgotten or bypassed.
+
+**Common Pitfall:** exposing public setters on an Aggregate's properties "for convenience" (to make object initialization or a mapping library's job easier) — this reopens exactly the gap intention-revealing methods are meant to close, letting any external code (including a careless future change, or a mapper configured incorrectly) put the Aggregate into a state its own business rules were specifically designed to prevent.
+
+---
+
+---

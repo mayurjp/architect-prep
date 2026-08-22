@@ -1950,4 +1950,79 @@ Because each downstream dependency has its own dedicated, bounded resource alloc
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is the "Fat Gateway" anti-pattern, and how does an API Gateway (covered earlier) accumulating actual business logic over time undermine the separation of concerns it was originally meant to provide?**
+
+An API Gateway's intended job is routing, authentication, and cross-cutting concerns (rate limiting, request logging) — a "Fat Gateway" emerges when teams gradually add genuine business logic directly into the gateway itself (data transformation rules specific to one domain, orchestration logic combining multiple backend calls with business meaning), turning what was meant to be a thin routing layer into a second, hidden monolith that every team now depends on and must coordinate changes through.
+
+```text
+INTENDED Gateway responsibilities: routing, auth, rate limiting, TLS termination -- GENERIC, cross-cutting
+
+"FAT GATEWAY" anti-pattern: the gateway ALSO contains --
+  - business rules deciding HOW to combine Order + Inventory + Payment data for a specific response shape
+  - domain-specific validation logic that REALLY belongs inside a specific microservice
+  - orchestration logic that's genuinely PART of a business workflow, not just generic request routing
+```
+
+Because business logic living in the gateway is shared, centralized infrastructure that every team's requests flow through, any team needing to change that logic must now coordinate through the gateway's own team/release cycle — reintroducing exactly the "everyone must coordinate deployments together" coupling problem microservices were meant to eliminate, just relocated into the gateway instead of a monolith.
+
+**Common Pitfall:** treating "just put it in the gateway, it's easy since every request already passes through there" as a convenient default for any cross-service concern — genuine business logic belongs inside the specific microservice (or a dedicated Aggregator/Facade service, covered elsewhere) that owns that domain; the gateway should stay confined to genuinely generic, cross-cutting concerns that have nothing to do with any single service's specific business rules.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is the specific failure mode when two services sharing one database's schema evolve independently, and why does this reintroduce exactly the coupling the Database-per-Service pattern (covered earlier) is meant to eliminate?**
+
+If two services share direct access to the same underlying database schema, one team altering a table's structure (renaming a column, changing a type) to serve their own service's evolving needs can silently break the *other* team's service, which reads/writes that same table with no visibility into the change — the database schema itself becomes an unversioned, implicit contract neither team fully controls or can safely evolve alone.
+
+```text
+Service A and Service B BOTH read/write the SAME "Orders" table directly.
+
+Service A's team renames "Status" column to "OrderStatus" to support a NEW business requirement.
+Service B's team has NO IDEA this happened -- their code still queries "Status" -- BREAKS IMMEDIATELY,
+with NO deployment, NO code change, and NO warning on Service B's OWN side at all
+```
+
+Because a shared database schema has no natural mechanism for versioning or backward-compatible evolution the way an explicit, owned API contract does (covered elsewhere for Consumer-Driven Contracts), any schema change one team makes for their own purposes can silently break another team's service that happens to depend on the same underlying tables — precisely the "you can't deploy your service independently without coordinating with every other team touching the same database" coupling Database-per-Service is designed to prevent.
+
+**Common Pitfall:** sharing a database "temporarily" during a migration or for convenience, assuming the coupling risk is manageable because "we'll coordinate carefully" — in practice, schema changes happen incrementally over a long period by different people who may not even remember (or know) which other services depend on the same tables; the discipline required to avoid breaking changes indefinitely rarely holds up as team membership and priorities shift over time.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is a Saga's "Semantic Lock," and how does marking a record as "pending" during a long-running Saga prevent other transactions from acting on inconsistent, in-flight data?**
+
+A traditional database lock isn't available across a Saga's multiple, separately-committed local transactions (covered elsewhere as exactly why Sagas avoid distributed locking) — a Semantic Lock instead uses an explicit application-level flag (a `Status = "Pending"` field) that other business logic is written to respect, effectively creating a lock enforced by convention and business logic, rather than a genuine database-level lock.
+
+```csharp
+// Step 1 of a Saga: reserving inventory for an order
+public async Task ReserveStockAsync(int productId, int quantity)
+{
+    var product = await _db.Products.FindAsync(productId);
+    product.Status = "PendingReservation"; // the SEMANTIC LOCK -- OTHER business logic checks THIS flag
+    product.ReservedQuantity += quantity;
+    await _db.SaveChangesAsync(); // commits IMMEDIATELY -- this is its OWN local transaction, no distributed lock held
+}
+
+// ELSEWHERE in the system -- code respecting the semantic lock
+public bool CanSellProduct(Product product) => product.Status != "PendingReservation";
+```
+
+```text
+WITHOUT the semantic lock: a DIFFERENT concurrent process could see the product as fully available
+and OVERSELL it, WHILE the Saga's later steps (payment, confirmation) are STILL in progress
+
+WITH the semantic lock: OTHER business logic explicitly CHECKS the "PendingReservation" status and
+REFUSES to treat the product as freely available UNTIL the Saga either COMPLETES or COMPENSATES
+```
+
+Because this "lock" is purely a convention enforced by every piece of business logic that reads the flag — not an actual database-level lock preventing concurrent access — it requires every relevant code path across the system to correctly check and respect the semantic status; unlike a real lock, nothing at the database engine level prevents code that *doesn't* check the flag from acting on the data anyway.
+
+**Common Pitfall:** implementing a Semantic Lock's "pending" flag but forgetting to update every other query/business-logic path elsewhere in the system that reads the same entity to actually respect it — since the "lock" has no enforcement at the database level, any code path that doesn't explicitly check the status flag can act on the data as if the Saga weren't in progress at all, silently reintroducing the exact inconsistency the semantic lock was meant to prevent.
+
+---
+
 ---

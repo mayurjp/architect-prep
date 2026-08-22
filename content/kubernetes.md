@@ -1398,4 +1398,81 @@ Because the Cluster Autoscaler is aware of Pod priority when deciding what to pr
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is `kubectl describe pod`, and how does its Events section help diagnose why a Pod won't schedule or start, as distinct from what `kubectl logs` shows?**
+
+`kubectl logs` shows output from a container that's already *running* (or that ran and exited) — it's useless for a Pod that never got scheduled or never got its container started in the first place. `kubectl describe pod` instead shows the Pod's full spec/status *and*, critically, an Events section recording exactly what Kubernetes itself tried to do (and any failures along the way) — scheduling decisions, image pulls, probe failures — making it the correct first stop for a Pod that isn't running at all.
+
+```bash
+kubectl describe pod my-app-7d9f8-abc12
+```
+```text
+Events:
+  Type     Reason             Age   From               Message
+  ----     ------             ----  ----               -------
+  Warning  FailedScheduling   30s   default-scheduler   0/3 nodes are available: insufficient memory
+  Warning  Failed             10s   kubelet             Failed to pull image "myapp:v2": not found
+```
+
+Because `kubectl logs` requires a container to have actually started before there's any output to show at all, a Pod stuck in `Pending` (never scheduled) or failing to even pull its image produces *zero* log output — the Events section in `describe pod` is where these earlier-stage failures (scheduling, image pulling, probe failures) actually surface, since they happen before a container process ever runs.
+
+**Common Pitfall:** running `kubectl logs` first and being confused by an empty or error response for a Pod stuck in `Pending` or `ImagePullBackOff` — `kubectl logs` only has something to show once a container has actually started; `kubectl describe pod`'s Events section is the correct tool for diagnosing anything that goes wrong *before* that point.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What are a Kubernetes Deployment's `maxSurge` and `maxUnavailable` fields, and how do they control how aggressively old Pods are replaced with new ones during a rolling update?**
+
+During a rolling update, `maxSurge` caps how many *extra* Pods (beyond the desired replica count) can exist temporarily while new ones are being created, and `maxUnavailable` caps how many Pods can be *missing* (below the desired count) at any point during the rollout — together they tune how the trade-off between rollout speed and available capacity actually plays out.
+
+```yaml
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 1        # up to 1 EXTRA Pod may exist temporarily during rollout
+      maxUnavailable: 0  # NEVER fewer than the desired replica count -- ZERO downtime tolerance
+```
+
+```text
+Desired replicas: 3, maxSurge: 1, maxUnavailable: 0
+
+Rollout: create 1 NEW Pod (now 4 total) -> wait for it to become Ready -> terminate 1 OLD Pod (back to 3) ->
+         repeat until ALL 3 are the NEW version -- NEVER drops below 3 AVAILABLE Pods at any point
+```
+
+Because these two fields are independently tunable, a team can choose `maxUnavailable: 0` for a genuinely zero-downtime rollout (at the cost of temporarily using slightly more cluster resources via `maxSurge`), or the reverse (`maxSurge: 0`, some `maxUnavailable`) for a resource-constrained cluster willing to tolerate brief reduced capacity in exchange for not needing extra headroom during the rollout at all.
+
+**Common Pitfall:** leaving both fields at their permissive defaults for a workload that genuinely can't tolerate reduced capacity during a rollout — the default rolling update behavior allows some temporary unavailability unless `maxUnavailable: 0` is explicitly set, which is easy to overlook until a rollout coincides with a traffic spike and the temporarily reduced replica count causes real, user-visible degradation.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is the Horizontal Pod Autoscaler's stabilization window, and how does it prevent a metric that briefly spikes and drops (flapping) from causing rapid, thrashing scale-up/scale-down cycles?**
+
+Without a stabilization window, the HPA would react to every fresh metric reading independently — a CPU metric that spikes for 30 seconds and drops back down could trigger a scale-up immediately followed by a scale-down moments later, repeatedly, as the metric fluctuates. The stabilization window instead has the HPA look back across a configurable time range and choose the highest (for scale-up) or lowest (for scale-down) recommended replica count seen within that window, smoothing out short-lived spikes.
+
+```yaml
+behavior:
+  scaleDown:
+    stabilizationWindowSeconds: 300  # look back 5 MINUTES -- use the HIGHEST replica count recommended in that window
+  scaleUp:
+    stabilizationWindowSeconds: 0    # scale UP immediately -- no smoothing delay for THIS direction
+```
+
+```text
+Metric readings over the last 5 minutes suggest: 3 replicas, 3 replicas, 8 replicas (a BRIEF spike), 3, 3
+WITHOUT a stabilization window: HPA scales to 8, then immediately back down to 3 -- THRASHING
+WITH a 300s scaleDown stabilization window: HPA uses the HIGHEST recommendation from the WINDOW (8) --
+  stays at 8 replicas for the FULL window, THEN scales down once the window's HIGH-WATER MARK drops too
+```
+
+Because scaling down is typically the direction where flapping causes the most disruption (repeatedly terminating and recreating Pods, each incurring startup cost), it's common to apply a longer stabilization window specifically to scale-down while leaving scale-up more immediate — reacting to genuine, sustained load increases quickly, while smoothing out brief, noisy spikes on the way back down.
+
+**Common Pitfall:** applying a long stabilization window to BOTH scale-up and scale-down uniformly — this smooths out flapping in both directions, but also makes the autoscaler sluggish to react to a genuine, sudden traffic surge, since scale-up decisions get held back by the same smoothing window meant to prevent scale-down thrashing; tuning the two directions independently (as shown above) is usually the better trade-off.
+
+---
+
 ---

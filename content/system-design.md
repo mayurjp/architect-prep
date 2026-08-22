@@ -1761,4 +1761,68 @@ Because the routing decision happens at the network layer itself (via BGP, befor
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is DNS's role as the very first step of nearly every request, and why is a DNS lookup's result typically cached (via TTL) rather than looked up fresh every single time?**
+
+Before a client can send a single byte to a server, it must resolve a domain name (`api.example.com`) to an IP address via DNS — since this resolution step adds latency to every request that needs it, DNS responses include a Time-To-Live (TTL) telling the client (or an intermediate resolver) how long it may safely reuse that answer without asking again.
+
+```text
+Client wants: https://api.example.com/orders
+
+STEP 1 (DNS lookup): api.example.com -> 203.0.113.42   (TTL: 300 seconds)
+STEP 2: client connects DIRECTLY to 203.0.113.42 for THIS request, and for the NEXT 300 SECONDS
+        worth of requests too, WITHOUT repeating the DNS lookup AT ALL
+```
+
+Because a DNS lookup itself takes real time (often tens of milliseconds, sometimes more for an uncached resolver chain), paying that cost on *every single request* would add meaningfully to latency across an entire application — caching the result for its TTL duration means the lookup cost is paid once, then amortized across every request made during that window, at the cost of the IP address change taking up to a full TTL to actually propagate if it needs to change.
+
+**Common Pitfall:** setting a DNS TTL far too long for a value that might need to change quickly (like the IP behind a failover target) — a long TTL means clients (and intermediate caching resolvers) keep using a now-stale, possibly-unreachable IP address for the full TTL duration after a failover, directly delaying how fast traffic actually shifts to the new location, regardless of how quickly the DNS record itself was updated.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is the Token Bucket algorithm for rate limiting, and how does it differ from a Fixed Window Counter in allowing short, legitimate bursts of traffic?**
+
+A Fixed Window Counter simply counts requests within a fixed time window (e.g., "100 per minute") and rejects anything beyond that count — the Token Bucket algorithm instead maintains a "bucket" that refills with tokens at a steady rate, and each request consumes one token, allowing a client that hasn't made requests recently to burst up to the bucket's full capacity all at once, rather than being smoothed into a strict per-window cap.
+
+```text
+Token Bucket: capacity = 10 tokens, refill rate = 1 token/second
+
+A CLIENT that's been IDLE for 10+ seconds has a FULL bucket (10 tokens) -- it can BURST 10 requests
+INSTANTLY, all at once, and the bucket then EMPTIES -- refilling GRADUALLY at 1/second afterward
+
+Fixed Window: "100 requests per minute" -- a client that's used 0 of its 100 requests can ALSO burst,
+but ONLY up to the window's OWN limit, and a request arriving JUST as one window ends and another
+begins can EXPLOIT the boundary to get NEARLY DOUBLE the intended rate in a short span (a KNOWN
+Fixed Window weakness that Token Bucket, and the related "Sliding Window Log," avoid)
+```
+
+Because Token Bucket's refill happens continuously (not reset abruptly at fixed window boundaries), it avoids the "boundary burst" exploit inherent to Fixed Window counters, while still permitting legitimate short bursts from clients that have been under their allotted rate recently — a smoother, more nuanced trade-off between strictness and burst tolerance than a naive fixed-window count.
+
+**Common Pitfall:** implementing rate limiting with a naive Fixed Window Counter without realizing its boundary-exploit weakness — a client aware of exactly when a window resets can send a burst right at the boundary, effectively getting close to double the intended rate limit within a short span straddling two windows; Token Bucket (or Sliding Window Log) closes this specific gap at the cost of slightly more implementation complexity.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is the "split-brain" risk in Leader-Follower replication, and how does a majority-quorum-based consensus protocol (like Raft or Paxos) prevent two nodes from both believing they're the leader simultaneously?**
+
+If a network partition splits a cluster into two groups that can't communicate with each other, and each group naively elects its own leader (believing the other side is simply down), you end up with two nodes both accepting writes as "the leader" simultaneously — a split-brain scenario that can produce silently diverging, conflicting data. Majority-quorum consensus protocols prevent this by requiring a node to receive votes from a strict *majority* of the total cluster to become leader, mathematically guaranteeing at most one side of any partition can ever achieve that majority.
+
+```text
+A 5-node cluster splits into a 3-node group and a 2-node group during a network partition.
+
+The 3-node group: can achieve a MAJORITY (3 out of 5) -- CAN elect a new leader, continues operating
+The 2-node group: can NEVER achieve a majority (2 out of 5 is NOT enough) -- CANNOT elect a leader --
+                   this side correctly REFUSES to accept writes, avoiding a SECOND, CONFLICTING leader
+```
+
+Because a majority requires more than half of the *total* cluster (not just the nodes currently reachable from any one node's perspective), it's mathematically impossible for two disjoint groups to *both* achieve a majority at the same time — at most one side of any partition can ever have enough votes to elect a leader, guaranteeing at most one leader exists cluster-wide even during a network split, at the direct cost of the minority side becoming unavailable for writes until the partition heals.
+
+**Common Pitfall:** implementing a leader-election scheme requiring only a *simple majority of currently reachable nodes* (rather than a majority of the *total* cluster size) — this reintroduces exactly the split-brain risk consensus protocols are designed to prevent, since two genuinely disjoint groups could each see a "majority" of whichever nodes they can currently reach, both incorrectly concluding they're entitled to elect their own leader.
+
+---
+
 ---
