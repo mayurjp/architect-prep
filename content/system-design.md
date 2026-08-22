@@ -1533,4 +1533,81 @@ Because the timeout treats "no response within the configured window" identicall
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is the difference between a Heartbeat and a Health Check, two related but distinct terms often conflated at a system-design level?**
+
+A Heartbeat is a periodic "I'm alive" signal a service *pushes* to a monitor on its own schedule — a Health Check is a query a monitor *pulls* from a service, on the monitor's own schedule, asking "are you healthy right now?" The direction of who initiates the check is the key distinguishing detail, and each fits a different failure-detection scenario.
+
+```text
+HEARTBEAT -- the SERVICE itself PUSHES a periodic signal, on ITS OWN schedule:
+  Service -----(every 10s: "I'm still alive")-----> Monitor
+  -- if the MONITOR stops RECEIVING heartbeats, it INFERS the service has FAILED --
+  -- WORKS even if the SERVICE is in a state where it CAN'T easily respond to an INCOMING request
+     (e.g., it can STILL send OUTBOUND messages, but its OWN inbound listener has WEDGED) --
+
+HEALTH CHECK -- the MONITOR actively PULLS/QUERIES the service, on the MONITOR'S OWN schedule:
+  Monitor -----(GET /health, every 10s)-----> Service
+  -- the SERVICE must be ABLE to RECEIVE and RESPOND to this INCOMING request for the check to SUCCEED --
+  -- (covered earlier, under Kubernetes' Liveness/Readiness Probes) --
+```
+A Heartbeat can detect a specific failure mode a Health Check might miss — a service whose *inbound* request-handling has wedged (unable to receive/respond to a Health Check's pull) but whose outbound heartbeat-sending logic runs on a completely separate code path might still successfully push heartbeats, while a service that's *entirely* frozen would stop sending heartbeats *and* fail to respond to health checks either way; a Health Check, conversely, can verify something a bare Heartbeat cannot — genuine, specific operational readiness (can this service actually reach its database right now), not just "the process is still running and its heartbeat-sending loop hasn't crashed."
+
+**Common Pitfall:** treating "Heartbeat" and "Health Check" as fully interchangeable synonyms — while both aim at detecting failure, the direction of initiation (push versus pull) and what each can actually verify differ meaningfully; a system relying purely on heartbeats has no way to ask "but can you actually serve a real request right now," while a system relying purely on health checks has no way to detect a service whose specific inbound-request-handling path has wedged independently of its overall process health.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: How does Sharding Re-balancing (moving data between shards as a cluster grows) work, and why is Consistent Hashing (covered earlier) specifically valuable for minimizing how much data must move during a re-balance?**
+
+Adding a new shard to a growing cluster requires redistributing some existing data onto it — how *much* data needs to move during that re-balance depends entirely on the sharding scheme's underlying key-to-shard mapping; Consistent Hashing (covered earlier for a distributed cache) minimizes this movement dramatically compared to a naive modulo-based sharding scheme.
+
+```text
+NAIVE modulo-based sharding -- shard = hash(key) % N (N = number of SHARDS):
+  With N=4 shards: key "X" -> hash(X) % 4 -> shard 2
+  ADDING a 5th shard: N becomes 5 -> hash(X) % 5 -> a COMPLETELY DIFFERENT shard, for VIRTUALLY EVERY key
+  -- ADDING ONE shard requires MOVING ALMOST EVERY SINGLE KEY in the ENTIRE cluster -- CATASTROPHICALLY EXPENSIVE
+
+CONSISTENT HASHING -- keys and SHARDS are BOTH placed on the SAME hash RING (covered earlier):
+  ADDING a 5th shard: it takes ownership of ONLY the RING SEGMENT immediately preceding IT --
+  -- ONLY the keys that FALL WITHIN that ONE NEWLY-CLAIMED segment need to MOVE --
+  -- EVERY OTHER key, on EVERY OTHER shard, is COMPLETELY UNAFFECTED -- STAYS EXACTLY WHERE IT WAS --
+```
+Because Consistent Hashing only reassigns the specific, narrow portion of the hash ring the newly-added shard actually claims, a re-balance touches only a small, bounded fraction of the total keyspace — the naive modulo scheme's `% N` recalculates a *completely different* answer for virtually every key the moment `N` changes at all, forcing nearly the entire dataset to be reshuffled for even a single shard addition.
+
+**Why this specifically matters for the operational cost of scaling a sharded system over its lifetime:** a system expected to grow its shard count repeatedly over time (adding capacity as data volume grows) accumulates the re-balancing cost every single time — a naive modulo scheme's near-total-reshuffle cost, repeated across many scaling events over a system's lifetime, becomes a genuinely significant, recurring operational burden that Consistent Hashing's narrow, targeted re-balancing avoids almost entirely.
+
+**Common Pitfall:** implementing sharding using a simple `hash(key) % N` scheme for a system expected to grow its shard count over time, without anticipating the re-balancing cost this specific scheme incurs on every single scaling event — this works fine for a system whose shard count is fixed and never expected to change, but becomes a severe, recurring operational cost the moment shard count needs to grow, which Consistent Hashing (or an equivalent scheme designed for minimal-movement re-balancing) is specifically designed to avoid.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is the difference between Multi-Region Active-Active and Active-Passive architecture, and what specific trade-off — write-conflict handling versus failover time — distinguishes the two?**
+
+Active-Passive keeps one region as the sole, designated primary handling all writes, with one or more other regions on standby, ready to take over only if the primary fails — Active-Active has multiple regions simultaneously accepting live writes and traffic, all the time, directly connecting to the Multi-Region (Multi-Master) Writes trade-off covered under NoSQL.
+
+```text
+ACTIVE-PASSIVE -- ONE region handles ALL writes; OTHERS stand BY, REPLICATING, but NOT actively serving writes:
+  US-East (ACTIVE, handles ALL writes) ---(replicates)---> EU-West (PASSIVE, standby, READ-ONLY replica)
+  -- NO write conflicts possible AT ALL -- only ONE region EVER accepts writes --
+  -- BUT if US-East FAILS: FAILOVER requires PROMOTING EU-West to become the NEW primary --
+     THIS PROMOTION takes GENUINE TIME (detecting the failure, PROMOTING the replica, updating
+     DNS/routing) -- a REAL WINDOW of DOWNTIME/UNAVAILABILITY during THIS FAILOVER process
+
+ACTIVE-ACTIVE -- MULTIPLE regions SIMULTANEOUSLY accept LIVE writes, ALL the TIME:
+  US-East (ACTIVE) <---(bidirectional replication)---> EU-West (ALSO ACTIVE, simultaneously)
+  -- if US-East FAILS: EU-West is ALREADY actively serving traffic -- ESSENTIALLY ZERO failover time --
+  -- BUT: the SAME record COULD be WRITTEN in BOTH regions SIMULTANEOUSLY -- GENUINE write CONFLICTS
+     MUST be detected and RESOLVED (Last-Write-Wins, custom merge logic -- covered under NoSQL) --
+```
+Active-Passive completely avoids the write-conflict problem (only one region ever accepts writes at any given moment) but pays for that simplicity with genuine failover time when the primary does fail — Active-Active essentially eliminates failover time (every region is already actively serving) but requires the application/database to have a genuine, deliberate conflict-resolution strategy for the cases where the same data is legitimately written in two different regions nearly simultaneously.
+
+**Why this is the exact same underlying trade-off covered under NoSQL's Multi-Region Writes discussion, generalized beyond just the database layer:** Active-Active versus Active-Passive isn't purely a database-layer decision — it applies to an entire system's architecture (application servers, caches, message queues, and the database together) — but the fundamental trade-off (accept write conflicts for near-zero failover time, versus accept failover time for conflict-free simplicity) is identical in shape to the database-specific version of this same trade-off covered under NoSQL.
+
+**Common Pitfall:** choosing Active-Active primarily for its "impressive," marketing-friendly near-zero-downtime characteristics, without the application and every downstream system genuinely being designed to handle real, concurrent write conflicts correctly — Active-Active's failover benefit is only actually realized if conflict resolution is handled correctly and deliberately throughout the system; adopting it without that groundwork can silently produce data inconsistencies (a lost update, a conflicting change silently discarded) that are considerably harder to detect and diagnose than the comparatively simple, well-understood downtime window Active-Passive's failover process introduces instead.
+
+---
+
 ---

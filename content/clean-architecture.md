@@ -1261,3 +1261,91 @@ By defining `IOrderRepository` inside the Application layer's own project (rathe
 **Common Pitfall:** defining repository/service interfaces in the Infrastructure project "because that's where the implementation naturally lives," then being surprised that the Application layer ends up needing a project reference to Infrastructure after all — this specific, easy-to-overlook detail (which project physically contains the interface's `.cs` file) is precisely what determines whether the Dependency Rule is genuinely enforced at compile time by the project reference graph, or merely hoped for as an unenforced convention that a future change could silently violate.
 
 ---
+
+## Beginner — Question 12
+
+**Q12: What is the Composition Root, specifically in a Clean Architecture application, and why must it be the one place allowed to reference every layer, when every other layer is restricted?**
+
+The Composition Root (touched on briefly under OOP's Dependency Injection discussion) is the single location where all of an application's concrete dependencies are actually wired together — in a Clean Architecture app, it lives in the outermost layer (typically alongside `Program.cs`/`Startup.cs`), and is deliberately the *only* place in the entire codebase permitted to reference every other layer at once, since its whole job is connecting interfaces defined in inner layers to their concrete implementations living in outer ones.
+
+```csharp
+// Program.cs -- the COMPOSITION ROOT -- the ONE place allowed to reference EVERY layer SIMULTANEOUSLY
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddScoped<IOrderRepository, EfOrderRepository>(); // Application's INTERFACE, Infrastructure's IMPL
+builder.Services.AddScoped<IPaymentGateway, StripePaymentGateway>(); // SAME pattern, DIFFERENT interface/impl pair
+builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(PlaceOrderCommand).Assembly));
+
+// -- EVERY OTHER class in the ENTIRE application ONLY EVER references INTERFACES, via constructor injection --
+// -- ONLY THIS ONE FILE knows about the ACTUAL CONCRETE types (EfOrderRepository, StripePaymentGateway) --
+```
+Because every other class throughout the application depends only on interfaces (injected via constructor parameters, covered under Dependency Inversion), no class anywhere else needs — or is permitted — to know which concrete implementation is actually plugged in; the Composition Root is where that single, deliberate decision is made, exactly once, for the entire application, keeping every other class's dependencies expressed purely in terms of abstractions.
+
+**Why concentrating this knowledge in exactly ONE place (rather than scattering `new ConcreteType()` calls throughout the codebase) matters:** if concrete type selection were scattered across many classes (each one deciding for itself which concrete implementation to instantiate), swapping an implementation (a different payment gateway) would require hunting down and changing every one of those scattered decision points — centralizing it in the Composition Root means swapping an implementation requires changing exactly one line, in exactly one file, regardless of how many classes throughout the application ultimately depend on that interface.
+
+**Common Pitfall:** letting concrete-type instantiation logic leak outside the Composition Root — a class deep in the Application layer calling `new EfOrderRepository()` directly "just this once, for convenience" — this reintroduces a dependency on Infrastructure's concrete type exactly where the Dependency Rule says it shouldn't exist, and defeats the entire purpose of having one single, disciplined Composition Root as the sole place concrete wiring decisions are made.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is a "Query Object" in the Application layer, and how does it mirror CQRS's Command side (covered earlier) but for reads specifically, as a dedicated class representing one specific query with its own handler?**
+
+Just as a Command (covered earlier under CQRS) represents one specific write operation as a first-class object with its own dedicated handler, a Query Object does the same for a specific *read* — rather than a generic repository method with an ever-growing list of optional filter parameters, each distinct query shape gets its own dedicated class and handler, exactly mirroring the Command side's structure.
+
+```csharp
+// a QUERY OBJECT -- represents ONE SPECIFIC read query, as a FIRST-CLASS object, MIRRORING Command's structure
+public record GetActiveOrdersForCustomerQuery(int CustomerId) : IRequest<List<OrderDto>>;
+
+public class GetActiveOrdersForCustomerQueryHandler : IRequestHandler<GetActiveOrdersForCustomerQuery, List<OrderDto>>
+{
+    public async Task<List<OrderDto>> Handle(GetActiveOrdersForCustomerQuery query, CancellationToken ct)
+    {
+        return await _db.Orders
+            .Where(o => o.CustomerId == query.CustomerId && o.Status == "Active")
+            .Select(o => new OrderDto(o.Id, o.Total))
+            .ToListAsync(ct);
+    }
+}
+
+// the CONTROLLER simply DISPATCHES the query -- IDENTICAL shape to dispatching a COMMAND
+var orders = await _mediator.Send(new GetActiveOrdersForCustomerQuery(customerId));
+```
+Rather than a generic `IOrderRepository.GetOrders(int? customerId, string status, DateTime? after, ...)` method accumulating an ever-growing list of optional parameters to serve every possible read scenario, each distinct query shape gets its own dedicated `IRequest<TResult>` class and handler — precisely mirroring how Commands are structured, giving reads the same first-class, independently-testable, independently-evolvable treatment CQRS already gives writes.
+
+**Why this specifically avoids the "fat repository interface" problem covered elsewhere (the generic `IRepository<T>` anti-pattern):** a single, generic repository method trying to serve every possible read need inevitably grows an unwieldy parameter list, or requires a separate method per query shape anyway — Query Objects embrace that reality directly, giving each distinct query its own class from the start, rather than trying to force every possible read through one shared, increasingly bloated method signature.
+
+**Common Pitfall:** continuing to add optional parameters to one shared, general-purpose repository method as new read requirements accumulate over a project's lifetime, rather than introducing a new, dedicated Query Object for each genuinely distinct read need — the generic method's parameter list eventually becomes unwieldy and its internal logic increasingly conditional (branching heavily based on which parameters happen to be populated), exactly the kind of complexity Query Objects avoid by giving each distinct query its own small, focused, independently-understandable class instead.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is the Shared Kernel pattern from Domain-Driven Design, and why is it considered a high-risk, high-coordination-cost pattern compared to a Bounded Context's usual default of full isolation?**
+
+A Bounded Context (covered under Microservices) normally maintains its own, fully independent model — the Shared Kernel is a deliberate, narrow exception: a small, explicitly-agreed-upon set of types/code genuinely shared *between* two (or more) Bounded Contexts, rather than each maintaining its own separate copy.
+
+```csharp
+// a SHARED KERNEL -- a SEPARATE, SMALL package, referenced by BOTH the OrderService AND ShippingService
+// (TWO otherwise SEPARATE Bounded Contexts) -- an EXPLICIT, DELIBERATE exception to their USUAL isolation
+namespace Company.SharedKernel;
+public record Address(string Street, string City, string PostalCode, string Country);
+// -- BOTH Bounded Contexts use THIS EXACT SAME type, RATHER than EACH maintaining their OWN separate "Address" --
+```
+```text
+WITHOUT a Shared Kernel -- EACH Bounded Context maintains its OWN, INDEPENDENT "Address" concept:
+  OrderService's Address   -- shaped for BILLING concerns
+  ShippingService's Address -- shaped for DELIVERY concerns
+  -- COMPLETELY INDEPENDENT -- EACH context can evolve ITS OWN "Address" WITHOUT coordinating with the OTHER
+
+WITH a Shared Kernel -- BOTH contexts use the EXACT SAME "Address" type, from ONE shared package:
+  -- a CHANGE to the SHARED "Address" type REQUIRES COORDINATING with EVERY context that DEPENDS on it --
+  -- NEITHER team can UNILATERALLY change it WITHOUT the OTHER team's AWARENESS/AGREEMENT --
+```
+Because both teams now depend on the exact same shared type, a change to it can no longer be made unilaterally by either team — any modification requires explicit coordination between every team depending on the Shared Kernel, exactly the kind of cross-team coordination overhead that Bounded Contexts' usual, default full isolation (covered under Microservices) is specifically designed to avoid in the first place.
+
+**Why DDD explicitly frames this as a high-risk pattern requiring deliberate, ongoing team coordination, not a convenient default to reach for:** the entire value proposition of separate Bounded Contexts is that teams can evolve their own models independently, without needing to coordinate with every other team — a Shared Kernel deliberately reintroduces exactly that coordination requirement, but *only* for the specific, narrow slice of shared code, which is precisely why DDD literature frames it as a pattern to use sparingly, and only when the *cost* of maintaining two separate, duplicated versions of some genuinely-identical concept is judged to outrun the coordination cost of sharing it directly.
+
+**Common Pitfall:** reaching for a Shared Kernel reflexively, whenever two Bounded Contexts happen to need a conceptually similar type, without weighing the ongoing coordination cost against simply letting each context maintain its own independent version (even if that means some duplicated code) — a Shared Kernel that grows to include more than a small, genuinely stable set of types quietly reintroduces the exact tight coupling between teams that Bounded Contexts' usual full isolation exists specifically to prevent, undermining the independence that's the entire point of splitting into separate contexts in the first place.
+
+---

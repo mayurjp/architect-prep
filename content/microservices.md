@@ -1667,4 +1667,118 @@ Because the traffic-management logic runs once in the kernel (via eBPF programs 
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is the difference between a "Thin" and a "Smart" client SDK a service provides to its own consumers, and how does a Thin client avoid the coupling risk a Smart client introduces?**
+
+A service that provides a client SDK/library for others to call it can design that SDK to be genuinely "thin" (just wiring — building the HTTP request, parsing the response, nothing more) or "smart" (embedding actual business logic — validation rules, decision-making, caching strategies specific to the service's own domain) — the distinction directly determines whether updating that business logic requires every single consumer to also update their SDK version.
+
+```csharp
+// THIN client SDK -- JUST wiring -- NO business logic embedded AT ALL
+public class OrderServiceClient
+{
+    public async Task<Order> GetOrderAsync(int id) =>
+        await _httpClient.GetFromJsonAsync<Order>($"/orders/{id}"); // JUST the HTTP call, nothing more
+}
+
+// SMART client SDK -- embeds ACTUAL business logic -- a GENUINE coupling risk
+public class OrderServiceClient
+{
+    public async Task<decimal> CalculateDiscountedPriceAsync(Order order)
+    {
+        var basePrice = await GetOrderTotalAsync(order.Id);
+        if (order.CustomerTier == "Gold") return basePrice * 0.9m; // BUSINESS RULE, baked DIRECTLY into the SDK
+        return basePrice;
+    }
+}
+```
+If the discount business rule changes (Gold tier discount becomes 15%, or a new tier is introduced), *every consumer* using the Smart client SDK must upgrade to a new SDK version to get the corrected behavior — exactly mirroring the "shared library trap" (covered earlier) risk, since business logic now lives duplicated across every consumer's own deployed SDK version rather than in one single, authoritative place (the service itself). A Thin client sidesteps this entirely: the business logic stays server-side, in the one service that owns it, and every consumer automatically gets the current, correct behavior on their very next call, with no SDK upgrade needed at all.
+
+**Common Pitfall:** embedding business logic into a client SDK "for convenience" (saving each consumer from writing their own request-building/response-parsing code, which reasonably belongs in a Thin client, but going further to also embed decision-making logic that genuinely belongs server-side) — this quietly reintroduces the exact same versioning/consistency problem the "shared library trap" describes, just packaged as a client SDK rather than an internal shared library; a Thin client (wiring only) is generally the safer default, keeping genuine business logic centralized in the service itself.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is the Outbox Pattern's Relay/Polling Publisher component specifically, and what latency trade-off does a polling-based relay introduce compared to the CDC-based outbox relay covered under Messaging?**
+
+The Outbox Pattern (covered extensively) writes an event to an "outbox" table in the same local transaction as the business data change — but *something* still has to actually read that outbox table and publish its contents to the message broker; the Relay (or Polling Publisher) is that separate component, and its specific implementation approach (simple polling versus CDC-based, covered under Messaging) directly determines how much latency exists between a business change committing and its event actually reaching the broker.
+
+```csharp
+// a SIMPLE POLLING-based Relay -- a BACKGROUND SERVICE, checking the outbox table on a FIXED INTERVAL
+public class OutboxRelayService : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var unpublished = await _db.OutboxMessages.Where(m => !m.Published).ToListAsync();
+            foreach (var message in unpublished)
+            {
+                await _messageBroker.PublishAsync(message);
+                message.Published = true;
+            }
+            await _db.SaveChangesAsync();
+            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); // POLLS every 5 SECONDS
+        }
+    }
+}
+```
+```text
+POLLING-based relay -- LATENCY is BOUNDED by the POLLING INTERVAL:
+  A business change COMMITS at T=0 -- but the OUTBOX message might NOT be picked up and PUBLISHED
+  until the NEXT poll cycle runs -- UP TO 5 SECONDS of ADDED LATENCY (in the example ABOVE),
+  EVEN THOUGH the underlying DATABASE change ALREADY committed INSTANTLY
+
+CDC-based relay (covered under Messaging) -- taps the DATABASE's OWN transaction log DIRECTLY --
+  publishes the OUTBOX ROW'S INSERT nearly IMMEDIATELY, WITHOUT waiting for ANY fixed polling interval
+```
+A polling-based relay is dramatically simpler to build and operate (just a background service and a query), but introduces latency bounded by however frequently it polls — a CDC-based relay (covered under Messaging's Change Data Capture discussion) taps the database's transaction log directly, publishing changes essentially as soon as they're committed, trading the relay's implementation simplicity for near-real-time publishing latency instead.
+
+**Why choosing between them is a genuine, workload-specific trade-off, not a strict "CDC is always better":** for many business workflows, a few seconds of added latency between a database commit and the corresponding event reaching consumers is entirely acceptable, making the simpler polling-based relay the pragmatic, lower-operational-complexity choice — CDC-based relay infrastructure (a tool tapping the database's transaction log) is genuinely more operationally complex to set up and maintain, and earns that complexity specifically for workloads where near-real-time event propagation is a hard requirement, not a nice-to-have.
+
+**Common Pitfall:** implementing a polling-based relay with an aggressively short polling interval (checking every 100ms) in an attempt to approximate CDC-level low latency — this adds continuous, largely wasted database query load (most poll cycles finding nothing new to publish) without actually achieving genuinely real-time latency; if truly near-real-time publishing is a hard requirement, a CDC-based relay is the appropriate tool, rather than pushing a polling-based approach to an aggressively tight interval that mostly just adds unnecessary database load.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is the transformation from a service's internal Domain Event into a published Integration Event, and how does this translation layer prevent a service's internal domain model from leaking directly into its public event contract?**
+
+A Domain Event (covered under Clean Architecture, scoped entirely within one service's own boundary) often carries rich, internal domain detail specific to that service's own model — an Integration Event (what actually gets published externally, to other services) should instead be a deliberately-designed, stable public contract, translated from the internal Domain Event rather than being the exact same object serialized and published directly.
+
+```csharp
+// INTERNAL Domain Event -- rich, tied DIRECTLY to this service's OWN internal domain model
+public class OrderShippedDomainEvent
+{
+    public Order Order { get; set; }                    // the ENTIRE internal Order aggregate -- INTERNAL detail
+    public InternalWarehouseLocation SourceWarehouse { get; set; } // an INTERNAL-ONLY concept, MEANINGLESS externally
+}
+
+// PUBLISHED Integration Event -- a DELIBERATELY-DESIGNED, STABLE public CONTRACT, TRANSLATED from the above
+public class OrderShippedIntegrationEvent
+{
+    public int OrderId { get; set; }
+    public string TrackingNumber { get; set; }
+    public DateTime ShippedAtUtc { get; set; }
+    // -- NO internal domain concepts (InternalWarehouseLocation) LEAK into THIS public contract AT ALL --
+}
+
+// the TRANSLATION happens EXPLICITLY, at the BOUNDARY, BEFORE publishing EXTERNALLY
+var integrationEvent = new OrderShippedIntegrationEvent
+{
+    OrderId = domainEvent.Order.Id,
+    TrackingNumber = domainEvent.Order.TrackingNumber,
+    ShippedAtUtc = DateTime.UtcNow
+};
+await _eventBus.PublishAsync(integrationEvent);
+```
+Because the Integration Event is a separately-designed type (not simply the internal Domain Event serialized directly), the service's own internal domain model remains free to evolve — renaming an internal property, restructuring `InternalWarehouseLocation` entirely — without breaking any external consumer, since they only ever depend on the stable, deliberately-designed `OrderShippedIntegrationEvent` contract, never on the service's actual internal domain types.
+
+**Why this directly connects to the earlier "Database per Service" and Bounded Context (covered elsewhere) discussions:** exactly as a service's internal database schema shouldn't be directly exposed to other services (covered under Database-per-Service), a service's internal Domain Event/model shouldn't be directly exposed via its published events either — both are instances of the same underlying principle: a service's own Bounded Context's internal model is free to evolve independently, precisely because external consumers only ever depend on a deliberately-designed, stable public contract, never on internal implementation details.
+
+**Common Pitfall:** serializing and publishing a Domain Event object directly as the Integration Event, skipping the explicit translation step to save a small amount of mapping code — this directly couples every external consumer to the publishing service's internal domain model's exact shape, meaning an innocuous internal refactor (renaming a domain property, restructuring an internal-only nested object) can silently break every external consumer still expecting the old shape, precisely the coupling the translation step exists to prevent.
+
+---
+
 ---

@@ -1112,4 +1112,97 @@ HPA and the Cluster Autoscaler operate at genuinely different layers and react t
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is a Kubernetes Headless Service (`clusterIP: None`), and how does it let DNS resolve directly to individual Pod IP addresses, rather than to one shared, load-balanced virtual IP?**
+
+An ordinary Service (covered earlier) provides one stable virtual IP that load-balances across matching Pods, hiding individual Pod IPs entirely — a Headless Service instead skips that virtual IP altogether, and a DNS lookup against it returns the *actual* IP addresses of every matching Pod directly, letting a client (or another Pod) discover and connect to specific individual Pods by identity.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-database
+spec:
+  clusterIP: None      # HEADLESS -- NO virtual IP, NO built-in load balancing at ALL
+  selector:
+    app: my-database
+```
+```bash
+nslookup my-database.default.svc.cluster.local
+# an ORDINARY Service would return ONE virtual IP -- a HEADLESS Service returns EVERY MATCHING POD'S
+# ACTUAL, INDIVIDUAL IP address DIRECTLY:
+# Address: 10.1.2.3  (Pod replica 1)
+# Address: 10.1.2.4  (Pod replica 2)
+# Address: 10.1.2.5  (Pod replica 3)
+```
+Because a client resolving this DNS name gets back every individual Pod's actual IP directly (rather than one shared, load-balanced virtual IP), it can specifically choose to connect to Pod replica 1 rather than "whichever replica the load balancer happens to route to" — this is exactly the mechanism a `StatefulSet` (covered earlier) relies on to give each of its replicas its own stable, individually-addressable DNS name (`my-database-0.my-database.default.svc.cluster.local`), essential for stateful workloads where clients genuinely need to reach one *specific* replica rather than an arbitrary one.
+
+**Common Pitfall:** using an ordinary (non-headless) Service for a `StatefulSet`-based workload, expecting clients to be able to address individual replicas by identity — an ordinary Service's load-balancing virtual IP structurally hides which specific Pod actually served a given request; a Headless Service is specifically what's required whenever client code needs to address a *particular* replica directly, rather than accepting whichever replica an ordinary Service's load balancing happens to route to.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is a Kubernetes Deployment's `revisionHistoryLimit`, and how does it control how many old ReplicaSets (covered earlier) are retained for potential rollback purposes?**
+
+Every time a Deployment's Pod template changes, Kubernetes creates a new ReplicaSet (covered earlier) but keeps the *previous* one around (scaled to zero) specifically so `kubectl rollout undo` (covered earlier) can quickly restore it — `revisionHistoryLimit` controls exactly how many of these old, scaled-to-zero ReplicaSets are retained before the oldest ones are automatically garbage-collected.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-api
+spec:
+  revisionHistoryLimit: 5   # KEEP the 5 MOST RECENT old ReplicaSets -- OLDER ones are AUTOMATICALLY deleted
+  template: # ...
+```
+```text
+After MANY deployments over TIME, WITHOUT a limit, DOZENS of old, scaled-to-zero ReplicaSets could
+ACCUMULATE indefinitely, cluttering "kubectl get replicasets" output and consuming a small amount
+of etcd storage for EACH one's retained metadata
+
+WITH revisionHistoryLimit: 5 -- ONLY the 5 MOST RECENT revisions remain ROLLBACK-ABLE via
+'kubectl rollout undo --to-revision=N' -- ANYTHING OLDER is AUTOMATICALLY cleaned up
+```
+Setting this value trades off "how far back can I roll back to" against "how much old, unused metadata accumulates in the cluster" — a smaller value keeps the cluster tidier but limits how far back a rollback can reach; a larger value preserves a longer rollback history at the cost of more retained (though inactive) ReplicaSet objects.
+
+**Common Pitfall:** leaving `revisionHistoryLimit` at an unnecessarily large default value (or unset, retaining Kubernetes' own default) for a Deployment that redeploys extremely frequently (many times per day, in an active CI/CD pipeline) — this can accumulate a genuinely large number of retained old ReplicaSets over time, an easily-overlooked source of unnecessary etcd storage growth for objects that will, realistically, never actually be rolled back to given how far in the past they are.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is the Kubernetes Vertical Pod Autoscaler (VPA), and how does it differ from the Horizontal Pod Autoscaler (HPA, covered extensively) by adjusting a Pod's own resource requests/limits rather than the number of replicas?**
+
+HPA (covered extensively) scales the *number* of Pod replicas up or down in response to observed load — VPA instead adjusts the resource *requests/limits* of each individual Pod (giving it more or less CPU/memory), leaving the replica *count* unchanged, based on that Pod's own actual observed resource consumption over time.
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: my-api-vpa
+spec:
+  targetRef:
+    apiVersion: "apps/v1"
+    kind: Deployment
+    name: my-api
+  updatePolicy:
+    updateMode: "Auto" # VPA can AUTOMATICALLY adjust (and RESTART Pods with) NEW resource requests/limits
+```
+```text
+VPA OBSERVES: "my-api's Pods consistently use only 150m CPU, but their REQUEST is set to 500m CPU"
+  -- VPA ADJUSTS the Deployment's Pod template's CPU REQUEST DOWN to more accurately match ACTUAL usage
+  -- (or ADJUSTS it UP, if Pods are CONSISTENTLY hitting their CURRENT limit and being THROTTLED)
+
+-- REPLICA COUNT stays EXACTLY the same throughout -- ONLY the PER-POD resource ALLOCATION changes --
+```
+Because VPA operates on the *size* of each individual Pod rather than *how many* Pods exist, it's suited to a genuinely different scaling dimension than HPA — a workload that isn't well-suited to horizontal scaling at all (a single-instance, stateful process that can't simply run more replicas) can still benefit from VPA right-sizing its resource requests/limits to match its actual observed consumption, something HPA has no mechanism to address at all.
+
+**Why combining VPA and HPA on the exact same Deployment is generally discouraged (a genuine, well-documented caveat):** VPA changing a Pod's resource *requests* can interact awkwardly with HPA's own scaling calculations (which are often themselves based on resource utilization *relative to* the current requests) — the two autoscalers adjusting different dimensions of the *same* underlying metric can create confusing, sometimes oscillating feedback loops; Kubernetes' own documentation specifically cautions against combining VPA and HPA on CPU/memory for the same workload without careful, deliberate configuration to avoid exactly this interaction.
+
+**Common Pitfall:** enabling both VPA and HPA (scaling on CPU utilization) simultaneously for the same Deployment without accounting for their potential interaction — VPA changing the Pod's resource requests changes the very denominator HPA's CPU-utilization-percentage calculation is based on, potentially causing HPA to make scaling decisions based on a constantly-shifting baseline, a well-documented caveat that requires deliberate, careful configuration (or using VPA in a "recommendation-only" mode, without automatic application) rather than naively combining both autoscalers' default behaviors.
+
+---
+
 ---

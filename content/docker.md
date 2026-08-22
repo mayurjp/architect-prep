@@ -997,4 +997,81 @@ Rootless Mode achieves this using Linux user namespaces, mapping the "root" user
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is a Docker restart policy (`--restart=always`/`unless-stopped`/`on-failure`), and how does it let a container automatically restart after crashing, or even after the Docker daemon itself restarts?**
+
+A restart policy tells the Docker daemon what to do when a container stops — restart it automatically, leave it stopped, or restart it only if it exited with a failure — removing the need for an external script or human to notice a crashed container and manually restart it.
+
+```bash
+docker run --restart=always myapi
+# if 'myapi' CRASHES (or the entire HOST reboots, and Docker's daemon starts back up), Docker
+# AUTOMATICALLY restarts THIS container -- NO external script or human intervention needed AT ALL
+
+docker run --restart=on-failure:5 myapi
+# restarts ONLY if the container exits with a NON-ZERO (failure) code -- UP TO 5 restart attempts,
+# THEN gives up if it KEEPS failing (avoiding an INFINITE crash-loop consuming resources FOREVER)
+
+docker run --restart=unless-stopped myapi
+# behaves like 'always', EXCEPT if a HUMAN explicitly ran 'docker stop' -- THAT stop is RESPECTED,
+# NOT immediately overridden by an automatic restart
+```
+Because `always` restarts the container even after the entire host reboots (as long as Docker's own daemon starts back up), it's the appropriate choice for a genuinely long-running service expected to always be up — `on-failure` is more appropriate when a clean, intentional exit (code 0) should be respected and NOT trigger a restart, while a crash (non-zero exit) should be automatically recovered from.
+
+**Common Pitfall:** running a production container with no restart policy configured at all (Docker's actual default is `no` — never automatically restart) — a container that crashes then simply stays down until someone notices and manually restarts it, defeating the basic self-healing behavior that even a simple restart policy provides essentially for free.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is Docker's `json-file` logging driver's `max-size`/`max-file` configuration, and how does an unbounded default logging configuration risk filling up disk space over time for a long-running, chatty container?**
+
+By default, Docker's `json-file` logging driver (the default) writes a container's stdout/stderr to a log file on the host with no size limit at all — a long-running, chatty container (one logging frequently) can accumulate an unboundedly large log file over weeks or months, eventually consuming all available disk space on the host, unless log rotation limits are explicitly configured.
+
+```bash
+# WITHOUT any log size limit -- the LOG FILE grows UNBOUNDED, INDEFINITELY, for as long as the CONTAINER runs
+docker run myapi
+# -- MONTHS later, /var/lib/docker/containers/.../*.json could be MANY GIGABYTES, EATING disk space
+
+# WITH explicit log rotation configured -- BOUNDS the TOTAL log storage for THIS container
+docker run --log-opt max-size=10m --log-opt max-file=3 myapi
+# -- EACH log FILE capped at 10MB -- ONCE it hits THAT size, ROTATES to a NEW file --
+# -- ONLY the 3 MOST RECENT files are KEPT -- OLDER ones are AUTOMATICALLY DELETED --
+# -- TOTAL log storage for THIS container is BOUNDED at, AT MOST, ~30MB, FOREVER, REGARDLESS of RUNTIME
+```
+Without explicit `max-size`/`max-file` limits, a container's logs simply keep growing for as long as it runs — a genuinely long-lived container (one that's never restarted for months) logging routinely can accumulate gigabytes of log data, eventually causing a "disk full" failure on the host that can affect *every other* container running on that same host, not just the one whose logs actually grew unbounded.
+
+**Common Pitfall:** discovering a "disk full" production incident and tracing it back to an unbounded container log file that had been silently growing for months — this is a well-known, easily-preventable operational hazard; configuring `max-size`/`max-file` (or an equivalent log-rotation setting for whatever logging driver is actually in use) should be a standard, default part of any production container configuration, not something added reactively only after a disk-full incident has already occurred.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is a container "init" process (`--init` flag, or the `tini` binary it wraps), and how does it solve the "PID 1 zombie reaping" problem for a containerized application that spawns child processes?**
+
+In Linux, process ID 1 (PID 1) has special responsibilities — specifically, it's responsible for "reaping" (cleaning up) zombie processes (child processes that have exited but whose exit status hasn't yet been collected by their parent) and correctly forwarding signals (like `SIGTERM`, covered under graceful shutdown) to all its child processes. Most ordinary applications were never written with these PID-1-specific responsibilities in mind, and a container's main process runs as PID 1 by default.
+
+```text
+WITHOUT an init process -- your APPLICATION itself runs as PID 1 -- but it was NEVER WRITTEN to
+  handle PID 1's SPECIAL responsibilities:
+  -- if your app SPAWNS child processes (a script invoking OTHER commands) and DOESN'T explicitly
+     "wait" on and REAP each one, those children become PERMANENT ZOMBIE processes, slowly
+     ACCUMULATING and consuming the process TABLE, since NOTHING is reaping them
+  -- SIGTERM sent to the CONTAINER might not be CORRECTLY forwarded to CHILD processes your
+     app spawned, since your APP was never DESIGNED to act as an INIT SYSTEM
+
+WITH --init -- Docker INSERTS a tiny, PURPOSE-BUILT init process (tini) as the ACTUAL PID 1:
+docker run --init myapi
+  -- tini CORRECTLY reaps zombie child processes AUTOMATICALLY
+  -- tini CORRECTLY forwards SIGTERM/SIGINT to YOUR application (now running as PID 2, NOT PID 1)
+  -- your APPLICATION itself NEVER needs to know or care about ANY of PID 1's special responsibilities AT ALL
+```
+Because `tini` is specifically designed and tested to correctly fulfill PID 1's responsibilities (zombie reaping, signal forwarding), inserting it via `--init` lets your actual application run as an ordinary process (PID 2), completely unaware of and unburdened by PID-1-specific concerns — the init process handles all of that correctly on the application's behalf, regardless of whether the application itself was ever written with containerization's specific process-model quirks in mind.
+
+**Why this specifically matters more for applications that spawn their own child processes, rather than every single container:** a simple, single-process application (most typical .NET web APIs, for instance) that never spawns additional child processes is far less likely to encounter the zombie-process-accumulation problem specifically — `--init` earns its keep specifically for containers running shell scripts, process managers, or any application that itself spawns and manages child processes, where PID 1's zombie-reaping responsibility genuinely matters.
+
+**Common Pitfall:** running a container whose entrypoint is a shell script spawning multiple background child processes, without `--init`, then observing the container's process count growing slowly over time (via `docker exec ... ps aux`) — this is the classic zombie-process-accumulation symptom `--init`/`tini` exists specifically to prevent, and is easy to overlook until the accumulating zombies eventually exhaust the container's process table or otherwise cause resource issues.
+
+---
+
 ---
