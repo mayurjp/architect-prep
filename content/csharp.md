@@ -1161,4 +1161,91 @@ Because `current` is a raw pointer with no bounds checking, incrementing it past
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What are C# 12's Collection Expressions (`[1, 2, 3]`), and how does this single, unified syntax replace the several different initialization syntaxes previously needed for arrays, `List<T>`, and `Span<T>`?**
+
+Before C# 12, initializing an array, a `List<T>`, and a `Span<T>` each required its own distinct syntax — Collection Expressions introduce one unified `[...]` syntax that works across all of them (and other collection-like types), with the compiler inferring the correct concrete construction based on the target type.
+
+```csharp
+// BEFORE C# 12 -- each collection TYPE needed its OWN, DIFFERENT initialization syntax
+int[] array = new int[] { 1, 2, 3 };
+List<int> list = new List<int> { 1, 2, 3 };
+Span<int> span = new int[] { 1, 2, 3 };
+
+// C# 12 Collection Expressions -- ONE UNIFIED syntax, works for ALL of them
+int[] array = [1, 2, 3];
+List<int> list = [1, 2, 3];
+Span<int> span = [1, 2, 3];
+
+// the "spread" operator (..) INLINES another collection's elements DIRECTLY
+int[] combined = [0, ..array, 4, 5]; // [0, 1, 2, 3, 4, 5] -- 'array's ELEMENTS spliced directly IN
+```
+The compiler determines the correct concrete construction (a `new int[]`, a `new List<int>()` with `Add` calls, or an appropriately-sized `Span<int>`) based entirely on the *target type* the collection expression is being assigned to — the same bracketed literal syntax works uniformly, removing the need to remember a different initialization pattern per collection type.
+
+**Common Pitfall:** assuming collection expressions always allocate identically regardless of target type — assigning to `int[]`/`List<T>` still allocates on the heap as usual, while assigning to `Span<T>` can sometimes avoid a heap allocation entirely (using `stackalloc`-backed storage for a small, fixed-size collection, covered elsewhere) — the *syntax* is unified, but the underlying allocation behavior still depends on which concrete target type is actually being constructed.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is the `nint`/`nuint` native-sized integer type, and when does its size actually matter for interop or pointer-sized values, as opposed to using an ordinary `int`/`long`?**
+
+`nint`/`nuint` are integer types whose size matches the platform's native pointer size — 4 bytes on a 32-bit process, 8 bytes on a 64-bit process — unlike `int` (always 4 bytes) or `long` (always 8 bytes), which stay a fixed size regardless of the process's bitness.
+
+```csharp
+int fixedSize = 42;      // ALWAYS 4 bytes, REGARDLESS of whether the process is 32-bit or 64-bit
+long alwaysBig = 42;      // ALWAYS 8 bytes, REGARDLESS of process bitness
+nint nativeSized = 42;    // 4 bytes on a 32-BIT process, 8 bytes on a 64-BIT process -- MATCHES the POINTER size
+
+// interop scenario -- a native function's signature EXPECTS a POINTER-SIZED integer parameter
+[DllImport("somelib.dll")]
+static extern nint GetBufferHandle(); // the NATIVE function returns something POINTER-SIZED -- 'nint' matches EXACTLY
+```
+When calling into native code (via P/Invoke) that returns or accepts a pointer-sized value (a handle, an address), using `nint`/`nuint` guarantees the C# type's size always matches the actual native pointer size on whatever platform the code happens to run on — using a fixed-size `int` would silently truncate a 64-bit pointer value on a 64-bit process, while using a fixed `long` would be needlessly oversized (and potentially incompatible) on a 32-bit process.
+
+**Common Pitfall:** using `nint`/`nuint` as a general-purpose "faster" or "more efficient" integer type for ordinary application logic that has nothing to do with pointers or native interop — its variable size (4 vs 8 bytes, depending on process bitness) makes application-level arithmetic *less* predictable, not more efficient; `nint`/`nuint` earn their specific purpose only for genuinely pointer-sized values in interop scenarios, not as a general substitute for `int`/`long` elsewhere.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is the difference between C#'s newer Incremental Source Generators (`IIncrementalGenerator`) and the original `ISourceGenerator` API, and how does incremental generation avoid re-running an entire generator on every single keystroke in the IDE?**
+
+The original `ISourceGenerator` API re-executes its *entire* generation logic from scratch on every single compilation (including, in an IDE, after nearly every keystroke) — `IIncrementalGenerator` instead lets the generator declare a pipeline of cacheable *stages*, so that only the stages whose actual inputs changed need to re-run, dramatically reducing the generator's IDE-responsiveness cost for large codebases.
+
+```csharp
+// OLDER ISourceGenerator -- the ENTIRE Execute method RE-RUNS, from SCRATCH, on EVERY compilation
+public class OldGenerator : ISourceGenerator
+{
+    public void Execute(GeneratorExecutionContext context)
+    {
+        // scans EVERY syntax tree in the ENTIRE compilation, EVERY single time -- EVEN if
+        // ONLY ONE UNRELATED file, ELSEWHERE in the project, actually changed
+    }
+}
+
+// NEWER IIncrementalGenerator -- declares a PIPELINE of CACHEABLE stages
+public class NewGenerator : IIncrementalGenerator
+{
+    public void Initialize(IncrementalGeneratorInitializationContext context)
+    {
+        var classDeclarations = context.SyntaxProvider
+            .CreateSyntaxProvider(predicate: IsCandidateClass, transform: GetClassInfo)
+            .Where(info => info is not null); // this STAGE's OUTPUT is CACHED -- based on its OWN specific INPUT
+
+        context.RegisterSourceOutput(classDeclarations, GenerateSource);
+        // ONLY the classes whose SYNTAX actually CHANGED get RE-TRANSFORMED -- UNRELATED, UNCHANGED
+        // classes REUSE their PREVIOUSLY-CACHED result, WITHOUT re-running ANY of this logic AGAIN
+    }
+}
+```
+Because each pipeline stage's output is cached and keyed against its own specific input, editing one file elsewhere in a large solution doesn't force the generator to re-analyze *every* file again — only the specific syntax nodes that actually changed flow through the pipeline's stages again, while everything else's previously-computed, cached result is reused directly, which is precisely what keeps a large codebase's IDE experience (IntelliSense, live error-checking) responsive even with source generators actively running in the background on every keystroke.
+
+**Why this specifically matters for the developer experience in a large solution, not just raw compile time:** an IDE re-triggers analysis extremely frequently (nearly every keystroke, for live error squiggles and IntelliSense) — a generator using the older `ISourceGenerator` API re-scanning an entire large codebase on every one of those triggers can noticeably degrade typing responsiveness; `IIncrementalGenerator`'s caching is specifically what makes source generators practical to use in genuinely large, actively-edited solutions without that responsiveness cost.
+
+**Common Pitfall:** writing a new source generator using the older `ISourceGenerator` API out of habit or unfamiliarity with the newer incremental model — for anything beyond a tiny, trivial generator, this reintroduces exactly the "re-scan everything on every keystroke" performance problem `IIncrementalGenerator`'s pipeline-based caching exists specifically to solve; new generator development should default to `IIncrementalGenerator` unless there's a specific reason the older API is genuinely required.
+
+---
+
 ---

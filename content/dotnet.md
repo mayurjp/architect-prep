@@ -1163,4 +1163,80 @@ Background GC still requires two brief, genuinely blocking pauses (at the very s
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is a .NET Global Tool, and how does `dotnet tool install --global` let you install a CLI utility built with .NET, usable from any directory on the machine?**
+
+A .NET Global Tool is a NuGet package that packages a runnable console application rather than a library — installing one globally makes its command available system-wide, from any directory, exactly like any other command-line tool, without needing to clone a repository or manually build the tool's source.
+
+```bash
+dotnet tool install --global dotnet-ef   # installs EF Core's CLI tool, GLOBALLY, usable from ANY directory
+dotnet ef migrations add InitialCreate   # now works from ANY project directory, ANYWHERE on the machine
+
+dotnet tool list --global                # lists EVERY globally-installed .NET tool
+dotnet tool update --global dotnet-ef    # updates it to the LATEST published version
+```
+Because the tool is published as an ordinary NuGet package (just one flagged as a "tool package" rather than a library), it's distributed and versioned through the exact same NuGet infrastructure every other .NET package uses — a team can pin a specific tool version in a `.config/dotnet-tools.json` manifest file (a "local tool," restorable per-repository) for reproducibility across a team, or install it globally for personal, machine-wide convenience.
+
+**Common Pitfall:** installing a tool globally when a project specifically needs every team member (and CI) to use the *exact same* tool version — a global install reflects whatever version happens to be on that one developer's machine, which can silently drift between team members' machines over time; a local tool manifest (`dotnet new tool-manifest` plus `dotnet tool install` without `--global`) pins an exact version in source control, restorable identically by anyone running `dotnet tool restore`.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is `System.Text.Json`'s `JsonConverter<T>`, and how does writing a custom converter let you control exactly how a specific type is serialized and deserialized, beyond what the framework's default conventions provide?**
+
+`System.Text.Json` has sensible default conventions for serializing ordinary types — but some types need genuinely custom serialization logic (a type with no natural JSON representation, a legacy format's specific date string, an enum that should serialize as a custom string rather than its numeric value) — a `JsonConverter<T>` lets you take full, explicit control over exactly how a specific type reads from and writes to JSON.
+
+```csharp
+public class UnixTimestampConverter : JsonConverter<DateTime>
+{
+    public override DateTime Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        long unixSeconds = reader.GetInt64(); // the JSON holds a RAW UNIX TIMESTAMP, not an ISO-8601 string
+        return DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime;
+    }
+
+    public override void Write(Utf8JsonWriter writer, DateTime value, JsonSerializerOptions options)
+    {
+        writer.WriteNumberValue(((DateTimeOffset)value).ToUnixTimeSeconds()); // WRITE it back OUT as a raw NUMBER
+    }
+}
+
+var options = new JsonSerializerOptions { Converters = { new UnixTimestampConverter() } };
+var order = JsonSerializer.Deserialize<Order>(json, options); // 'Order.CreatedAt' now correctly parses a UNIX timestamp
+```
+Because the converter is registered on `JsonSerializerOptions`, every `DateTime` property anywhere in the object graph being serialized/deserialized with these options automatically uses this custom logic — rather than needing manual, ad-hoc conversion code scattered everywhere a `DateTime` happens to need this particular external format, the conversion logic lives in exactly one place and applies uniformly.
+
+**Common Pitfall:** writing a custom `JsonConverter` for a type whose actual serialization need could be satisfied by a simpler, built-in mechanism (an attribute like `[JsonPropertyName]`, or a `JsonNumberHandling` option) — a full custom converter is genuinely more code to write and maintain than the framework's built-in, declarative options already provide for many common customization needs; a custom converter earns its complexity specifically for genuinely custom serialization logic (like translating between two fundamentally different representations, as shown above), not for simple renaming or basic formatting adjustments the framework already handles directly.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is .NET Assembly Strong Naming, and why has it become a largely legacy concept for modern .NET (Core), directly connecting to the earlier discussion of the Global Assembly Cache's own reduced relevance?**
+
+Strong Naming cryptographically signs an assembly with a public/private key pair, embedding a unique, verifiable identity into the assembly itself — originally important for uniquely identifying assemblies destined for the Global Assembly Cache (GAC, covered earlier), where multiple versions of a library needed an unambiguous way to coexist and be correctly resolved by name, version, and public key together.
+
+```xml
+<!-- .NET Framework era -- STRONG NAMING was FREQUENTLY required, particularly for GAC-DEPLOYED assemblies -->
+<PropertyGroup>
+  <SignAssembly>true</SignAssembly>
+  <AssemblyOriginatorKeyFile>MyKey.snk</AssemblyOriginatorKeyFile>
+</PropertyGroup>
+```
+```text
+Modern .NET (Core) -- the GAC (covered earlier) is LARGELY IRRELEVANT -- dependencies are RESOLVED
+via NuGet package REFERENCES and PER-APPLICATION deployment folders, NOT a SHARED, machine-wide,
+STRONG-NAME-KEYED cache AT ALL -- much of Strong Naming's ORIGINAL PURPOSE (disambiguating MULTIPLE
+versions coexisting in ONE SHARED location) simply DOESN'T APPLY the SAME way anymore
+```
+Because modern .NET applications typically bundle their own dependencies in a per-application folder (or use NuGet's own version-resolution mechanisms) rather than relying on one shared, machine-wide GAC where strong names were essential for disambiguation, the *original* problem Strong Naming was designed to solve has largely disappeared for the majority of modern .NET applications — some strong naming support remains for specific compatibility and tooling scenarios, but it's no longer the pervasive, frequently-required practice it was in the .NET Framework era.
+
+**Why this is a direct consequence of the same underlying platform shift covered for the GAC's reduced relevance:** both Strong Naming's prominence and the GAC's centrality stemmed from the same .NET Framework-era deployment model (one shared runtime installation, with shared, versioned assemblies in one common location) — modern .NET's shift toward self-contained, per-application deployment (each application carrying its own dependency versions, covered under the SDK/Runtime discussion) removed the underlying reason both features were so heavily relied upon in the first place, which is why they're frequently discussed together as a connected pair of "important in .NET Framework, largely legacy in modern .NET" concepts.
+
+**Common Pitfall:** assuming strong naming is required for a modern .NET library simply because "that's how .NET assemblies are supposed to work," based on outdated .NET Framework-era guidance — for most modern .NET libraries distributed via NuGet, strong naming provides little practical benefit and is no longer a default expectation; it remains relevant mainly for narrow, specific compatibility scenarios (certain legacy interop cases, or organizational policies inherited from .NET Framework-era requirements) rather than being a broadly necessary practice for new .NET (Core) development.
+
+---
+
 ---

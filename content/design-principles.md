@@ -1230,4 +1230,105 @@ public class CheckoutController(IOrderPlacement orderPlacement) { /* ... */ }
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is the Principle of Orthogonality (a term from *The Pragmatic Programmer*), and how does it differ from the general notion of Coupling covered elsewhere?**
+
+Orthogonality describes components that are genuinely independent — changing one has no effect on the others, the way moving along one axis in a coordinate system doesn't affect your position on a perpendicular axis. It's closely related to low Coupling, but frames the goal more specifically as *independence of change*, not merely "not too many references between modules."
+
+```csharp
+// NON-ORTHOGONAL -- changing the LOGGING mechanism ALSO risks affecting business LOGIC, because they're TANGLED
+public class OrderProcessor
+{
+    public void Process(Order order)
+    {
+        Console.WriteLine($"Processing order {order.Id}"); // LOGGING, INLINE, MIXED with BUSINESS LOGIC
+        order.Total = CalculateTotal(order);                // the ACTUAL business LOGIC
+        Console.WriteLine($"Total calculated: {order.Total}"); // MORE logging, TANGLED IN AGAIN
+    }
+}
+
+// ORTHOGONAL -- LOGGING and BUSINESS LOGIC are INDEPENDENT axes -- CHANGING ONE genuinely doesn't TOUCH the OTHER
+public class OrderProcessor
+{
+    private readonly ILogger _logger; // an INDEPENDENT concern, INJECTED
+    public void Process(Order order)
+    {
+        order.Total = CalculateTotal(order); // PURE business logic -- UNAWARE of logging ENTIRELY
+        _logger.LogInformation("Order {Id} processed, total {Total}", order.Id, order.Total);
+    }
+}
+```
+In the orthogonal version, swapping the logging implementation (a different `ILogger`, or removing logging entirely for a test) has zero effect on `CalculateTotal`'s own logic — the two concerns vary along genuinely independent "axes," exactly the property Orthogonality names directly, whereas the first version's tangled logging/logic makes changing one concern risk unintentionally affecting the other.
+
+**Why this is a slightly different lens than "Coupling," even though closely related:** Coupling (covered elsewhere) is usually described structurally (how many references exist between modules) — Orthogonality asks the more behavioral question "if I change *this*, does *that* change too, even though it conceptually shouldn't?" — a system can have technically "low coupling" by a narrow structural count, while still having orthogonality violations where changes ripple in ways they conceptually shouldn't; the Orthogonality framing specifically highlights *unexpected ripple effects* as the thing to watch for.
+
+**Common Pitfall:** assuming a codebase with few explicit references between classes is automatically well-designed, without checking whether changing one part *actually, behaviorally* leaves genuinely unrelated parts untouched — a system can superficially look decoupled (few direct references) while still having tangled, non-orthogonal behavior (a shared mutable global state two "independent" classes both quietly depend on, for instance), which only a behavioral, orthogonality-focused review would actually catch.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is a class-level Invariant, as the third piece of Design by Contract (alongside the Preconditions/Postconditions covered earlier under LSP), and how does it differ from a method's own pre/postconditions?**
+
+A Precondition and Postcondition (covered earlier) describe what must be true before and after one *specific method* call — an Invariant is a condition that must hold true for an object at *all* times it's observable from outside (between any two method calls), not just around one particular method's execution.
+
+```csharp
+public class BankAccount
+{
+    public decimal Balance { get; private set; }
+
+    // INVARIANT: Balance must NEVER be negative, AT ANY POINT the object is observable from OUTSIDE
+    // (NOT just "at the end of THIS one method" -- but ALWAYS, between ANY two PUBLIC method calls)
+
+    public void Withdraw(decimal amount)
+    {
+        // PRECONDITION (specific to THIS method): amount must be positive AND <= Balance
+        if (amount <= 0 || amount > Balance) throw new InvalidOperationException();
+        Balance -= amount;
+        // POSTCONDITION (specific to THIS method): Balance decreased by EXACTLY 'amount'
+        // -- but ALSO, the CLASS-WIDE INVARIANT (Balance >= 0) must STILL hold, AFTER this method too
+    }
+
+    public void ApplyInterest(decimal rate)
+    {
+        Balance += Balance * rate;
+        // this ENTIRELY DIFFERENT method must ALSO preserve the SAME class-wide INVARIANT (Balance >= 0)
+    }
+}
+```
+While `Withdraw`'s own precondition/postcondition are specific to that one method's particular contract, the invariant ("Balance is never negative") is a *class-wide* rule that *every* method modifying `Balance` — `Withdraw`, `ApplyInterest`, or any future method added later — must all independently preserve; it's not tied to any single method's specific behavior, but to the object's overall, ongoing validity as observed from outside at any point in its lifetime.
+
+**Why invariants matter specifically for reasoning about a class as a whole, not just verifying individual methods in isolation:** checking that `Withdraw` alone correctly maintains its own precondition/postcondition doesn't guarantee the *class* as a whole is safe — a *different* method (`ApplyInterest`, or one added months later by someone unfamiliar with the original design) could still violate the same invariant if its author isn't aware the invariant needs to be preserved everywhere, not just within the one method they happen to be modifying; explicitly documenting class-level invariants makes this cross-cutting obligation visible to every future method author, not just implicitly assumed.
+
+**Common Pitfall:** carefully validating a method's own specific precondition/postcondition while never explicitly documenting (even informally, in a comment) the class-level invariants every method is implicitly expected to preserve — a future maintainer adding a new method has no way to know "oh, I also need to make sure Balance never goes negative here" unless that invariant was made explicit somewhere, rather than existing only as tribal knowledge in the original author's head.
+
+---
+
+## Advanced — Question 12
+
+**Q12: How does the Open/Closed Principle's advice to "design for extension" tension with YAGNI's caution against speculative generality, and how does a team decide when building an actual extension point is genuinely worth it versus premature?**
+
+The Open/Closed Principle (covered earlier) advises designing code so new behavior can be added without modifying existing code — YAGNI (covered earlier) warns against building generalized abstractions for requirements that don't exist yet. Taken naively, these seem to pull in opposite directions; reconciling them requires distinguishing "extension points built in response to genuine, already-observed variation" from "extension points built speculatively, for variation that might never actually materialize."
+
+```csharp
+// SPECULATIVE (YAGNI violation) -- building an extension point for a requirement that DOESN'T YET EXIST
+public interface IShippingCalculator { decimal Calculate(Order order); }
+public class StandardShippingCalculator : IShippingCalculator { /* the ONLY implementation that will EVER exist */ }
+// -- the TEAM has NO current plan for a SECOND shipping calculator -- this ABSTRACTION serves NO ACTUAL need YET
+
+// GENUINE OCP application -- built AFTER a SECOND, REAL variant ACTUALLY materialized
+public interface IShippingCalculator { decimal Calculate(Order order); }
+public class UsShippingCalculator : IShippingCalculator { /* the ORIGINAL implementation */ }
+public class InternationalShippingCalculator : IShippingCalculator { /* a SECOND, GENUINELY NEEDED variant, JUST ADDED */ }
+// -- THIS interface EARNED its existence -- it serves a REAL, CURRENTLY-EXISTING need, RIGHT NOW
+```
+The deciding factor isn't "does this code theoretically vary" (almost anything theoretically *could* vary someday) but "has this variation *actually* materialized, or is there concrete, credible evidence it will very soon" — building the `IShippingCalculator` abstraction the *moment* a second, genuinely-needed shipping calculation strategy is actually requested is squarely legitimate OCP application; building the identical abstraction a year earlier, with no second variant in sight, is the exact speculative generality YAGNI warns against, even though the resulting code might look structurally identical either way.
+
+**Why "refactor toward OCP when the second variant actually appears" is generally the safer default than "build the extension point upfront just in case":** a single, concrete implementation is usually easier to understand and modify directly than a needlessly abstracted one — and critically, once a *second* real variant actually appears, you have genuine, concrete information about *what specifically varies* between them, letting you design the actual abstraction boundary around real requirements rather than a guess made in advance; this connects directly to "Encapsulate What Varies" (covered earlier), which specifically requires knowing what varies before encapsulating it well.
+
+**Common Pitfall:** justifying a speculative, unused extension point by invoking the Open/Closed Principle as though OCP alone were sufficient justification for building any abstraction, without weighing it against YAGNI's caution — OCP describes a *property* well-designed code often has once genuine variation exists; it isn't a mandate to preemptively design every conceivable extension point before any evidence that specific variation will ever actually be needed.
+
+---
+
 ---

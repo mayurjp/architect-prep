@@ -1480,4 +1480,107 @@ The `GlyphBitmap` (potentially large pixel data) exists exactly *once* per uniqu
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is the Marker Interface pattern, and how does an EMPTY interface — one with no members at all — still convey meaningful information by "tagging" a type?**
+
+A Marker Interface has no methods or properties whatsoever — its entire purpose is to *label* a type as belonging to some category, letting other code check `is ISomeMarker` to test for membership in that category, without the interface itself defining any actual behavioral contract at all.
+
+```csharp
+public interface IAuditable { } // COMPLETELY EMPTY -- NO members AT ALL -- exists PURELY as a TAG
+
+public class Order : IAuditable { /* ... */ }      // TAGGED as auditable
+public class TempCacheEntry { /* ... */ }           // NOT tagged -- NOT auditable
+
+// generic code CHECKS for the TAG, WITHOUT the marker interface itself defining ANY behavior at all
+public void SaveEntity(object entity)
+{
+    if (entity is IAuditable)
+    {
+        _auditLog.Record($"{entity.GetType().Name} was saved at {DateTime.UtcNow}");
+    }
+    _repository.Save(entity);
+}
+```
+Because `IAuditable` has no members, implementing it costs a class nothing beyond simply declaring the interface — its entire value is purely informational, letting generic code branch on "is this type tagged with this marker" via a simple type check, a pattern historically used for things like .NET's own (now largely legacy) `ISerializable`-adjacent marker conventions before attributes became the more common modern alternative for this exact purpose.
+
+**Common Pitfall:** reaching for a Marker Interface in modern C# where a custom Attribute (`[Auditable]`) would typically be the more idiomatic, more flexible choice — attributes can carry additional metadata (parameters) a marker interface fundamentally cannot (since it has no members to carry any data at all), and don't consume a class's limited "interface implementation" slot the way an interface does; Marker Interfaces remain a legitimate, simple choice for many scenarios, but attributes are generally the more common, more extensible modern equivalent for pure "tagging" purposes specifically.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is a "Strategy Factory" — combining the Strategy pattern (covered earlier) with a Factory — and how does it let calling code select the correct concrete strategy based on runtime data, without needing to know each concrete strategy type itself?**
+
+The Strategy pattern (covered earlier) lets an algorithm vary by swapping interchangeable strategy objects — but *something* still has to decide *which* concrete strategy to actually use for a given situation. A Strategy Factory centralizes that selection logic in one place, so calling code simply asks for "the right strategy for this input" without needing to know the mapping from input to concrete strategy type itself.
+
+```csharp
+public interface IShippingStrategy { decimal Calculate(Order order); }
+public class UsShippingStrategy : IShippingStrategy { /* ... */ }
+public class EuShippingStrategy : IShippingStrategy { /* ... */ }
+public class DefaultShippingStrategy : IShippingStrategy { /* ... */ }
+
+// the STRATEGY FACTORY -- centralizes the "WHICH strategy for THIS input" DECISION, in ONE place
+public class ShippingStrategyFactory
+{
+    public IShippingStrategy GetStrategy(string countryCode) => countryCode switch
+    {
+        "US" => new UsShippingStrategy(),
+        "DE" or "FR" or "IT" => new EuShippingStrategy(),
+        _ => new DefaultShippingStrategy()
+    };
+}
+
+// calling code NEVER needs to know the MAPPING itself -- just asks the FACTORY for the RIGHT one
+var strategy = _factory.GetStrategy(order.Country);
+var cost = strategy.Calculate(order);
+```
+Without the factory, every call site needing shipping calculation would need to independently know and replicate the same country-to-strategy mapping logic — centralizing it in one factory means that mapping lives in exactly one place, and adding a new country/strategy combination only requires updating the factory, not every individual call site that happens to need a shipping strategy.
+
+**Why combining these two patterns is more useful than either alone:** Strategy alone solves "how do I swap algorithms" but says nothing about "who decides which one to swap in" — a Factory alone solves "how do I create the right object for this input" but without Strategy, there'd be no common interface for the created objects to share, making them non-interchangeable from the caller's perspective; combining them gives both a common, swappable interface (Strategy) and a single, centralized selection mechanism (Factory) for choosing which implementation of that interface applies to a given situation.
+
+**Common Pitfall:** scattering the "which strategy for this input" decision logic across many different call sites (each independently re-implementing the same country-code `switch`) rather than centralizing it in one Strategy Factory — this duplicates the selection logic everywhere it's needed, meaning a new country/strategy combination requires hunting down and updating every single scattered copy, rather than updating the one factory that every call site already delegates to.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is the difference between the "Transparent" and "Safe" variants of implementing the Composite pattern, and what genuine trade-off does each make regarding where child-management methods (`Add`/`Remove`) live?**
+
+The Composite pattern (covered earlier) lets client code treat an individual object and a collection of objects uniformly through one shared interface — but a genuine design decision remains: should the *child-management* methods (`Add`, `Remove`, for adding/removing children) live on the shared `Component` interface itself (the "Transparent" variant) or only on the `Composite` subclass specifically (the "Safe" variant)?
+
+```csharp
+// TRANSPARENT variant -- Add/Remove live on the SHARED interface -- UNIFORM, but TYPE-UNSAFE
+public interface IFileSystemComponent
+{
+    void Display();
+    void Add(IFileSystemComponent child);    // EVERY component has THIS -- even a LEAF (a File)!
+    void Remove(IFileSystemComponent child);
+}
+public class File : IFileSystemComponent
+{
+    public void Display() { /* ... */ }
+    public void Add(IFileSystemComponent child) => throw new NotSupportedException(); // a FILE has NO children --
+    public void Remove(IFileSystemComponent child) => throw new NotSupportedException(); // MUST throw at RUNTIME
+}
+
+// SAFE variant -- Add/Remove live ONLY on the Composite subclass -- TYPE-SAFE, but LESS uniform
+public interface IFileSystemComponent { void Display(); }
+public class File : IFileSystemComponent { public void Display() { /* ... */ } } // NO Add/Remove AT ALL -- clean
+public class Directory : IFileSystemComponent
+{
+    private readonly List<IFileSystemComponent> _children = new();
+    public void Display() { /* ... */ }
+    public void Add(IFileSystemComponent child) => _children.Add(child);   // ONLY Directory HAS these methods
+    public void Remove(IFileSystemComponent child) => _children.Remove(child);
+}
+```
+The Transparent variant lets client code treat every component completely uniformly through one interface (calling `.Add()` on *anything* compiles, even a `File`) — but this uniformity comes at the cost of type safety: calling `.Add()` on a `File` compiles perfectly fine, only failing with a runtime exception, since a leaf node conceptually has no children at all. The Safe variant restores compile-time type safety (a `File` simply has no `Add` method to accidentally call) but sacrifices the interface's full uniformity, since client code now needs to know to cast down to `Directory` specifically before it can add children.
+
+**Why this is a genuine, unavoidable trade-off, not a "correct" answer either variant clearly wins:** the Transparent variant's core value proposition (treat everything through one uniform interface) is directly undermined by including methods some concrete types can't meaningfully support — but the Safe variant's type safety comes at the cost of losing exactly the uniform treatment that's Composite's whole reason for existing in the first place; different codebases reasonably choose differently depending on whether they weight compile-time safety or uniform treatment more heavily for their specific use case.
+
+**Common Pitfall:** implementing the Transparent variant without deliberately choosing it — simply adding `Add`/`Remove` to the shared interface out of convenience, without recognizing this is a specific, named trade-off (accepting runtime `NotSupportedException` risk in exchange for uniformity) rather than an obviously "more complete" interface design; being aware both variants are legitimate, named choices helps a team make (and document) a deliberate decision rather than stumbling into the Transparent variant's runtime-safety trade-off unknowingly.
+
+---
+
 ---

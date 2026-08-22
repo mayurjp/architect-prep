@@ -1290,4 +1290,102 @@ Because C#'s overload resolution is determined entirely at compile time based on
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is a `static` class in C#, and how does it differ from an ordinary class with all-static members, in terms of what the compiler specifically enforces?**
+
+A `static` class is marked explicitly as never intended to be instantiated — the compiler enforces this directly, rejecting `new MyStaticClass()` at compile time, and additionally forbids the class from containing any instance members (fields, properties, or methods without the `static` keyword) at all, whereas an ordinary class that merely *happens* to only have static members provides neither guarantee.
+
+```csharp
+public static class MathHelpers // MARKED static -- the COMPILER enforces BOTH rules below
+{
+    public static int Square(int x) => x * x;
+    // public int InstanceMethod() => 5; -- COMPILE ERROR -- a static class CANNOT have INSTANCE members AT ALL
+}
+
+var helper = new MathHelpers(); // COMPILE ERROR -- static classes CANNOT be instantiated, PERIOD
+
+// COMPARE: an ORDINARY class that merely HAPPENS to only have static members SO FAR
+public class OrdinaryHelpers
+{
+    public static int Cube(int x) => x * x * x;
+    public int SomeoneAddsThisLater() => 5; // COMPILES FINE -- NOTHING stops an INSTANCE member being ADDED LATER
+}
+var instance = new OrdinaryHelpers(); // COMPILES FINE -- NOTHING stops INSTANTIATION either
+```
+Because `static class` is a distinct, compiler-enforced declaration (not merely a convention), it guarantees both "this can never be instantiated" and "this can never accidentally gain an instance member later" — an ordinary class that simply happens to contain only static members today provides neither guarantee, and a future developer could freely add an instance member or instantiate it, with the compiler offering no protection against either.
+
+**Common Pitfall:** using an ordinary (non-`static`) class purely as a container for static utility methods, relying on convention/documentation alone to communicate "this should never be instantiated" — marking the class `static` explicitly turns that intention into a compiler-enforced guarantee, catching an accidental `new` or an accidentally-added instance member immediately at compile time, rather than relying on every future developer reading and respecting a comment or naming convention.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What happens when a class implements two interfaces that both provide a Default Interface Method (covered earlier) for the exact same method signature, and how must the implementing class explicitly resolve this ambiguity?**
+
+When two interfaces both supply a default implementation for a method with the identical signature, and a class implements *both* interfaces, the compiler cannot automatically decide which default to use — it forces the implementing class to explicitly override the method itself, resolving the ambiguity directly rather than silently picking one default over the other.
+
+```csharp
+public interface ILogger
+{
+    void Log(string message) => Console.WriteLine($"[LOG] {message}"); // a DEFAULT implementation
+}
+public interface IAuditor
+{
+    void Log(string message) => Console.WriteLine($"[AUDIT] {message}"); // a DIFFERENT default, SAME signature
+}
+
+// a class implementing BOTH -- the COMPILER FORCES an EXPLICIT resolution -- NEITHER default is picked AUTOMATICALLY
+public class OrderProcessor : ILogger, IAuditor
+{
+    public void Log(string message) // MUST be explicitly implemented -- resolves the AMBIGUITY directly
+    {
+        ((ILogger)this).Log(message);   // explicitly CALLS one specific interface's default...
+        ((IAuditor)this).Log(message);  // ...and/or the OTHER, or SOME entirely CUSTOM combined behavior
+    }
+}
+```
+Rather than the compiler guessing which interface's default "wins" (which could silently produce surprising, hard-to-predict behavior depending on interface declaration order or other arbitrary factors), C# simply requires the implementing class to provide its own explicit `Log` implementation — which can call one specific interface's default via an explicit interface cast, both, or neither, giving the class author full, deliberate control over exactly how the conflict is resolved.
+
+**Common Pitfall:** assuming the compiler will pick "the more specific" or "the most recently declared" interface's default automatically, the way some other language features might resolve similar ambiguities — C# takes the more conservative approach of forcing an explicit resolution at compile time (a compile *error* if the class doesn't provide its own override), rather than silently guessing, which is precisely why an ambiguous default-method conflict is always caught immediately rather than being a subtle, silent runtime behavior surprise.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is "Encapsulation Leakage" via a property that returns a mutable collection or reference type directly, and how does exposing internal mutable state through a getter break encapsulation despite the underlying field itself being private?**
+
+A class can have a genuinely `private` backing field and still leak full mutable access to its internal state, if a public property simply returns that mutable object by reference — calling code holding the returned reference can freely mutate the object's contents directly, completely bypassing whatever validation/business rules the class's own methods were meant to enforce.
+
+```csharp
+public class Order
+{
+    private readonly List<OrderLine> _lines = new(); // PRIVATE field -- LOOKS properly encapsulated
+    public List<OrderLine> Lines => _lines;            // but returns the SAME MUTABLE list, BY REFERENCE!
+
+    public void AddLine(OrderLine line)
+    {
+        if (line.Quantity <= 0) throw new ArgumentException("Quantity must be positive"); // VALIDATION lives HERE
+        _lines.Add(line);
+    }
+}
+
+var order = new Order();
+order.Lines.Add(new OrderLine { Quantity = -5 }); // BYPASSES 'AddLine' ENTIRELY -- 'Order's OWN VALIDATION was NEVER RUN
+// the PRIVATE field is STILL private -- but its CONTENTS are FREELY mutable from OUTSIDE the class, REGARDLESS
+```
+Even though `_lines` itself can never be *reassigned* from outside `Order` (it's `private`, and the property has no setter), the *list object* `_lines` refers to is fully mutable, and the property hands out a direct reference to that exact same mutable object — calling code can add/remove/modify its contents freely, entirely bypassing `AddLine`'s validation logic, since it never goes through that method at all.
+
+**The fix — expose a read-only VIEW, forcing all mutation through the class's own validated methods:**
+```csharp
+private readonly List<OrderLine> _lines = new();
+public IReadOnlyList<OrderLine> Lines => _lines; // callers can READ, but CANNOT Add/Remove/Clear through THIS reference
+// all MUTATION must go through AddLine() (or an equivalent method), where VALIDATION is actually enforced
+```
+By exposing `IReadOnlyList<OrderLine>` instead of the mutable `List<OrderLine>` itself, calling code can still enumerate and inspect the collection freely, but has no way to call `.Add()`/`.Remove()`/`.Clear()` on it at all — every mutation is forced through `AddLine()` (or whatever other validated method the class provides), which is exactly where the class's own business rules are actually enforced.
+
+**Common Pitfall:** believing a class is properly encapsulated simply because its fields are marked `private`, without separately checking whether any public property or method hands out a *direct, mutable reference* to one of those private fields' contents — `private` only protects the *field itself* from being reassigned from outside; it says nothing about whether the *object that field refers to* can still be freely mutated through a reference the class itself handed out via a getter, which is precisely the subtler form of encapsulation violation this scenario describes.
+
+---
+
 ---
