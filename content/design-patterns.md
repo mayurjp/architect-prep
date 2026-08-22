@@ -1951,4 +1951,108 @@ Because each "kind" is now just an instance of `MonsterType` (ordinary data, pot
 
 ---
 
+## Beginner — Question 18
+
+**Q18: How does a project enforce the Facade pattern at the compiler level — not merely by convention — by exposing only one simplified entry-point class as `public` while keeping a subsystem's other classes `internal`?**
+
+C#'s `internal` access modifier restricts a type's visibility to the same assembly — designing a subsystem so that only its intended Facade class is `public`, with every other supporting class marked `internal`, means consuming code in a *different* assembly literally cannot reference those internal classes directly, even if it wanted to; the Facade becomes the only possible entry point, enforced by the compiler rather than relying on developer discipline or documentation alone.
+
+```csharp
+// Assembly: PaymentProcessing.dll
+public class PaymentFacade // the ONLY public entry point -- the INTENDED Facade
+{
+    public void ProcessPayment(decimal amount) { /* orchestrates the INTERNAL classes below */ }
+}
+
+internal class FraudDetector { /* ... */ }      // INTERNAL -- INVISIBLE outside THIS assembly
+internal class PaymentGateway { /* ... */ }     // INTERNAL -- INVISIBLE outside THIS assembly
+internal class TransactionLogger { /* ... */ }  // INTERNAL -- INVISIBLE outside THIS assembly
+```
+
+```text
+Code in a DIFFERENT assembly REFERENCING PaymentProcessing.dll: CAN see and use "PaymentFacade" --
+  CANNOT see "FraudDetector"/"PaymentGateway"/"TransactionLogger" AT ALL -- the COMPILER itself
+  ENFORCES this, NOT merely a NAMING convention or a CODE-REVIEW guideline
+```
+
+Because `internal` visibility is a hard, compiler-enforced boundary rather than a social convention that could be accidentally bypassed, a consumer of the assembly genuinely *cannot* reach around the Facade to call an internal subsystem class directly, even by mistake — a stronger guarantee than simply documenting "please only use `PaymentFacade`" and hoping every consumer respects that guidance.
+
+**Common Pitfall:** marking every subsystem class `public` "just in case something needs it later," even when only the Facade is meant to be the actual entry point — this leaves the door open for external code to bypass the Facade entirely, reaching directly into subsystem classes the Facade was specifically designed to hide, undermining the simplified interface's whole purpose.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: How does a Fluent Builder use a generic self-type (`TSelf`, returning it rather than a fixed base type) to let a subclass's fluent chain correctly return the subclass's own type, rather than losing type information to its base Builder class?**
+
+Without a self-type parameter, a Builder base class's fluent methods returning `this` are typed as the *base* class, meaning chaining a subclass-specific method after a base-class fluent method would fail to compile (the base type doesn't have the subclass's extra methods) — parameterizing the base Builder over `TSelf` (constrained to itself) and having every fluent method return `TSelf` instead of a fixed base type lets the chain correctly preserve the subclass's own, more specific type throughout.
+
+```csharp
+public abstract class BuilderBase<TSelf> where TSelf : BuilderBase<TSelf>
+{
+    protected string _name = "";
+    public TSelf WithName(string name) { _name = name; return (TSelf)this; } // returns TSelf, NOT the base type
+}
+
+public class CarBuilder : BuilderBase<CarBuilder>
+{
+    private string _color = "";
+    public CarBuilder WithColor(string color) { _color = color; return this; }
+}
+
+// Chaining WORKS correctly -- WithName() (from the BASE) returns CarBuilder, NOT BuilderBase<CarBuilder> --
+// so .WithColor() (a CarBuilder-SPECIFIC method) can be chained IMMEDIATELY afterward
+var car = new CarBuilder().WithName("Model X").WithColor("Red").Build();
+```
+
+```text
+WITHOUT the TSelf pattern: WithName() would return "BuilderBase<CarBuilder>" -- calling
+  .WithColor() DIRECTLY afterward would FAIL to compile, since BuilderBase<CarBuilder> has
+  NO KNOWLEDGE of CarBuilder's OWN, subclass-specific WithColor() method AT ALL
+
+WITH the TSelf pattern: WithName() returns "TSelf", which the COMPILER resolves to the ACTUAL
+  concrete "CarBuilder" type in THIS context -- .WithColor() chains SEAMLESSLY afterward
+```
+
+Because the self-type parameter lets a base class's fluent methods return whatever concrete subclass is actually being used (resolved generically, at compile time), a fluent Builder hierarchy can be extended with subclass-specific methods while preserving the ability to freely interleave base-class and subclass-specific method calls in any order within the same fluent chain — something a fixed, non-generic base return type would break.
+
+**Common Pitfall:** building a Fluent Builder hierarchy without the self-type generic pattern, then being surprised that a subclass's fluent chain "loses" access to its own specific methods the moment a base-class fluent method is called in the middle of the chain — the fix is parameterizing the base Builder over `TSelf` (constrained to itself) so every fluent method's return type resolves to the actual concrete subclass being used, not a fixed base type.
+
+---
+
+## Advanced — Question 17
+
+**Q17: How does the Event Sourcing pattern's "store the changes, not the snapshots" approach differ fundamentally from the Memento pattern's (covered earlier) single-snapshot capture, despite both existing to let past state be reconstructed?**
+
+The Memento pattern captures one complete snapshot of an object's *entire current state* at a specific moment, to be restored later wholesale — Event Sourcing instead never stores current state directly at all; it stores the sequence of individual *events* (changes) that occurred, with the current state derived by replaying all of them, in order, from the very beginning, every single time it's needed.
+
+```csharp
+// MEMENTO -- captures ONE complete SNAPSHOT of the ENTIRE current state, at ONE point in time
+public class OrderMemento { public OrderState State; } // a FULL COPY of everything, AS OF right NOW
+
+// EVENT SOURCING -- stores the SEQUENCE of INDIVIDUAL CHANGES, NEVER the state itself directly
+var events = new List<IDomainEvent> {
+    new OrderCreated(orderId: 5, customerId: 42),
+    new ItemAdded(orderId: 5, productId: 9, quantity: 2),
+    new OrderShipped(orderId: 5)
+};
+// current state is DERIVED by REPLAYING every event, IN ORDER, from the VERY BEGINNING --
+// there is NO "stored current state" ANYWHERE AT ALL -- ONLY the EVENT LOG itself
+```
+
+```text
+Memento: ONE snapshot PER capture point -- RESTORING means simply SWAPPING back IN that ONE
+  captured state DIRECTLY -- NO replaying/reconstruction logic needed AT ALL
+
+Event Sourcing: MANY individual events, ACCUMULATING over the ENTIRE lifetime of the entity --
+  RECONSTRUCTING current state means REPLAYING ALL of them, IN ORDER, EVERY single time --
+  (in PRACTICE, often OPTIMIZED via periodic SNAPSHOTS, covered elsewhere under the topic itself)
+```
+
+Because Event Sourcing retains the *complete history* of every individual change (not just a point-in-time snapshot), it enables capabilities Memento fundamentally cannot: reconstructing state as of *any* arbitrary past point in time (not just the specific moments a Memento happened to be captured), and deriving entirely new projections/read models (covered under Clean Architecture) from the same underlying event history after the fact — capabilities that follow directly from retaining the full sequence of changes rather than a handful of discrete snapshots.
+
+**Common Pitfall:** conflating Event Sourcing with "just taking Mementos more frequently" — the fundamental difference isn't merely *how often* state is captured, but *what* is actually stored: discrete point-in-time snapshots (Memento) versus an ordered log of individual changes from which state is derived (Event Sourcing); the latter enables reconstructing state at *any* point and deriving new views retroactively, capabilities a collection of Mementos, however frequent, doesn't provide in the same way.
+
+---
+
 ---

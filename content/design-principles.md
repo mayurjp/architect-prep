@@ -1654,4 +1654,82 @@ Because a type parameter used in both input and output positions within the same
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is the "Explicit is Better Than Implicit" heuristic, and how does a method with hidden side effects — mutating a field nobody would expect from its own name — violate it even without breaking any specifically-named SOLID principle?**
+
+A method's name sets an expectation for what it does — `CalculateTotal()` implies a pure calculation, returning a value, with no other observable effect; if it *also* silently mutates some unrelated field or writes to a database as a side effect, that hidden behavior is genuinely surprising to any caller relying purely on the method's name to understand its behavior, even though no single, formally-named SOLID principle directly forbids it.
+
+```csharp
+// VIOLATES "explicit is better than implicit" -- the NAME suggests a PURE calculation,
+// but it ALSO has a HIDDEN side effect NOBODY would expect from reading the method's SIGNATURE
+public decimal CalculateTotal(Order order)
+{
+    order.LastCalculatedAt = DateTime.UtcNow; // a HIDDEN, SURPRISING side effect -- NOT suggested by the NAME at all
+    return order.Items.Sum(i => i.Price * i.Quantity);
+}
+```
+
+```text
+A CALLER reading "CalculateTotal(order)" REASONABLY assumes: "this just COMPUTES and RETURNS
+  a number, with NO OTHER effect" -- the HIDDEN mutation of "LastCalculatedAt" is a SURPRISE
+  that ONLY becomes apparent by reading the METHOD's actual IMPLEMENTATION, not its NAME/signature
+```
+
+Because this heuristic isn't one of the formally-named SOLID/GRASP principles, but a more general guiding value underlying several of them (Command-Query Separation, covered elsewhere, is essentially this same idea applied specifically to the query/mutation distinction), recognizing a violation requires simply asking "would a reasonable reader be surprised by what this code actually does, given its name?" rather than checking against a specific, formally-named rule.
+
+**Common Pitfall:** justifying a hidden side effect as "harmless" or "just a small additional thing while I'm already in there" — even a seemingly minor hidden mutation erodes a caller's ability to reason correctly about a method purely from its name and signature, which is precisely the trust "Explicit is Better Than Implicit" is meant to preserve.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is the "Uniform Access Principle," and how does a client being unable to tell whether `obj.Value` is a stored field or a computed property support swapping one for the other later without breaking callers?**
+
+The Uniform Access Principle states that a client accessing a piece of data should use the exact same syntax regardless of whether that data is stored directly (a plain field) or computed on demand (a method/property) — C#'s properties directly support this: `obj.Value` looks identical to calling code whether `Value` is a simple auto-property backed by a field, or a computed property running logic on every access.
+
+```csharp
+public class Order
+{
+    // VERSION 1 -- a simple, stored property
+    public decimal Total { get; set; }
+
+    // VERSION 2 -- LATER changed to a COMPUTED property -- CALLERS using "order.Total" don't
+    // need to change AT ALL -- the SYNTAX is IDENTICAL, regardless of stored vs. computed
+    public decimal Total => Items.Sum(i => i.Price * i.Quantity);
+}
+```
+
+```text
+Caller code: "var total = order.Total;" -- IDENTICAL syntax, WHETHER "Total" is a STORED field
+  OR a COMPUTED property -- the CALLER never needs to KNOW (or CARE) which one it actually IS
+```
+
+Because C#'s property syntax makes stored and computed access indistinguishable from the caller's perspective, a class can freely switch a member's implementation between "stored" and "computed" at any point in its evolution without requiring every calling site to change — directly supporting the Open/Closed Principle's (covered earlier) goal of extending/adjusting behavior without modifying dependent code.
+
+**Common Pitfall:** exposing a public field directly (rather than a property) for a value that might later need to become computed — a plain public field, unlike a property, cannot later be changed to include logic without breaking every calling site's syntax (since C# fields and properties aren't syntactically interchangeable at the *declaration* level, even though the *access* syntax looks the same); starting with an auto-property rather than a plain field preserves this future flexibility from day one.
+
+---
+
+## Advanced — Question 17
+
+**Q17: How does the Liskov Substitution Principle's formal variance rule for method overriding — requiring an override's parameters be contravariant while its return type is covariant — reflect the exact same "safe to substitute" reasoning underlying LSP itself?**
+
+For a subclass's overridden method to be safely substitutable wherever the base class's method is expected, its *parameters* must accept at least as broad a range of inputs as the base method (contravariant — as broad or broader), while its *return type* must guarantee at least as narrow/specific a range of outputs as the base method promised (covariant — as narrow or narrower) — this precisely mirrors the general LSP requirement that a substituted subtype must honor every guarantee the base type's callers were relying on.
+
+```text
+Base method:      Animal Feed(Animal a)
+Safely OVERRIDING: Dog    Feed(Animal a)   -- RETURN type NARROWED (covariant) -- caller expecting
+                                              an Animal back is STILL satisfied by a MORE SPECIFIC Dog
+UNSAFELY overriding: Animal Feed(Dog a)    -- PARAMETER type NARROWED (should be BROADENED instead) --
+                                              a CALLER passing a Cat (an Animal) would BREAK this override,
+                                              since it ONLY accepts a Dog, NOT any Animal
+```
+
+Because a caller of the *base* method's contract expects to be able to pass *any* `Animal` and receive back *at least* an `Animal`, an override narrowing its accepted parameter type (accepting only `Dog`, rejecting other `Animal` subtypes) breaks substitutability entirely — while narrowing the *return* type (promising a more specific `Dog` instead of merely `Animal`) is perfectly safe, since any caller expecting an `Animal` back is still completely satisfied by receiving a more specific `Dog`.
+
+**Common Pitfall:** narrowing an overriding method's *parameter* type (accepting a more specific type than the base method declared) assuming this is a safe, natural specialization — this actually breaks substitutability, since a caller relying on the base method's contract (accepting *any* instance of the declared parameter type) can no longer safely call the override with an argument of the base type that isn't also the override's narrower, specific type — precisely the LSP violation this variance rule exists to prevent.
+
+---
+
 ---

@@ -1562,4 +1562,92 @@ Because deferring a full Gen 2 collection means garbage that would otherwise hav
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is the difference between reading `Environment.GetEnvironmentVariable` directly and reading configuration via `IConfiguration` (covered under ASP.NET Core), and why does a plain console/worker app without the Generic Host still have direct access to environment variables the simple way?**
+
+`Environment.GetEnvironmentVariable` is a plain BCL API available in *any* .NET application, reading a single environment variable directly from the OS process environment — `IConfiguration` (covered under ASP.NET Core) is a richer abstraction layering *multiple* configuration sources together (JSON files, environment variables, command-line args) with a unified, hierarchical key structure; a simple script or minimal console app with no Generic Host set up has no `IConfiguration` available at all, but can always fall back to the plain BCL API.
+
+```csharp
+// WORKS in ANY .NET app, EVEN one with NO Generic Host / IConfiguration setup AT ALL
+string? connString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING");
+
+// REQUIRES the Generic Host (covered elsewhere) to be set up FIRST -- combines MULTIPLE sources
+var config = new ConfigurationBuilder().AddEnvironmentVariables().AddJsonFile("appsettings.json").Build();
+string? connString2 = config["ConnectionStrings:Default"]; // a UNIFIED, HIERARCHICAL key, from MULTIPLE sources
+```
+
+Because `Environment.GetEnvironmentVariable` requires no setup or framework at all, it remains the simplest option for a small script or a minimal console utility that doesn't need `IConfiguration`'s richer, multi-source, hierarchical capabilities — `IConfiguration` earns its additional setup cost specifically when an application needs to combine several configuration sources with clear precedence and a structured key hierarchy.
+
+**Common Pitfall:** setting up the full Generic Host and `IConfiguration` machinery for a trivial, single-purpose script that only ever needs to read one or two simple environment variables — this adds meaningful ceremony for a use case the plain `Environment.GetEnvironmentVariable` API already handles perfectly well on its own, without any additional setup.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is `Task.ContinueWith`, and why is `await` almost universally preferred over it in modern C# async code, given both let you run code after a Task completes?**
+
+`ContinueWith` schedules a callback to run after a Task finishes, giving you manual control over which `TaskScheduler` it runs on — but it predates `async`/`await`, has notoriously easy-to-get-wrong default behavior around exception handling and thread/context capturing, and produces noticeably more verbose, harder-to-read code for anything beyond the simplest single continuation.
+
+```csharp
+// ContinueWith -- verbose, and the DEFAULT scheduler/exception behavior is EASY to get WRONG
+GetDataAsync().ContinueWith(task =>
+{
+    if (task.IsFaulted) { /* handle exception -- task.Exception is an AggregateException, NOT the original */ }
+    else { ProcessData(task.Result); }
+});
+
+// await -- reads LINEARLY, exceptions propagate NATURALLY via ordinary try/catch
+try
+{
+    var data = await GetDataAsync();
+    ProcessData(data);
+}
+catch (Exception ex) { /* the ORIGINAL exception type, NOT wrapped in AggregateException */ }
+```
+
+Because `await` reads as ordinary, linear, sequential code (rather than a nested callback), and propagates exceptions using C#'s normal `try`/`catch` mechanism with the *original* exception type (rather than `ContinueWith`'s `AggregateException` wrapping), it's dramatically easier to write correctly and read later — `ContinueWith` remains occasionally useful for advanced scenarios needing explicit control over exactly which scheduler a continuation runs on, but for ordinary async code, `await` is almost universally the better choice.
+
+**Common Pitfall:** using `ContinueWith` out of unfamiliarity with `async`/`await`, then being surprised that `task.Exception` is an `AggregateException` wrapping the actual thrown exception, rather than the original exception type itself — `await`'s exception propagation unwraps this automatically, surfacing the original exception directly, which is one of several subtle behavioral differences that make `await` the safer default for ordinary continuation logic.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is `AsyncLocal<T>`, and how does it let ambient, contextual data flow implicitly across an `await` boundary and into a spawned child Task, without being explicitly passed as a parameter — the mechanism underlying `IHttpContextAccessor` (covered under ASP.NET Core)?**
+
+`AsyncLocal<T>` provides storage that automatically flows with the logical call context across `await` boundaries and into any Tasks spawned from that context — unlike a plain `ThreadLocal<T>` (covered earlier), whose value is tied to a specific physical thread and would NOT correctly follow execution as it hops across different thread-pool threads during async continuations.
+
+```csharp
+private static readonly AsyncLocal<string> _correlationId = new();
+
+async Task ProcessRequestAsync(string correlationId)
+{
+    _correlationId.Value = correlationId; // SET once, at the START of request processing
+    await Step1Async(); // even though THIS might resume on a DIFFERENT physical thread after its own
+                          // internal 'await', _correlationId.Value STILL correctly flows THROUGH
+}
+
+async Task Step1Async()
+{
+    Console.WriteLine(_correlationId.Value); // STILL correctly sees the SAME correlationId,
+                                               // EVEN IF this method is executing on a DIFFERENT thread
+}
+```
+
+```text
+ThreadLocal<T>: tied to a SPECIFIC physical THREAD -- a Task RESUMING on a DIFFERENT thread-pool
+  thread after an 'await' would see a COMPLETELY DIFFERENT (or EMPTY) value -- WRONG for async code
+
+AsyncLocal<T>: flows with the LOGICAL execution context ITSELF -- REGARDLESS of WHICH physical
+  thread actually happens to RESUME the continuation after an 'await' -- CORRECTLY "ambient"
+  data ACROSS asynchronous, potentially THREAD-HOPPING execution
+```
+
+Because `AsyncLocal<T>` is specifically designed to survive the thread-hopping nature of async continuations, it's the actual mechanism `IHttpContextAccessor` (covered under ASP.NET Core) relies on internally to make the current request's `HttpContext` available anywhere in that request's call chain without needing to be explicitly threaded through every method's parameter list — the same ambient-data pattern applies to correlation IDs, culture/locale settings, or any other "flows implicitly with this logical operation" data.
+
+**Common Pitfall:** using `[ThreadStatic]`/`ThreadLocal<T>` (covered earlier) for data meant to flow through async code, assuming it behaves the same as `AsyncLocal<T>` — since async continuations frequently resume on a *different* physical thread than where they started, thread-local storage silently "loses" the expected value partway through an async operation, a subtle, hard-to-diagnose bug that `AsyncLocal<T>`'s logical-context-following behavior specifically avoids.
+
+---
+
 ---

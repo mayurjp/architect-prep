@@ -1566,4 +1566,93 @@ Because skipping zero-initialization means a bug that reads a stackalloc'd buffe
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is the null-coalescing assignment operator (`??=`), and how does it let you assign a value to a variable only if it's currently null, in one concise expression?**
+
+`x ??= value` is shorthand for "if `x` is currently `null`, assign it `value`; otherwise leave it unchanged" — combining a null check and a conditional assignment into a single, compact operator, avoiding a more verbose explicit `if` statement for this common pattern.
+
+```csharp
+List<string>? names = null;
+names ??= new List<string>(); // ONLY assigns a new List if 'names' is CURRENTLY null
+
+// equivalent, WITHOUT ??=:
+if (names is null) names = new List<string>();
+```
+
+```text
+names is null      -> names ??= new List<string>()  -> 'names' is NOW a new, empty List
+names is NOT null   -> names ??= new List<string>()  -> 'names' is LEFT COMPLETELY UNCHANGED --
+                        the right-hand side is NEVER even EVALUATED in this case
+```
+
+Because the right-hand side is only evaluated if the left-hand side is actually null (short-circuiting, like `??` itself), `??=` is also useful for lazily initializing an expensive value only the first time it's actually needed, without the overhead of constructing it on every subsequent call where it's already been set.
+
+**Common Pitfall:** assuming `x ??= value` always re-evaluates and re-assigns `value`, similar to a plain `x = value` — it specifically skips the assignment (and never even evaluates `value`) whenever `x` already holds a non-null value, which matters if `value` itself is an expensive-to-construct expression relying on that short-circuiting behavior for its performance benefit.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is a `readonly struct`, and how does marking every field read-only let the compiler avoid defensive copies when the struct is passed as an `in` parameter (covered earlier)?**
+
+Passing a struct via `in` (covered earlier) avoids the cost of copying it by value, but the compiler must still guard against the method accidentally mutating the caller's original data through that reference — if the struct's fields are mutable, the compiler inserts a defensive copy anyway just to be safe; declaring the entire struct `readonly` proves to the compiler that no method on it can ever mutate its state, eliminating the need for that defensive copy altogether.
+
+```csharp
+public readonly struct Point3D // EVERY field guaranteed read-only -- the COMPILER can trust this fully
+{
+    public readonly double X, Y, Z;
+    public Point3D(double x, double y, double z) { X = x; Y = y; Z = z; }
+}
+
+void PrintDistance(in Point3D p) { /* ... */ } // NO defensive copy needed -- the COMPILER knows
+                                                 // Point3D's readonly-ness makes mutation IMPOSSIBLE
+```
+
+```text
+A NON-readonly struct passed via 'in': the compiler CAN'T be certain NO method call on it
+  mutates state -- it INSERTS a defensive COPY anyway, just to be SAFE -- silently NEGATING
+  part of the performance benefit 'in' was supposed to provide
+
+A readonly struct passed via 'in': the compiler KNOWS, with CERTAINTY, that NOTHING can
+  mutate it -- NO defensive copy is EVER needed -- the FULL 'in' performance benefit is REALIZED
+```
+
+Because `readonly struct` gives the compiler a compile-time guarantee it can rely on completely, it's the recommended combination alongside `in` parameters for genuinely performance-sensitive code passing large structs by reference — without it, `in`'s benefit can be silently, partially undermined by defensive copying the compiler inserts purely out of caution.
+
+**Common Pitfall:** using `in` parameters for a struct that isn't declared `readonly`, assuming the full copy-avoidance benefit is automatically realized — the compiler may still insert defensive copies for a non-readonly struct's `in` parameter usage, meaning the expected performance win doesn't materialize without also marking the struct itself `readonly`.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is `[module: DisableRuntimeMarshalling]`, and how does opting out of the runtime's automatic interop marshalling reduce P/Invoke call overhead for a type whose memory layout already exactly matches its native counterpart?**
+
+Ordinary P/Invoke calls involve the runtime automatically marshalling managed types into their native equivalents (handling potential layout differences, string encoding conversions) — this marshalling has a real, non-zero cost per call; `DisableRuntimeMarshalling` tells the runtime to skip this step entirely for an assembly, blittable types can be passed directly, byte-for-byte, with zero marshalling overhead, but only when the managed type's layout is *already* guaranteed identical to its native counterpart.
+
+```csharp
+[module: System.Runtime.CompilerServices.DisableRuntimeMarshalling]
+
+[StructLayout(LayoutKind.Sequential)]
+public struct NativePoint { public int X; public int Y; } // BLITTABLE -- layout EXACTLY matches native C struct
+
+[DllImport("mylib")]
+static extern void ProcessPoint(NativePoint p); // NO marshalling overhead AT ALL -- passed DIRECTLY, byte-for-byte
+```
+
+```text
+WITHOUT DisableRuntimeMarshalling: EVERY P/Invoke call pays a SMALL, but NON-ZERO marshalling
+  cost, EVEN for an ALREADY-blittable type the runtime could have passed DIRECTLY
+
+WITH DisableRuntimeMarshalling: BLITTABLE types are passed DIRECTLY, with ZERO marshalling
+  overhead AT ALL -- for a HOT PATH making MANY thousands of P/Invoke calls per second, this
+  CAN measurably matter
+```
+
+Because this setting is assembly-wide and disables *all* automatic marshalling for that assembly's interop calls, it's only safe when every P/Invoke signature in that assembly genuinely deals with already-blittable types — a type requiring genuine marshalling (a `string`, needing encoding conversion) would behave incorrectly with this setting active, since the runtime is explicitly told not to perform that conversion work at all.
+
+**Common Pitfall:** enabling `DisableRuntimeMarshalling` for an assembly that also has P/Invoke signatures involving non-blittable types (strings, arrays needing conversion) — since marshalling is disabled entirely for the whole assembly, any signature actually relying on the runtime's automatic conversion behavior will behave incorrectly or corrupt data, since that conversion no longer happens at all; this optimization is appropriate only when every interop call in the assembly genuinely deals with blittable, layout-identical types.
+
+---
+
 ---
