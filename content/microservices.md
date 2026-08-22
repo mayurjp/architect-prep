@@ -2025,4 +2025,88 @@ Because this "lock" is purely a convention enforced by every piece of business l
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is the difference between a "Thin" event payload (just an ID) and a "Fat" event payload (the full changed data) in event-driven microservices, and what trade-off does each make?**
+
+A Thin event carries just enough information (typically an ID) for a consumer to know *something changed* and go fetch the current details itself via a follow-up API call — a Fat event carries the full changed data directly in the event itself, letting a consumer act immediately without any follow-up call at all.
+
+```json
+// THIN event -- just enough to know WHAT changed
+{ "eventType": "OrderUpdated", "orderId": 5 }
+// consumer must make a SEPARATE API call: GET /api/orders/5 to get the ACTUAL current details
+
+// FAT event -- the FULL changed data included DIRECTLY
+{ "eventType": "OrderUpdated", "orderId": 5, "status": "Shipped", "total": 129.99, "items": [...] }
+// consumer has EVERYTHING it needs IMMEDIATELY -- NO follow-up call required AT ALL
+```
+
+```text
+Thin event: SMALLER payload, but requires a FOLLOW-UP call -- and that follow-up call could
+  return DATA that's ALREADY changed AGAIN since the event was published (a RACE)
+
+Fat event: LARGER payload, NO follow-up call needed -- but the event ITSELF could become
+  STALE if consumed LATE (a consumer processing an OLD event sees OLD data, even though a
+  NEWER event -- reflecting a MORE RECENT change -- might ALREADY be sitting in the SAME queue)
+```
+
+Because a Thin event trades a smaller payload for an extra network round-trip (and a small risk that round-trip returns even-newer data than the event describes), while a Fat event trades a larger payload for immediate usability (at the risk of processing a stale snapshot if events are consumed out of order or with delay), the right choice depends on how time-sensitive the consumer's need for freshness is, and how expensive an extra round-trip to the publishing service would be.
+
+**Common Pitfall:** defaulting to Fat events everywhere "for convenience," without considering that a consumer processing events with any delay (a backlog, a slow consumer) could act on meaningfully stale data embedded directly in an old event — for data that changes frequently and where freshness genuinely matters, a Thin event forcing a fresh fetch at actual processing time can be the safer choice, despite its extra round-trip cost.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is a Saga "Timeout" step, and how does it let a Saga proceed with a compensating action when a specific step never responds at all — rather than waiting indefinitely?**
+
+A Saga step that calls out to another service could simply never receive a response (the service crashed, a message was lost) — a Timeout step wraps that call with an explicit deadline, and if no response arrives before it elapses, the Saga treats it as a *failure*, triggering the same compensating-action logic (covered extensively elsewhere) it would use for an explicit failure response.
+
+```csharp
+// A Saga step with an EXPLICIT timeout -- treats "no response within 30 seconds" as a FAILURE
+var reservationResult = await _inventoryClient.ReserveStockAsync(orderId, quantity)
+    .WaitAsync(TimeSpan.FromSeconds(30)); // THROWS a TimeoutException if NO response arrives in time
+
+// The Saga's OWN failure-handling logic treats a TIMEOUT exactly like an EXPLICIT failure response --
+// triggering the SAME compensating actions (releasing any EARLIER reservations, etc.) either way
+```
+
+```text
+WITHOUT a timeout: the Saga could WAIT FOREVER for a step that will NEVER actually respond --
+  the ENTIRE business transaction remains STUCK, INDEFINITELY, in a HALF-COMPLETED state
+
+WITH a timeout: after a REASONABLE, CONFIGURED deadline, the Saga TREATS the non-response AS
+  a FAILURE, and proceeds to COMPENSATE (undo) whatever EARLIER steps already succeeded --
+  the TRANSACTION reaches a DEFINITIVE, KNOWN end state, RATHER than hanging INDEFINITELY
+```
+
+Because a distributed system can never fully distinguish "the other service is just slow" from "the other service (or the network) has genuinely failed permanently," a timeout is a pragmatic, necessary design choice — accepting the small risk of incorrectly compensating a step that *would* have eventually succeeded, in exchange for guaranteeing the Saga always reaches a definite conclusion rather than hanging forever.
+
+**Common Pitfall:** implementing Saga steps that call downstream services without any explicit timeout at all, relying purely on the underlying HTTP client's own default timeout (which might be extremely long, or effectively infinite) — a Saga without a deliberately-chosen, business-appropriate timeout at each step risks remaining stuck in a half-completed state far longer than acceptable, blocking whatever real-world process (an order, a reservation) the Saga represents.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is Cross-Service CQRS — a dedicated read-side service aggregating data from several write-side services' own events — and how does it differ from a simple API Gateway aggregation (covered earlier)?**
+
+An API Gateway aggregation (covered earlier) makes *synchronous, real-time* calls to several backend services and combines their responses for each individual client request — Cross-Service CQRS instead maintains its *own*, pre-built, denormalized read store, continuously kept up to date by *subscribing to events* published by the various write-side services, so a query against it never needs to call any other service synchronously at all.
+
+```text
+API Gateway aggregation: EACH client request TRIGGERS live calls to Order, Customer, and
+  Inventory services, RIGHT NOW, combining their responses -- LATENCY depends on the SLOWEST
+  of the THREE calls, EVERY single time a client asks
+
+Cross-Service CQRS read model: a SEPARATE, DEDICATED read-side service CONTINUOUSLY listens
+  to OrderPlaced, CustomerUpdated, and StockReserved events (published by the WRITE-side
+  services) and maintains its OWN pre-joined, DENORMALIZED view -- a QUERY against IT is a
+  SINGLE, FAST lookup against ALREADY-COMBINED data, with NO live calls to ANY other service
+```
+
+Because the CQRS read-side service's data is kept up to date asynchronously, ahead of time, via events (rather than synchronously, on-demand, per request), queries against it are dramatically faster and more resilient to a downstream service being temporarily slow or unavailable — the trade-off is that the read model reflects whatever state existed as of the last event it processed, introducing the same eventual-consistency lag inherent to any event-driven architecture, whereas a Gateway aggregation's live calls always reflect the absolute current state (at the cost of that call's own live latency and availability dependency).
+
+**Common Pitfall:** reaching for a synchronous API Gateway aggregation for a query pattern that's actually executed extremely frequently and doesn't require up-to-the-millisecond freshness — repeatedly paying live cross-service call latency for the same query pattern is a strong signal that a dedicated, event-fed CQRS read model would serve the same queries far faster and with far less coupling to the availability of every underlying service being called synchronously.
+
+---
+
 ---

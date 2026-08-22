@@ -1475,4 +1475,98 @@ Because scaling down is typically the direction where flapping causes the most d
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is a Kubernetes Deployment's `selector` field, and why must it match the Pod template's own labels exactly for the Deployment to actually manage those Pods?**
+
+A Deployment's `selector` defines which Pods it considers "mine" — it must match the labels declared in the Deployment's own Pod template, since Kubernetes uses label matching (not any other relationship) to determine which running Pods a given Deployment is responsible for creating, updating, and scaling.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  selector:
+    matchLabels:
+      app: my-api          # MUST match the Pod template's labels below EXACTLY
+  template:
+    metadata:
+      labels:
+        app: my-api          # the Pod's OWN label -- MATCHES the selector above
+```
+
+```text
+IF selector.matchLabels DOESN'T match template.metadata.labels: Kubernetes REJECTS the
+  Deployment OUTRIGHT at CREATION time -- "selector does not match template labels" -- this
+  is actually a HARD, VALIDATED requirement, NOT merely a BEST PRACTICE
+```
+
+Because Kubernetes tracks ownership purely through label matching rather than any direct object reference, an accidentally overly-broad `selector` (matching more labels than intended) could cause a Deployment to mistakenly "adopt" and manage Pods that were actually created by a completely different, unrelated Deployment sharing an overlapping label — which is exactly why Kubernetes enforces the selector-matches-template-labels requirement so strictly at creation time.
+
+**Common Pitfall:** using an overly broad or generic label (like just `app: backend`) shared across multiple, genuinely different Deployments — since Service/Deployment ownership is determined purely by label matching, an insufficiently specific label can cause one Deployment to unintentionally select and manage Pods that actually belong to a completely different, unrelated Deployment.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is a Kubernetes Service's `sessionAffinity: ClientIP` setting, and how does it let a client's requests consistently reach the same backend Pod, despite a Service normally load-balancing across all matching Pods?**
+
+By default, a Service distributes requests across all its matching Pods without regard to which client sent a previous request — `sessionAffinity: ClientIP` changes this, routing all requests from the same client IP address to the *same* backend Pod for the configured duration, useful for a workload relying on server-side, in-memory session state tied to a specific Pod instance.
+
+```yaml
+apiVersion: v1
+kind: Service
+spec:
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800  # requests from the SAME client IP stick to the SAME Pod for up to 3 hours
+```
+
+```text
+WITHOUT sessionAffinity: EACH request from the SAME client could land on a DIFFERENT Pod --
+  fine for STATELESS services, but BREAKS anything relying on IN-MEMORY, PER-POD session state
+
+WITH sessionAffinity: ClientIP: the SAME client IP CONSISTENTLY reaches the SAME Pod, for as
+  LONG as the configured timeout -- session data held IN-MEMORY on that SPECIFIC Pod remains
+  ACCESSIBLE to that CLIENT, WITHOUT needing an EXTERNAL, SHARED session store at all
+```
+
+Because this affinity is based purely on the client's source IP address (not a cookie or any application-level session identifier), it's a coarser mechanism than application-level sticky sessions — it works transparently at the network layer, but many clients behind the same NAT/proxy sharing one apparent source IP would all be routed to the same Pod, and a genuinely stateless, horizontally-scaled architecture (with session state in a shared external store, covered elsewhere) is generally the more robust long-term solution than relying on this mechanism.
+
+**Common Pitfall:** relying on `sessionAffinity: ClientIP` as a permanent architectural solution for session state, rather than a stopgap — many real clients sit behind a shared NAT gateway or corporate proxy, meaning MANY DIFFERENT actual users can share the SAME apparent client IP, all getting routed to the SAME single Pod regardless of that Pod's own current load; a shared, external session store (Redis, covered under NoSQL) removes this dependency on IP-based stickiness entirely.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is a Kubernetes `VolumeSnapshot`, and how does it let a StatefulSet's PersistentVolume be captured as a point-in-time snapshot for backup/restore, independent of any specific Pod's own lifecycle?**
+
+A `VolumeSnapshot` is a Kubernetes API object representing a point-in-time copy of a `PersistentVolumeClaim`'s underlying storage — created via a `VolumeSnapshotClass` backed by the underlying storage provider's own native snapshot capability (an EBS snapshot, an Azure Disk snapshot), it exists independently of whichever Pod happened to be using that volume at the moment it was taken, and can later be used to provision a brand-new volume pre-populated with that exact captured state.
+
+```yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: database-backup-2026-08-22
+spec:
+  volumeSnapshotClassName: csi-aws-vsc
+  source:
+    persistentVolumeClaimName: database-pvc  # snapshots THIS PVC's CURRENT state
+```
+
+```text
+A VolumeSnapshot is TAKEN at a SPECIFIC point in time -- INDEPENDENT of whatever Pod happens
+  to be MOUNTING that volume RIGHT NOW -- the Pod could be RESTARTED, RESCHEDULED, or even
+  DELETED entirely AFTERWARD -- the SNAPSHOT itself remains a SEPARATE, DURABLE Kubernetes object
+
+RESTORING: a NEW PersistentVolumeClaim can be created "FROM" a VolumeSnapshot -- provisioning
+  a BRAND NEW volume PRE-POPULATED with EXACTLY the snapshotted DATA, usable by a NEW Pod
+```
+
+Because the snapshot is a first-class Kubernetes API object (not something baked into any specific Pod's own state), it integrates naturally with GitOps/backup automation tooling that already understands the Kubernetes API — a scheduled `CronJob` (covered elsewhere) can trigger regular `VolumeSnapshot` creation, and a disaster-recovery process can restore from one by simply creating a new PVC referencing it, all through the same declarative Kubernetes API used for everything else.
+
+**Common Pitfall:** assuming Kubernetes' own storage abstractions alone (PersistentVolumes, StatefulSets) provide backup/disaster-recovery protection without any separate `VolumeSnapshot` strategy — a PersistentVolume surviving a Pod restart protects against Pod-level failure, but doesn't protect against data corruption, accidental deletion, or a need to restore to an earlier point in time; `VolumeSnapshot`s (or an application-level backup strategy) are still needed specifically for genuine point-in-time recovery, which ordinary PV persistence alone doesn't provide.
+
+---
+
 ---

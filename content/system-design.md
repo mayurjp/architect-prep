@@ -1825,4 +1825,73 @@ Because a majority requires more than half of the *total* cluster (not just the 
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is the difference between rate limiting applied per-client versus globally, and why does a global-only limit fail to prevent one abusive client from starving every other legitimate client?**
+
+A global rate limit caps the *total* request volume across all clients combined — a single misbehaving or malicious client can consume the entire global budget by itself, leaving nothing for any other legitimate client; a per-client limit instead caps each individual client's *own* request volume independently, so one client exceeding its own limit doesn't affect any other client's separate allowance at all.
+
+```text
+Global limit: "1,000 requests/second, TOTAL, across EVERY client combined"
+  -- ONE misbehaving client sending 1,000 requests/second CONSUMES the ENTIRE global budget --
+     EVERY OTHER legitimate client gets ZERO capacity left, even though THEY did NOTHING wrong
+
+Per-client limit: "100 requests/second, PER CLIENT" -- the SAME misbehaving client is capped
+  at ITS OWN 100/second -- EVERY OTHER client STILL gets ITS OWN separate 100/second allowance,
+  COMPLETELY UNAFFECTED by the ONE client's excessive behavior
+```
+
+Because a global-only limit has no concept of "whose" requests are consuming the shared budget, it provides zero fairness guarantee between clients — a per-client limit (keyed by API key, account, or IP, covered elsewhere) is what actually protects well-behaved clients from being starved by one bad actor, which a purely aggregate, client-agnostic limit structurally cannot provide on its own.
+
+**Common Pitfall:** implementing only a global rate limit "to protect the backend from overload" without also layering a per-client limit — this genuinely protects the backend's aggregate capacity, but provides zero fairness between individual clients; a single abusive or buggy client can still degrade service for every other legitimate client, which only a per-client (or per-tenant) limit actually prevents.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is the Sliding Window Log/Counter rate-limiting algorithm, and how does it address the Fixed Window's boundary-burst weakness (covered earlier) without Token Bucket's burst-allowance behavior?**
+
+A Fixed Window Counter's weakness (covered earlier) is that a client can send a burst right at the boundary between two windows, briefly achieving nearly double the intended rate — a Sliding Window instead considers a continuously-moving time window (the last N seconds, ending *right now*, not aligned to any fixed boundary), smoothing out exactly this boundary-exploit without Token Bucket's deliberate burst-allowance for idle clients.
+
+```text
+Fixed Window (100 req/min, windows aligned to the CLOCK): a client sends 100 requests at 11:59:59,
+  then ANOTHER 100 at 12:00:01 -- BOTH bursts are WITHIN their OWN window's limit, but the
+  CLIENT effectively sent 200 requests within JUST TWO SECONDS -- the BOUNDARY EXPLOIT
+
+Sliding Window (100 req per ANY rolling 60-second period, ending RIGHT NOW): the SAME 200-request
+  burst spanning 11:59:59 to 12:00:01 is EVALUATED as "200 requests within THIS rolling 60-second
+  window" -- CORRECTLY exceeds the 100-request limit, REGARDLESS of WHERE a FIXED clock boundary
+  would have fallen
+```
+
+Because a Sliding Window's boundary is always "N seconds before right now" rather than a fixed, predictable clock-aligned boundary, there's no exploitable seam for a client to straddle — unlike Token Bucket (covered earlier), which deliberately *allows* a burst up to its full bucket capacity for a client that's been under its rate recently, Sliding Window enforces the configured rate more strictly and continuously, without that deliberate burst allowance.
+
+**Common Pitfall:** implementing a Sliding Window Log literally (storing every single request's exact timestamp to precisely evaluate the rolling window) at very high request volumes — this can become memory-intensive; a Sliding Window *Counter* approximation (weighting the previous and current fixed windows proportionally, rather than tracking every individual timestamp) provides a close approximation at a fraction of the memory cost, a common practical trade-off in real rate-limiter implementations.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What happens when a Two-Phase Commit's Coordinator crashes after sending "prepare" but before sending the final "commit"/"abort" decision, and why does this leave every participant blocked, holding locks, until the coordinator recovers?**
+
+In 2PC (covered earlier), every participant that voted "yes" during the prepare phase must hold its locks and wait for the coordinator's final decision — if the coordinator crashes at exactly this moment, no participant knows whether the transaction was ultimately meant to commit or abort, and none can safely proceed on their own, since guessing wrong would violate the protocol's atomicity guarantee.
+
+```text
+Coordinator sends "PREPARE" to Participants A, B, C -- ALL THREE respond "YES, I can commit"
+  and HOLD their LOCKS, waiting for the coordinator's FINAL decision
+
+Coordinator CRASHES right HERE -- BEFORE sending EITHER "COMMIT" or "ABORT" to ANYONE
+
+Participants A, B, C are now STUCK -- each one KNOWS it voted "yes," but has NO WAY to know
+  what the OTHER participants voted, or what the coordinator's FINAL decision would have been --
+  they MUST continue HOLDING their locks, BLOCKING any other transaction needing the SAME
+  data, UNTIL the coordinator eventually RECOVERS and tells them the ACTUAL outcome
+```
+
+Because a participant that already voted "yes" has surrendered its ability to unilaterally decide the outcome (the coordinator might have already told a *different* participant to commit, or might be about to), the only protocol-safe option is to keep waiting, holding locks indefinitely, until the coordinator recovers and communicates the actual decision — this is precisely the "blocking" characteristic that makes 2PC's coordinator a genuine single point of failure, and a major reason distributed systems generally prefer the Saga pattern (covered extensively elsewhere), which has no equivalent indefinite-blocking failure mode.
+
+**Common Pitfall:** treating 2PC's coordinator as "just another service that might occasionally be briefly unavailable," without appreciating that its failure at precisely the wrong moment doesn't just delay the transaction — it can block every participant's locks indefinitely, potentially freezing unrelated transactions needing the same locked data, until the coordinator specifically recovers; this blocking failure mode (not merely 2PC's synchronous coordination overhead) is the deeper reason it's avoided at scale in favor of the Saga pattern's non-blocking, compensating-action model.
+
+---
+
 ---

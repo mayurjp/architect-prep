@@ -1295,4 +1295,90 @@ Because allowing swap trades a fast, unambiguous failure (OOMKilled, which orche
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is a Docker container's PID namespace, and why does the first process inside a container always see itself as PID 1, regardless of what its actual process ID is on the host?**
+
+Linux namespaces isolate what a process can "see" — a PID namespace specifically gives a container its own, independent view of process IDs, starting from 1, completely separate from the host's own PID numbering; the same underlying process has a genuinely different PID as seen from inside the container versus as seen from the host.
+
+```bash
+docker run -d --name myapp nginx
+docker exec myapp ps aux   # INSIDE the container -- nginx's master process shows as PID 1
+ps aux | grep nginx        # ON THE HOST -- the SAME process shows a COMPLETELY DIFFERENT, HOST-assigned PID
+```
+
+```text
+Inside the container's OWN PID namespace: the FIRST process started IS, by definition, PID 1 --
+  it has NO PARENT process (within its OWN namespace's VIEW), and if it EXITS, the ENTIRE
+  container's PID namespace is considered TERMINATED
+
+On the HOST's PID namespace: that SAME process is just AN ORDINARY process, with an ORDINARY,
+  host-assigned PID, VISIBLE and MANAGEABLE like any other process running on the machine
+```
+
+Because PID 1 carries special responsibilities in any Linux process tree (reaping "zombie" child processes, being the target of signals like `SIGTERM` during `docker stop`, covered elsewhere), a containerized application acting as PID 1 needs to correctly handle these responsibilities itself — which is exactly why a container "init" process (`--init`/`tini`, covered elsewhere) is often used specifically to take on PID 1's duties properly, rather than an application that was never designed to be a process's PID 1 having to handle them.
+
+**Common Pitfall:** running an application directly as a container's PID 1 without considering that PID 1 has special Linux semantics (it doesn't receive default signal handling the same way an ordinary process does, and it's responsible for reaping zombie child processes) — an application never designed with these PID-1-specific responsibilities in mind can behave unexpectedly (ignoring `SIGTERM`, leaking zombie processes) purely because of its accidental role as the container's PID 1, not because of any bug in the application's own logic.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is a Docker Build Secret (`--mount=type=secret`), and how does it let a build step access a sensitive value without that value ever being baked into any image layer at all?**
+
+Passing a sensitive value as a regular `ARG`/`ENV` risks it being permanently baked into an image layer's history (recoverable even after a later layer "removes" it) — a Build Secret instead mounts the sensitive value into the build step's filesystem *only for the duration of that specific `RUN` instruction*, never persisting it into any layer at all.
+
+```dockerfile
+# BuildKit syntax -- the secret is mounted ONLY during THIS RUN instruction, then DISAPPEARS
+RUN --mount=type=secret,id=npm_token \
+    NPM_TOKEN=$(cat /run/secrets/npm_token) npm install --token=$NPM_TOKEN
+# -- the secret file at /run/secrets/npm_token EXISTS only WHILE this RUN executes --
+#    it is NEVER written into the resulting IMAGE LAYER at all
+```
+
+```bash
+docker build --secret id=npm_token,src=./npm_token.txt -t myapp .
+```
+
+```text
+ARG/ENV approach: the sensitive value gets BAKED into the image's LAYER HISTORY PERMANENTLY --
+  ANYONE with access to the image (even after a LATER layer appears to "remove" it) can
+  potentially RECOVER it by inspecting EARLIER layers directly
+
+--mount=type=secret: the value is NEVER written to ANY layer at ALL -- it exists ONLY in the
+  EPHEMERAL build container's filesystem, for the DURATION of ONE specific RUN instruction
+```
+
+Because the secret is mounted directly into the build container's transient filesystem rather than being passed as a persisted build argument, no image layer — past, present, or future — ever contains the sensitive value at all, closing off the entire "recover it from an old layer" attack vector that plagues `ARG`/`ENV`-based secret-passing.
+
+**Common Pitfall:** passing a sensitive credential via `ARG`/`ENV` "temporarily," assuming a later `RUN` instruction unsetting the variable removes it from the image — Docker layers are immutable and cumulative; an earlier layer containing the secret remains fully present (and extractable) in the final image regardless of what any later layer does, which is exactly the vulnerability `--mount=type=secret` is designed to close.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is the difference between Docker's `--cpus` (a hard cap) and `--cpu-shares` (a relative weight), and how does each behave differently under contention versus when the host has spare CPU capacity?**
+
+`--cpus=1.5` sets an absolute ceiling — the container can never use more than 1.5 CPU cores' worth of time, even if the host is otherwise completely idle. `--cpu-shares=512` instead sets a *relative* weight used only when multiple containers are actually competing for CPU — if the host has spare capacity, a container can use far more than its "share" would suggest, with the weight only mattering once contention actually occurs.
+
+```bash
+docker run --cpus=1.5 myapp     # HARD cap -- NEVER uses more than 1.5 cores, EVEN if the host is IDLE
+docker run --cpu-shares=512 myapp  # RELATIVE weight -- ONLY matters when OTHER containers are ALSO competing
+```
+
+```text
+--cpus=1.5: container is CAPPED at 1.5 cores' worth of CPU time, PERIOD -- REGARDLESS of whether
+  the HOST machine has 64 OTHER, COMPLETELY IDLE cores sitting UNUSED right now
+
+--cpu-shares=512 (default 1024): if the HOST is IDLE, this container can use AS MUCH CPU as it
+  WANTS -- the "512" weight ONLY determines its PROPORTIONAL share RELATIVE to OTHER containers'
+  shares, and ONLY takes EFFECT once ACTUAL CPU CONTENTION happens between MULTIPLE containers
+```
+
+Because `--cpus` enforces an absolute ceiling regardless of actual contention while `--cpu-shares` only influences the *relative* split during genuine contention, `--cpus` provides predictable, guaranteed-consistent behavior (useful for capacity planning and multi-tenant fairness guarantees) while `--cpu-shares` allows better overall host utilization when contention isn't actually happening, at the cost of less predictable, contention-dependent behavior.
+
+**Common Pitfall:** using `--cpu-shares` alone expecting it to provide the same guaranteed ceiling `--cpus` does — a container with a low `--cpu-shares` weight can still consume the ENTIRE host's CPU capacity whenever no other container happens to be competing for it at that moment, which is a fundamentally different (and less predictable) guarantee than `--cpus`'s hard, unconditional cap.
+
+---
+
 ---

@@ -1651,4 +1651,84 @@ Because the *only* way to change `Status` is through the `Cancel()` method (or s
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is a Clean Architecture "Command" object (in the CQRS sense, covered elsewhere), and how does its simple, plain-data shape differ from an Aggregate's rich, behavior-carrying shape?**
+
+A Command is a simple data container describing *what the caller wants to happen* (its properties are just the inputs needed to carry out one specific action) — an Aggregate (covered earlier) is the opposite: a rich object with its own behavior methods enforcing invariants, not merely a bag of properties to be read and written externally.
+
+```csharp
+public record CreateOrderCommand(int CustomerId, List<OrderLineDto> Items); // PLAIN data -- NO behavior at all,
+                                                                             // just describes WHAT the caller wants
+
+public class Order // an AGGREGATE -- has its OWN behavior methods, ENFORCES its OWN invariants
+{
+    public void AddLine(int productId, int quantity) { /* validates, enforces business rules */ }
+    public void Cancel() { /* enforces invariants -- covered earlier */ }
+}
+```
+
+Because a Command's entire purpose is to travel from the outside world (a controller, covered elsewhere) into the Application layer as an input to a Use Case/Handler, it deliberately carries no behavior of its own — the Handler receiving it is what actually orchestrates calling the Aggregate's real behavior methods, keeping the "here's what I want" (Command) cleanly separate from the "here's how business rules are actually enforced" (Aggregate).
+
+**Common Pitfall:** adding business logic/behavior methods directly onto a Command object, blurring the line between "a plain description of intent" and "an object enforcing business rules" — Commands should stay simple, serializable data; any actual business logic belongs in the Aggregate (or Domain Service, covered elsewhere) the Command's Handler ultimately invokes.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: How does the Anti-Corruption Layer pattern (covered under Microservices) apply within a single Clean Architecture application's own Infrastructure layer, translating a legacy database's awkward schema into the Domain's own clean model?**
+
+The same ACL concept covered under Microservices — protecting a clean internal model from an external system's awkward concepts — applies just as directly *inside* one Clean Architecture application's Infrastructure layer, when that Infrastructure layer must read from a legacy database whose schema doesn't match the Domain's own clean entity shapes at all.
+
+```csharp
+// Infrastructure layer -- reads the LEGACY database's AWKWARD, non-normalized schema directly
+public class LegacyOrderRepository : IOrderRepository
+{
+    public async Task<Order> GetByIdAsync(int id)
+    {
+        var legacyRow = await _legacyDb.QueryAsync("SELECT ord_id, ord_stat_cd, cust_ref FROM TBL_ORD_MASTER WHERE ord_id = @id", id);
+        // an ANTI-CORRUPTION LAYER, translating the LEGACY schema's CRYPTIC columns/codes
+        // into the DOMAIN's OWN CLEAN Order entity -- the DOMAIN never sees "ord_stat_cd" AT ALL
+        return new Order(legacyRow.ord_id, TranslateStatusCode(legacyRow.ord_stat_cd), legacyRow.cust_ref);
+    }
+}
+```
+
+Because this translation happens entirely inside the Infrastructure layer's repository implementation, the Domain and Application layers remain completely unaware of the legacy schema's awkward column names, cryptic status codes, or non-normalized structure — exactly the Dependency Rule's benefit (covered earlier), applied specifically to insulate the clean inner layers from a genuinely messy, hard-to-change legacy data source.
+
+**Common Pitfall:** letting a legacy database's own awkward naming/structure leak directly into Domain entities (naming a Domain property `OrdStatCd` to match the legacy column, rather than translating it to something meaningful like `Status`) — this defeats the entire purpose of the Anti-Corruption Layer; the translation should happen entirely within the Infrastructure-layer repository, presenting the Domain with clean, meaningful names and types regardless of how awkward the underlying legacy schema actually is.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is a Clean Architecture "Saga Orchestrator" living in the Application layer, and how does it coordinate multiple Use Cases/Aggregates across a multi-step business process while staying free of any Infrastructure-layer dependency itself?**
+
+A Saga Orchestrator (the orchestration-style Saga, covered under Microservices, applied within a single application's own Application layer) coordinates a sequence of steps — each one itself a Use Case/Command invoking a specific Aggregate — while depending only on abstractions (repository interfaces, other Use Cases) defined in the inner layers, never directly on any concrete Infrastructure implementation.
+
+```csharp
+// Application layer -- orchestrates MULTIPLE steps, depends ONLY on ABSTRACTIONS
+public class PlaceOrderSagaHandler
+{
+    private readonly IOrderRepository _orders;       // an INTERFACE -- defined in the INNER layer
+    private readonly IInventoryService _inventory;    // ALSO an interface
+    private readonly IPaymentGateway _payments;       // ALSO an interface
+
+    public async Task HandleAsync(PlaceOrderCommand command)
+    {
+        var order = Order.Create(command.CustomerId, command.Items); // uses the AGGREGATE's OWN behavior
+        await _orders.SaveAsync(order);
+        var reserved = await _inventory.ReserveStockAsync(order.Items); // STEP 2
+        if (!reserved) { await CompensateAsync(order); return; }        // COMPENSATION, if STEP 2 fails
+        await _payments.ChargeAsync(order.CustomerId, order.Total);      // STEP 3
+    }
+}
+```
+
+Because the Orchestrator depends only on interfaces (`IOrderRepository`, `IInventoryService`, `IPaymentGateway`) rather than any concrete Infrastructure implementation, it remains fully testable in isolation (substituting test doubles for each interface, covered under Testing) and fully compliant with the Dependency Rule — the actual HTTP calls, database queries, and message-broker interactions those interfaces represent live entirely in the Infrastructure layer, wired in only at the Composition Root (covered earlier).
+
+**Common Pitfall:** letting a Saga Orchestrator directly reference a concrete Infrastructure class (an `HttpClient`, a specific message broker's SDK type) instead of an Application-layer-defined interface — this violates the Dependency Rule the same way any other inner-layer-depends-on-outer-layer violation would, and makes the orchestration logic significantly harder to unit test without a real, running HTTP endpoint or message broker available.
+
+---
+
 ---
