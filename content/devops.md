@@ -1315,4 +1315,84 @@ Because the flag (not a separate branch) is what hides incomplete work from user
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a Pipeline Trigger, and how does the choice between a push-triggered, scheduled, and manually-triggered pipeline shape when a pipeline actually runs?**
+
+A pipeline needs some event to start it — a Trigger defines what that event is: a push-triggered pipeline runs automatically on every commit/PR to a specific branch, a scheduled trigger runs at fixed times regardless of any code change (a nightly build), and a manual trigger only runs when someone explicitly starts it, useful for pipelines (like a production deployment) that shouldn't happen automatically on every merge.
+
+```yaml
+# Push trigger -- runs on EVERY commit to main
+trigger:
+  branches: [main]
+
+# Scheduled trigger -- runs NIGHTLY, REGARDLESS of whether any code actually changed
+schedules:
+  - cron: "0 2 * * *"
+
+# Manual trigger only -- a deployment pipeline that should NEVER run automatically
+trigger: none  # requires an explicit, human-initiated run
+```
+
+Because each trigger type reflects a genuinely different intent — "run this automatically whenever code changes," "run this periodically regardless of code changes," or "run this only when a human deliberately decides to" — choosing the right trigger type for a given pipeline (CI builds push-triggered, a production deployment manually-triggered or gated behind an approval) directly shapes the safety and automation trade-offs of the overall delivery process.
+
+**Common Pitfall:** configuring a production deployment pipeline with an unconditional push trigger on the main branch — this means *every* merge to main automatically deploys to production with no human checkpoint at all; for anything beyond a team deliberately practicing full continuous deployment with strong automated safety nets (canary analysis, automated rollback), a manual approval gate or trigger is usually the safer default.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is a Feature Flag "Kill Switch," and how does designing a flag specifically for fast, one-click disabling differ from an ordinary gradual-rollout flag?**
+
+An ordinary Feature Flag is typically designed for a *gradual* rollout (5% of users, then 25%, then 100%) — a Kill Switch is a flag deliberately designed for the opposite scenario: instantly disabling a feature entirely, for everyone, the moment it's discovered to be causing harm, with the flag check placed at a point in the code where flipping it takes effect immediately, without a deployment.
+
+```csharp
+if (!_featureFlags.IsEnabled("new-recommendation-engine")) // checked on EVERY request -- NO caching delay
+{
+    return _legacyRecommendationService.GetRecommendations(userId); // INSTANT fallback if the flag flips OFF
+}
+return _newRecommendationEngine.GetRecommendations(userId);
+```
+
+```text
+GRADUAL ROLLOUT flag: designed to slowly INCREASE exposure -- 5% -> 25% -> 100% -- over DAYS
+KILL SWITCH flag: designed for the OPPOSITE -- INSTANTLY drop from "on" to "off" for EVERYONE,
+                   the MOMENT an on-call engineer flips it, WITHOUT waiting for a deployment AT ALL
+```
+
+Because a Kill Switch's entire value lies in how *fast* it can be flipped during an active incident, its implementation needs to avoid caching delays or slow propagation (a flag value cached for 10 minutes defeats the purpose of an emergency kill switch) — the underlying feature-flag infrastructure's propagation speed matters far more for a kill switch than for an ordinary gradual-rollout flag, where a few minutes of propagation delay is inconsequential.
+
+**Common Pitfall:** relying on a feature-flagging system with a long propagation delay (a config cached for many minutes before refreshing) for a flag intended as an emergency kill switch — during an active incident, every minute a broken feature stays live because the flag hasn't propagated yet is directly costly; a genuine kill switch needs near-instant propagation, which may require a different flag-delivery mechanism than an ordinary gradual-rollout flag.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is "Bake Time" in a Canary/progressive-delivery pipeline, and how does deliberately waiting before advancing to the next rollout stage catch a regression that only manifests under sustained load?**
+
+Bake Time is a deliberate pause built into a progressive-delivery pipeline between rollout stages — after routing a small percentage of traffic to a new version, the pipeline waits a defined period (monitoring error rates, latency, resource usage) *before* advancing to the next stage, specifically to catch problems (a slow memory leak, a resource exhaustion issue) that only become visible after sustained exposure to real traffic, not immediately upon deployment.
+
+```yaml
+canary:
+  steps:
+    - setWeight: 10   # route 10% of traffic to the new version
+    - pause: { duration: 30m }  # BAKE TIME -- wait 30 MINUTES, monitoring metrics, BEFORE proceeding
+    - setWeight: 50
+    - pause: { duration: 30m }  # ANOTHER bake period at the NEXT stage
+    - setWeight: 100
+```
+
+```text
+A MEMORY LEAK in the new version might look PERFECTLY healthy for the FIRST few minutes of traffic --
+ONLY becoming visible (rising memory usage, eventual OOM) after SUSTAINED exposure over TIME --
+a canary pipeline advancing stages TOO QUICKLY (no bake time) would ADVANCE PAST 10% traffic
+BEFORE the leak had ENOUGH TIME to become OBSERVABLE, missing the regression ENTIRELY
+```
+
+Because some categories of regression (memory leaks, gradually-degrading connection pool exhaustion, a slow cache-eviction bug) only manifest after a meaningful period of sustained traffic, a canary pipeline that advances through rollout stages too quickly can complete an entire rollout before such a regression ever becomes visible in its metrics — bake time is specifically the mechanism that gives these slower-developing failure modes enough exposure time to surface before the rollout proceeds further.
+
+**Common Pitfall:** configuring a canary pipeline's stages to advance immediately once basic health checks pass, without any deliberate bake time — this catches fast, immediately-obvious regressions (a crash, an immediate spike in error rate) but provides no protection at all against slower-developing issues that only emerge after sustained load, precisely the kind of regression bake time exists to catch.
+
+---
+
 ---

@@ -1183,9 +1183,9 @@ Modern authenticated encryption modes (AES-GCM, ChaCha20-Poly1305) verify the ci
 
 ---
 
-## Beginner — Question 13
+## Beginner — Question 12
 
-**Q13: What is Sensitive Data Exposure via an API that returns more fields than a client actually needs, and how does returning a full user object — including a password hash field — create risk even if the client never actually displays it?**
+**Q12: What is Sensitive Data Exposure via an API that returns more fields than a client actually needs, and how does returning a full user object — including a password hash field — create risk even if the client never actually displays it?**
 
 An endpoint returning an entire internal object (rather than a purpose-built DTO, covered elsewhere) can leak sensitive fields the client-side UI simply chooses not to render — but "not rendered" doesn't mean "not present"; the data still travels over the network and sits in the browser's own memory/network inspector, fully readable by anyone with access to the raw HTTP response, regardless of whether the UI happens to display it.
 
@@ -1209,9 +1209,9 @@ Because the actual HTTP response contains every field on the full entity regardl
 
 ---
 
-## Intermediate — Question 14
+## Intermediate — Question 13
 
-**Q14: What is a Business Logic Vulnerability, as a distinct category from the technical vulnerabilities covered extensively (SQL Injection, XSS), and why can't automated scanners typically detect this category at all?**
+**Q13: What is a Business Logic Vulnerability, as a distinct category from the technical vulnerabilities covered extensively (SQL Injection, XSS), and why can't automated scanners typically detect this category at all?**
 
 A Business Logic Vulnerability exploits a flaw in an application's *intended, working-as-designed* business rules — not a technical bug like unescaped input or a missing authorization check, but a legitimate feature used in a way its designers never anticipated, producing an outcome that's technically "correct" by the code's own logic but genuinely harmful to the business.
 
@@ -1236,9 +1236,9 @@ An attacker submitting `quantity = -5` triggers a "charge" of a negative amount 
 
 ---
 
-## Advanced — Question 13
+## Advanced — Question 12
 
-**Q13: How does an attacker chain together multiple innocent-looking classes' side effects — property setters, finalizers — that were never individually dangerous, into a full remote code execution exploit via Insecure Deserialization (covered earlier)?**
+**Q12: How does an attacker chain together multiple innocent-looking classes' side effects — property setters, finalizers — that were never individually dangerous, into a full remote code execution exploit via Insecure Deserialization (covered earlier)?**
 
 A single class's property setter or finalizer having a side effect (writing a file, starting a process) usually isn't dangerous in isolation — a Deserialization Gadget Chain exploits the fact that deserializing one object can trigger a *cascade*: setting Object A's property triggers Object A's own setter logic, which might construct Object B (triggering B's constructor/setter), which might construct Object C, and so on — an attacker who can find and chain together the right sequence of otherwise-harmless classes already present in an application's loaded assemblies can compose a full, powerful exploit from pieces that were never individually designed to be dangerous at all.
 
@@ -1266,9 +1266,9 @@ Because none of the individual gadgets is inherently malicious — each is a com
 
 ---
 
-## Beginner — Question 14
+## Beginner — Question 13
 
-**Q14: Why does rate-limiting by IP address alone provide weaker protection than combining it with account-based or API-key-based limiting, given an attacker can simply rotate IP addresses to bypass an IP-only limit?**
+**Q13: Why does rate-limiting by IP address alone provide weaker protection than combining it with account-based or API-key-based limiting, given an attacker can simply rotate IP addresses to bypass an IP-only limit?**
 
 Rate limiting purely by IP address assumes each IP address represents roughly one distinct client — but an attacker with access to many IP addresses (a botnet, a pool of proxy/VPN exit nodes, cloud-hosted instances they control) can simply spread their requests across many different source IPs, with each individual IP staying comfortably under the per-IP limit even while the attacker's *overall* request volume remains enormous.
 
@@ -1291,9 +1291,9 @@ Because an API key or account identity travels *with* the client regardless of w
 
 ---
 
-## Intermediate — Question 15
+## Intermediate — Question 14
 
-**Q15: What is a Host Header Injection vulnerability, and how does an application trusting a client-supplied `Host` header — for instance, to build a password-reset link — let an attacker poison that link to point at an attacker-controlled domain?**
+**Q14: What is a Host Header Injection vulnerability, and how does an application trusting a client-supplied `Host` header — for instance, to build a password-reset link — let an attacker poison that link to point at an attacker-controlled domain?**
 
 The `Host` header (covered under HTTP) is technically client-supplied, not a value the server can inherently trust — an application that naively uses it to construct absolute URLs (a password-reset link emailed to a user) can be tricked into generating a link pointing at whatever domain the attacker supplied in their own request's `Host` header, rather than the application's genuine, intended domain.
 
@@ -1331,9 +1331,9 @@ Using a base URL from the application's own trusted configuration (never from an
 
 ---
 
-## Advanced — Question 14
+## Advanced — Question 13
 
-**Q14: How can a Race Condition in a multi-step email/OTP verification flow — submitting the same verification code via multiple concurrent requests — bypass a one-time-use check implemented without proper atomicity?**
+**Q13: How can a Race Condition in a multi-step email/OTP verification flow — submitting the same verification code via multiple concurrent requests — bypass a one-time-use check implemented without proper atomicity?**
 
 A verification flow (email confirmation, an OTP code) typically checks "has this code already been used?" before marking it used and granting the associated action (activating an account, confirming an email change) — if that check-then-mark sequence isn't atomic, sending the exact same code via several simultaneous, concurrent requests can let *all* of them pass the "not yet used" check before any of them has had a chance to mark it used, exactly the TOCTOU race condition pattern covered earlier, applied specifically to an authentication/verification flow.
 
@@ -1372,9 +1372,9 @@ By collapsing the check and the mark-as-used update into one atomic database sta
 
 ---
 
-## Beginner — Question 12
+## Beginner — Question 14
 
-**Q12: What is Information Disclosure via exposed `.git`/`.env` files or verbose server banners, and how does a misconfigured deployment accidentally expose files that were never meant to be publicly servable?**
+**Q14: What is Information Disclosure via exposed `.git`/`.env` files or verbose server banners, and how does a misconfigured deployment accidentally expose files that were never meant to be publicly servable?**
 
 A web server configured to serve static files from a directory will happily serve *anything* in that directory unless explicitly restricted — if a deployment accidentally leaves a `.git` folder (the entire repository history) or a `.env` file (containing secrets) inside the publicly-servable web root, anyone who guesses or discovers the right URL can simply download them directly.
 
@@ -1395,9 +1395,9 @@ Because a static file server has no inherent concept of "this file is source-con
 
 ---
 
-## Intermediate — Question 13
+## Intermediate — Question 15
 
-**Q13: What is Regular Expression Denial of Service (ReDoS), and how does a maliciously crafted input string exploit catastrophic backtracking in a poorly-written regex to consume exponential CPU time?**
+**Q15: What is Regular Expression Denial of Service (ReDoS), and how does a maliciously crafted input string exploit catastrophic backtracking in a poorly-written regex to consume exponential CPU time?**
 
 Certain regex patterns, when matched against a specifically crafted (but not necessarily long) input string, force the regex engine into "catastrophic backtracking" — trying an exponentially growing number of possible ways to match, consuming CPU time that grows exponentially with input length, effectively hanging the application on a single, cheap-looking request.
 
@@ -1426,9 +1426,9 @@ Setting an explicit `matchTimeout` bounds the worst-case CPU cost any single reg
 
 ---
 
-## Advanced — Question 12
+## Advanced — Question 14
 
-**Q12: What is Server-Side Template Injection (SSTI), and how does it differ fundamentally from XSS by letting an attacker's injected code execute on the SERVER during template rendering, rather than in the victim's browser?**
+**Q14: What is Server-Side Template Injection (SSTI), and how does it differ fundamentally from XSS by letting an attacker's injected code execute on the SERVER during template rendering, rather than in the victim's browser?**
 
 XSS (covered extensively) injects a script that executes in a *victim's browser* — SSTI injects template syntax that a server-side templating engine (Jinja2, Handlebars, Razor in certain misuse patterns) evaluates and executes *on the server itself*, during the template-rendering process — a fundamentally more severe vulnerability class, since server-side code execution can lead directly to full remote code execution on the server, not merely a browser-side script running in one victim's session.
 
@@ -1459,6 +1459,93 @@ var rendered = _templateEngine.Render(template, new { name = userSuppliedName, t
 The safe pattern mirrors the exact same "separate code from data" principle covered for SQL Injection's parameterized queries — the template's actual *structure* (its syntax) comes entirely from trusted, developer-authored source, and untrusted input is only ever substituted in as a plain data value for a placeholder, never concatenated directly into the template text the engine will actually parse and evaluate as code.
 
 **Common Pitfall:** building a "dynamic email template" or "customizable report" feature that lets an admin user (or worse, an end user) supply a template string that's then rendered directly by the templating engine — even when the immediate user seems "trusted" (an internal admin), allowing arbitrary template syntax to be supplied and rendered opens exactly this SSTI vulnerability class; a genuinely safe customizable-template feature must strictly limit what syntax user-supplied templates can actually contain, or avoid letting users supply raw template syntax at all, restricting them to selecting from a fixed set of developer-authored templates with data substitution only.
+
+---
+
+## Beginner — Question 15
+
+**Q15: What is the difference between an Allowlist (Positive) and a Denylist (Negative) approach to input validation, and why is allowlisting generally considered the more robust default?**
+
+A Denylist approach validates input by rejecting known-bad patterns (blocking specific characters or strings known to be dangerous) — an Allowlist approach instead validates by accepting *only* an explicitly-known-safe set of patterns, rejecting everything else by default; allowlisting is generally stronger because it doesn't depend on anticipating every possible malicious variation in advance.
+
+```csharp
+// DENYLIST -- rejects KNOWN-bad patterns -- an ATTACKER only needs to find ONE pattern NOT on the list
+if (input.Contains("<script>") || input.Contains("javascript:")) return BadRequest();
+// what about <img onerror=...>? <svg onload=...>? -- the DENYLIST didn't anticipate EVERY variant
+
+// ALLOWLIST -- accepts ONLY a known-safe pattern -- everything ELSE is REJECTED, by DEFAULT
+if (!Regex.IsMatch(input, @"^[a-zA-Z0-9\s]{1,100}$")) return BadRequest();
+// ANY input NOT matching this EXPLICIT, NARROW pattern is REJECTED, REGARDLESS of what form it takes
+```
+
+Because a denylist can only ever block patterns its author specifically thought to include, it's structurally vulnerable to any variation the author didn't anticipate — an allowlist instead flips the default from "accept unless explicitly forbidden" to "reject unless explicitly permitted," which remains robust even against attack patterns nobody has thought of yet, since anything not matching the known-safe shape is rejected regardless of its specific form.
+
+**Common Pitfall:** relying on a denylist of specific "dangerous" strings/characters for input validation, treating it as a complete defense — attackers routinely discover encoding tricks, alternate syntaxes, or entirely new patterns a denylist's author never anticipated; wherever the *legitimate* shape of valid input can be precisely, narrowly defined (an email format, a numeric ID, a fixed set of allowed values), an allowlist provides meaningfully stronger protection than trying to enumerate every possible bad pattern.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is Broken Object Level Authorization (BOLA) — the OWASP API Security Top 10's name for the same underlying flaw as IDOR (covered earlier) — and why does it top that specific list for APIs?**
+
+BOLA and IDOR describe the same core vulnerability (an object identifier in a request lets a user access another user's data by simply changing the ID) — BOLA is specifically the term used in the OWASP API Security Top 10, where it's ranked as the single most common and impactful API vulnerability, reflecting how central "does this endpoint check ownership, not just authentication" is to nearly every API operating on per-user resources.
+
+```http
+GET /api/v1/orders/1042    -- Alice's OWN order, correctly returned
+GET /api/v1/orders/1043    -- Bob's order -- returned ANYWAY, because the endpoint checks ONLY
+                               "is the CALLER authenticated?" not "does the caller OWN order 1043?"
+```
+
+```csharp
+// VULNERABLE -- checks AUTHENTICATION, but NEVER checks OWNERSHIP of the SPECIFIC requested object
+[HttpGet("{id}")]
+[Authorize]
+public IActionResult GetOrder(int id) => Ok(_db.Orders.Find(id)); // ANY authenticated user, ANY id
+
+// FIXED -- checks that the SPECIFIC object belongs to the CURRENT caller
+[HttpGet("{id}")]
+[Authorize]
+public IActionResult GetOrder(int id)
+{
+    var order = _db.Orders.Find(id);
+    if (order.CustomerId != CurrentUserId) return Forbid(); // OWNERSHIP check, PER OBJECT
+    return Ok(order);
+}
+```
+
+Because nearly every API endpoint operates on a specific, identified object (an order, a document, an account) rather than a whole collection, and because it's such an easy check to accidentally omit while an endpoint still "works correctly" for the developer's own test account, BOLA/IDOR ranks as the single most common API vulnerability category — every single object-returning endpoint needs its own explicit ownership check, and missing even one creates a genuine data-exposure vulnerability.
+
+**Common Pitfall:** assuming `[Authorize]` alone is sufficient protection for an endpoint returning a specific object by ID — `[Authorize]` only confirms the caller is *authenticated*, saying nothing about whether they're authorized to access *this particular* object; every endpoint accepting an object identifier needs its own explicit per-object ownership/authorization check, a distinction easy to overlook since the endpoint appears to "work" during testing against the developer's own account.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is a JWT Key Confusion attack, and how can it trick a server configured for RS256 (asymmetric) verification into accepting a token signed using its OWN public key as an HMAC secret?**
+
+RS256 uses a private key to *sign* a token and a corresponding public key to *verify* it — HS256 instead uses one single shared secret for both signing and verification. A Key Confusion attack exploits a poorly-implemented verification library that doesn't strictly enforce which algorithm a token must use: an attacker crafts a token declaring `alg: HS256` and signs it using the server's own *public* key (which is, by design, publicly available) as the HMAC secret — if the server's verification code doesn't reject an algorithm mismatch, it ends up computing the exact same HMAC using that same public key, and the forged signature validates successfully.
+
+```json
+// A LEGITIMATE token: signed with RS256, using the server's PRIVATE key
+{ "alg": "RS256", ... }
+
+// The ATTACKER'S forged token: claims HS256, and is signed using the server's PUBLIC key AS THE HMAC SECRET
+{ "alg": "HS256", ... }
+```
+
+```text
+VULNERABLE verification code: "whatever algorithm the TOKEN claims, use THAT to verify" --
+  the ATTACKER'S token says HS256 -- the code computes an HMAC using the SERVER's PUBLIC KEY
+  (WHICH IS PUBLICLY KNOWN) as the SECRET -- the ATTACKER, who ALSO knows the public key, can
+  COMPUTE the IDENTICAL HMAC themselves -- the FORGED signature VALIDATES successfully
+
+SECURE verification code: the SERVER explicitly SPECIFIES "I expect RS256, and ONLY RS256" --
+  a token CLAIMING HS256 is REJECTED IMMEDIATELY, REGARDLESS of what its signature contains
+```
+
+Because the server's public key is, by definition, not secret at all, an attacker who knows it (trivially available, since it's meant to be public) can compute a valid HMAC using it as the "secret" if the verification code is naive enough to trust the *token's own* claimed algorithm rather than enforcing a specific, expected one — the fix is for verification code to hard-code the expected algorithm and reject any token claiming a different one, never trusting the `alg` header to dictate its own verification method.
+
+**Common Pitfall:** implementing JWT verification that reads the `alg` field from the token itself and dynamically selects a verification method based on it — a secure implementation must instead have the server explicitly specify which single algorithm (or a tightly restricted, known-safe set) it expects, rejecting any token that claims something else, rather than letting the potentially-attacker-controlled token header dictate how it should be verified.
 
 ---
 

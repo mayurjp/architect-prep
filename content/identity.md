@@ -1312,3 +1312,85 @@ Because the credential is cryptographically bound to the *exact origin* it was r
 **Common Pitfall:** describing Passkeys as simply "a more convenient password" or "a stronger OTP," missing that their actual, structural security advantage over both is the origin-binding mechanism specifically — a user's own carefulness or training has nothing to do with why a phishing attempt against a Passkey-protected account fails; it fails because the browser/authenticator itself has structurally nothing valid to offer the phishing site, a categorically different and stronger guarantee than any user-vigilance-dependent defense.
 
 ---
+
+## Beginner — Question 15
+
+**Q15: What is a Bearer Token, and why does its name reflect a specific, important security property — anyone who possesses it can use it, regardless of who they actually are?**
+
+A Bearer Token (the typical form of an OAuth Access Token, including most JWTs used as access tokens) grants access to whoever "bears" (presents) it — the receiving server doesn't verify anything about *who* is presenting the token beyond the token's own validity, meaning a stolen bearer token is exactly as usable by an attacker as by its legitimate original holder.
+
+```http
+GET /api/orders HTTP/1.1
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+```text
+The server's ONLY check: "is this token VALID (correctly signed, not expired)?"
+The server does NOT check: "is the ENTITY presenting this token the SAME one it was ORIGINALLY issued to?"
+
+-- ANYONE possessing a VALID bearer token can use it EXACTLY as the ORIGINAL, legitimate holder could --
+   this is WHY protecting a bearer token from theft (secure storage, short expiry, HTTPS-only
+   transmission) matters SO MUCH -- POSSESSION alone is the ENTIRE access-granting mechanism
+```
+
+Because there's no additional binding between the token and whoever is presenting it (unlike Token Binding/DPoP or mTLS-bound tokens, covered elsewhere, which *do* add exactly this kind of binding), a stolen bearer token is fully, unrestrictedly usable by the thief until it expires or is explicitly revoked — this is precisely why secure token storage (covered elsewhere for SPAs) and short token lifetimes matter so much for bearer tokens specifically.
+
+**Common Pitfall:** assuming a bearer token's cryptographic signature alone provides meaningful protection against theft — the signature only proves the token was genuinely issued by the expected Authorization Server and hasn't been tampered with; it says nothing at all about whether the entity currently presenting the token is the one it was originally issued to, which is exactly the gap Token Binding/DPoP (covered elsewhere) is designed to close.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is the OAuth 2.0 Resource Owner Password Credentials (ROPC) grant, and why is it now considered deprecated/discouraged in favor of the Authorization Code flow (covered earlier)?**
+
+ROPC lets a client collect the user's actual username and password directly, then exchange those credentials for a token itself — as opposed to the Authorization Code flow, where the user enters their credentials directly into the Identity Provider's own login page, never exposing them to the client application at all.
+
+```http
+POST /token
+grant_type=password&username=alice&password=hunter2&client_id=my-app
+```
+
+```text
+ROPC: the CLIENT APPLICATION itself HANDLES the user's raw PASSWORD directly -- the client
+      could be MALICIOUS, or simply POORLY secured, and now has ACCESS to the user's ACTUAL credentials
+
+Authorization Code flow: the user's password is ENTERED directly on the IDENTITY PROVIDER's
+      OWN login page -- the CLIENT APPLICATION never sees the raw password AT ALL, ONLY a token
+```
+
+Because ROPC requires the client to directly handle the user's raw password, it fundamentally defeats one of OAuth's core purposes — letting a user grant a third-party application scoped access *without ever handing that application their actual credentials* — and it's structurally incompatible with anything beyond a single-factor password check (no MFA, no passwordless/Passkey support, no federated login), which is why modern guidance (including OAuth 2.1's draft spec) explicitly removes ROPC entirely.
+
+**Common Pitfall:** using ROPC for a "trusted first-party" client (a company's own mobile app, reasoning "we already trust our own app with the password") — even for a first-party client, ROPC blocks adopting MFA, Passkeys, or any future authentication method the Identity Provider might support, since the client is hard-coded to a raw username/password exchange; the Authorization Code flow (with PKCE, covered earlier) remains the better choice even for first-party clients specifically to preserve this flexibility.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Token Exchange (RFC 8693), and how does it let one service exchange a token it holds for a different, more narrowly-scoped token to call a downstream service on the original caller's behalf?**
+
+In a chain of service-to-service calls (Service A calls Service B, which needs to call Service C), simply forwarding Service A's original token to Service C over-shares access — Token Exchange lets Service B present its own credentials *plus* the original token to the Authorization Server, receiving back a *new*, narrower token scoped specifically to what Service B actually needs to do on Service C, rather than passing along the original, broader-scoped token unchanged.
+
+```http
+POST /token
+grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+&subject_token=<Service A's original token>
+&subject_token_type=urn:ietf:params:oauth:token-type:access_token
+&audience=service-c
+&scope=orders.read   <-- request a NARROWER scope than the ORIGINAL token had
+```
+
+```text
+Service A's original token: scope = "orders.read orders.write payments.read payments.write"
+                             (BROAD -- everything Service A itself is allowed to do)
+
+Token EXCHANGED by Service B, specifically for calling Service C: scope = "orders.read"
+                             (NARROW -- ONLY what Service B's call to Service C ACTUALLY needs)
+```
+
+Because the exchanged token is deliberately scoped down to exactly what the downstream call requires (rather than forwarding the original, broader token unchanged), Service C receives a token whose blast radius — if it were somehow leaked or misused — is limited to just what Service B's specific downstream call needed, directly embodying the Principle of Least Privilege across a multi-hop service chain, rather than every hop in the chain silently accumulating the original caller's full set of permissions.
+
+**Common Pitfall:** simply forwarding an incoming request's original bearer token unchanged to every downstream service in a call chain — this means every downstream service receives the SAME broad token the original caller had, regardless of what that specific downstream call actually needs; Token Exchange lets each hop request a properly scoped-down token instead, meaningfully reducing what a compromised downstream service could do with a token it received.
+
+---
+
+---

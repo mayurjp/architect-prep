@@ -1235,4 +1235,83 @@ Because the IMDS endpoint is only reachable from *within* the specific VM/instan
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What are Azure Blob Storage's access tiers (Hot, Cool, Archive), and how does choosing the right tier for infrequently-accessed data reduce storage cost without any application code change?**
+
+Blob Storage lets you assign each blob (or a whole container's default) an access tier reflecting how often it's expected to be read — Hot for frequently-accessed data, Cool for infrequently-accessed data kept for at least 30 days, and Archive for rarely-accessed data kept for months/years — with storage cost decreasing (and retrieval cost/latency increasing) as you move from Hot toward Archive.
+
+```csharp
+var blobClient = containerClient.GetBlobClient("old-invoice-2020.pdf");
+await blobClient.SetAccessTierAsync(AccessTier.Archive); // moves the SAME blob to a CHEAPER tier -- no code elsewhere changes
+```
+
+```text
+Hot     -- highest storage cost, LOWEST retrieval cost/latency -- for data read FREQUENTLY
+Cool    -- lower storage cost, HIGHER retrieval cost -- for data read INFREQUENTLY (30+ day minimum)
+Archive -- LOWEST storage cost, retrieval takes HOURS (a "rehydration" request) -- for RARELY-accessed data
+```
+
+Because the application interacts with a blob the same way regardless of its tier (the tier only affects cost and retrieval latency, not the blob's URL or API), a lifecycle policy can automatically move aging data (invoices older than a year, log files past their active-use window) into progressively cheaper tiers without any application code ever needing to know or care which tier a given blob currently sits in.
+
+**Common Pitfall:** leaving old, rarely-accessed data sitting in the Hot tier indefinitely simply because it's the default — for data with a predictable access pattern (frequently read when new, then rarely touched), an Azure Blob Storage Lifecycle Management policy can automatically transition it through Hot → Cool → Archive on a schedule, meaningfully reducing storage cost for data nobody configured a tiering policy for, purely out of oversight.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is the difference between Azure SQL Database's DTU-based and vCore-based purchasing models, and how does the choice change how you reason about scaling performance?**
+
+The DTU (Database Transaction Unit) model bundles CPU, memory, and I/O into one abstract, blended unit — you pick a tier (Basic/Standard/Premium) and a DTU count, without controlling the underlying resources independently. The vCore model instead lets you directly specify the number of virtual cores and the amount of memory, giving explicit, independent control over each resource dimension rather than one blended abstraction.
+
+```text
+DTU model:    "Standard S3" = 100 DTUs -- an OPAQUE blend of CPU+memory+IO -- you don't directly
+              control HOW MUCH of each -- simpler to pick, HARDER to reason about WHERE a bottleneck is
+
+vCore model:  "General Purpose, 4 vCores, 20.4 GB memory" -- EXPLICIT, INDEPENDENT control over
+              compute AND memory -- lets you reason about a CPU-bound workload differently
+              from a MEMORY-bound one, and scale JUST the dimension that's ACTUALLY the bottleneck
+```
+
+Because the vCore model exposes CPU and memory as independently adjustable dimensions (and additionally supports Azure Hybrid Benefit, letting you apply existing on-premises SQL Server licenses toward the cost), it gives more precise, informed scaling decisions for a workload whose actual bottleneck (CPU-bound analytics versus memory-hungry caching of query plans) is already understood — while the DTU model remains simpler for teams that don't need that level of granular control.
+
+**Common Pitfall:** staying on the DTU model purely out of familiarity/inertia for a workload whose actual performance bottleneck is well understood (CPU-bound, or memory-bound) — the vCore model's independently-scalable dimensions let you target the actual constraint directly, and its Azure Hybrid Benefit licensing option can also meaningfully reduce cost for an organization already holding SQL Server licenses, a saving the DTU model has no equivalent for.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Azure Cosmos DB's Change Feed, and how does it let downstream services react to data changes in near-real-time without polling the database themselves?**
+
+Change Feed is a persistent, ordered log of every insert and update to a Cosmos DB container (not deletes, by default) — a consumer (an Azure Function, a custom processor) subscribes to it and receives each change as it happens, rather than needing to repeatedly poll the container asking "has anything changed since I last checked?"
+
+```csharp
+[Function("ProcessOrderChanges")]
+public void Run([CosmosDBTrigger(
+    databaseName: "OrdersDb",
+    containerName: "Orders",
+    Connection = "CosmosDBConnection",
+    LeaseContainerName = "leases")] IReadOnlyList<Order> changedOrders)
+{
+    foreach (var order in changedOrders)
+    {
+        // reacts to EACH changed Order document, as changes happen -- NO polling required
+    }
+}
+```
+
+```text
+WITHOUT Change Feed: a downstream service would need to repeatedly QUERY the container on a timer,
+asking "what changed since my last check?" -- wasteful, and introduces a POLLING-INTERVAL delay
+
+WITH Change Feed: changes are PUSHED to the subscribed Function/processor AS THEY HAPPEN --
+NO wasted polling queries, and MUCH LOWER latency between a change occurring and a reaction to it
+```
+
+Because Change Feed maintains its own ordered, append-only record of changes per physical partition (tracked via "leases" that coordinate which processor instance handles which partition, enabling horizontal scale-out of the processing itself), it provides a reliable, ordered stream of changes that scales naturally with the container's own partitioning — directly analogous to the general Change Data Capture concept covered under Messaging/NoSQL, but as Cosmos DB's own first-class, built-in feature.
+
+**Common Pitfall:** implementing custom polling logic against a Cosmos DB container (a scheduled query checking a `LastModified` timestamp column) to detect changes, unaware that Change Feed already provides this capability natively, with better latency and without the wasted query cost of polling on a fixed interval — Change Feed should be the default choice for "react to data changes" requirements against Cosmos DB, reserving custom polling logic for genuinely different needs Change Feed doesn't cover.
+
+---
+
 ---

@@ -1203,4 +1203,77 @@ VPC Peering suits a scenario where two genuinely separate, independently-adminis
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a GCP Project, and why is it the fundamental unit of billing and resource isolation, as distinct from an Organization or Folder (covered earlier)?**
+
+A Project is where actual GCP resources (a Compute Engine VM, a Cloud Storage bucket, a BigQuery dataset) live and where billing is ultimately attributed — Organizations and Folders (covered earlier) exist purely to group and apply policy across many Projects, but they don't themselves hold resources or billing records directly.
+
+```text
+Organization (your company)
+  └── Folder (e.g., "Engineering")
+        └── Project ("payments-service-prod")  <-- RESOURCES actually LIVE here, BILLING attributes here
+              ├── Compute Engine VMs
+              ├── Cloud Storage buckets
+              └── BigQuery datasets
+```
+
+Because every resource must belong to exactly one Project, and every Project has its own billing account association, a Project is both the smallest unit of resource isolation (a VM in Project A is entirely separate from one in Project B, even under the same Organization) and the smallest unit of cost attribution — letting an organization cleanly track spend and access per team/application by giving each its own Project(s), rather than a shared, undifferentiated resource pool.
+
+**Common Pitfall:** creating too few Projects (putting many unrelated applications/teams into one shared Project "to keep things simple") — this makes it much harder to isolate one team's IAM permissions, quotas, and billing from another's, since Project boundaries are the natural unit for all three; most GCP guidance favors more, smaller, purpose-scoped Projects (dev/staging/prod per application, even) over fewer, large shared ones.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is Cloud Run's "minimum instances" setting, and how does keeping at least one warm instance running trade ongoing cost for eliminating cold starts entirely?**
+
+By default, Cloud Run can scale a service down to zero instances when there's no traffic, which is what produces the cold-start latency (covered earlier) on the next request — setting a minimum instance count keeps that many instances warm and ready *at all times*, even with zero traffic, completely eliminating cold starts for requests as long as traffic stays within that reserved capacity.
+
+```yaml
+# Cloud Run service configuration
+scaling:
+  minInstanceCount: 1   # ALWAYS keep at least 1 instance warm -- NEVER scales to zero
+  maxInstanceCount: 10
+```
+
+```text
+minInstanceCount: 0 (default): scales to ZERO during idle periods -- NEXT request pays the FULL cold-start cost
+minInstanceCount: 1: at least ONE instance stays WARM continuously -- that instance's requests NEVER cold-start,
+                     but you're now BILLED for that instance's uptime EVEN DURING periods of zero traffic
+```
+
+Because a warm instance sits idle (and billed) even when there's no traffic to serve, this setting directly trades ongoing cost for eliminated cold-start latency — genuinely worthwhile for a latency-sensitive, customer-facing endpoint where an occasional 8-second cold start is unacceptable, but wasteful for a rarely-invoked internal batch job where cold-start latency simply doesn't matter.
+
+**Common Pitfall:** setting `minInstanceCount` far higher than actually needed "just to be safe" — each warm instance is billed continuously regardless of whether it's ever used, so over-provisioning minimum instances for a service with genuinely bursty, infrequent traffic wastes money that scaling-to-zero (accepting occasional cold starts) would have saved; the setting should reflect an actual latency requirement, not a blanket "always keep some extra capacity around" habit.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Cloud Spanner's node-based (or Processing Unit-based) provisioning model, and how does adding compute capacity let both storage and throughput scale independently of the underlying data volume?**
+
+Spanner's compute (nodes, or fractional "Processing Units" for smaller deployments) is provisioned separately from how much data you store — adding more nodes increases both query throughput *and* the amount of storage the cluster can efficiently serve, without needing to separately reason about "do I have enough disk" the way a traditional single-server database would.
+
+```text
+Spanner provisioning: "3 nodes" (or "3000 Processing Units")
+  -- EACH node provides a CERTAIN amount of CPU/throughput capacity, AND storage capacity scales
+     ALONGSIDE it automatically -- adding NODES increases BOTH dimensions TOGETHER, not independently
+```
+
+```text
+A traditional single-server database: storage and compute are the SAME machine's resources --
+  scaling ONE (bigger disk) doesn't automatically scale the OTHER (more CPU/query throughput)
+
+Spanner: adding NODES scales BOTH throughput AND storage capacity SIMULTANEOUSLY, because DATA
+  is automatically SPLIT and REBALANCED across the underlying storage tied to however many
+  nodes are currently provisioned -- genuinely HORIZONTAL scaling, not a single bigger machine
+```
+
+Because Spanner automatically splits and rebalances data across its underlying storage infrastructure as nodes are added or removed, provisioning more compute capacity directly and automatically scales the cluster's ability to handle more data and more throughput together — the operator reasons about "how many nodes do I need for this workload's throughput," and storage capacity scales as a natural consequence, rather than being a separately-managed concern.
+
+**Common Pitfall:** under-provisioning Spanner nodes based purely on current data *volume* without considering actual query *throughput* needs (or vice versa) — because nodes govern both dimensions together, a workload with a small dataset but very high query throughput (or the reverse: huge dataset, low throughput) still needs to be sized based on whichever dimension is actually the binding constraint, not just "how much data do we have."
+
+---
+
 ---
