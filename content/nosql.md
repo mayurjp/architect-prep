@@ -1215,4 +1215,76 @@ Because the aggregate result is maintained incrementally as changes occur (rathe
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a "Collection" (MongoDB) or "Table"/"Column Family" (Cassandra) in a NoSQL database, and how does its typically relaxed structure differ from a strict relational table?**
+
+A relational table enforces one fixed schema for every row (every row has exactly the same columns, with declared types) — a NoSQL collection groups together conceptually similar records (documents, wide-column rows) *without* requiring every single one to share an identical structure, deferring the "does this shape make sense" decision to the application rather than a database-enforced schema.
+
+```json
+// Two documents in the SAME MongoDB "products" collection -- DIFFERENT shapes, both perfectly valid
+{ "_id": 1, "name": "Keyboard", "price": 29.99 }
+{ "_id": 2, "name": "Laptop", "price": 999.99, "specs": { "ram": "16GB", "cpu": "i7" } }
+```
+
+```text
+Relational TABLE: EVERY row has the EXACT SAME columns -- enforced by the database SCHEMA itself
+NoSQL COLLECTION: documents/rows CAN have different fields -- the "shape" is a CONVENTION, not an ENFORCED RULE
+```
+
+Because the database itself doesn't reject a document/row for having a different shape than its siblings, a collection can hold genuinely evolving data (a `Product` schema gaining a new optional field over time, applied only to newly-created documents) without a schema migration — directly connecting to the "Schema-on-Read versus Schema-on-Write" distinction covered elsewhere.
+
+**Common Pitfall:** assuming "flexible schema" means "no schema considerations needed at all" — application code still needs to handle documents of varying shapes correctly (a field that might or might not be present), and many NoSQL databases (MongoDB's JSON Schema validation, covered elsewhere) let you optionally enforce structure exactly where it matters, rather than the flexibility being an all-or-nothing proposition.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is Optimistic Concurrency Control in a NoSQL database (via a version field or ETag), and how does it differ from a lock-based (pessimistic) approach for handling concurrent updates?**
+
+Rather than acquiring a lock on a document before modifying it (pessimistic concurrency, which most NoSQL databases don't even support in the traditional relational sense), a NoSQL database typically supports Optimistic Concurrency Control: a version number or ETag stored on the document itself, and every write conditionally checks that the version hasn't changed since it was read — directly analogous to EF Core's Concurrency Token (`RowVersion`, covered elsewhere) applied to a document store.
+
+```json
+// Document as read by Client A
+{ "_id": 5, "name": "Widget", "stock": 10, "_etag": "v1" }
+```
+```text
+Client A wants to decrement stock to 9, conditioned on _etag still being "v1":
+  IF current _etag == "v1": write succeeds, stock becomes 9, _etag becomes "v2"
+  IF current _etag != "v1" (someone else already wrote): write is REJECTED --
+    Client A must re-read the CURRENT document and decide how to retry
+```
+
+Because the check-and-write happens as one atomic, conditional operation at the database level (rather than a separate lock-acquire step), no connection or session needs to hold a lock open for the duration of a user's think time — the trade-off is that a conflicting write is *rejected after the fact* rather than prevented up front, requiring the losing client to detect the rejection and retry.
+
+**Common Pitfall:** implementing "read, then write" logic against a NoSQL document without any version/ETag check at all — this reintroduces exactly the Lost Update problem (covered under EF Core's concurrency-token scenario) in a NoSQL context: two concurrent writers can each read the same starting value, and the second write silently overwrites the first's change with no error or conflict detection whatsoever.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is a Consistent Hashing Ring, and how does it let a distributed NoSQL database add or remove nodes while redistributing only a small fraction of the data, rather than reshuffling nearly everything?**
+
+Naively hashing a key modulo the number of nodes (`hash(key) % nodeCount`) means adding or removing even one node changes almost every key's target node, since the modulus itself changed — Consistent Hashing instead maps both nodes and keys onto positions on a fixed, circular hash space (a "ring"), so a key belongs to whichever node's position comes next going clockwise, meaning only the keys between the changed node and its neighbor need to move.
+
+```text
+A RING of hash values 0 to 2^32-1, with NODES placed at specific positions on it:
+
+        Node A (position 100)
+       /                      \
+Node D (pos 900)          Node B (pos 400)
+       \                      /
+        Node C (pos 600) ----
+
+A key hashing to position 250 belongs to Node B (the NEXT node clockwise from 250)
+-- if Node B is REMOVED, ONLY the keys between Node A and Node B's old position move to Node C --
+   EVERY OTHER key, belonging to Node A, Node C, or Node D, is COMPLETELY UNAFFECTED
+```
+
+Because only the specific range of the ring between the changed node and its immediate neighbor is affected, adding or removing a node in a large cluster causes a proportionally small fraction of keys to be redistributed — roughly `1/N` of the data for an N-node cluster — rather than the near-total reshuffle a naive modulus-based approach would trigger for the exact same operation.
+
+**Common Pitfall:** assuming consistent hashing alone guarantees perfectly even data distribution across all nodes — a small number of nodes placed at only a few ring positions can produce uneven "ranges" purely by chance; real implementations (Cassandra, DynamoDB) address this with "virtual nodes" (each physical node occupying many smaller positions scattered around the ring), smoothing out the distribution far more evenly than a naive one-position-per-node approach would achieve on its own.
+
+---
+
 ---

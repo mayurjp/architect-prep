@@ -1381,4 +1381,95 @@ Because `.TemporalAsOf()` composes with the rest of ordinary LINQ (`.Where()`, `
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is `OnModelCreating`, and why is it the conventional place to put Fluent API configuration rather than scattering it across other parts of a `DbContext`?**
+
+`OnModelCreating` is a method EF Core calls exactly once, at model-building time (covered earlier), giving you a `ModelBuilder` to configure exactly how your entity classes map onto database tables — anything the Fluent API can express (relationships, keys, indexes, query filters) belongs here, since it's the one place EF Core actually invokes during that model-building phase.
+
+```csharp
+public class AppDbContext : DbContext
+{
+    public DbSet<Product> Products { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<Product>()
+            .HasIndex(p => p.Sku)
+            .IsUnique(); // Fluent API configuration -- MUST go here, EF Core only reads this ONCE at startup
+    }
+}
+```
+
+Because `OnModelCreating` runs once during the model-building phase (covered earlier under Compiled Models) rather than per-query or per-request, any configuration expressed here becomes a permanent part of the built `IModel` for the application's lifetime — it's not re-evaluated per request, which is exactly why it's the correct, singular place for structural mapping decisions rather than something recomputed on every query.
+
+**Common Pitfall:** attempting to put per-request or per-user conditional logic directly into `OnModelCreating` (for instance, trying to vary an index based on some runtime request value) — since it only runs once at startup, this simply doesn't work the way conditional logic elsewhere in the application does; any genuinely per-request variability (like a multi-tenant Global Query Filter, covered earlier) must instead be expressed as a filter predicate referencing a value resolved *at query time*, not a one-time branch inside `OnModelCreating` itself.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is EF Core's `DbUpdateConcurrencyException`, and how do you actually handle it once a Concurrency Token (covered earlier) detects a conflicting update?**
+
+`DbUpdateConcurrencyException` is thrown by `SaveChanges()`/`SaveChangesAsync()` when EF Core detects that zero rows matched its `UPDATE ... WHERE Id = @id AND RowVersion = @expectedVersion` statement — meaning some other process changed the row's concurrency token since it was read, exactly the scenario the earlier `RowVersion`-based Optimistic Concurrency example produces.
+
+```csharp
+try
+{
+    await context.SaveChangesAsync();
+}
+catch (DbUpdateConcurrencyException ex)
+{
+    var entry = ex.Entries.Single(); // the conflicting tracked entity
+    var databaseValues = await entry.GetDatabaseValuesAsync(); // the CURRENT row, as it actually exists now
+
+    if (databaseValues is null)
+    {
+        // someone else DELETED the row entirely -- there's nothing left to reconcile against
+    }
+    else
+    {
+        // reload the current values, let the caller decide how to reconcile, or simply retry with fresh data
+        entry.OriginalValues.SetValues(databaseValues);
+    }
+}
+```
+
+Merely catching the exception isn't enough on its own — a real resolution strategy has to decide what happens next: reject the user's change entirely and show them the current data ("someone else already changed this, please review and retry"), attempt an automatic merge of non-conflicting fields, or simply retry the whole business operation against the freshly-reloaded row, depending on what makes sense for that specific business operation.
+
+**Common Pitfall:** catching `DbUpdateConcurrencyException` and simply calling `SaveChangesAsync()` again immediately without first reloading the entity's current database values — retrying blindly with the *same* stale in-memory values just reproduces the exact same version mismatch and throws the identical exception again; a correct retry must first refresh the tracked entity's understanding of the row's current state (as shown above) before attempting to save again.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is the `IEntityTypeConfiguration<T>` pattern, and how does it let Fluent API configuration be split across one file per entity, rather than accumulating inside one large `OnModelCreating` method?**
+
+For an application with many entities, putting every entity's Fluent API rules directly inline in `OnModelCreating` produces one enormous, unwieldy method — `IEntityTypeConfiguration<T>` lets each entity's configuration live in its own dedicated class, discovered and applied automatically rather than requiring `OnModelCreating` to know about every entity's specific rules itself.
+
+```csharp
+public class ProductConfiguration : IEntityTypeConfiguration<Product>
+{
+    public void Configure(EntityTypeBuilder<Product> builder)
+    {
+        builder.HasIndex(p => p.Sku).IsUnique();
+        builder.Property(p => p.Name).HasMaxLength(200).IsRequired();
+        builder.HasMany(p => p.Reviews).WithOne(r => r.Product);
+    }
+}
+
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    // ONE line discovers and applies EVERY IEntityTypeConfiguration<T> in the assembly --
+    // OnModelCreating itself never grows, no matter how many entities the application has
+    modelBuilder.ApplyConfigurationsFromAssembly(typeof(AppDbContext).Assembly);
+}
+```
+
+Because each entity's configuration lives in its own file, adding a new entity means adding a new `IEntityTypeConfiguration<T>` class rather than editing an ever-growing shared `OnModelCreating` method that every developer touching *any* entity's mapping would otherwise need to modify — directly reducing merge-conflict surface area on a file every entity-related change would otherwise need to touch.
+
+**Common Pitfall:** mixing both styles inconsistently within the same codebase — some entities configured inline in `OnModelCreating`, others via their own `IEntityTypeConfiguration<T>` class — making it unclear, for any given entity, where to actually look for its configuration; committing to one consistent convention (nearly always `IEntityTypeConfiguration<T>` plus `ApplyConfigurationsFromAssembly` for anything beyond a handful of entities) keeps configuration discoverable.
+
+---
+
 ---

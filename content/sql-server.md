@@ -1235,4 +1235,79 @@ Because the operation's progress is durably persisted rather than discarded on i
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is `NULL` in SQL Server, and why does comparing two `NULL` values with `=` never evaluate to true?**
+
+`NULL` represents "unknown" or "absent" rather than any concrete value — including the value zero, an empty string, or false — and because two unknown things can't be logically confirmed equal to each other, SQL Server's three-valued logic (`TRUE`/`FALSE`/`UNKNOWN`) evaluates `NULL = NULL` as `UNKNOWN`, not `TRUE`, even for the "same" `NULL`.
+
+```sql
+SELECT * FROM Users WHERE MiddleName = NULL;  -- returns ZERO rows, even for users with a NULL MiddleName!
+SELECT * FROM Users WHERE MiddleName IS NULL; -- the CORRECT way to check for NULL
+```
+
+```text
+NULL = NULL     -> UNKNOWN (NOT true!)
+NULL = 'Alice'  -> UNKNOWN
+5 = 5           -> TRUE (ordinary values compare normally)
+```
+
+Because a `WHERE` clause only includes rows where the condition evaluates to `TRUE` (not `UNKNOWN`), `WHERE MiddleName = NULL` silently returns no rows at all, rather than throwing an error or matching NULL rows — SQL Server provides the dedicated `IS NULL`/`IS NOT NULL` predicates specifically because ordinary comparison operators (`=`, `<>`) are structurally unable to express a NULL check correctly.
+
+**Common Pitfall:** writing `WHERE column = NULL` (or `<> NULL`) expecting it to behave like an ordinary equality check — it silently returns zero rows instead of raising an error, making this a particularly easy mistake to overlook during testing if the specific NULL-matching code path isn't explicitly exercised; always use `IS NULL`/`IS NOT NULL` for NULL checks.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is SQL Server's `WITH (NOLOCK)` query hint, and what specific risk (dirty reads) does it trade for reduced blocking?**
+
+`WITH (NOLOCK)` tells SQL Server to read data without taking shared locks and without respecting other transactions' exclusive locks — effectively reading at the Read Uncommitted isolation level for that one query, trading strict data correctness for reduced blocking against concurrent writers.
+
+```sql
+SELECT * FROM Orders WITH (NOLOCK) WHERE Status = 'Pending';
+-- reads WITHOUT taking shared locks, and WITHOUT waiting on other transactions' exclusive locks
+```
+
+```text
+Transaction A: UPDATE Orders SET Total = 150 WHERE Id = 5;  -- NOT yet committed, might still ROLL BACK
+Transaction B (WITH NOLOCK): SELECT Total FROM Orders WHERE Id = 5; -- reads 150 -- a "DIRTY READ"
+-- if Transaction A then ROLLS BACK, Transaction B already acted on a value that NEVER actually existed
+```
+
+Because `NOLOCK` reads whatever value happens to be in the data pages at that instant — including changes from a transaction that hasn't committed and might still roll back — a query using it can observe data that never actually existed as a committed, durable value; this trade-off is sometimes accepted for low-stakes reporting queries where reduced blocking matters more than perfect accuracy, but it's inappropriate for anything financially or logically sensitive.
+
+**Common Pitfall:** sprinkling `WITH (NOLOCK)` across queries as a reflexive "make it faster" habit without understanding it changes correctness, not just performance — for anything where an occasionally-wrong, possibly-uncommitted value could cause real harm (financial calculations, inventory decisions), Read Committed Snapshot Isolation (covered earlier) provides a similarly non-blocking read experience *without* the dirty-read risk, and is almost always the better choice over `NOLOCK`.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is SQL Server's Query Store, and how does it let you compare a query's execution plan and performance characteristics across time, catching a plan regression that a single point-in-time look at `sys.dm_exec_query_stats` (covered earlier) cannot?**
+
+Query Store is a built-in feature that persistently records every query's execution plans and runtime statistics *over time*, specifically so you can compare "how did this query perform yesterday versus today" — something the transient, in-memory `sys.dm_exec_query_stats` (covered earlier) can't provide, since its data is lost whenever a plan is evicted from cache or the server restarts.
+
+```sql
+ALTER DATABASE MyApp SET QUERY_STORE = ON; -- enable it, per database
+
+-- find queries whose average execution time got WORSE recently versus their own historical baseline
+SELECT q.query_id, rs.avg_duration, rs.last_execution_time
+FROM sys.query_store_query q
+JOIN sys.query_store_runtime_stats rs ON q.query_id = rs.query_id
+ORDER BY rs.avg_duration DESC;
+```
+
+```text
+Query Store tracks MULTIPLE plans a SINGLE query has used OVER TIME -- if SQL Server silently
+switches to a WORSE plan (a classic PARAMETER SNIFFING regression, covered earlier), Query Store's
+history lets you SEE both the OLD, good plan and the NEW, bad plan side by side, and even manually
+FORCE the query back to the previously-good plan via sp_query_store_force_plan
+```
+
+Because Query Store persists this history durably (surviving server restarts and plan cache evictions, unlike the transient DMVs), it's specifically designed to answer "did something change" questions — a query that was fast yesterday and slow today, with the *exact* plan that changed identifiable and even reversible, rather than only ever being able to inspect whatever plan happens to be in cache right now.
+
+**Common Pitfall:** relying solely on `sys.dm_exec_query_stats` (covered earlier) to diagnose "this query got slower recently" — its data disappears the moment a plan is evicted from cache (memory pressure, a server restart, an index rebuild invalidating cached plans), losing exactly the historical comparison needed to confirm a regression actually happened and pinpoint when; Query Store's durable, time-based history is the tool built specifically for this diagnostic need.
+
+---
+
 ---

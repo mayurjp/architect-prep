@@ -1481,3 +1481,79 @@ Fuzz Testing's random inputs are often deliberately, aggressively malformed — 
 **Common Pitfall:** conflating Fuzz Testing with Property-Based Testing simply because both generate random test inputs — Property-Based Testing requires a well-defined property to check and is primarily a correctness-verification technique; Fuzz Testing requires no such property at all and is primarily a robustness/security technique hunting for crashes and vulnerabilities, and the two are complementary rather than interchangeable, often both employed together against the same system for their genuinely different purposes.
 
 ---
+
+## Beginner — Question 15
+
+**Q15: What is a Test Runner, and how is its job distinct from the testing framework/assertion library (like xUnit) itself?**
+
+A testing framework (xUnit, NUnit) provides the attributes and assertion methods used to *write* a test (`[Fact]`, `Assert.Equal`) — a Test Runner is the separate tool responsible for *discovering* every test in a project, *executing* them, and reporting pass/fail results, whether that's via a CLI command, an IDE's built-in test explorer, or a CI pipeline step.
+
+```bash
+dotnet test  # the TEST RUNNER -- discovers every [Fact]/[Theory] in the project and executes them
+```
+
+```text
+xUnit (the FRAMEWORK)         -- defines HOW to WRITE a test: attributes, assertions, test lifecycle
+dotnet test / VS Test Explorer (the RUNNER) -- defines HOW to DISCOVER and EXECUTE those written tests
+```
+
+Because the runner and the framework are separate concerns, the same xUnit tests can be executed by multiple different runners (the `dotnet test` CLI, Visual Studio's Test Explorer, a CI server's test-reporting plugin) without the test code itself needing to change at all — the runner's job is purely discovery, execution, and reporting, while the framework's job is purely providing the vocabulary to express a test's logic.
+
+**Common Pitfall:** assuming a test that "passes locally in the IDE" is guaranteed to behave identically under a different runner (a CI pipeline's `dotnet test` invocation) — subtle differences in how a runner handles parallelization, environment variables, or working directories can occasionally cause a test to behave differently across runners, which is why running the exact same CI command locally (rather than relying solely on an IDE's test explorer) is a valuable sanity check before pushing.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is the value of a consistent test naming convention (like `MethodName_Scenario_ExpectedBehavior`), and why does it matter specifically for a FAILING test's diagnostic value?**
+
+A well-named test communicates what broke without needing to open the test's body at all — a CI failure list showing `WithdrawFunds_InsufficientBalance_ThrowsException` immediately tells a reader what scenario failed and what was expected, versus a vaguely-named `Test3` that provides zero information until someone actually opens the file and reads its implementation.
+
+```csharp
+[Fact]
+public void WithdrawFunds_InsufficientBalance_ThrowsException() { /* ... */ } // self-describing failure
+
+[Fact]
+public void Test3() { /* ... */ } // a FAILURE here tells you NOTHING without opening the file
+```
+
+```text
+CI test report, ONE test failing:
+  ✗ WithdrawFunds_InsufficientBalance_ThrowsException   <-- IMMEDIATELY informative, even from a CI dashboard
+  ✗ Test3                                                 <-- tells you NOTHING without further investigation
+```
+
+Because a failing CI build is often triaged quickly by someone who wasn't the original test's author (an on-call engineer, a reviewer), a test name that encodes the method under test, the scenario, and the expected behavior turns the CI failure list itself into useful diagnostic information — dramatically reducing the time needed to understand *what broke* before even opening the actual test file.
+
+**Common Pitfall:** naming tests generically (`Test1`, `Test2`, or simply mirroring the method name with no scenario detail, like `WithdrawFundsTest`) — this provides essentially zero diagnostic value from a failure report alone, forcing every triage to start by opening and reading the test's actual implementation just to understand what it was even checking.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Deterministic Simulation Testing, and how does running an entire distributed system inside a single-threaded, simulated environment with a controllable virtual clock let you reproduce race conditions deterministically?**
+
+Ordinary distributed-systems testing runs real network calls, real threads, and real timers — meaning a race condition might only reproduce 1 time in 10,000 runs, if at all, since real-world timing is inherently non-deterministic. Deterministic Simulation Testing instead runs the *entire* system (network, disk, clock) inside a single-threaded simulator that controls every source of non-determinism explicitly, making a given failure scenario perfectly, deterministically reproducible from a single random seed.
+
+```text
+REAL distributed test:
+  Node A and Node B communicate over an ACTUAL network -- timing is governed by the REAL OS scheduler,
+  REAL network latency, REAL clock -- a specific race condition might reproduce RARELY, or NEVER, in testing
+
+DETERMINISTIC SIMULATION test:
+  Node A and Node B run as SIMULATED actors inside ONE single-threaded process -- the simulator
+  EXPLICITLY controls: message delivery ORDER, SIMULATED network delay, a VIRTUAL clock's tick --
+  GIVEN THE SAME random SEED, the EXACT SAME sequence of events happens EVERY SINGLE TIME
+```
+
+```text
+A "found" race condition, discovered by an unlucky simulation run using seed #48291, can be
+REPLAYED exactly by re-running with THAT SAME seed -- turning a "reproduces 1 in 10,000 times
+in production" bug into a 100%-reproducible, debuggable test case, RUN ENTIRELY LOCALLY
+```
+
+Because every source of real-world non-determinism (thread scheduling, network timing, clock ticks) is replaced by the simulator's own fully-controlled, seeded pseudo-randomness, the exact same seed always produces the exact same sequence of simulated events — letting a rare, hard-to-reproduce race condition be captured once and then replayed deterministically as many times as needed while debugging, something no amount of re-running a real, non-deterministic distributed test could reliably achieve.
+
+**Common Pitfall:** assuming Deterministic Simulation Testing is simply "unit testing with extra steps" — building a genuine simulation harness (a virtual clock, simulated network partitions/delays, single-threaded actor scheduling standing in for real concurrency) is a substantial upfront engineering investment, usually undertaken only by teams building genuinely distributed, correctness-critical systems (databases, consensus protocols) where the payoff of deterministically reproducing rare distributed race conditions justifies that investment.
+
+---

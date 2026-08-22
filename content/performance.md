@@ -1247,3 +1247,73 @@ Because the requester at `t=61s` gets an immediate response (the still-reasonabl
 **Common Pitfall:** setting `max-age` alone without `stale-while-revalidate`, and being surprised that the request arriving *right after* expiration experiences a noticeable latency spike (having to wait for a full, synchronous origin fetch) compared to every other cached request — `stale-while-revalidate` specifically smooths over exactly this "worst-case, first request after expiration" latency spike, letting that unlucky request still get a fast (if momentarily stale) response while the refresh happens transparently in the background instead.
 
 ---
+
+## Beginner — Question 15
+
+**Q15: What is the difference between a Load Test and a Stress Test, and what different question does each one actually answer?**
+
+A Load Test measures how the system behaves under an *expected*, realistic level of traffic (does it meet its performance targets under normal/peak conditions?) — a Stress Test deliberately pushes traffic *beyond* expected levels, specifically to find out where and how the system eventually breaks, and whether it degrades gracefully or fails catastrophically.
+
+```text
+LOAD TEST:   simulate 1,000 concurrent users (the EXPECTED peak) -- does response time stay under 200ms?
+STRESS TEST: keep INCREASING simulated users -- 2,000... 5,000... 10,000 -- until something BREAKS --
+             WHERE does it break, and HOW does it fail (graceful slowdown vs. total outage)?
+```
+
+Because a Load Test only validates behavior at an already-anticipated traffic level, it says nothing about how much headroom actually exists above that level, or what happens when that headroom runs out — a Stress Test answers a genuinely different, complementary question: not "does it work under normal conditions" but "what's the actual breaking point, and does the system fail safely (rejecting excess requests cleanly) or catastrophically (crashing, corrupting data)."
+
+**Common Pitfall:** running only a Load Test at the expected traffic level and considering performance testing "done" — this provides no information about the system's actual breaking point or failure mode under a genuine, unexpected traffic spike (a marketing campaign going viral, a retry storm); a Stress Test specifically answers the "what happens beyond our expected capacity" question a Load Test is not designed to address.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What are `Min Pool Size` and `Max Pool Size` in a database connection string, and how do misconfigured values create either a cold-start latency problem or an exhausted-connection-pool problem?**
+
+Connection Pooling (covered earlier) reuses a set of already-open database connections rather than opening a fresh one per request — `Min Pool Size` controls how many connections stay open even when idle (avoiding the cost of opening one from scratch on the next request), while `Max Pool Size` caps how many can ever be open simultaneously, protecting the database from being overwhelmed by too many concurrent connections.
+
+```text
+Connection String: "...;Min Pool Size=10;Max Pool Size=100;"
+
+Min Pool Size TOO LOW (e.g., 0): every request after a quiet period pays the FULL cost of
+  opening a FRESH connection -- a "cold start" latency spike on the FIRST requests after idle time
+
+Max Pool Size TOO LOW: under HIGH concurrent load, requests needing a connection but finding
+  the pool already at its CAP must WAIT for one to free up -- manifesting as REQUEST TIMEOUTS
+  that look like a DATABASE problem, but are actually a POOL-SIZE configuration problem
+```
+
+Because these two settings bound opposite failure modes — too few connections kept warm causes latency spikes after idle periods, too low a maximum causes contention/timeouts under genuine concurrent load — correctly sizing them requires understanding the application's actual concurrency profile (how many simultaneous database operations realistically happen at peak), not simply picking arbitrary round numbers.
+
+**Common Pitfall:** diagnosing intermittent request timeouts under load as "the database is slow" without first checking whether `Max Pool Size` is simply too small for the application's actual peak concurrency — exhausting the connection pool produces symptoms (requests hanging, then timing out) that superficially resemble a genuinely slow database, but the actual fix is raising the pool size limit (or reducing how long each connection is held), not database-side query tuning.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is a Memory-Mapped File, and how does it let a very large file be accessed as if it were an in-memory array, without loading the entire file's contents into managed memory at once?**
+
+A Memory-Mapped File asks the operating system to map a file's contents directly into the process's virtual address space — reading or writing through that mapped memory region transparently reads/writes the underlying file, with the OS's own page cache handling which portions are actually resident in physical RAM at any given moment, rather than the application explicitly loading the whole file itself.
+
+```csharp
+using var mmf = MemoryMappedFile.CreateFromFile("huge-dataset.bin", FileMode.Open);
+using var accessor = mmf.CreateViewAccessor(0, 0); // maps the ENTIRE file, but doesn't load it all into RAM upfront
+
+long value = accessor.ReadInt64(1_000_000_000); // reads 8 bytes at a specific OFFSET --
+// the OS transparently pages in JUST the needed portion of the file, NOT the entire multi-gigabyte file
+```
+
+```text
+A NAIVE approach -- File.ReadAllBytes("huge-dataset.bin") -- loads the ENTIRE file into MANAGED
+memory upfront, which for a 50GB file is SIMPLY NOT POSSIBLE within available RAM
+
+A MEMORY-MAPPED FILE -- the OS's VIRTUAL MEMORY system handles PAGING portions of the file IN
+and OUT of PHYSICAL RAM transparently, AS NEEDED -- letting code ACCESS ANY OFFSET within a
+FILE FAR LARGER than available PHYSICAL RAM, WITHOUT the application EVER loading it ALL at once
+```
+
+Because the operating system's virtual memory subsystem (the same mechanism underlying ordinary process memory) handles paging file contents in and out of physical RAM on demand, a memory-mapped file lets application code treat a multi-gigabyte file as if it were a giant, randomly-accessible in-memory array — genuinely useful for very large datasets (a search index, a large binary data file) accessed at scattered, unpredictable offsets, where loading the whole thing into managed memory upfront simply isn't feasible.
+
+**Common Pitfall:** using a Memory-Mapped File for genuinely sequential, whole-file processing (reading a file start-to-finish exactly once) where an ordinary buffered `FileStream` would perform just as well with far less complexity — memory-mapped files earn their added complexity specifically for large-file *random-access* patterns (jumping to arbitrary offsets repeatedly), not as a universal replacement for straightforward sequential file I/O.
+
+---
