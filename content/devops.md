@@ -1149,4 +1149,91 @@ Because the user only ever sees v1's response, a genuinely broken new version (v
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is build metadata (a git commit SHA, or a build number) embedded into a deployed artifact, and how does it let you verify exactly which code version is actually running in a given environment?**
+
+Embedding a unique identifier — the exact git commit SHA, or a CI-assigned build number — directly into a deployed artifact (a response header, a `/version` endpoint, an application's own startup log line) lets anyone verify exactly which specific code version is actually running, without needing to trust deployment records or assume the deployment pipeline worked as intended.
+
+```csharp
+// EMBEDDED at BUILD time, via CI -- baked directly INTO the application ITSELF
+public static class BuildInfo
+{
+    public const string CommitSha = "a1b2c3d4"; // INJECTED by the CI pipeline at BUILD time
+    public const string BuildNumber = "2026.03.15.42";
+}
+
+app.MapGet("/version", () => new { commit = BuildInfo.CommitSha, build = BuildInfo.BuildNumber });
+```
+```bash
+curl https://api.example.com/version
+# { "commit": "a1b2c3d4", "build": "2026.03.15.42" }
+# -- CONFIRMS, DIRECTLY from the RUNNING application ITSELF, EXACTLY which SOURCE CODE commit is
+#    ACTUALLY deployed HERE, RIGHT NOW -- WITHOUT needing to TRUST deployment RECORDS/LOGS ALONE
+```
+Because this identifier is baked directly into the running artifact itself (not merely recorded in a separate deployment log that could be stale or inaccurate), anyone investigating an incident can query the running application directly and get a definitive, authoritative answer to "what code is actually running here" — invaluable when a deployment record says one thing but the actual running behavior suggests something else might be true, letting the discrepancy be resolved immediately rather than debated based on potentially-unreliable secondary records.
+
+**Common Pitfall:** relying purely on a deployment pipeline's own logs or a change-management ticket to determine what's currently running in a given environment, without the running application itself exposing a definitive, directly-queryable answer — deployment records can be wrong (a rollback that wasn't properly logged, a manual hotfix applied out-of-band) in ways that only surface once someone actually queries the running system directly and finds a mismatch; embedding build metadata directly into the artifact removes this entire class of ambiguity.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What specific challenge does a schema-breaking database migration pose for a Blue-Green Deployment, beyond what a purely stateless service's Blue-Green switch would suggest?**
+
+Blue-Green Deployment (covered earlier) works cleanly for a stateless service — but a shared database sitting behind both the Blue and Green environments complicates this significantly: if Green's new code requires a schema change that Blue's *old* code can't tolerate, the two environments can no longer safely share that same database during the transition window, breaking Blue-Green's clean "just switch traffic back if something goes wrong" rollback guarantee.
+
+```text
+BLUE (current, STABLE version) and GREEN (NEW version) SHARE the SAME database, in the SIMPLE
+Blue-Green model:
+
+IF Green's new code REQUIRES a BREAKING schema change (renaming a column BLUE's code STILL expects
+BY its OLD name):
+  -- the INSTANT this migration RUNS, BLUE's OLD code BREAKS IMMEDIATELY (its queries reference
+     a COLUMN NAME that NO LONGER EXISTS) -- EVEN THOUGH traffic HASN'T been SWITCHED to Green YET
+  -- the CLEAN "just switch traffic BACK to Blue if Green has a PROBLEM" ROLLBACK SAFETY NET
+     is NOW BROKEN -- Blue is ALREADY broken TOO, by the SAME schema change
+```
+```text
+The STANDARD MITIGATION -- the "Expand/Contract" pattern (ALSO called "Parallel Change"):
+  1. EXPAND: ADD the new column, WITHOUT removing the OLD one -- BOTH Blue's OLD code and Green's
+     NEW code can STILL run, SIMULTANEOUSLY, against THIS SAME schema, UNCHANGED in COMPATIBILITY
+  2. Deploy GREEN, SWITCH traffic, VERIFY it's HEALTHY
+  3. CONTRACT: ONLY ONCE Blue is GENUINELY no longer needed (the switch is CONFIRMED successful,
+     with NO rollback risk remaining) -- THEN, and ONLY then, remove the OLD column
+```
+The Expand/Contract pattern specifically avoids ever making a single migration step that simultaneously breaks the currently-running (Blue) version — by first only *adding* new schema elements (both old and new code can coexist against the expanded schema) and only *removing* the old ones after the new version is confirmed stable and the old version is genuinely no longer needed, the database migration itself becomes safely compatible with Blue-Green's core "either version can run against the current schema" assumption throughout the transition.
+
+**Common Pitfall:** treating a database migration as just another routine part of a Blue-Green deployment's "deploy the new version" step, without recognizing that a schema-breaking migration can invalidate Blue-Green's entire rollback safety guarantee the instant it runs — genuinely safe Blue-Green deployments involving schema changes require the Expand/Contract discipline specifically, ensuring the *shared* database remains simultaneously compatible with both the old and new application code throughout the transition window, not just planning the application-level switch alone.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is GitOps' reconciliation loop, and how does a controller's continuous "compare actual versus desired state, then reconcile" cycle differ from a one-time "push" deployment by continuously self-healing away from unauthorized manual changes?**
+
+A traditional CI/CD pipeline pushes a deployment once, at release time, and then stops paying attention — GitOps' reconciliation loop instead runs *continuously*, forever, repeatedly comparing the cluster's actual, live state against what's declared in Git, and automatically correcting any detected difference, not just at deployment time but at all times afterward too.
+
+```text
+TRADITIONAL "push" deployment -- runs ONCE, then STOPS PAYING ATTENTION:
+  CI/CD pipeline DEPLOYS version 2.0 -- JOB DONE, pipeline EXITS
+  -- LATER, someone MANUALLY runs 'kubectl edit' to TWEAK a running Deployment DIRECTLY --
+  -- NOTHING notices OR corrects this -- the MANUAL change PERSISTS, SILENTLY, INDEFINITELY --
+
+GitOps RECONCILIATION LOOP -- runs CONTINUOUSLY, FOREVER, NEVER "finishes":
+  Controller (e.g., ArgoCD/Flux) CONTINUOUSLY: "does the CLUSTER's ACTUAL state match WHAT'S
+  DECLARED in Git, RIGHT NOW?"
+  -- SOMEONE manually 'kubectl edit's a Deployment DIRECTLY, BYPASSING Git ENTIRELY
+  -- the CONTROLLER'S NEXT reconciliation PASS (seconds/minutes LATER) DETECTS this DRIFT
+  -- AUTOMATICALLY REVERTS the CLUSTER back to MATCH what Git DECLARES -- the MANUAL change is
+     SILENTLY, AUTOMATICALLY UNDONE, WITHOUT ANY human needing to NOTICE or INTERVENE AT ALL
+```
+Because the controller never stops comparing and correcting, any unauthorized manual change (a well-intentioned emergency hotfix, an accidental typo from `kubectl edit`, or a malicious change from a compromised credential) gets automatically reverted on the very next reconciliation pass — turning Git into not just the *initial* source of truth at deployment time, but the *continuously enforced* source of truth for as long as the cluster exists, directly reinforcing the Immutable Infrastructure discipline covered earlier by making manual drift genuinely short-lived rather than silently permanent.
+
+**Why this specifically differs from Infrastructure Drift Detection (covered earlier) in one important way:** Drift Detection (covered earlier) typically *alerts* a human that drift occurred, for them to decide how to respond — GitOps' reconciliation loop goes a step further, *automatically* correcting the drift itself, without waiting for human intervention at all; Drift Detection is a monitoring/alerting practice, while GitOps' reconciliation is an active, self-healing enforcement mechanism built directly into the deployment model itself.
+
+**Common Pitfall:** performing a legitimate emergency hotfix via direct `kubectl edit` during an incident, without also updating the corresponding Git-declared configuration to match — the very next reconciliation pass silently reverts the emergency fix back to the old, broken state, since the controller has no way of knowing the manual change was actually intentional; any genuine change, even an urgent one, needs to go through Git in a GitOps-managed cluster, or it will be automatically and silently undone by the reconciliation loop's own normal, expected behavior.
+
+---
+
 ---

@@ -1183,6 +1183,91 @@ Modern authenticated encryption modes (AES-GCM, ChaCha20-Poly1305) verify the ci
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is Sensitive Data Exposure via an API that returns more fields than a client actually needs, and how does returning a full user object — including a password hash field — create risk even if the client never actually displays it?**
+
+An endpoint returning an entire internal object (rather than a purpose-built DTO, covered elsewhere) can leak sensitive fields the client-side UI simply chooses not to render — but "not rendered" doesn't mean "not present"; the data still travels over the network and sits in the browser's own memory/network inspector, fully readable by anyone with access to the raw HTTP response, regardless of whether the UI happens to display it.
+
+```csharp
+// VULNERABLE -- returns the ENTIRE User entity, INCLUDING PasswordHash, EVEN THOUGH the UI only DISPLAYS name/email
+[HttpGet("{id}")]
+public User GetUser(int id) => _db.Users.Find(id); // PasswordHash, SecurityStamp, etc. -- ALL included
+```
+```json
+{ "id": 5, "name": "Alice", "email": "alice@example.com", "passwordHash": "AQAAAAIAAYagAAAAEL9...", "securityStamp": "..." }
+```
+```text
+EVEN THOUGH the FRONTEND UI only ever DISPLAYS "name" and "email" -- ANYONE inspecting the RAW
+HTTP RESPONSE (via browser DEV TOOLS, a PROXY tool like Burp Suite, or SIMPLY calling the API
+DIRECTLY with curl) can SEE the FULL passwordHash and securityStamp VALUES DIRECTLY -- the UI's
+CHOICE not to DISPLAY a field provides ZERO actual PROTECTION for that field's DATA AT ALL
+```
+Because the actual HTTP response contains every field on the full entity regardless of what the client's UI code happens to choose to render, "the frontend doesn't show it" provides no real security boundary at all — anyone capable of inspecting the raw network traffic (a legitimate, logged-in user using their browser's own dev tools, not even a sophisticated attacker) can see every field the API actually returned, directly connecting to the earlier discussion of why a purpose-built DTO (covered under Web API), rather than a full entity, should define exactly what a response contains.
+
+**Common Pitfall:** relying on frontend code to "hide" sensitive fields by simply not rendering them, treating this as equivalent to the backend never having sent them at all — the backend API response is the actual security boundary; a DTO's field selection determines what's genuinely protected, while a frontend's rendering choice determines only what's *displayed*, two fundamentally different things that are easy to conflate until someone actually inspects the raw network traffic and finds the "hidden" data was never actually hidden from the network at all.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is a Business Logic Vulnerability, as a distinct category from the technical vulnerabilities covered extensively (SQL Injection, XSS), and why can't automated scanners typically detect this category at all?**
+
+A Business Logic Vulnerability exploits a flaw in an application's *intended, working-as-designed* business rules — not a technical bug like unescaped input or a missing authorization check, but a legitimate feature used in a way its designers never anticipated, producing an outcome that's technically "correct" by the code's own logic but genuinely harmful to the business.
+
+```csharp
+// TECHNICALLY correct code -- NO SQL injection, NO XSS, PROPER authorization -- but a BUSINESS LOGIC FLAW
+[HttpPost("order")]
+[Authorize]
+public IActionResult PlaceOrder(int productId, int quantity)
+{
+    var product = _db.Products.Find(productId);
+    var total = product.Price * quantity; // WHAT IF 'quantity' is NEGATIVE?
+    _paymentService.Charge(User.CustomerId, total); // a NEGATIVE quantity -> a NEGATIVE total -> a NEGATIVE charge
+    // -- a "CHARGE" of -$500 is, TECHNICALLY, a CREDIT to the ATTACKER'S account/card --
+    return Ok();
+}
+```
+An attacker submitting `quantity = -5` triggers a "charge" of a negative amount — which, depending on the payment provider's own handling, could translate directly into money being *credited back* to the attacker rather than charged — nothing here involves SQL injection, XSS, or a broken authorization check; every technical control is functioning exactly as designed, and the vulnerability lies entirely in a missing business rule ("quantity must be a positive integer") that no generic security scanner would ever think to check for, since it requires understanding the actual business meaning of "quantity" and "charge" in this specific application's specific domain.
+
+**Why automated vulnerability scanners are structurally unable to detect this category:** a scanner can recognize generic technical patterns (an unescaped SQL string, a reflected input in HTML output) that apply across virtually any application — a Business Logic Vulnerability requires understanding what "correct" behavior actually *means* for this specific application's specific business rules, something a generic, pattern-matching scanner has no way to know; catching this category requires a human reviewer (or a very specifically-tailored test) who genuinely understands the business domain and can reason about "what happens if a legitimate feature is used in an unintended way," not a tool checking for known technical vulnerability signatures.
+
+**Common Pitfall:** relying on automated security scanning tools as a complete measure of an application's security posture, without dedicated manual review or threat-modeling specifically focused on business logic — a clean scan result says nothing about whether business rules (negative quantities, discount stacking, race conditions in a loyalty-points system) have been thought through and defended against; business logic vulnerabilities require deliberate, domain-aware manual review, a fundamentally different activity than running an automated technical vulnerability scanner.
+
+---
+
+## Advanced — Question 13
+
+**Q13: How does an attacker chain together multiple innocent-looking classes' side effects — property setters, finalizers — that were never individually dangerous, into a full remote code execution exploit via Insecure Deserialization (covered earlier)?**
+
+A single class's property setter or finalizer having a side effect (writing a file, starting a process) usually isn't dangerous in isolation — a Deserialization Gadget Chain exploits the fact that deserializing one object can trigger a *cascade*: setting Object A's property triggers Object A's own setter logic, which might construct Object B (triggering B's constructor/setter), which might construct Object C, and so on — an attacker who can find and chain together the right sequence of otherwise-harmless classes already present in an application's loaded assemblies can compose a full, powerful exploit from pieces that were never individually designed to be dangerous at all.
+
+```text
+An ATTACKER'S crafted deserialization payload doesn't need to find ONE single "dangerous" class --
+it can CHAIN TOGETHER several INNOCENT-LOOKING ones, EACH contributing ONE SMALL, UNREMARKABLE step:
+
+  Gadget 1: a CACHING class whose PROPERTY SETTER, when GIVEN a specific object, calls ".ToString()"
+            on it (COMPLETELY innocent -- MANY caching classes do THIS)
+  Gadget 2: a class whose OWN ".ToString()" override HAPPENS to invoke a DELEGATE/CALLBACK stored
+            in one of ITS OWN fields (ALSO completely innocent in ISOLATION -- a common PATTERN)
+  Gadget 3: the ATTACKER sets THAT delegate/callback field, during DESERIALIZATION, to POINT AT
+            Process.Start() (or an EQUIVALENT dangerous OPERATION)
+
+CHAINED together: Gadget 1's setter -> CALLS .ToString() -> TRIGGERS Gadget 2's OVERRIDE ->
+                  INVOKES the ATTACKER-CONTROLLED delegate -> EXECUTES Process.Start() --
+                  ARBITRARY CODE EXECUTION, built ENTIRELY from PIECES, NONE of which were
+                  INDIVIDUALLY "DANGEROUS" code AT ALL
+```
+Because none of the individual gadgets is inherently malicious — each is a completely ordinary, unremarkable piece of code doing something a class of its kind commonly does — this class of vulnerability is notoriously difficult to catch via ordinary code review, since reviewing any single class in isolation reveals nothing alarming at all; the danger emerges only from the specific *combination and sequencing* an attacker can construct across many classes already present in the application's loaded assemblies (including third-party library code the application's own developers never wrote).
+
+**Why this specifically reinforces why deserializing into a fixed, known type (covered earlier) is the actual, structural fix, rather than trying to audit every class for "dangerous" behavior:** because gadget chains can be built from combinations of individually-innocent classes across an application's *entire* set of loaded assemblies (including third-party dependencies), auditing every single class for "could this be part of some gadget chain" is essentially infeasible at scale — the actual fix (covered earlier) is architectural: deserializing into a specific, known, fixed type structurally prevents the attacker from ever specifying *which* type gets instantiated in the first place, closing off the entire technique regardless of how many potentially-chainable gadgets happen to exist somewhere in the loaded assemblies.
+
+**Common Pitfall:** attempting to defend against gadget-chain attacks by specifically searching for and removing "known dangerous" classes from an application's dependencies, treating it as a targeted cleanup task — new gadget chains are continuously discovered across the broader software ecosystem's libraries, and a defense based on removing today's known-dangerous classes provides no protection against tomorrow's newly-discovered chain; the structural fix (restricting deserialization to fixed, known types, covered earlier) closes off the entire attack technique regardless of which specific gadgets might exist, rather than playing an endless, incomplete game of whack-a-mole against individually-identified dangerous classes.
+
+---
+
+---
+
 ## Beginner — Question 12
 
 **Q12: What is Information Disclosure via exposed `.git`/`.env` files or verbose server banners, and how does a misconfigured deployment accidentally expose files that were never meant to be publicly servable?**

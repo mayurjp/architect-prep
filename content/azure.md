@@ -1076,4 +1076,85 @@ Because Arc projects the external resource's identity and management surface int
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is the difference between Azure Key Vault's older Access Policy model and its newer RBAC-based permission model, and why does Microsoft now recommend migrating to RBAC?**
+
+The older Access Policy model grants permissions directly on the Key Vault resource itself, in a flat list scoped only to that one vault — the newer RBAC model integrates Key Vault permissions into Azure's broader Role-Based Access Control system (used consistently across every other Azure resource type), letting Key Vault access be managed with the exact same tools, patterns, and audit trail as everything else in a subscription.
+
+```text
+ACCESS POLICY model -- a FLAT list, SCOPED ONLY to THIS one Key Vault, SEPARATE from Azure's
+GENERAL RBAC system used EVERYWHERE ELSE:
+  "Grant get/list secrets permission to User X, on THIS specific vault" -- managed THROUGH
+  Key Vault's OWN, SEPARATE permission UI/API, DISTINCT from how EVERY OTHER Azure resource's
+  access is managed
+
+RBAC model -- Key Vault permissions become ORDINARY Azure ROLE ASSIGNMENTS, THE SAME as EVERY
+OTHER resource:
+  "Assign the 'Key Vault Secrets User' ROLE to User X, SCOPED to THIS vault" -- managed through
+  the EXACT SAME Azure RBAC system used for EVERY OTHER resource type -- ONE CONSISTENT model,
+  ONE CONSISTENT audit trail, ACROSS the ENTIRE subscription
+```
+Because RBAC integrates Key Vault access into the same permission system governing every other Azure resource, an organization's access reviews, audit logging, and permission-management tooling all work consistently across Key Vault and everything else — rather than Key Vault requiring its own separate, Access-Policy-specific tooling and mental model that doesn't align with how the rest of Azure's resources are governed.
+
+**Common Pitfall:** continuing to use the older Access Policy model for new Key Vault deployments out of familiarity, unaware that Microsoft has been actively steering customers toward the RBAC model as the current recommended approach — the RBAC model provides more granular, more consistent permission management (fine-grained roles like "Secrets User" versus "Secrets Officer") that aligns Key Vault's access model with the rest of Azure, rather than requiring a separate, vault-specific permission paradigm.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is Azure Service Bus's Duplicate Detection feature, and how does specifying a MessageId let the broker discard a republished duplicate within a configured time window — a concrete Azure implementation of the general broker-level deduplication concept covered under Messaging?**
+
+Duplicate Detection lets Azure Service Bus recognize and silently discard a message carrying the same `MessageId` as one it already received within a configured history window — the concrete, Azure-specific implementation of the general broker-level message deduplication concept (covered under Messaging), letting a producer safely retry a publish without risking the message being enqueued twice.
+
+```csharp
+// enabling Duplicate Detection on a Queue, with a configured HISTORY WINDOW
+var queueOptions = new CreateQueueOptions("orders-queue")
+{
+    RequiresDuplicateDetection = true,
+    DuplicateDetectionHistoryTimeWindow = TimeSpan.FromMinutes(10) // remembers MessageIds for 10 MINUTES
+};
+
+var message = new ServiceBusMessage(orderJson) { MessageId = order.Id.ToString() }; // a STABLE, CLIENT-CHOSEN id
+await sender.SendMessageAsync(message);
+
+// IF the SAME message is RE-SENT (e.g., a RETRY after an uncertain network failure), WITH the
+// SAME MessageId, WITHIN the 10-minute WINDOW -- Service Bus SILENTLY DISCARDS the duplicate,
+// NEVER enqueuing it a SECOND time AT ALL
+```
+Because the broker itself tracks which `MessageId`s it has already seen within the configured window, a producer's retried publish (uncertain whether its first attempt actually succeeded, exactly the scenario covered under Messaging's general deduplication discussion) is safely absorbed without risking the message reaching a consumer twice — this is precisely the same architectural concept covered generally under Messaging, here made concrete with Azure Service Bus's specific configuration knobs.
+
+**Common Pitfall:** relying on Duplicate Detection's history window as a permanent, unlimited-duration guarantee — a duplicate publish arriving *after* the configured window has elapsed (a very delayed retry, well beyond the window) is no longer recognized as a duplicate and will be enqueued again; Duplicate Detection bounds the *window* during which producer-side retries are safely absorbed, but doesn't eliminate the need for consumer-side idempotency (covered under Messaging) as the more comprehensive, unbounded safety net.
+
+---
+
+## Advanced — Question 13
+
+**Q13: How does a poorly-chosen Partition Key in Azure Cosmos DB create a "hot partition," specifically in terms of Cosmos DB's own Request Unit (RU) throughput allocation model?**
+
+Cosmos DB divides a container's total provisioned throughput (Request Units, or RUs) evenly across its underlying physical partitions, based on the chosen Partition Key — if one specific partition key value receives disproportionately more traffic than others, that one *logical* partition's requests all route to the *same* physical partition, which has only its own fixed *share* of the total provisioned RUs, regardless of how much total throughput the container as a whole has been provisioned with.
+
+```text
+A Cosmos DB container, provisioned with 10,000 RU/s TOTAL, PARTITIONED by "TenantId":
+
+IF traffic is EVENLY spread across MANY different TenantId values:
+  -- each PHYSICAL partition handles ITS OWN SHARE of the total 10,000 RU/s, ROUGHLY EVENLY
+
+IF ONE SPECIFIC TenantId (a single VERY LARGE, VERY ACTIVE customer) generates a
+DISPROPORTIONATE SHARE of ALL traffic:
+  -- EVERY request for THAT one TenantId ROUTES to the SAME PHYSICAL partition
+  -- THAT ONE physical partition has ONLY its OWN fixed SHARE of the TOTAL 10,000 RU/s
+     (Cosmos DB SPLITS the total EVENLY across UNDERLYING physical partitions) --
+  -- THIS ONE tenant's requests get THROTTLED (429 "Too Many Requests") ONCE they EXCEED
+     THAT physical partition's SHARE, EVEN THOUGH the CONTAINER'S total 10,000 RU/s BUDGET,
+     AS A WHOLE, is FAR from FULLY consumed -- OTHER, LESS-BUSY partitions SIT LARGELY IDLE
+```
+Because RUs are allocated per underlying physical partition (derived from the logical partition key), a single, disproportionately busy partition key value can be throttled even while the container's *overall* provisioned throughput remains far from exhausted — exactly the general "hot partition" concept covered under NoSQL, made concrete here in terms of Cosmos DB's specific RU-based throughput-allocation mechanics.
+
+**Why choosing a Partition Key with sufficiently high cardinality and even access distribution matters more in Cosmos DB specifically than in some other NoSQL databases:** because RU throttling happens at the *physical partition* level, a hot logical partition key doesn't just risk uneven load in the abstract — it directly and immediately translates into throttled (`429`) requests for that specific key's traffic, a concrete, immediately-visible consequence that makes Partition Key selection a first-order design decision in Cosmos DB specifically, not merely a background performance consideration.
+
+**Common Pitfall:** choosing a Partition Key based on a natural-seeming business dimension (a `TenantId`, a `Category`) without checking whether that dimension's actual real-world traffic distribution is genuinely even across its possible values — a natural-seeming key can still concentrate a large fraction of total traffic onto a small number of values (a few very large tenants, a few very popular categories), producing exactly this hot-partition throttling even though the key choice seemed entirely reasonable at design time.
+
+---
+
 ---

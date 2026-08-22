@@ -1055,4 +1055,89 @@ A higher concurrency setting means fewer container instances are needed to serve
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is GCP Secret Manager, and how does it differ from simply storing secrets as environment variables in a Cloud Run or GKE deployment's own configuration?**
+
+Secret Manager stores sensitive values (API keys, database passwords) in a dedicated, access-controlled, versioned store — distinct from baking secrets directly into a deployment's environment-variable configuration, which typically leaves them visible to anyone who can view that configuration (via `kubectl describe`, a deployment YAML file checked into version control, or a cloud console's own configuration view).
+
+```bash
+# storing a secret in Secret Manager -- ACCESS-CONTROLLED, VERSIONED, AUDITED, SEPARATELY from deployment config
+gcloud secrets create db-password --data-file=password.txt
+
+# a Cloud Run service REFERENCES the secret by NAME -- the ACTUAL VALUE is fetched SECURELY at RUNTIME,
+# NEVER stored directly in the SERVICE's own, more WIDELY-VISIBLE configuration
+gcloud run deploy my-api --set-secrets=DB_PASSWORD=db-password:latest
+```
+```text
+WITHOUT Secret Manager -- a PLAIN environment variable, VISIBLE directly in the deployment's OWN
+configuration (viewable via 'kubectl describe', a CI/CD LOG, or the CLOUD CONSOLE itself):
+  env: [{ name: "DB_PASSWORD", value: "actual-plaintext-password-here" }]  <-- VISIBLE to ANYONE
+  who can VIEW this configuration AT ALL, WITHOUT any SEPARATE access control on the SECRET ITSELF
+```
+Because Secret Manager stores the actual secret value separately, with its own independent access control (IAM permissions specifically on the secret, not just on the deployment configuration), viewing a deployment's configuration only reveals *which named secret* it references — not the secret's actual value — and Secret Manager additionally provides automatic versioning (rotating a secret creates a new version, with old versions still auditable) and access logging that plain environment-variable configuration doesn't provide at all.
+
+**Common Pitfall:** storing genuinely sensitive values directly as plaintext environment variables in a deployment's own configuration (or worse, checked into a YAML file in version control) rather than in a dedicated secret-management service — this exposes the secret's actual value to anyone with read access to the deployment configuration itself, a much broader audience than the narrower, secret-specific access control a dedicated service like Secret Manager provides.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What are GCP Pub/Sub's Ordering Keys, and how do they let messages sharing the same key be delivered in order, while messages with different keys are still processed in parallel?**
+
+Pub/Sub doesn't guarantee message ordering by default — but attaching an Ordering Key to a message groups it with every other message sharing that same key, guaranteeing Pub/Sub delivers *those specific* messages in the exact order they were published, while messages under *different* keys remain free to be delivered and processed in parallel, with no ordering guarantee (or need for one) between them.
+
+```csharp
+// messages for the SAME order (SHARING an ordering key) are delivered IN ORDER
+await publisher.PublishAsync(new PubsubMessage
+{
+    Data = ByteString.CopyFromUtf8(orderCreatedJson),
+    OrderingKey = $"order-{orderId}" // ALL messages for THIS order share the SAME key
+});
+```
+```text
+Messages with OrderingKey="order-5":   delivered IN EXACT PUBLISH order (OrderCreated, THEN OrderShipped)
+Messages with OrderingKey="order-9":   delivered IN EXACT PUBLISH order TOO -- but INDEPENDENTLY of order-5's
+-- order-5's messages and order-9's messages have NO ordering RELATIONSHIP to EACH OTHER AT ALL --
+   they can be PROCESSED CONCURRENTLY, IN PARALLEL, SINCE they DON'T share the SAME key
+```
+This mirrors the exact same underlying concept as Kafka's message-key-based partition assignment (covered under Messaging) — ordering is only ever guaranteed *within* one key's own sequence of messages, never *across* different keys, letting a system achieve the throughput benefit of parallel processing across many independent keys while still preserving strict ordering for the specific, narrower cases (all events for one specific order, one specific user) where ordering genuinely matters.
+
+**Common Pitfall:** assigning every message the exact same Ordering Key (or omitting ordering keys where genuine ordering isn't actually needed) — a single shared key forces Pub/Sub to serialize delivery of *every* message through that one key's ordering guarantee, eliminating the parallel-processing throughput benefit the Ordering Key mechanism specifically exists to preserve for independent, unrelated message groups; Ordering Keys should be scoped narrowly to genuinely-related messages (all events for one specific entity), not applied blanket across an entire topic's traffic.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is GCP's Binary Authorization for GKE, and how does it let a cluster enforce that only images signed by a trusted, attested build pipeline can actually be deployed, blocking unverified images entirely?**
+
+Binary Authorization is a deploy-time enforcement mechanism that requires container images to carry a valid, cryptographically-signed attestation (proof that the image passed through an approved, trusted build/CI pipeline) before Kubernetes will allow them to actually run — an unsigned or improperly-attested image is rejected at deployment time, regardless of where it came from or how it was pushed to the registry.
+
+```bash
+# a POLICY requiring EVERY deployed image to carry a VALID attestation from a TRUSTED, NAMED ATTESTOR
+gcloud container binauthz policy import policy.yaml
+```
+```yaml
+# policy.yaml -- REQUIRES a valid attestation from "built-by-ci-pipeline" for EVERY image
+defaultAdmissionRule:
+  requireAttestationsBy:
+    - projects/my-project/attestors/built-by-ci-pipeline
+  enforcementMode: ENFORCED_BLOCK_AND_AUDIT_LOG
+```
+```text
+An image built and PUSHED through the APPROVED CI pipeline: gets a VALID attestation, ATTACHED --
+  -> DEPLOYS successfully
+
+An image PUSHED directly by a DEVELOPER, bypassing the APPROVED pipeline entirely (even if the
+image is OTHERWISE perfectly legitimate, non-malicious code): has NO valid ATTESTATION attached
+  -> DEPLOYMENT is BLOCKED ENTIRELY by the CLUSTER itself, REGARDLESS of the image's ACTUAL CONTENT
+```
+Because the cluster itself enforces this check at admission time (rather than relying purely on process/discipline to ensure only pipeline-built images ever get deployed), it closes off a genuine supply-chain risk: even a compromised CI/CD credential or a well-intentioned developer's manual `kubectl apply` bypassing the normal pipeline is structurally blocked from deploying anything that hasn't gone through — and been cryptographically attested by — the officially trusted build process.
+
+**Why this specifically addresses supply-chain risk at the deployment gate, complementing (rather than replacing) earlier image-scanning practices covered under DevOps:** vulnerability scanning (covered under DevOps) checks an image's *contents* for known issues before deployment — Binary Authorization instead verifies the image's *provenance* (did it genuinely come from the trusted, approved build process at all), a distinct and complementary concern; an image could pass every vulnerability scan yet still represent a supply-chain risk if it didn't actually originate from the organization's trusted, audited build pipeline in the first place.
+
+**Common Pitfall:** relying solely on registry-level access controls (restricting who can *push* images) to prevent unauthorized deployments, without also enforcing Binary Authorization's deploy-time attestation check — a compromised credential with push access could still push an unauthorized image that would then deploy successfully absent any deploy-time provenance verification; Binary Authorization adds a genuinely separate, cluster-enforced checkpoint specifically at the point of actual deployment, not just at the point of registry access.
+
+---
+
 ---

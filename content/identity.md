@@ -1150,3 +1150,88 @@ Because the actual OAuth tokens never leave the server side at all — the brows
 **Common Pitfall:** implementing a SPA with tokens stored directly in browser JavaScript (memory or `localStorage`) purely because it's architecturally simpler (no separate BFF component needed), without weighing this against the very real, well-documented XSS-driven token-theft risk that architecture carries — for a genuinely security-sensitive application, the BFF Token Handler pattern's added architectural complexity (a server-side component brokering every token) is a deliberate, worthwhile trade against eliminating an entire, serious vulnerability category, not just an arbitrary added layer of complexity.
 
 ---
+
+## Beginner — Question 13
+
+**Q13: What is the difference between Session-based Authentication (a server-side session ID stored in a cookie) and Token-based Authentication (a JWT), as the two fundamental approaches to remembering "who this user is" across multiple requests?**
+
+Session-based Authentication stores the actual user/session data on the *server*, giving the client only an opaque session ID to present on each request — Token-based Authentication instead puts the user's identity/claims directly *inside* a self-contained token (a JWT, covered extensively) that the client holds and presents, with the server needing no per-session storage of its own at all.
+
+```text
+SESSION-based -- the SERVER holds the REAL data; the CLIENT holds ONLY an OPAQUE reference to it:
+  Client's cookie: "session=a1b2c3d4"  -- MEANS NOTHING on its OWN
+  Server's session STORE: { "a1b2c3d4": { userId: 42, roles: ["Admin"] } }  -- the ACTUAL DATA lives HERE
+  -- EVERY request: server LOOKS UP "a1b2c3d4" in ITS OWN store to find OUT who the USER actually IS
+
+TOKEN-based (JWT) -- the TOKEN ITSELF carries the ACTUAL claims; the SERVER needs NO per-session STORAGE:
+  Client's token: "eyJhbGc...{userId: 42, roles: [Admin]}...signature"  -- SELF-CONTAINED, MEANINGFUL on its OWN
+  -- EVERY request: server just VERIFIES the token's SIGNATURE -- NO database/store LOOKUP needed AT ALL
+```
+Because a session ID is meaningless without the server's own corresponding stored data, the server must maintain (and look up) that per-session state on every request — a JWT instead carries everything the server needs to know directly within the token itself, letting the server validate it (checking the cryptographic signature) without any server-side storage lookup at all, which is precisely the trade-off underlying the earlier discussion of JWT's revocation limitations (a session can be instantly invalidated by simply deleting server-side state; a self-contained JWT cannot be "deleted" the same way).
+
+**Common Pitfall:** treating "Token-based" (JWT) authentication as an unconditionally superior replacement for session-based authentication in every scenario — JWTs trade away the server's ability to instantly and simply revoke access (covered in more depth in a related question) in exchange for eliminating server-side session storage lookups; for a scenario where instant, simple revocation genuinely matters more than avoiding a storage lookup, server-side sessions remain a perfectly legitimate, often simpler choice, not an outdated approach JWTs have universally superseded.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: Why can't a stateless, self-contained JWT be "revoked" the same way a server-side session can, and what workarounds (short expiry, a denylist) exist to compensate?**
+
+A server-side session can be revoked instantly — simply delete its entry from the server's session store, and the next request presenting that session ID fails immediately. A JWT's entire design point is that the server *doesn't* need to look anything up to validate it (just verify the signature) — but that same design point means there's no server-side record to delete, so a JWT remains valid (and accepted) until its own embedded expiration time arrives, no matter what happens on the server side in the meantime.
+
+```text
+SESSION revocation -- INSTANT, SIMPLE:
+  DELETE the session ENTRY from the SERVER's OWN store -- the NEXT request with THAT session id FAILS IMMEDIATELY
+
+JWT "revocation" -- GENUINELY HARD, because THERE'S NOTHING SERVER-SIDE to DELETE:
+  the TOKEN ITSELF is SELF-CONTAINED and CRYPTOGRAPHICALLY SIGNED -- the SERVER validates it PURELY
+  by CHECKING the SIGNATURE, with NO DATABASE lookup INVOLVED AT ALL -- there's SIMPLY NOTHING
+  to "DELETE" that would actually STOP the TOKEN from CONTINUING to VALIDATE SUCCESSFULLY
+```
+```text
+WORKAROUNDS, each with its OWN trade-off:
+  SHORT EXPIRY (e.g., 15 minutes) -- BOUNDS how LONG a "revoked" token remains VALID/ACCEPTED, but
+    does NOT provide INSTANT revocation -- there's STILL a WINDOW (up to 15 MINUTES) where a
+    SUPPOSEDLY-revoked token WOULD STILL be ACCEPTED
+  DENYLIST (a SERVER-SIDE list of EXPLICITLY revoked token IDs, CHECKED on EVERY request) --
+    provides GENUINELY INSTANT revocation, but REINTRODUCES the EXACT per-request SERVER-SIDE
+    LOOKUP JWTs were ORIGINALLY meant to AVOID -- largely UNDOING the "STATELESS" BENEFIT
+  Continuous Access Evaluation (COVERED EARLIER) -- a MORE SOPHISTICATED, NEAR-REAL-TIME variant
+    of THIS SAME fundamental DENYLIST-style APPROACH
+```
+Every practical mitigation for JWT's revocation gap trades away some of the token's original statelessness benefit — a short expiry bounds but doesn't eliminate the window, while a denylist provides instant revocation but reintroduces the exact per-request lookup the stateless design was meant to avoid in the first place; there's no way to have both true statelessness *and* instant revocation simultaneously, since they're fundamentally in tension with each other.
+
+**Common Pitfall:** issuing long-lived JWTs (hours or days) without any denylist or Continuous Access Evaluation mechanism, then being surprised that revoking a compromised user's access ("disable this account immediately") doesn't actually take effect until the token's own long expiration finally arrives — recognizing this fundamental trade-off upfront (short expiry, a denylist, or CAE, each compensating differently) is necessary for designing a JWT-based system with actually meaningful, timely revocation behavior, rather than discovering the gap only during a real security incident.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is Proof Key for Code Exchange (PKCE), and how does it protect the OAuth Authorization Code flow for a public client — a mobile app or SPA — that cannot safely keep a client secret confidential?**
+
+The Authorization Code flow (covered extensively) traditionally relies on a client secret to prove, during the code-for-token exchange, that the same application which initiated the flow is the one completing it — but a public client (a mobile app, a SPA, whose entire code is inspectable/extractable by anyone) cannot keep a secret confidential at all, since it would need to be embedded directly in distributed, inspectable client code. PKCE replaces the static, embeddable secret with a dynamically-generated, per-request proof instead.
+
+```text
+1. BEFORE redirecting to the Authorization Server, the CLIENT generates a RANDOM "code_verifier"
+   (a SECRET, but GENERATED FRESH for THIS one specific AUTH attempt, NEVER embedded in the APP's CODE)
+   code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+
+2. the CLIENT computes a "code_challenge" -- a HASH of the verifier -- and sends ONLY the HASH,
+   ALONGSIDE the initial AUTHORIZATION request:
+   code_challenge = SHA256(code_verifier)  -- sent in the AUTHORIZATION request itself
+
+3. LATER, when EXCHANGING the returned authorization CODE for an actual TOKEN, the client
+   sends the ORIGINAL, UN-HASHED code_verifier ALONGSIDE the CODE:
+   POST /token { code: "...", code_verifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk" }
+
+4. the AUTHORIZATION SERVER hashes the RECEIVED code_verifier and CHECKS it MATCHES the
+   code_challenge from STEP 2 -- PROVING the ENTITY exchanging the CODE is the SAME one that
+   ORIGINATED the AUTHORIZATION REQUEST, WITHOUT EVER needing a STATIC, EMBEDDABLE CLIENT SECRET
+```
+Because the `code_verifier` is generated freshly for each individual authorization attempt (never hardcoded anywhere in the distributed application's own code, unlike a traditional client secret), an attacker who intercepts the authorization *code* itself (perhaps via a malicious app registering the same custom URL scheme a mobile app uses for its redirect) still cannot complete the token exchange, since they don't have the original, dynamically-generated `code_verifier` that only the legitimate client instance that started this specific flow ever held.
+
+**Why PKCE has become the recommended default even for confidential clients, not just public ones:** while PKCE was originally designed specifically to protect public clients (which structurally cannot keep a secret confidential), current OAuth security best-practice guidance recommends using PKCE universally, even alongside a client secret for confidential clients — it provides genuine additional protection (specifically against authorization code interception) at negligible cost, making it a broadly beneficial addition rather than a public-client-only requirement.
+
+**Common Pitfall:** implementing the Authorization Code flow for a mobile app or SPA using a traditional, static client secret embedded directly in the distributed application code (extractable by anyone who decompiles the app or inspects the SPA's own JavaScript) — a public client has no way to keep such a secret genuinely confidential at all, making a static embedded secret provide no real security benefit; PKCE's dynamically-generated, per-attempt verifier is specifically designed to solve exactly this structural limitation of public clients.
+
+---
