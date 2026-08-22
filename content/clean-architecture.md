@@ -1731,4 +1731,99 @@ Because the Orchestrator depends only on interfaces (`IOrderRepository`, `IInven
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is a Clean Architecture View Model (distinct from an MVC ViewModel, covered under MVC) — specifically, the shape returned from a Use Case to its Presentation-layer caller — and how does it differ from the raw Domain Entity the Use Case worked with internally?**
+
+A Use Case often works internally with a full, rich Domain Entity (with its own behavior methods and invariant-enforcing logic, covered earlier) — but the data it hands back to whatever called it (a Web API controller, a CLI command) should typically be a simpler, purpose-shaped View Model containing only what that specific caller actually needs to display or act on, not the entity's full internal shape.
+
+```csharp
+// The DOMAIN entity -- rich, has ITS OWN behavior methods, used INTERNALLY by the Use Case
+public class Order { public void Cancel() { /* ... */ } public decimal Total { get; private set; } /* ... */ }
+
+// The Use Case's OUTPUT -- a SIMPLE View Model, containing ONLY what the CALLER actually needs
+public record OrderSummaryViewModel(int Id, string CustomerName, decimal Total, string Status);
+
+public class GetOrderSummaryHandler
+{
+    public async Task<OrderSummaryViewModel> HandleAsync(int orderId)
+    {
+        var order = await _orderRepository.GetByIdAsync(orderId); // the RICH Domain entity
+        return new OrderSummaryViewModel(order.Id, order.Customer.Name, order.Total, order.Status.ToString());
+        // -- the CALLER receives ONLY this SIMPLE shape -- NEVER the Domain entity's OWN behavior methods
+    }
+}
+```
+
+Because the Domain Entity's rich behavior (methods enforcing business rules, covered earlier) has no meaning to a Presentation-layer caller that just wants to display data, returning a simpler, purpose-built View Model keeps the boundary between "how the Domain models the business" and "what the outside world actually needs to see" cleanly separated — directly connecting to the earlier DTO discussion, but specifically framed as a Use Case's *output* shape.
+
+**Common Pitfall:** returning a Domain Entity directly from a Use Case to a Web API controller, which then serializes it straight to JSON — this leaks the Domain's internal shape (and potentially unwanted fields, or circular navigation properties causing serialization issues) directly to external clients, exactly the anti-pattern covered earlier under "returning EF Core entities directly from an endpoint."
+
+---
+
+## Intermediate — Question 17
+
+**Q17: How does explicitly distinguishing an "Application Services" layer wrapping Domain Services (covered earlier) make clear which logic is reusable across many use cases versus specific to orchestrating just one?**
+
+A Domain Service (covered earlier) contains genuine business logic that doesn't naturally belong to any single Entity — an Application Service sits one layer above it, orchestrating *which* Domain Services and Repositories a specific Use Case needs to call, in what order, without containing any business logic of its own; the distinction clarifies that Domain Services are meant to be reusable building blocks, while Application Services are use-case-specific orchestration.
+
+```csharp
+// DOMAIN SERVICE -- genuine BUSINESS LOGIC, REUSABLE across MULTIPLE different use cases
+public class PricingService // a DOMAIN service
+{
+    public decimal CalculateDiscountedPrice(Product product, Customer customer) { /* business RULES */ }
+}
+
+// APPLICATION SERVICE (a Use Case Handler) -- ORCHESTRATES, does NOT contain business logic itself
+public class PlaceOrderHandler // an APPLICATION service
+{
+    public async Task HandleAsync(PlaceOrderCommand command)
+    {
+        var price = _pricingService.CalculateDiscountedPrice(product, customer); // DELEGATES to the Domain Service
+        var order = Order.Create(customer, product, price);                       // DELEGATES to the Aggregate
+        await _orderRepository.SaveAsync(order);                                   // ORCHESTRATES the SEQUENCE
+    }
+}
+```
+
+Because a Domain Service's logic (calculating a discount) might genuinely be needed by *several* different Use Cases (placing an order, generating a price-preview report), keeping it separate from any one specific Application Service lets it be reused across all of them — while the Application Service itself remains a thin, use-case-specific orchestration layer, never containing business rules that might need to be reused elsewhere.
+
+**Common Pitfall:** embedding genuine business logic (a discount calculation, a validation rule spanning multiple entities) directly inside an Application Service/Use Case Handler rather than extracting it into a reusable Domain Service — this logic then becomes trapped, specific to that one Use Case, and must be duplicated (or awkwardly re-invoked) if a second Use Case later needs that exact same business rule.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is a Clean Architecture Unit of Work abstraction defined in the Application layer, and how does wrapping a repository's "save changes" call behind an explicit interface let multiple repository operations commit together as one atomic transaction, without the Application layer knowing it's actually EF Core's `SaveChangesAsync()` underneath?**
+
+`IUnitOfWork` (an Application-layer-defined interface) exposes a single `SaveChangesAsync()` (or `CommitAsync()`) method — the Application layer calls it after making changes through one or more repositories, without knowing (or needing to know) that its concrete Infrastructure implementation is actually backed by a single, shared EF Core `DbContext` instance, whose own `SaveChangesAsync()` commits every tracked change across all those repositories as one atomic database transaction.
+
+```csharp
+// Application layer -- defines the INTERFACE, knows NOTHING about EF Core specifically
+public interface IUnitOfWork { Task<int> SaveChangesAsync(); }
+
+public class PlaceOrderHandler
+{
+    public async Task HandleAsync(PlaceOrderCommand command)
+    {
+        _orderRepository.Add(newOrder);           // tracked, but NOT yet committed
+        _inventoryRepository.DecrementStock(...);  // ALSO tracked, NOT yet committed
+        await _unitOfWork.SaveChangesAsync();      // BOTH changes commit TOGETHER, as ONE atomic transaction
+    }
+}
+
+// Infrastructure layer -- the CONCRETE implementation, the ONLY place that KNOWS it's EF Core
+public class EfUnitOfWork : IUnitOfWork
+{
+    private readonly AppDbContext _context;
+    public Task<int> SaveChangesAsync() => _context.SaveChangesAsync(); // EF Core's OWN mechanism, HIDDEN behind the interface
+}
+```
+
+Because both repositories in this example share the *same* underlying `DbContext` instance (injected as a Scoped service, covered under EF Core), calling `SaveChangesAsync()` once commits every change tracked across *all* of them as a single, atomic unit — the Application layer expresses "commit everything I've done in this Use Case together" through a clean, EF-Core-agnostic interface, while the actual atomicity mechanism (a single `DbContext`'s own change tracking and transaction) lives entirely in the Infrastructure layer.
+
+**Common Pitfall:** having each repository call its own, separate "save" operation independently (each repository owning its own `DbContext` instance) rather than sharing one `DbContext` coordinated through a single `IUnitOfWork` — this breaks the atomicity guarantee entirely, since a failure partway through would leave some repositories' changes committed and others not, exactly the inconsistent, partially-applied state a proper Unit of Work is designed to prevent.
+
+---
+
 ---

@@ -2109,4 +2109,78 @@ Because the CQRS read-side service's data is kept up to date asynchronously, ahe
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is a Bounded Context Map (from DDD), and how does explicitly documenting the relationship between two bounded contexts — Shared Kernel, Customer-Supplier, Conformist — clarify expectations beyond simply drawing service boundaries?**
+
+Identifying Bounded Contexts (covered earlier) alone only says *where* one service's model ends and another's begins — a Context Map additionally documents *how* two contexts relate: a Shared Kernel (both contexts deliberately share a small, common model), Customer-Supplier (one context's team has influence over the other's design decisions), or Conformist (one context simply accepts the other's model as-is, with no influence over it at all).
+
+```text
+Bounded Context Map: OrderContext <--Customer-Supplier--> InventoryContext
+  -- means: OrderContext's TEAM has SOME INFLUENCE over InventoryContext's API design
+     (they're "CUSTOMERS" whose NEEDS the "SUPPLIER" team CONSIDERS)
+
+Bounded Context Map: OrderContext <--Conformist--> LegacyBillingSystem
+  -- means: OrderContext's team has ZERO influence over LegacyBillingSystem's design --
+     they SIMPLY ACCEPT and CONFORM to whatever it PROVIDES, AS-IS
+```
+
+Because these relationship types carry genuinely different collaboration and negotiation expectations (a Customer-Supplier relationship implies ongoing dialogue about API changes, while a Conformist relationship implies no such negotiation is even possible), explicitly naming which kind of relationship exists between two contexts sets realistic expectations for how changes on one side will (or won't) be coordinated with the other — information that simply drawing context boundaries on a diagram doesn't convey on its own.
+
+**Common Pitfall:** drawing Bounded Context boundaries on an architecture diagram without also documenting the *nature* of the relationship between adjacent contexts — teams then discover, often through friction during an actual API change, whether they were supposed to have a say in the other side's design or not; an explicit Context Map heads off this ambiguity before it becomes a real, costly point of conflict.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is the "Read Replica of Another Service's Data" anti-pattern — directly subscribing to and copying another service's raw database replication stream — and why does this reintroduce schema coupling even more tightly than the Database View Pattern (covered earlier)?**
+
+The Database View Pattern (covered earlier) at least exposes a defined, intentional view as the sharing mechanism — this anti-pattern goes a step further and directly consumes another service's *raw* database replication stream (its internal, physical table structure), meaning any internal schema change the other team makes — even one considered a purely private implementation detail — silently breaks the consuming service, since it's coupled to internal structure that was never intended as a public contract at all.
+
+```text
+Database View Pattern (covered earlier): Service B reads a DELIBERATELY-DEFINED VIEW that
+  Service A's team EXPLICITLY exposes and MAINTAINS as A CONTRACT -- Service A's team KNOWS
+  this view is BEING relied upon, and is CAREFUL about changing it
+
+"Raw Replication Stream" anti-pattern: Service B directly SUBSCRIBES to Service A's INTERNAL
+  database's OWN physical REPLICATION log -- Service A's team has NO IDEA Service B is EVEN
+  DOING this -- ANY internal schema change (even a PURELY internal refactor) SILENTLY BREAKS
+  Service B, with NEITHER team even AWARE of the DEPENDENCY until something ACTUALLY breaks
+```
+
+Because a raw replication stream exposes a service's entire *internal* schema as an unintentional, undocumented, unversioned contract — with the producing team having no visibility into who's consuming it or how — this is a strictly worse coupling problem than even the already-risky Database View Pattern, which at least involves a deliberate, known, intentionally-maintained sharing surface between the two teams.
+
+**Common Pitfall:** adopting direct database replication as a "quick and easy" way to share data between services, reasoning that it's technically simpler than building a proper API or event contract — this creates an invisible, undocumented dependency on internal schema details neither team is even aware exists, virtually guaranteeing an eventual silent breakage the moment the producing service makes what it believes is a purely internal, safe change.
+
+---
+
+## Advanced — Question 18
+
+**Q18: Why must a Saga's compensating action (covered extensively elsewhere) itself be idempotent/safely retryable, given that a Saga's own failure-recovery logic might need to retry a compensation that partially failed?**
+
+A compensating action (like issuing a refund) can itself fail partway through, or its confirmation could be lost due to a network issue — the Saga's recovery logic will then retry that same compensating action, meaning the compensation itself needs the same idempotency guarantee (covered earlier, generally, for retried operations) as any other retried step, or a retried refund could result in the customer being refunded twice.
+
+```csharp
+// A NON-idempotent compensating action -- DANGEROUS if retried after a partial failure
+public async Task CompensateAsync(int orderId)
+{
+    await _paymentService.RefundAsync(orderId, amount); // if this SUCCEEDS, but the CONFIRMATION
+                                                           // is LOST (network drop), a RETRY issues
+                                                           // a SECOND, DUPLICATE refund
+}
+
+// An IDEMPOTENT compensating action -- SAFE to retry, ANY number of times
+public async Task CompensateAsync(int orderId, string compensationId)
+{
+    if (await _paymentService.WasRefundedAsync(orderId, compensationId)) return; // ALREADY done -- SKIP
+    await _paymentService.RefundAsync(orderId, amount, compensationId); // SAFE, even if RETRIED
+}
+```
+
+Because a Saga's own compensation logic is itself just another distributed operation subject to the same partial-failure risks as any forward step (a network drop after the refund succeeded but before the Saga records it as complete), treating compensating actions as somehow exempt from the idempotency requirement other Saga steps need is a real, easy-to-overlook gap — the compensation step deserves exactly the same idempotency-key-based protection (covered earlier) as any forward-moving Saga step.
+
+**Common Pitfall:** implementing careful idempotency for a Saga's *forward* steps while treating its *compensating* actions as simple, one-shot operations that "just undo" something — since compensations can fail and be retried exactly like forward steps can, an idempotent compensation is just as essential as an idempotent forward step, and overlooking this can produce a Saga's own recovery logic causing the exact kind of duplicate side effect the Saga pattern is meant to prevent.
+
+---
+
 ---

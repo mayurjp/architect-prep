@@ -1381,4 +1381,94 @@ Because `--cpus` enforces an absolute ceiling regardless of actual contention wh
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is Docker's `latest` tag convention, and why is relying on it in production riskier than pinning an explicit version tag or a content digest (covered earlier)?**
+
+`latest` is just an ordinary, mutable tag — whichever image was most recently pushed with that tag *is* "latest," and it can point to a completely different set of bytes tomorrow than it does today, with no guarantee of consistency across pulls or across time.
+
+```bash
+docker pull myapp:latest   # TODAY -- pulls WHATEVER image currently has the "latest" tag
+# ... a WEEK later, someone pushes a NEW image ALSO tagged "latest" ...
+docker pull myapp:latest   # NOW pulls a COMPLETELY DIFFERENT image -- SAME tag, DIFFERENT actual content
+```
+
+```text
+"latest" tag: MUTABLE -- can be REASSIGNED to point at a DIFFERENT image at ANY time -- TWO
+  different machines pulling "myapp:latest" at DIFFERENT MOMENTS could get GENUINELY
+  DIFFERENT images, with NO way to tell from the TAG alone WHICH version either one actually got
+
+Explicit version tag ("myapp:2.3.1") or DIGEST ("myapp@sha256:abc123..."): a SPECIFIC,
+  KNOWN, and (for a digest) CRYPTOGRAPHICALLY GUARANTEED set of bytes -- PULLING it LATER
+  ALWAYS gets the EXACT SAME image, REGARDLESS of when or from WHERE
+```
+
+Because production deployments need reproducibility (knowing precisely which image bytes are running, and being able to reliably redeploy that exact same version later for a rollback), relying on the ever-shifting `latest` tag undermines this guarantee entirely — a digest (covered earlier) provides the strongest possible guarantee, while an explicit, immutable version tag convention (never re-pushing over an already-used version number) is a reasonable middle ground.
+
+**Common Pitfall:** deploying production workloads referencing `myapp:latest` rather than a specific, immutable version — this means a rollback, a redeploy, or simply scaling up new replicas at a later time could silently pull a *different* image than what's currently running, since "latest" has no guarantee of pointing at the same bytes across time; explicit version tags or digests are essential for genuinely reproducible deployments.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is a Docker Compose Override File (`docker-compose.override.yml`), and how does Compose automatically merging it with the base file let a developer apply local-only customizations without modifying the shared, checked-in compose file?**
+
+Docker Compose automatically loads `docker-compose.override.yml` alongside `docker-compose.yml` if present, merging its settings on top of the base file's own configuration — letting a developer add personal, local-only overrides (a different exposed port, an extra volume mount for local debugging) without touching the shared, version-controlled base file every other developer relies on.
+
+```yaml
+# docker-compose.yml (SHARED, checked into version control)
+services:
+  api:
+    image: myapp:latest
+    ports: ["5000:5000"]
+
+# docker-compose.override.yml (LOCAL-ONLY -- often .gitignore'd, or committed as a starting TEMPLATE)
+services:
+  api:
+    ports: ["5001:5000"]   # THIS developer's machine ALREADY has something else on port 5000 locally
+    volumes: ["./local-debug-configs:/app/configs"]  # a LOCAL-ONLY debugging mount
+```
+
+```text
+"docker compose up" AUTOMATICALLY merges BOTH files -- the OVERRIDE file's settings TAKE
+  PRECEDENCE over the BASE file's matching settings -- WITHOUT the DEVELOPER needing to
+  MODIFY (or ACCIDENTALLY commit changes to) the SHARED base docker-compose.yml file AT ALL
+```
+
+Because the override file is automatically detected and merged without any explicit command-line flag needed, a developer's personal customizations stay cleanly separated from the shared, team-wide configuration — often the override file itself is excluded from version control entirely (or a template version is committed, with each developer maintaining their own local copy), avoiding the risk of accidentally committing a personal, machine-specific customization into the shared file everyone else depends on.
+
+**Common Pitfall:** directly editing the shared `docker-compose.yml` file with personal, local-only customizations (a different port, a personal debug mount) — this risks accidentally committing those personal changes and breaking the setup for every other developer relying on the shared file's original configuration; an override file (kept out of version control, or documented as a personal template) is the cleaner mechanism for this exact need.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is Docker Content Trust (`DOCKER_CONTENT_TRUST=1`), and how does requiring a cryptographically signed image before it can be pulled or run protect against a compromised registry silently serving a tampered image under a legitimate-looking tag?**
+
+With Content Trust enabled, the Docker client refuses to pull or run any image that isn't cryptographically signed by a trusted publisher — verifying the image's signature against a known, trusted public key before allowing it to be used at all, meaning even if an attacker compromised the registry itself and swapped out an image's contents under an existing, legitimate-looking tag, the signature verification would fail and the client would refuse to proceed.
+
+```bash
+export DOCKER_CONTENT_TRUST=1
+docker pull myregistry.com/myapp:2.3.1
+# -- REFUSES to pull UNLESS the image is SIGNED by a TRUSTED key -- an ATTACKER who
+#    COMPROMISED the registry and SWAPPED the image's ACTUAL bytes under the SAME tag
+#    CANNOT produce a VALID signature WITHOUT ALSO possessing the ORIGINAL signing KEY
+```
+
+```text
+WITHOUT Content Trust: the CLIENT trusts WHATEVER bytes the REGISTRY happens to SERVE for a
+  GIVEN tag -- a COMPROMISED registry could SILENTLY serve a TAMPERED image, and the CLIENT
+  would have NO WAY to detect this AT ALL
+
+WITH Content Trust: the CLIENT INDEPENDENTLY verifies a CRYPTOGRAPHIC signature BEFORE
+  trusting the image -- a COMPROMISED registry SERVING tampered bytes FAILS this VERIFICATION,
+  since it CANNOT forge a VALID signature WITHOUT the ORIGINAL, LEGITIMATE signing key
+```
+
+Because signature verification happens client-side, independently of whatever the registry itself claims or serves, Content Trust provides genuine protection against a specific, serious supply-chain threat: a compromised or malicious registry silently substituting a different, tampered image under an existing, trusted-looking tag — a threat that ordinary tag/digest-based pulling alone (without cryptographic verification) has no defense against.
+
+**Common Pitfall:** trusting a registry's access controls (authentication, authorization) alone as sufficient protection against a tampered image, without additionally verifying cryptographic signatures via Content Trust — access controls protect against *unauthorized* pushes, but don't protect against a registry itself being compromised (or an authorized-but-compromised account pushing a malicious image); Content Trust's signature verification provides an independent, additional layer of protection against exactly this scenario.
+
+---
+
 ---

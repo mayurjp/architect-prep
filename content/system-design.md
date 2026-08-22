@@ -1894,4 +1894,99 @@ Because a participant that already voted "yes" has surrendered its ability to un
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is the Health Check Dependency Chain problem, and why can a service's own health check considering its downstream dependencies' health cause it to be marked unhealthy — and needlessly restarted — purely because of an unrelated downstream outage?**
+
+If Service A's health check endpoint also verifies that its downstream dependency Service B is reachable and healthy, then Service B having a completely unrelated outage causes Service A's health check to *also* start failing — even though Service A itself is running perfectly fine — potentially triggering an orchestrator to restart Service A repeatedly, which does absolutely nothing to fix the actual, unrelated problem in Service B.
+
+```csharp
+// A health check that ALSO verifies a DOWNSTREAM dependency -- RISKY
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    Predicate = check => check.Name == "self" || check.Name == "downstream-service-b" // CHECKS BOTH
+});
+// if Service B has an UNRELATED outage, Service A's OWN health check STARTS FAILING TOO --
+// even though Service A ITSELF is completely FINE -- Kubernetes might RESTART Service A
+// REPEATEDLY, which does NOTHING to fix Service B's ACTUAL, UNRELATED problem
+```
+
+```text
+Service A's health check ALSO verifies Service B: Service B goes DOWN -- Service A's health
+  check STARTS FAILING TOO -- an ORCHESTRATOR sees a "FAILING" Service A and RESTARTS it --
+  REPEATEDLY -- Service A NEVER ACTUALLY recovers (there's NOTHING WRONG with it), and this
+  ADDS Service A's OWN restart CHURN on TOP of the ALREADY-existing Service B outage
+```
+
+Because a Readiness check (covered elsewhere, distinct from Liveness) *can* reasonably reflect "am I currently able to serve requests successfully," a health check specifically used for *Liveness* (deciding whether to restart the process) should generally check only the service's own internal health, not cascade a downstream failure into an unnecessary restart of a perfectly healthy process — conflating the two health-check purposes is exactly what causes this problem.
+
+**Common Pitfall:** implementing a single, combined health check endpoint that verifies both "am I healthy" and "are my dependencies healthy" and using it for both Liveness and Readiness purposes identically — a downstream outage should reasonably affect Readiness (temporarily stop routing traffic to this instance), but should generally NOT trigger a Liveness-driven restart of an instance that is, itself, perfectly healthy and would do nothing to fix the actual downstream problem.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is Request Coalescing (Request Collapsing), and how does merging multiple identical, concurrently-arriving requests for the same resource into one actual backend call reduce load during a cache-miss stampede, as distinct from the Stampede Lock covered under NoSQL?**
+
+The Stampede Lock (covered under NoSQL/Redis) prevents a cache-miss stampede by having only *one* request actually recompute the value while others wait — Request Coalescing achieves a similar end result via a slightly different mechanism: the *first* incoming request for a given key is dispatched to the backend as normal, but any *additional*, identical requests arriving while that first one is still in flight are transparently attached to (and share the result of) that same single in-flight call, rather than each independently triggering its own backend request or explicitly acquiring a lock.
+
+```csharp
+private static readonly ConcurrentDictionary<string, Task<Product>> _inFlightRequests = new();
+
+async Task<Product> GetProductAsync(int id)
+{
+    var key = $"product-{id}";
+    var task = _inFlightRequests.GetOrAdd(key, _ => FetchFromDatabaseAsync(id)); // ONLY the FIRST
+        // caller for THIS key actually STARTS a new database call -- EVERY subsequent CONCURRENT
+        // caller for the SAME key gets ATTACHED to that SAME in-flight Task INSTEAD
+    var result = await task;
+    _inFlightRequests.TryRemove(key, out _);
+    return result;
+}
+```
+
+```text
+100 CONCURRENT requests arrive for the SAME product ID, AT THE SAME moment (a CACHE MISS,
+  or a POPULAR item suddenly going VIRAL): WITHOUT coalescing, ALL 100 hit the DATABASE
+  SIMULTANEOUSLY -- WITH coalescing, ONLY the FIRST triggers an ACTUAL database call -- the
+  OTHER 99 simply AWAIT that SAME in-flight Task, and ALL 100 receive the SAME result, from
+  JUST ONE actual database round trip
+```
+
+Because Request Coalescing operates entirely within a single process's own in-memory request tracking (rather than requiring an external, distributed lock the way a Stampede Lock does), it's a lighter-weight mechanism appropriate for reducing redundant *within-one-instance* concurrent duplicate work — a Stampede Lock remains necessary specifically when the coordination needs to span *multiple, separate* server instances all potentially handling the same cache-miss simultaneously.
+
+**Common Pitfall:** implementing Request Coalescing purely within a single instance while running many replicated instances behind a load balancer, expecting it to prevent a stampede across the *entire* fleet — a single instance's in-memory coalescing only deduplicates concurrent requests landing on *that one* instance; preventing a stampede across many instances all potentially hitting the same cache-miss simultaneously still requires a distributed mechanism like the Stampede Lock (covered under NoSQL).
+
+---
+
+## Advanced — Question 18
+
+**Q18: How does combining the Transactional Outbox Pattern (covered under Messaging) with an Idempotent Consumer (covered under Microservices) approximate "effectively-once" processing across an entire distributed pipeline, even though neither piece alone guarantees it?**
+
+The Outbox Pattern guarantees a message is published *at least once* for every committed database change (covered under Messaging) — an Idempotent Consumer guarantees that processing the *same* message multiple times produces the same result as processing it once (covered under Microservices) — neither alone provides exactly-once processing, but combined, they produce a system where a message is reliably published at least once, and safely processed exactly-once-in-effect no matter how many times it's redelivered.
+
+```text
+Outbox Pattern ALONE: guarantees a message is published AT LEAST once (it might be published
+  TWICE, if a relay crashes and retries after ALREADY successfully publishing) -- but says
+  NOTHING about what happens if a CONSUMER receives the SAME message MULTIPLE times
+
+Idempotent Consumer ALONE: guarantees that IF the same message arrives MULTIPLE times,
+  processing it PRODUCES the SAME result EACH TIME -- but says NOTHING about whether the
+  MESSAGE was reliably PUBLISHED in the FIRST place (a producer-side crash COULD still LOSE it
+  entirely, WITHOUT the Outbox pattern's OWN durability guarantee)
+
+COMBINED: the Outbox pattern GUARANTEES the message is NEVER LOST (published AT LEAST once,
+  tied to the SAME database transaction as the CHANGE it describes) -- the Idempotent
+  Consumer GUARANTEES that ANY duplicate deliveries have NO additional, UNWANTED EFFECT --
+  TOGETHER, this produces "EFFECTIVELY-ONCE" processing: the message is NEVER lost, and NEVER
+  processed with a DUPLICATE side effect, EVEN THOUGH neither individual guarantee, ALONE,
+  provides TRUE exactly-once semantics
+```
+
+Because true exactly-once delivery is provably difficult (and in a fully general distributed setting, effectively impossible) to guarantee at the transport layer alone, this combination sidesteps the problem by accepting at-least-once delivery as a given, and instead making redundant delivery *harmless* through consumer-side idempotency — a pragmatic, widely-used pattern that achieves the *practical effect* of exactly-once processing without requiring the underlying messaging infrastructure to solve exactly-once delivery itself.
+
+**Common Pitfall:** believing a messaging platform's own "exactly-once delivery" marketing claim removes the need for consumer-side idempotency entirely — even platforms offering strong internal delivery guarantees (Kafka's Exactly-Once Semantics, covered under Messaging) provide that guarantee only *within* their own transactional boundary; a genuinely end-to-end "effectively-once" guarantee across an entire business process (spanning the original database transaction, the message broker, and the consumer's own side effects) still benefits from the Outbox-plus-Idempotent-Consumer combination as defense in depth.
+
+---
+
 ---
