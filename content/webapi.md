@@ -1424,4 +1424,82 @@ Because `CsvResult` implements the same `IResult` interface every built-in Minim
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is `ControllerBase` (as distinct from `Controller`, covered under MVC), and why do Web API controllers inherit from it instead?**
+
+`ControllerBase` provides everything a Web API controller actually needs — model binding, `Ok()`/`NotFound()`/other `IActionResult` helpers, `ModelState`, access to `HttpContext` — without the view-related members (`View()`, `ViewBag`, `PartialView()`) that only make sense for an application actually rendering Razor views; `Controller` simply extends `ControllerBase` by adding those view-specific members on top.
+
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+public class ProductsController : ControllerBase { // NOT Controller -- no views involved, no need for its extra members
+    [HttpGet]
+    public IActionResult Get() => Ok(new[] { "widget", "gadget" });
+}
+```
+
+```text
+ControllerBase          -- model binding, IActionResult helpers, ModelState, HttpContext access
+   |
+   +-- Controller       -- ADDS View(), ViewBag, PartialView(), and other Razor-view-specific members
+```
+
+Because a pure API never renders a view, inheriting from `Controller` for a Web API controller would simply carry unused members along for no benefit — `ControllerBase` is the leaner, more precisely-scoped base class, and its use for API controllers is purely a matter of not depending on a capability (view rendering) the controller will never exercise.
+
+**Common Pitfall:** inheriting from `Controller` out of habit for a pure Web API controller — it still compiles and works fine since `Controller` includes everything `ControllerBase` has, but it's an imprecise signal about the controller's actual purpose, and pulls in view-rendering-related dependencies (like requiring the Razor view engine be registered) that a genuinely view-free API doesn't need.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is the `[ApiConventionType]`/`[ApiConventionMethod]` attribute pair, and how does it let a Web API apply a standard set of expected response types to many actions in bulk, rather than annotating each individually with `[ProducesResponseType]` (covered earlier)?**
+
+Rather than hand-writing `[ProducesResponseType(200)]`/`[ProducesResponseType(404)]`/`[ProducesResponseType(400)]` on every single action that follows the same common CRUD-style response pattern, `[ApiConventionType(typeof(DefaultApiConventions))]` applies a built-in convention (or a custom one you write) that infers the same response-type documentation automatically, based on the action's name and parameter shape matching the convention's expected pattern.
+
+```csharp
+[ApiController]
+[ApiConventionType(typeof(DefaultApiConventions))] // applies the BUILT-IN convention to every action below
+public class ProductsController : ControllerBase {
+    [HttpGet("{id}")]
+    public IActionResult Get(int id) { /* ... */ } // convention infers: 200 OK, 404 Not Found -- NO attribute needed
+}
+```
+
+```text
+DefaultApiConventions recognizes common METHOD NAME patterns (Get, Post, Put, Delete) and their
+PARAMETER SHAPES, and automatically documents the SAME response types [ProducesResponseType] would
+have required WRITING OUT explicitly on EVERY SINGLE matching action across the ENTIRE controller
+```
+
+Because the convention is applied once at the controller (or even assembly) level rather than repeated on every action, it eliminates a specific, common source of copy-pasted attribute boilerplate — an action whose behavior *doesn't* match the convention's expected pattern can still override it with an explicit `[ProducesResponseType]` where needed.
+
+**Common Pitfall:** assuming `[ApiConventionType]` changes an action's *actual runtime behavior* — it only affects the generated OpenAPI/Swagger documentation (covered earlier via API Explorer), describing what responses an action is expected to produce; it has no effect whatsoever on what the action actually returns at runtime, and mismatches between the documented convention and real behavior are a purely documentation-level bug.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is `IEndpointConventionBuilder`'s `.RequireAuthorization()`/`.AllowAnonymous()` for Minimal API endpoints, and how does it serve as the Minimal-API parallel to attribute-based `[Authorize]`/`[AllowAnonymous]` on MVC controllers?**
+
+Every Minimal API endpoint-registration call (`MapGet`, `MapPost`, etc.) returns an `IEndpointConventionBuilder`, which exposes fluent methods like `.RequireAuthorization()` and `.AllowAnonymous()` — the exact same underlying authorization mechanism as the attribute-based approach on a controller, just expressed as a chained method call rather than a decorating attribute, since Minimal API endpoints have no class/method to attach an attribute to in the first place.
+
+```csharp
+app.MapGet("/admin/reports", GetReports)
+   .RequireAuthorization("AdminOnly"); // equivalent to [Authorize(Policy = "AdminOnly")] on a controller action
+
+app.MapGet("/public/health", () => Results.Ok("healthy"))
+   .AllowAnonymous(); // equivalent to [AllowAnonymous]
+
+var group = app.MapGroup("/api/orders").RequireAuthorization(); // applies to EVERY endpoint in the GROUP at once
+group.MapGet("/{id}", GetOrder);   // inherits RequireAuthorization() from the group
+group.MapPost("/", CreateOrder);   // also inherits it
+```
+
+Because `.RequireAuthorization()` chains onto `IEndpointConventionBuilder` (which `MapGroup`, covered earlier, also returns), applying it once to a route group cascades the same authorization requirement to every endpoint registered within that group — directly mirroring how `[Authorize]` on an MVC controller class applies to every action inside it, without repeating the requirement on each individual endpoint.
+
+**Common Pitfall:** forgetting that Minimal API endpoints have NO implicit authorization requirement unless `.RequireAuthorization()` is explicitly chained (or inherited from an enclosing `MapGroup`) — unlike an MVC controller where a project-wide convention or base-class attribute might be more visually obvious, a Minimal API endpoint missing this call is easy to overlook, since there's no attribute physically present to draw attention to its absence during code review.
+
+---
+
 ---

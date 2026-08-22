@@ -1429,4 +1429,83 @@ Because the custom expander's candidate path is checked *before* the ordinary co
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is the `[NonAction]` attribute, and why would a public method on a Controller ever need to be explicitly excluded from being treated as a routable action?**
+
+By convention, every public method on a class deriving from `Controller` is treated by MVC as a potential action, reachable via routing — `[NonAction]` explicitly opts a specific public method out of that convention, for cases where a controller genuinely needs a public helper method (perhaps for another part of the codebase to call directly) without exposing it as an HTTP endpoint.
+
+```csharp
+public class OrdersController : Controller {
+    public IActionResult Index() => View(); // an ordinary ACTION -- reachable via routing
+
+    [NonAction]
+    public string BuildOrderSummary(Order order) { // PUBLIC, but NEVER treated as a routable action
+        return $"{order.Id}: {order.Total:C}";
+    }
+}
+```
+
+Without `[NonAction]`, MVC would still generally treat `BuildOrderSummary` as an action *unless* its signature made it unreachable by any route — `[NonAction]` makes the exclusion explicit and unambiguous, rather than relying on some incidental property of the method's signature to keep it from accidentally becoming routable.
+
+**Common Pitfall:** adding public helper methods to a Controller class without considering that MVC's convention treats every public method as a potential action — an unintentionally-exposed helper method can become an unexpected, undocumented endpoint; `[NonAction]` (or, more commonly, simply making the helper `private`/`protected`) closes this gap explicitly.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What are a Controller's own `OnActionExecuting`/`OnActionExecuted` overrides (available directly on the `Controller` base class), and when would you reach for these instead of a standalone `IActionFilter` class (covered earlier)?**
+
+`Controller` itself implements `IActionFilter`, so overriding `OnActionExecuting`/`OnActionExecuted` directly on a controller runs the exact same filter-pipeline hooks as a standalone filter class — but scoped to *that one controller* (and any it's subclassed by), without needing a separate class registered globally or via an attribute.
+
+```csharp
+public class OrdersController : Controller {
+    public override void OnActionExecuting(ActionExecutingContext context) {
+        // runs before EVERY action on THIS controller (and its subclasses) -- no separate filter class needed
+        ViewData["CurrentUserName"] = User.Identity?.Name;
+        base.OnActionExecuting(context);
+    }
+
+    public IActionResult Index() => View();
+}
+```
+
+This is a convenient shortcut specifically for logic tightly coupled to one controller's own concerns (setting shared `ViewData` every one of its actions needs) — logic meant to apply across *many unrelated* controllers is better expressed as a standalone `IActionFilter` (covered earlier) registered globally or applied via an attribute, since duplicating an override across every controller that needs the same behavior reintroduces the duplication a shared filter class is meant to eliminate.
+
+**Common Pitfall:** copying the same `OnActionExecuting` override logic into multiple unrelated controllers instead of extracting it into a shared base controller (or, better, a standalone `IActionFilter`) — controller-level overrides are best reserved for logic genuinely specific to one controller (or a controller hierarchy it defines), not as a substitute for a reusable, independently-registered filter.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is MVC's Application Model (`ApplicationModel`/`ControllerModel`/`ActionModel`), and how does it relate to the `IApplicationModelConvention`/`IActionModelConvention` interfaces covered earlier?**
+
+The Application Model is the in-memory object graph MVC builds during startup by reflecting over every controller and action in the application — `ApplicationModel` at the top, containing a `ControllerModel` per controller, each containing an `ActionModel` per action — and it's precisely *this* object graph that an `IApplicationModelConvention`/`IActionModelConvention` (covered earlier) receives and mutates, before MVC finalizes routing based on the result.
+
+```csharp
+public class RequireAuthorizationConvention : IControllerModelConvention {
+    public void Apply(ControllerModel controller) {
+        // 'controller' here IS the ControllerModel node in the Application Model graph
+        controller.Filters.Add(new AuthorizeFilter());
+        foreach (var action in controller.Actions) { // ActionModel nodes, nested under this ControllerModel
+            action.Selectors.Add(new SelectorModel { /* ... */ });
+        }
+    }
+}
+```
+
+```text
+ApplicationModel
+ └── ControllerModel (one per controller class)
+      ├── Filters, Properties, ApiExplorer settings -- all MUTABLE at this stage
+      └── ActionModel (one per action method)
+           └── Selectors, Parameters, Filters -- also mutable, nested one level deeper
+```
+
+Because this entire graph is constructed once, during startup, and is fully mutable at that point, any convention applied to it takes effect before routing is finalized — this is the actual mechanism underlying every "apply X to every controller automatically" convention covered earlier, rather than a separate, unrelated feature.
+
+**Common Pitfall:** assuming `IApplicationModelConvention`/`IActionModelConvention` (covered earlier) operate on some abstract, opaque concept of "conventions" rather than a concrete, inspectable object graph — understanding that `ApplicationModel`/`ControllerModel`/`ActionModel` is genuinely just reflected-over metadata, mutable like any other object graph, demystifies what a convention actually receives and changes, and makes writing a correct one considerably more approachable.
+
+---
+
 ---

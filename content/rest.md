@@ -2193,3 +2193,87 @@ Because the server only responds once genuinely new data exists (rather than the
 **Common Pitfall:** implementing Long Polling without a reasonable server-side timeout, letting connections hang indefinitely waiting for data that might never arrive — this can exhaust server-side connection/thread resources (many requests held open simultaneously, waiting); a well-designed Long Polling implementation always includes a timeout (returning an empty/no-op response after, say, 30 seconds), at which point the client simply issues a fresh long-poll request, preventing connections from being held open truly indefinitely.
 
 ---
+
+## Beginner — Question 17
+
+**Q17: What is the `OPTIONS` HTTP method's role in a REST API's own design (as distinct from its use in a CORS preflight check, covered under HTTP), and how can a client use it to discover which methods a specific resource actually supports?**
+
+Beyond its automatic use as a CORS preflight mechanism, `OPTIONS` is itself a defined HTTP method a REST API can implement to let a client ask "what can I actually do with this resource?" — the response's `Allow` header lists the supported methods for that exact URL, giving a client a way to discover a resource's capabilities without needing prior, out-of-band documentation.
+
+```http
+OPTIONS /api/orders/5 HTTP/1.1
+```
+```http
+HTTP/1.1 200 OK
+Allow: GET, PUT, PATCH, DELETE
+```
+
+```csharp
+[HttpOptions("{id}")]
+public IActionResult GetAllowedMethods(int id) {
+    Response.Headers.Append("Allow", "GET, PUT, PATCH, DELETE");
+    return Ok();
+}
+```
+
+Because the `Allow` header comes directly from the server's own routing configuration for that resource, a client (or a debugging tool) can use `OPTIONS` to verify exactly which verbs a given endpoint accepts, without needing to guess or consult separate documentation that might have drifted out of sync with the actual implementation.
+
+**Common Pitfall:** confusing this REST-level use of `OPTIONS` with the browser's automatic CORS preflight `OPTIONS` request (covered under HTTP) — they're the same HTTP method but serve different purposes; a REST API can support both simultaneously, using the CORS middleware to handle preflight checks while separately implementing `OPTIONS` on specific routes for genuine resource-capability discovery.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is the REST convention around a successful `DELETE` request's response body, and why do most APIs return `204 No Content` rather than the now-deleted resource's last known state?**
+
+A `DELETE` request's whole point is that the resource no longer exists afterward — returning `204 No Content` (an explicitly empty body) signals "the deletion succeeded, and there is nothing further to say," which is why it's the overwhelmingly common convention, though some APIs instead return `200 OK` with the deleted resource's final representation, useful when a client might want to display "you just deleted: [name]" without having cached that data beforehand.
+
+```http
+DELETE /api/orders/5 HTTP/1.1
+```
+```http
+HTTP/1.1 204 No Content
+```
+```text
+-- versus the LESS COMMON alternative, RETURNING the resource's LAST state before deletion:
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{ "id": 5, "status": "Cancelled", "total": 129.99 }
+```
+
+Because a deleted resource genuinely no longer exists, there's no "current state" left to return — `204`'s empty body is the more semantically honest response, while the `200`-with-body alternative is a deliberate, documented deviation some APIs choose purely for client convenience, not because it's more "correct" REST.
+
+**Common Pitfall:** inconsistently mixing both conventions across different endpoints of the same API (some `DELETE` actions returning `204`, others returning `200` with a body) without a documented, deliberate reason — clients consuming the API then can't safely assume a consistent response shape for every delete operation, undermining exactly the kind of predictability a well-designed API's conventions are meant to provide.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is resource embedding via an `?include=` query parameter (as used by JSON:API-style REST conventions), and how does it let a client request related resources in the SAME response, avoiding the N+1 follow-up-request problem that a purely resource-per-endpoint design otherwise creates?**
+
+A strict one-resource-per-endpoint REST design forces a client wanting an order *and* its customer *and* its line items to make separate follow-up requests for each related resource — `?include=` lets the client explicitly ask for specific related resources to be embedded directly in the initial response, trading strict resource-per-URL purity for a meaningful reduction in round-trips, directly addressing the "Chattiness" problem covered earlier.
+
+```http
+GET /api/orders/5?include=customer,lineItems HTTP/1.1
+```
+```json
+{
+  "id": 5,
+  "total": 129.99,
+  "customer": { "id": 42, "name": "Alice" },
+  "lineItems": [ { "productId": 9, "quantity": 2 } ]
+}
+```
+```text
+WITHOUT ?include=, the SAME data would require THREE separate round-trips:
+  GET /api/orders/5           -- get the order itself
+  GET /api/customers/42       -- a SEPARATE request, just to get the customer's name
+  GET /api/orders/5/line-items -- ANOTHER separate request, for the line items
+```
+
+Because the client explicitly opts into which related resources it needs embedded (rather than the server always eagerly including everything, or never including anything), this approach lets a mobile client on a slow connection request a lean response while a dashboard needing the full picture requests everything in one round-trip — directly analogous to GraphQL's (covered separately) field-selection model, but layered onto an otherwise ordinary REST endpoint rather than requiring a dedicated query language.
+
+**Common Pitfall:** implementing `?include=` by having the server ALWAYS eagerly load and embed every possible related resource regardless of what the client actually asked for — this defeats the entire purpose of making inclusion opt-in, and reintroduces the N+1-avoidance benefit's inverse problem: bloated responses for clients that only wanted the base resource; the query parameter's whole value lies in the CLIENT controlling exactly what gets embedded, not the server deciding unilaterally.
+
+---

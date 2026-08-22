@@ -1503,4 +1503,86 @@ Because these finer-grained hooks run at well-defined, distinct points *across a
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is `app.UseHttpsRedirection()`, and why does an ASP.NET Core project template still configure Kestrel to listen on plain HTTP at all if HTTPS is the intended production behavior?**
+
+`UseHttpsRedirection()` is middleware that issues a `307`/`308` redirect to the HTTPS equivalent of any request that arrives over plain HTTP — templates still configure an HTTP listener because it gives local development a working, zero-certificate-hassle endpoint, and because in many real deployments (behind a load balancer or reverse proxy that terminates TLS itself, covered under Kestrel/reverse-proxy) the *app itself* only ever receives plain HTTP traffic on its internal network hop, with the redirect middleware simply never firing in that topology.
+
+```csharp
+var app = builder.Build();
+app.UseHttpsRedirection(); // redirects http:// requests to the https:// equivalent URL
+app.UseHsts();             // (production only) tells the BROWSER to prefer https:// on subsequent visits
+```
+
+```text
+Client requests: http://myapi.com/orders
+Server responds: 307 Temporary Redirect
+                  Location: https://myapi.com/orders
+-- the CLIENT then automatically RE-REQUESTS the SAME path, this time over HTTPS
+```
+
+Because the redirect itself is a plaintext HTTP round-trip before the client ever switches to HTTPS, it doesn't protect that very first request from network-level tampering — `UseHsts()` closes that gap for *subsequent* visits by telling the browser to rewrite `http://` to `https://` itself, without ever issuing the initial insecure request at all (the same mechanism as HSTS Preloading, covered under HTTP).
+
+**Common Pitfall:** relying on `UseHttpsRedirection()` alone and assuming it fully protects the very first request a client ever makes — the redirect response itself travels over plain HTTP, meaning an attacker positioned on the network path for that one request can still intercept or tamper with it; pairing it with `UseHsts()` (and, for maximum protection, HSTS preloading) closes this specific first-visit gap.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is the conceptual difference between ASP.NET Core Middleware and an MVC Filter (covered in depth under MVC), and why does needing access to MVC-specific context push you toward a filter instead of middleware?**
+
+Middleware operates on the raw `HttpContext` and runs for *every* request regardless of which endpoint (or whether any endpoint at all) ultimately handles it — an MVC Filter runs only once routing has already selected a specific action, giving it access to MVC-specific context (the action's parameters, its `ModelState`, the controller instance itself) that middleware, running earlier and more generically, simply doesn't have visibility into.
+
+```csharp
+// MIDDLEWARE -- runs for EVERY request, has NO idea which action (if any) will eventually handle it
+app.Use(async (context, next) => {
+    // only HttpContext is available here -- no ActionDescriptor, no ModelState, no controller instance
+    await next(context);
+});
+
+// FILTER -- runs only AFTER routing has selected a specific action -- has RICH MVC-specific context
+public class LogActionFilter : IActionFilter {
+    public void OnActionExecuting(ActionExecutingContext context) {
+        var actionName = context.ActionDescriptor.DisplayName; // <-- unavailable to plain middleware
+    }
+    public void OnActionExecuted(ActionExecutedContext context) { }
+}
+```
+
+Because a filter executes inside the part of the pipeline that already knows which controller/action was matched, it can inspect or modify action arguments, short-circuit with a specific `IActionResult`, or react to model-validation results — none of which middleware, operating purely on the generic request/response before an endpoint is even selected, is positioned to do.
+
+**Common Pitfall:** implementing cross-cutting logic as middleware when it actually needs MVC-specific context (like the bound action arguments or `ModelState`) — the middleware either can't access that data at all, or ends up manually re-deriving it in a fragile way; recognizing that the logic genuinely needs post-routing, action-aware context is the signal to reach for a Filter (covered in depth under MVC) instead.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is `KestrelServerOptions.Limits` (`MaxConcurrentConnections`, `MaxRequestBodySize`, `MinRequestBodyDataRate`), and how do these connection-level limits protect against resource-exhaustion attacks that a single endpoint's `[RequestSizeLimit]` attribute (covered under Web API) can't address?**
+
+`[RequestSizeLimit]` (covered under Web API) constrains one specific *action's* accepted request body size — `KestrelServerOptions.Limits` operates one layer lower, at the server/connection level, bounding things no single action attribute can reach: the total number of simultaneous connections the server will accept, and the minimum data rate a client must sustain while streaming a request body before Kestrel gives up on it as too slow to be legitimate traffic.
+
+```csharp
+builder.WebHost.ConfigureKestrel(options => {
+    options.Limits.MaxConcurrentConnections = 100;           // caps SIMULTANEOUS connections, server-wide
+    options.Limits.MaxConcurrentUpgradedConnections = 100;    // separately caps WebSocket/upgraded connections
+    options.Limits.MaxRequestBodySize = 30_000_000;           // a SERVER-WIDE default, overridable per-endpoint
+    options.Limits.MinRequestBodyDataRate =
+        new MinDataRate(bytesPerSecond: 240, gracePeriod: TimeSpan.FromSeconds(5)); // kills a DELIBERATELY SLOW upload
+});
+```
+
+```text
+A "Slowloris"-style attacker opens many connections and sends request bodies at a TRICKLE (a few
+bytes per second) to tie up server resources indefinitely -- MinRequestBodyDataRate lets Kestrel
+ABORT any connection sending data BELOW the configured rate, closing off this specific attack class
+at the SERVER level, before it ever reaches any endpoint-specific size-limit attribute at all
+```
+
+Because these limits apply before a request is ever routed to a specific action, they protect the server against attack patterns (connection exhaustion, deliberately slow uploads) that target the server's own resources directly, rather than any particular endpoint's business logic — exactly the kind of protection an individual action's `[RequestSizeLimit]` attribute has no ability to provide, since it only ever sees requests that have already been accepted and routed.
+
+**Common Pitfall:** relying solely on per-action `[RequestSizeLimit]`/`[RequestFormLimits]` attributes (covered under Web API) as a complete defense against oversized or malicious uploads, without also configuring server-level `KestrelServerOptions.Limits` — an attacker opening many connections or streaming data deliberately slowly can still exhaust server resources before any specific action's own attribute-level limit is ever evaluated; the two layers address genuinely different threat surfaces and are meant to be configured together.
+
+---
+
 ---

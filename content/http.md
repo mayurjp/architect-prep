@@ -1251,3 +1251,74 @@ Because these headers are set entirely by the browser itself (a script running o
 **Common Pitfall:** relying on `Sec-Fetch-*` headers as a complete, standalone CSRF defense, without also maintaining the more established, broadly-supported defenses (anti-forgery tokens, `SameSite` cookies, covered under App Security) — `Sec-Fetch-*` support, while now broad across modern browsers, is a comparatively newer mechanism than the more established defenses; it's best used as an additional, complementary layer of defense-in-depth, not as a sole replacement for the well-established, more universally-relied-upon CSRF protections already in place.
 
 ---
+
+## Beginner — Question 16
+
+**Q16: What is the `User-Agent` request header, and why shouldn't server-side logic make significant behavioral decisions based on parsing it?**
+
+`User-Agent` is a client-supplied string describing the requesting browser/OS/device — but because it's entirely client-controlled and trivially spoofable (any HTTP client, including a script or a curious user's browser extension, can set it to whatever value it wants), it should never be treated as a reliable signal for security decisions, and even for non-security decisions (like feature detection) it's a notoriously fragile, easily-outdated approach.
+
+```http
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0
+```
+```csharp
+// FRAGILE -- ANY client can send WHATEVER User-Agent string it wants, INCLUDING one impersonating a "real" browser
+if (Request.Headers["User-Agent"].ToString().Contains("Chrome"))
+    return SomeChromeSpecificBehavior();
+```
+
+Because the header's entire value is simply whatever the requester's HTTP client chose to send, an attacker (or an entirely ordinary API client with no browser at all) can set it to mimic any legitimate browser string, making `User-Agent`-based logic trivially bypassable — feature detection (checking whether a specific capability actually works) is a far more robust approach than inferring capability from a spoofable identity string.
+
+**Common Pitfall:** using `User-Agent` sniffing to gate access, apply security policy, or make significant behavioral branches — since the header is entirely client-supplied and easily forged, any logic depending on it for something security-relevant provides no genuine protection at all; it remains reasonably useful only for low-stakes purposes like analytics/logging, where an occasional inaccurate or spoofed value carries no real consequence.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is the `If-Range` header, and how does it combine with `Range` (covered earlier) and a validator (`ETag`/`Last-Modified`) to safely resume a partial download only if the underlying resource hasn't changed since the download started?**
+
+Resuming a partial download with a plain `Range` request risks stitching together bytes from two *different* versions of a resource if it changed between the original download and the resume attempt — `If-Range` guards against this by making the range request conditional: the server only honors the partial range if the supplied `ETag`/date still matches the resource's current state, otherwise it sends the *entire*, current resource instead of a now-inconsistent partial chunk.
+
+```http
+GET /video.mp4 HTTP/1.1
+Range: bytes=1000000-
+If-Range: "abc123"    <-- the ETag the client remembers from when it downloaded the FIRST part
+```
+```http
+-- IF the ETag still matches (resource UNCHANGED): server honors the partial range
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 1000000-2000000/2000000
+
+-- IF the ETag no longer matches (resource CHANGED since the original download started):
+HTTP/1.1 200 OK    <-- the FULL, CURRENT resource, NOT a partial range -- avoiding an INCONSISTENT stitched file
+```
+
+Because a plain `Range` request has no way to detect that the resource changed between the original download and the resume, blindly honoring it could silently produce a corrupted file made of bytes from two different resource versions — `If-Range` makes the server itself responsible for detecting this and falling back to a full, consistent response instead.
+
+**Common Pitfall:** implementing resumable downloads with `Range` alone, without also sending `If-Range`, and assuming the resumed bytes will always be consistent with the earlier partial download — if the underlying resource changes between download attempts (a file replaced on the server, a video re-encoded), the client can silently end up with a corrupted, inconsistent file, a much harder bug to notice than an outright failed request.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is the `Cache-Control: stale-while-revalidate` directive, and how does it let a cache serve a stale response immediately while asynchronously refetching a fresh one in the background, rather than blocking the client on that refetch?**
+
+Ordinary cache expiration forces a client to wait for a fresh response once a cached entry's `max-age` has passed — `stale-while-revalidate=N` tells a supporting cache it may serve the now-stale cached response *immediately* for up to `N` additional seconds past expiration, while triggering a background revalidation request whose result updates the cache for the *next* request, trading a small window of potential staleness for consistently fast responses with no client-visible latency spike at the exact moment of expiration.
+
+```http
+Cache-Control: max-age=60, stale-while-revalidate=30
+```
+```text
+t=0s   : response cached, fresh for 60 seconds
+t=61s  : a request arrives -- entry is 1 second STALE, but within the 30s stale-while-revalidate window
+         -> the STALE response is served IMMEDIATELY (no waiting), while a background request
+            asynchronously refetches a FRESH response and updates the cache for NEXT time
+t=95s  : entry is now 35s stale -- BEYOND the stale-while-revalidate window -- a request here
+         MUST wait for a synchronous refetch, exactly like ordinary max-age expiration
+```
+
+Because the background revalidation happens without the requesting client ever waiting on it, this directive specifically targets the "thundering herd of clients all hitting an expired cache entry simultaneously" pattern — spreading the cost of refetching across background requests rather than making every single client-facing request pay the full latency of a synchronous refetch right at the moment of expiration.
+
+**Common Pitfall:** assuming `stale-while-revalidate` guarantees every client always sees perfectly fresh data — it deliberately trades a bounded window of staleness for consistently low latency; for data where even a brief, bounded staleness window is unacceptable (a real-time balance check), this directive is the wrong tool, and a `no-cache`-style always-revalidate approach is more appropriate despite its added latency cost.
+
+---
