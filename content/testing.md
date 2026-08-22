@@ -1200,3 +1200,98 @@ Mutant 1 represents a genuine behavioral difference (quantity exactly 10 now get
 **Common Pitfall:** treating a mutation testing tool's reported score as a hard, precise target that should reach 100% — because equivalent mutants are a genuine, unavoidable category (not a test-suite deficiency), a mature team typically manually reviews *surviving* mutants specifically to classify each one as "a genuine test gap, worth writing a new test for" versus "an equivalent mutant, appropriately un-killable and safe to ignore," rather than mechanically chasing a mutation score that mathematically cannot reach 100% for most realistic codebases.
 
 ---
+
+## Beginner — Question 12
+
+**Q12: What is the difference between a "Golden Path" test and an "Edge Case" test, and why does prioritizing the Golden Path first give the best early return on testing effort?**
+
+The Golden Path is the most common, expected way a feature is actually used — an Edge Case is an unusual, boundary, or error-inducing input, less frequently hit in practice but still important to eventually cover. Writing the Golden Path test first ensures the feature's primary, most-used behavior is verified immediately, before spending time on less-frequently-exercised scenarios.
+
+```csharp
+// GOLDEN PATH -- the MOST COMMON, EXPECTED usage -- verify THIS FIRST
+[Fact]
+public void PlaceOrder_WithValidItemsAndPayment_Succeeds()
+{
+    var result = _orderService.PlaceOrder(validOrder);
+    Assert.True(result.IsSuccess);
+}
+
+// EDGE CASES -- less common, but STILL worth covering -- AFTER the golden path is verified
+[Fact] public void PlaceOrder_WithEmptyCart_ReturnsError() { /* ... */ }
+[Fact] public void PlaceOrder_WithExpiredPaymentMethod_ReturnsError() { /* ... */ }
+[Fact] public void PlaceOrder_DuringMaintenanceWindow_ReturnsError() { /* ... */ }
+```
+A feature whose Golden Path is broken affects essentially every single user of that feature — testing it first catches the highest-impact class of bug immediately, with minimal testing effort invested; edge cases, while genuinely important for overall robustness, individually affect a much smaller fraction of real usage, making them lower-priority (though not unimportant) relative to ensuring the primary, everyday path actually works correctly first.
+
+**Common Pitfall:** spending disproportionate early testing effort enumerating exotic edge cases before a single test confirms the feature's most basic, common usage actually works at all — this can leave a genuinely broken Golden Path undetected while a suite accumulates many tests for scenarios far less likely to be hit in practice; establishing Golden Path coverage first, then expanding into edge cases, generally provides a better return on testing effort, especially early in a feature's development.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is the difference between State-Based and Interaction-Based (Mockist) testing styles, and how do they differ in what they actually assert about a system under test?**
+
+State-Based testing verifies a system's *observable outcome* — after calling a method, check that the resulting state (a return value, a database row, a field's final value) is correct — Interaction-Based (Mockist) testing instead verifies *how* the system under test interacted with its dependencies (which methods were called, with what arguments, how many times), regardless of what final state resulted.
+
+```csharp
+// STATE-BASED -- verifies the OUTCOME, doesn't care HOW it got there
+[Fact]
+public void Withdraw_ReducesBalance_StateBased()
+{
+    var account = new BankAccount(initialBalance: 100);
+    account.Withdraw(30);
+    Assert.Equal(70, account.Balance); // asserts the RESULTING STATE, NOT which internal methods were called
+}
+
+// INTERACTION-BASED (Mockist) -- verifies HOW the system interacted with a DEPENDENCY, NOT just the outcome
+[Fact]
+public void PlaceOrder_CallsPaymentGateway_InteractionBased()
+{
+    var mockGateway = new Mock<IPaymentGateway>();
+    var service = new OrderService(mockGateway.Object);
+
+    service.PlaceOrder(order);
+
+    mockGateway.Verify(g => g.Charge(order.Total), Times.Once()); // asserts a SPECIFIC INTERACTION occurred
+}
+```
+The State-Based test doesn't care whether `Withdraw` internally called some other private helper method twice or once — it only cares that `Balance` ends up correct; the Interaction-Based test doesn't directly check any resulting state at all — it specifically verifies that `Charge` was called exactly once, with the expected argument, regardless of what `OrderService`'s own internal state ends up looking like afterward.
+
+**Why this distinction matters for how BRITTLE a test suite becomes as implementation details change:** Interaction-Based tests are more tightly coupled to a system's *internal implementation* (which specific dependency methods get called, and how) — refactoring the internal implementation (calling a dependency differently, while producing the identical observable outcome) can break Interaction-Based tests even though nothing about the system's actual, externally-observable behavior changed at all; State-Based tests, focusing purely on observable outcomes, tend to be more resilient to this kind of internal refactoring, which is a genuine, ongoing debate in the testing community about which style produces a healthier, less brittle test suite overall.
+
+**Common Pitfall:** defaulting to Interaction-Based (Mockist) testing for everything, verifying every single internal method call a class makes to its dependencies — this tightly couples tests to implementation details that could legitimately change without any actual behavioral regression, producing a test suite that frequently breaks during harmless refactoring; State-Based testing (verifying outcomes) is often the more robust default, reserving Interaction-Based verification specifically for cases where the *interaction itself* is the actual behavior worth verifying (confirming a payment gateway really was called, since that's a side effect with no other directly observable state to check).
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is a "Test Smell," and how does recognizing patterns like Mystery Guest, Test Duplication, and Assertion Roulette help identify tests that are technically passing but poorly designed?**
+
+A Test Smell is a Code Smell (a surface indicator of a deeper design problem) applied specifically to test code — a test can pass reliably and still exhibit a Test Smell, signaling it's poorly designed in a way that will likely cause maintenance pain later, even though nothing is currently, technically broken.
+
+```csharp
+// MYSTERY GUEST -- the test depends on EXTERNAL state (a file, a database row) NOT visible WITHIN the test itself
+[Fact]
+public void ProcessOrder_Works() {
+    var order = _repository.GetById(42); // WHERE does order 42 come from?? SOME setup script, ELSEWHERE, UNSEEN
+    Assert.True(_service.Process(order).IsSuccess);
+}
+
+// ASSERTION ROULETTE -- MULTIPLE assertions, with NO clear message distinguishing WHICH ONE actually failed
+[Fact]
+public void ValidatesOrder() {
+    Assert.True(order.IsValid);
+    Assert.Equal(5, order.Items.Count);
+    Assert.True(order.Total > 0); // if THIS ONE fails, the TEST RUNNER'S output alone doesn't clearly say WHICH
+}
+
+// TEST DUPLICATION -- MULTIPLE tests, EACH re-verifying the SAME underlying LOGIC, just with COSMETICALLY
+// different inputs, providing NO ADDITIONAL genuine coverage beyond the FIRST one
+```
+Each smell signals a specific, recognizable maintenance risk: Mystery Guest makes a test's actual setup opaque (a future reader has no idea where "order 42" comes from, making the test hard to understand or safely modify); Assertion Roulette makes failure diagnosis slower (a failing test's output doesn't clearly indicate which specific assertion actually failed); Test Duplication inflates the suite's size and runtime without a corresponding increase in actual coverage.
+
+**Why cataloging these smells as named, recognizable patterns is more useful than a vague "write good tests" instruction:** just as Code Smells (covered under Design Principles' broader software-quality discussion) give a team a concrete, shared vocabulary for spotting design problems in production code, naming specific Test Smells lets a code reviewer say "this has a Mystery Guest smell" — a precise, actionable, and teachable observation — rather than a vaguer "this test seems hard to follow," which is harder to act on or teach to someone newer to the codebase.
+
+**Common Pitfall:** treating a test suite as adequately reviewed simply because every test currently passes, without ever examining tests for these smells — a test that reliably passes today can still be a genuine liability tomorrow (a Mystery Guest test that silently breaks when unrelated external setup changes, an Assertion Roulette test that takes 20 minutes to debug once it finally does fail) — passing today is a necessary, but not sufficient, condition for a test actually being well-designed.
+
+---

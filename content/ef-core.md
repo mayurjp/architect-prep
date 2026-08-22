@@ -1134,4 +1134,92 @@ When this exact query shows up as a top offender in SQL Server's Query Store or 
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is an EF Core Migration's `Down` method, and how does it let a migration be reversed, rolling the database schema back to its previous state?**
+
+Every EF Core migration has two methods — `Up` (applying the schema change) and `Down` (the exact inverse, undoing it) — the compiler-generated `Down` method lets `dotnet ef database update` roll a database back to an earlier migration's state, exactly reversing whatever `Up` did.
+
+```csharp
+public partial class AddDiscountCodeToProducts : Migration
+{
+    protected override void Up(MigrationBuilder migrationBuilder)
+    {
+        migrationBuilder.AddColumn<string>(name: "DiscountCode", table: "Products", type: "nvarchar(20)", nullable: true);
+    }
+
+    protected override void Down(MigrationBuilder migrationBuilder)
+    {
+        migrationBuilder.DropColumn(name: "DiscountCode", table: "Products"); // the EXACT INVERSE of Up
+    }
+}
+```
+```bash
+dotnet ef database update PreviousMigrationName
+# EF Core runs THIS migration's 'Down' method (and ANY OTHERS between the current and target migration,
+# in REVERSE order) -- ROLLING the SCHEMA BACK, WITHOUT the developer needing to hand-write undo SQL
+```
+Because `Down` is generated automatically alongside `Up` when EF Core scaffolds a migration (based on comparing the model before and after the change), rolling back a bad migration in a development or staging environment is usually as simple as running `database update` targeting an earlier migration — EF Core handles working out and applying the necessary reverse operations itself.
+
+**Common Pitfall:** assuming `Down` is always a perfectly safe, lossless operation to run against a database that already has real data — reversing a migration that *added* a column is safe (the column is simply dropped again), but reversing one that *removed* a column, if that column had data before the original `Up` ran, cannot restore data that's already been deleted; `Down` reverses the *schema* change correctly, but it cannot resurrect data lost during a prior, already-applied destructive migration.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is a Filtered `Include()` (EF Core 5+), and how does it let you load only a subset of a related collection — rather than the entire collection — directly as part of the same query?**
+
+Ordinarily, `Include()` loads the *entire* related collection for each parent entity — a Filtered Include lets you attach a `.Where()` (and `.OrderBy()`/`.Take()`) directly inside the `Include`, so only the matching subset of related entities is actually loaded, without needing a separate query or loading unwanted rows just to discard them in memory afterward.
+
+```csharp
+// WITHOUT filtered Include -- loads EVERY SINGLE order line, INCLUDING already-shipped/cancelled ones
+var order = await _db.Orders.Include(o => o.Lines).FirstAsync(o => o.Id == 5);
+
+// WITH filtered Include -- loads ONLY the "Pending" lines -- the REST are NEVER even fetched from the DATABASE
+var order = await _db.Orders
+    .Include(o => o.Lines.Where(l => l.Status == "Pending").OrderBy(l => l.CreatedDate))
+    .FirstAsync(o => o.Id == 5);
+```
+```sql
+-- the GENERATED SQL applies the FILTER directly in the JOIN's ON/WHERE clause itself --
+-- non-matching LINES are NEVER even TRANSFERRED over the network, let alone MATERIALIZED in memory
+SELECT * FROM Orders o
+LEFT JOIN OrderLines l ON o.Id = l.OrderId AND l.Status = 'Pending'
+WHERE o.Id = 5
+ORDER BY l.CreatedDate
+```
+Because the filter is pushed directly into the generated SQL's join condition, only the matching related rows ever leave the database at all — a substantial improvement over loading the *entire* related collection and then filtering it in memory with LINQ-to-Objects afterward, which would waste both network bandwidth and memory on rows the application was always going to discard anyway.
+
+**Common Pitfall:** loading a full related collection via an unfiltered `Include()` and then filtering it in application code (`order.Lines.Where(l => l.Status == "Pending")`) — this still transfers and materializes every related row from the database, even the ones immediately discarded by the in-memory filter; a Filtered Include pushes the same filter down into the actual SQL query, avoiding the wasted transfer and materialization entirely.
+
+---
+
+## Advanced — Question 13
+
+**Q13: How does modern EF Core (7+) automatically batch multiple `INSERT` statements from a single `SaveChanges()` call into fewer database round trips, and why did earlier EF Core versions require one round trip per row?**
+
+Older versions of EF Core issued one separate `INSERT` statement (and one round trip) per new entity added to a `DbSet`, even when many were saved together in a single `SaveChanges()` call — modern EF Core batches multiple `INSERT` statements together into fewer, larger round trips, substantially reducing the network overhead for bulk-insert scenarios.
+
+```csharp
+for (int i = 0; i < 1000; i++)
+    _db.Products.Add(new Product { Name = $"Product {i}" });
+
+await _db.SaveChangesAsync();
+```
+```text
+OLDER EF Core versions: 1,000 SEPARATE round trips -- ONE "INSERT INTO Products..." statement,
+  SENT and ACKNOWLEDGED, INDIVIDUALLY, for EACH of the 1,000 new Product entities
+
+MODERN EF Core (7+): the SAME 1,000 inserts are AUTOMATICALLY BATCHED into a MUCH SMALLER NUMBER
+  of round trips -- MULTIPLE "INSERT" statements are COMBINED into ONE larger SQL BATCH per round trip,
+  DRAMATICALLY REDUCING the NETWORK overhead FOR THIS EXACT SAME operation, WITH NO CODE CHANGE NEEDED
+```
+Because this batching happens automatically, entirely inside EF Core's own `SaveChanges` implementation, application code needs no changes at all to benefit — simply upgrading to a modern EF Core version transparently reduces the network round-trip cost of any bulk-insert-heavy workload, which is precisely why EF Core's own bulk-insert performance improved substantially across versions without requiring any change to how developers actually call `SaveChanges()`.
+
+**Why this doesn't fully eliminate the case for `ExecuteUpdate`/`ExecuteDelete` or genuinely specialized bulk-insert libraries (covered elsewhere):** automatic `SaveChanges` batching still goes through Change Tracking (covered earlier) for every entity involved — for truly massive bulk operations (millions of rows), the Change Tracking overhead itself (not just the round-trip count) can still be significant, which is why dedicated, no-tracking bulk-insert approaches (via a specialized library, or `ExecuteUpdate`-style bulk operations for updates specifically) remain relevant for the most extreme-scale scenarios, even with `SaveChanges`'s own batching improvements.
+
+**Common Pitfall:** assuming EF Core's `SaveChanges` batching makes it fully competitive with a dedicated bulk-insert library for genuinely massive (multi-million-row) insert operations — `SaveChanges` batching meaningfully improves the common case (hundreds to a few thousand entities), but for the most extreme bulk-insert scenarios, the overhead of Change Tracking itself (not just round trips) still makes a specialized, tracking-bypassing bulk-insert approach the better-performing choice.
+
+---
+
 ---

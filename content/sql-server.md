@@ -1020,4 +1020,87 @@ An over-estimated memory grant isn't just "safely generous" — memory granted t
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is a SQL Server Schema (like `dbo`), and how does it provide a namespace for organizing database objects, distinct from a Database itself?**
+
+A Schema is a logical container *within* a database, grouping related tables/views/procedures under a common namespace — distinct from the Database itself, which is the top-level container holding one or more schemas. `dbo` (database owner) is simply the default schema every object lives in unless explicitly assigned to a different one.
+
+```sql
+-- ONE database, with MULTIPLE schemas -- organizing objects LOGICALLY, WITHOUT needing SEPARATE databases
+CREATE SCHEMA Sales;
+CREATE SCHEMA Inventory;
+
+CREATE TABLE Sales.Orders (Id INT PRIMARY KEY);         -- lives in the "Sales" SCHEMA
+CREATE TABLE Inventory.Products (Id INT PRIMARY KEY);   -- lives in the "Inventory" SCHEMA
+CREATE TABLE dbo.Users (Id INT PRIMARY KEY);            -- the DEFAULT schema, if NONE is specified
+
+SELECT * FROM Sales.Orders;       -- schema-QUALIFIED reference -- UNAMBIGUOUS about WHICH "Orders" table
+```
+Because schemas exist *within* one database (rather than requiring separate databases entirely), a single database can cleanly separate logically-distinct groups of tables — `Sales.Orders` versus a hypothetical, entirely different `Reporting.Orders` view — while both still share the same database's transaction log, backup, and connection context, avoiding the overhead and isolation of maintaining genuinely separate databases just to organize tables into logical groups.
+
+**Common Pitfall:** leaving every single table in the default `dbo` schema regardless of how large and organizationally complex the database grows — for a database with dozens or hundreds of tables spanning genuinely distinct business domains, using dedicated schemas (`Sales`, `Inventory`, `Reporting`) to group related objects makes the database's overall structure meaningfully easier to navigate and reason about, and also enables schema-level permission grants (granting access to an entire schema at once, rather than table by table).
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What are `sys.dm_exec_requests` and `sp_who2`, and how does identifying a blocking session's SPID let a DBA diagnose a blocking chain during a live incident?**
+
+When one transaction holds a lock another transaction needs (covered under locking earlier), the second transaction *blocks*, waiting — `sys.dm_exec_requests` (and the older `sp_who2`) let a DBA see, in real time, which sessions are currently blocked, and critically, which *other* session (`blocking_session_id`) is the one actually holding the lock causing the block.
+
+```sql
+SELECT session_id, blocking_session_id, wait_type, wait_time, status, command
+FROM sys.dm_exec_requests
+WHERE blocking_session_id <> 0; -- shows ONLY sessions that ARE CURRENTLY blocked BY something else
+```
+```text
+session_id | blocking_session_id | wait_type          | wait_time
+    62      |         58          | LCK_M_S             | 4500 ms   <-- session 62 is BLOCKED, WAITING on session 58
+    71      |         58          | LCK_M_X             | 3200 ms   <-- session 71 ALSO blocked by the SAME session 58
+
+-- session 58 is the ROOT of THIS blocking chain -- BOTH other sessions are STUCK waiting on IT specifically
+```
+Once the blocking session's SPID (58, in this example) is identified, a DBA can inspect *that specific session*'s currently-running query (via `sys.dm_exec_sql_text` joined against its SPID) to understand *what it's actually doing* and *why* it's holding its lock for so long — perhaps an uncommitted transaction left open by a forgotten `COMMIT`, or a genuinely long-running operation — rather than only seeing symptoms (many sessions timing out) without any visibility into the actual root cause.
+
+**Why tracing the FULL blocking CHAIN matters, not just the FIRST blocked session noticed:** a blocking chain can be several sessions deep (session A blocks B, which in turn is *also* blocking C) — `blocking_session_id` lets a DBA walk this chain back to its true root, since killing or investigating an *intermediate* blocked-and-blocking session without identifying the actual root cause further upstream would leave the underlying problem (and the sessions still blocked behind it) completely unresolved.
+
+**Common Pitfall:** reactively killing the *first* blocked session noticed (mistaking a *victim* of blocking for the *cause*) rather than tracing `blocking_session_id` back to the actual root blocking session — killing a merely-blocked session accomplishes nothing, since it wasn't the one holding the lock in the first place; the actual fix requires identifying and addressing whatever the *root* blocking session (at the very start of the chain) is doing.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is a Bookmark Lookup (Key Lookup), and how does querying via a non-covering Non-Clustered Index force an extra round trip back to the Clustered Index for each matching row — a cost a covering index (via `INCLUDE`) eliminates?**
+
+A Non-Clustered Index (covered earlier) stores only the columns it's built on, plus a reference back to the full row's location in the Clustered Index — if a query needs a column *not* included in the Non-Clustered Index itself, SQL Server must perform an additional "Key Lookup," fetching each matching row's full data from the Clustered Index separately, one lookup per matching row.
+
+```sql
+CREATE NONCLUSTERED INDEX IX_Products_Category ON Products(Category);
+
+-- this query needs 'Price', which is NOT part of the index above AT ALL
+SELECT Name, Price FROM Products WHERE Category = 'Electronics';
+```
+```text
+Execution plan: Index Seek (IX_Products_Category) -- FINDS matching ROWS by Category QUICKLY
+             -> Key Lookup (Clustered Index)       -- for EACH matching row, a SEPARATE lookup FETCHES
+                                                        'Name' and 'Price' from the CLUSTERED index
+-- for a QUERY matching 10,000 rows, this means 10,000 SEPARATE Key Lookups -- can be SURPRISINGLY EXPENSIVE
+```
+```sql
+-- the FIX -- a COVERING index, using INCLUDE to add the NEEDED columns WITHOUT making them PART OF the index KEY
+CREATE NONCLUSTERED INDEX IX_Products_Category_Covering
+    ON Products(Category) INCLUDE (Name, Price);
+
+-- NOW the index ITSELF contains EVERYTHING the query needs -- NO Key Lookup REQUIRED AT ALL
+SELECT Name, Price FROM Products WHERE Category = 'Electronics'; -- SATISFIED ENTIRELY from the INDEX itself
+```
+Because `INCLUDE`d columns are stored directly in the Non-Clustered Index's leaf pages (without being part of the index's actual sort key, keeping the index itself smaller/more efficient for seeking), a query needing exactly those columns can be satisfied *entirely* from the index — this is called a "covering index," since the index alone fully "covers" everything the query needs, eliminating the per-row Key Lookup cost entirely.
+
+**Why this specifically matters more as the number of matching rows grows:** for a query matching only a handful of rows, the extra Key Lookups are individually cheap and largely unnoticeable — for a query matching thousands or millions of rows, each requiring its own separate Key Lookup, this per-row overhead accumulates into a genuinely significant cost, making covering indexes specifically valuable for frequently-run queries against large tables where the matched row count is itself large.
+
+**Common Pitfall:** adding columns to a Non-Clustered Index's key (rather than its `INCLUDE` list) purely to avoid Key Lookups, without considering the cost — adding columns to the actual index *key* affects the index's sort order and increases its size at every level of the index's B-tree structure, whereas `INCLUDE`d columns only add size at the leaf level and don't affect sort order at all; `INCLUDE` is specifically the right tool for "I need this column returned, but don't need to search or sort by it," while the index's actual key columns should be reserved for genuine search/sort/filter criteria.
+
+---
+
 ---

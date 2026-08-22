@@ -961,4 +961,82 @@ Because each parent hash summarizes everything beneath it in the tree, two repli
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is an "Upsert" operation in a NoSQL database, and how does it let a write either insert a new document or update an existing one, based on whether a matching key already exists, in one atomic operation?**
+
+An Upsert ("update or insert") lets application code write data without first checking whether a document already exists — the database itself atomically decides: if a document matching the given key already exists, update it; if not, create a new one — collapsing what would otherwise be a separate "check, then insert or update" sequence into one single, atomic operation.
+
+```javascript
+// MongoDB -- an UPSERT -- the database decides ATOMICALLY whether to INSERT or UPDATE
+db.userPreferences.updateOne(
+  { userId: 42 },                              // the MATCH condition
+  { $set: { theme: "dark", language: "en" } },
+  { upsert: true }                              // "IF no document MATCHES, INSERT a NEW one INSTEAD"
+);
+
+-- FIRST call for userId 42 (no EXISTING document) -- a NEW document is CREATED
+-- EVERY SUBSEQUENT call for the SAME userId -- the EXISTING document is UPDATED, in PLACE
+```
+Without Upsert, application code would need to separately query for the document, branch based on whether it exists, and then issue either an insert or an update — introducing exactly the check-then-act race condition (covered under TOCTOU) if two concurrent requests both check simultaneously and both conclude "it doesn't exist yet," potentially creating two duplicate documents; Upsert's atomicity avoids this race entirely, since the decision and the write happen as a single, indivisible database operation.
+
+**Common Pitfall:** implementing "insert or update" logic manually in application code (a separate read, followed by a conditional write) instead of using the database's native Upsert operation — beyond the unnecessary extra round trip, this manual approach reintroduces exactly the race condition Upsert's atomicity is specifically designed to eliminate, since two concurrent requests could both complete their "check" step before either completes its "write" step.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is a Change Stream (MongoDB) or Change Feed (Cosmos DB), and how does it let an application react to data changes in real time — a database-native counterpart to Change Data Capture (covered under Messaging)?**
+
+A Change Stream/Change Feed lets an application subscribe directly to a continuous stream of change events (inserts, updates, deletes) happening on a collection, natively provided by the database itself — conceptually similar to Change Data Capture (covered under Messaging, which typically taps a relational database's transaction log), but built directly into these NoSQL databases as a first-class, native capability rather than requiring a separate CDC connector/tool.
+
+```javascript
+// MongoDB Change Stream -- subscribes DIRECTLY to changes on a collection, NATIVELY, no EXTERNAL tool needed
+const changeStream = db.collection('orders').watch();
+
+changeStream.on('change', (change) => {
+  if (change.operationType === 'insert') {
+    notifyWarehouseSystem(change.fullDocument); // REACT to the NEW order, IMMEDIATELY, as it HAPPENS
+  }
+});
+```
+```text
+Cosmos DB Change Feed -- conceptually THE SAME idea -- an AZURE FUNCTION can be configured to
+TRIGGER AUTOMATICALLY, IMMEDIATELY, whenever a document in a MONITORED container is INSERTED/UPDATED
+-- NO polling, NO SEPARATE CDC connector NEEDED -- it's a NATIVE, BUILT-IN database CAPABILITY
+```
+Because the change stream is a native database feature (rather than requiring an external tool tapping the database's internals, as relational CDC typically does), an application can react to data changes with low latency and minimal additional infrastructure — directly enabling patterns like real-time notifications, cache invalidation the instant underlying data changes, or feeding a search index update pipeline, all triggered natively by the database itself rather than requiring a separately-operated CDC connector.
+
+**Why this is specifically valuable for keeping a secondary system (a cache, a search index, a materialized view) synchronized without application code needing to explicitly notify it on every write:** any code path that writes to the collection — even one the developers building the downstream consumer never anticipated — still triggers the Change Stream, since it observes changes at the database level, not by relying on every single write path remembering to also explicitly publish a notification; this mirrors the exact same core benefit covered for CDC under Messaging, just implemented as a first-class NoSQL database feature rather than an external connector.
+
+**Common Pitfall:** building a custom polling mechanism (repeatedly querying for "documents modified since my last check") to approximate real-time change notification, unaware the database already provides this natively via Change Streams/Change Feed — a polling-based approach adds both latency (bounded by the polling interval) and unnecessary load on the database, when the native change-stream mechanism provides genuinely real-time, push-based notification without either drawback.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is Multi-Region (Multi-Master) Writes in a globally-distributed NoSQL database, and what conflict-resolution strategy must be chosen when the same document is written in two different regions simultaneously?**
+
+Multi-Region Writes let a globally-distributed database accept writes to the *same* logical dataset in *multiple* geographic regions simultaneously, rather than routing all writes through one single, designated primary region — this dramatically improves write latency for geographically distributed users (each writes to their nearest region), but introduces the genuine possibility that the *same* document gets modified in two different regions at nearly the same instant, requiring an explicit conflict-resolution strategy to reconcile the two.
+
+```text
+User in the US writes to the "US-East" region:      Document {id: 5, price: 29.99}, at T=100ms
+User in Europe writes to the "West-Europe" region:  Document {id: 5, price: 34.99}, at T=101ms
+-- BOTH writes happened, essentially SIMULTANEOUSLY, in TWO DIFFERENT regions, BEFORE either
+   region's write had a CHANCE to REPLICATE to the OTHER -- a GENUINE, real conflict --
+
+CONFLICT RESOLUTION strategies a Multi-Master database might apply:
+  Last-Write-Wins (LWW, covered earlier for Cassandra) -- pick WHICHEVER write has the LATER timestamp
+  Custom Merge Procedure (Cosmos DB supports this) -- a USER-DEFINED function decides HOW to
+    RECONCILE the conflict (e.g., "keep the HIGHER price," a business-specific RULE, rather than
+    JUST picking based on TIMESTAMP alone)
+```
+Because two regions can genuinely accept conflicting writes to the same document before either has had a chance to replicate and detect the conflict, some resolution strategy is unavoidable — the database must decide, after the fact, which write (or what merged combination of both) becomes the final, agreed-upon value, and different databases offer different levels of control over exactly how that resolution happens (a simple, automatic Last-Write-Wins, versus a fully custom, application-defined merge function).
+
+**Why choosing Multi-Region Writes is a deliberate, consequential architectural trade-off, not a "strictly better" default:** accepting writes in multiple regions simultaneously dramatically improves write latency for geographically distributed users, but it fundamentally requires the application to be designed with genuine conflict resolution in mind — for data where a "wrong" automatic resolution (an overwritten price, a lost update) is genuinely unacceptable, a single-write-region (or single-master) architecture, accepting higher write latency for geographically distant users in exchange for eliminating this entire class of conflict, may be the more appropriate choice.
+
+**Common Pitfall:** enabling Multi-Region Writes purely for its latency benefits without a deliberate, considered conflict-resolution strategy in place — relying on a database's default Last-Write-Wins behavior without confirming it's actually appropriate for the specific data being written can silently discard a legitimate update (the "losing" write in the conflict simply vanishes) with no explicit warning or error surfaced anywhere, a genuinely easy trade-off to overlook until a real, concurrent conflict actually occurs in production.
+
+---
+
 ---
