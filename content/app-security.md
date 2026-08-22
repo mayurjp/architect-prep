@@ -1095,4 +1095,92 @@ Because the raw `\r\n` sequence is what the HTTP protocol itself uses to separat
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What are the `HttpOnly`, `Secure`, and `SameSite` cookie attributes, and how does each one defend against a different, specific attack?**
+
+These three cookie attributes are independent defenses, each closing off a different attack vector — combining all three provides layered protection, while relying on just one leaves the gaps the others were specifically designed to close.
+
+```csharp
+Response.Cookies.Append("session", sessionToken, new CookieOptions
+{
+    HttpOnly = true,           // blocks JavaScript (document.cookie) from reading this cookie AT ALL
+    Secure = true,              // the BROWSER will ONLY ever send this cookie over HTTPS, NEVER plain HTTP
+    SameSite = SameSiteMode.Lax // restricts whether this cookie is SENT on CROSS-SITE requests at all
+});
+```
+```text
+HttpOnly  -- defends against XSS-based cookie theft: even if an attacker successfully injects a
+             <script> tag (covered under XSS), document.cookie simply CANNOT see this cookie at all
+
+Secure    -- defends against NETWORK EAVESDROPPING: the cookie is NEVER transmitted over an
+             UNENCRYPTED HTTP connection, even if the user somehow ends up on a plain http:// URL
+
+SameSite  -- defends against CSRF (covered elsewhere): restricts the browser from automatically
+             attaching THIS cookie to requests ORIGINATING from a DIFFERENT site entirely
+```
+Each attribute closes a *specific*, narrow gap — `HttpOnly` doesn't prevent CSRF at all (the cookie is still automatically attached to cross-site requests, just not readable via JavaScript), and `SameSite` doesn't prevent an XSS attacker from directly using the browser's own authenticated session in-page (they don't need to read the cookie's *value* if their injected script can just make authenticated requests directly through the browser) — genuinely robust cookie security requires all three together, plus the other complementary defenses (CSP, anti-forgery tokens, covered elsewhere) rather than treating any single attribute as sufficient on its own.
+
+**Common Pitfall:** setting only `HttpOnly` on a session cookie and considering it "secure," without also setting `Secure` and an appropriate `SameSite` value — each attribute defends against a genuinely distinct attack category, and omitting any one of them leaves that specific attack vector (network eavesdropping, or CSRF, respectively) completely unaddressed, regardless of how well the other two are configured.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is Subresource Integrity (SRI), and how does an `integrity` hash attribute on a `<script>` tag let a browser detect and refuse to execute a third-party script that's been tampered with — such as a compromised CDN?**
+
+When a page loads a script from a third-party CDN, it's implicitly trusting that CDN to always serve the exact, unmodified file the developer originally intended — if that CDN is ever compromised (or an attacker performs a man-in-the-middle attack against a connection not otherwise protected), a modified, malicious script could be served instead, and the page would execute it without any indication anything was wrong. Subresource Integrity lets the page specify a cryptographic hash of the *expected* script content, and the browser itself verifies the actually-downloaded content matches before executing it at all.
+
+```html
+<!-- WITHOUT SRI -- the browser BLINDLY TRUSTS whatever the CDN happens to serve, NO verification AT ALL -->
+<script src="https://cdn.example.com/library.js"></script>
+
+<!-- WITH SRI -- the browser VERIFIES the downloaded content's HASH matches EXACTLY -->
+<script src="https://cdn.example.com/library.js"
+        integrity="sha384-oqVuAfXRKap7fdgcCY5uykM6+R9GqQ8K/uxy9rx7HNQlGYl1kPzQho1wx4JwY8wC"
+        crossorigin="anonymous"></script>
+```
+```text
+IF the CDN is COMPROMISED and serves a MODIFIED (malicious) version of library.js:
+  -> the DOWNLOADED content's ACTUAL hash will NOT MATCH the "integrity" attribute's EXPECTED hash
+  -> the BROWSER REFUSES to EXECUTE the script AT ALL -- BLOCKS it ENTIRELY, treats it as a LOAD FAILURE
+  -> the ATTACKER'S modified script NEVER RUNS, EVEN THOUGH the CDN itself successfully served it
+```
+Because the hash is computed over the *exact expected content* and embedded directly in the page the developer controls (not fetched from the potentially-compromised CDN itself), an attacker who compromises the CDN and modifies the script's content has no way to also modify the hash the browser checks against — any modification to the actual script content is guaranteed to produce a different hash, which the browser's own built-in verification catches before ever executing the tampered code.
+
+**Common Pitfall:** loading third-party scripts from a CDN without SRI hashes, reasoning "the CDN is reputable, so it's fine" — reputability doesn't protect against a CDN being compromised at some later point *after* the developer originally added the script tag; SRI protects against exactly this scenario (a *previously* trustworthy source later being compromised), which reputation-based trust alone provides no defense against at all.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is a Padding Oracle Attack, and how does a server's differing response (or timing) for "bad padding" versus "bad content" during CBC-mode decryption let an attacker decrypt ciphertext without ever knowing the encryption key?**
+
+Block ciphers operating in CBC (Cipher Block Chaining) mode require the plaintext to be padded to a multiple of the block size before encryption, and that padding must be validated (and stripped) during decryption — a Padding Oracle Attack exploits a server that reveals, through a distinguishable error response or timing difference, whether a *decrypted* ciphertext's padding was valid or invalid, letting an attacker use that single bit of leaked information, repeated many times, to decrypt the entire ciphertext without ever needing the actual encryption key.
+
+```text
+A server DECRYPTS an attacker-supplied, MODIFIED ciphertext, and responds DIFFERENTLY depending on WHY it failed:
+  "Decryption failed: invalid padding"         <-- REVEALS the PADDING specifically was WRONG
+  "Decryption failed: invalid content/MAC"     <-- REVEALS the PADDING was ACTUALLY fine, content was NOT
+
+-- an ATTACKER can SYSTEMATICALLY MODIFY specific BYTES of the ciphertext and OBSERVE WHICH of
+   these TWO responses comes BACK -- this SINGLE BIT of information ("was PADDING valid, YES or NO")
+   is ENOUGH, when REPEATED many times across MANY carefully crafted ciphertext modifications, to
+   RECOVER the ENTIRE PLAINTEXT, BYTE BY BYTE, WITHOUT EVER knowing the ACTUAL ENCRYPTION KEY at all
+```
+Because CBC mode's decryption process for one block mathematically depends on the *previous* ciphertext block, an attacker who can repeatedly submit slightly-modified ciphertext and observe only "was the padding valid" (not even the actual decrypted content) can, through many systematic trial modifications, mathematically reconstruct each byte of the original plaintext — a remarkably powerful attack requiring no knowledge of the key at all, purely exploiting the padding-validity signal being distinguishable from other failure modes.
+
+**The fix — ensure decryption failures are indistinguishable, regardless of the specific reason, and use authenticated encryption instead of plain CBC:**
+```csharp
+// MODERN, SAFE approach -- AES-GCM (Authenticated Encryption) -- verifies AUTHENTICITY and INTEGRITY
+// TOGETHER, as ONE atomic operation -- there is NO SEPARATE "padding validity" check to LEAK information about
+using var aesGcm = new AesGcm(key);
+aesGcm.Decrypt(nonce, ciphertext, tag, plaintext); // FAILS as ONE atomic unit -- NO distinguishable sub-reasons
+```
+Modern authenticated encryption modes (AES-GCM, ChaCha20-Poly1305) verify the ciphertext's integrity and authenticity as a single atomic operation, with no separate, independently-observable "padding was invalid" versus "content was invalid" distinction for an attacker to exploit at all — this is precisely why plain CBC mode without a message authentication code (MAC) is now considered unsafe for new designs, and modern cryptographic libraries/protocols default to AEAD (Authenticated Encryption with Associated Data) schemes instead.
+
+**Common Pitfall:** implementing custom CBC-mode decryption error handling that returns different error messages (or even just measurably different response times) for padding failures versus other decryption failures — even a *timing* difference alone (no distinguishable error message needed) has historically been sufficient for real-world padding oracle attacks; the robust fix is adopting an authenticated encryption mode that structurally eliminates the separate padding-validity signal, rather than attempting to carefully equalize error messages/timing by hand, which is notoriously easy to get subtly wrong.
+
+---
+
 ---

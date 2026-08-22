@@ -996,3 +996,77 @@ Because an opaque token carries no self-contained, verifiable information at all
 **Common Pitfall:** calling the introspection endpoint on *every single request* for high-traffic APIs without any caching — since introspection requires a network round-trip to the Authorization Server for every validation, this can turn the Authorization Server into a bottleneck/single point of failure for the entire system's request throughput; a short-lived, in-memory cache of introspection results (bounded by the token's own remaining lifetime) is a common mitigation, trading a small window of potential revocation delay for meaningfully reduced load on the Authorization Server.
 
 ---
+
+## Beginner — Question 11
+
+**Q11: What is an API Key as a simple authentication mechanism, and how does it differ from full OAuth 2.0 in terms of what it can and cannot express?**
+
+An API Key is a single, static, opaque string a client includes with every request to identify itself — the server checks the key against a known list and either allows or denies the request. It's dramatically simpler than OAuth 2.0, but that simplicity comes at the cost of expressiveness: an API Key has no concept of an individual end user, no scoped permissions, and no built-in expiration or refresh mechanism.
+
+```http
+GET /api/weather?city=London
+X-Api-Key: sk_live_a1b2c3d4e5f6g7h8
+```
+```text
+WHAT an API Key CAN express: "this request comes from a KNOWN, REGISTERED client" -- that's essentially ALL
+WHAT an API Key CANNOT express, that OAuth 2.0 CAN:
+  -- WHICH specific END USER (if any) this request is acting ON BEHALF OF
+  -- WHAT SPECIFIC SCOPE of access this ONE request should be limited to (it's typically ALL-OR-NOTHING)
+  -- an EXPIRATION or a REFRESH mechanism (an API Key TYPICALLY just works FOREVER, until MANUALLY revoked)
+```
+Because an API Key carries no notion of "on behalf of which user" or "with what specific scope," it's well suited for simple, server-to-server scenarios where the calling *application itself* (not any particular end user) is what needs identifying — a weather data provider's API, a third-party integration with no per-user consent model — but it's a poor fit for anything requiring per-user authorization, delegated consent, or fine-grained, scoped access, which is precisely the gap OAuth 2.0 (covered extensively elsewhere) is designed to fill.
+
+**Common Pitfall:** using a single, static API Key to represent *many different end users* of an application, layering ad-hoc, hand-rolled logic on top to simulate per-user scoping — this reinvents, poorly, exactly what OAuth 2.0's Access Tokens (carrying a specific `sub` claim identifying the user, and specific `scope` claims limiting access, covered elsewhere) already provide as a standardized, well-understood mechanism; a single shared API Key is fundamentally the wrong tool once genuine per-user authorization is actually needed.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is the OAuth 2.0 Device Authorization Grant (Device Code flow), and how does it let a device without a convenient browser or keyboard let the user authenticate using a separate, more capable device instead?**
+
+The Device Authorization Grant is designed for devices like a smart TV, a game console, or a CLI tool — anything lacking a convenient way for a user to type credentials or navigate a full web-based login flow directly on that device. Instead, the device displays a short, human-readable code and a URL, and the user completes the actual authentication on a *separate* device (their phone or laptop) that has a proper browser.
+
+```text
+1. The DEVICE (a smart TV app) requests a code from the Authorization Server
+   -> receives BACK: a device_code (for the DEVICE itself), a user_code (SHORT, human-readable,
+      e.g. "WDJB-MJHT"), and a verification_uri (e.g., "https://example.com/activate")
+
+2. The TV DISPLAYS: "Go to example.com/activate on your phone or computer, and enter code: WDJB-MJHT"
+
+3. The USER, on their OWN phone/laptop (a device WITH a proper browser/keyboard):
+   -> navigates to the verification_uri, ENTERS the short code, LOGS IN normally, GRANTS consent
+
+4. MEANWHILE, the TV app POLLS the Authorization Server's token endpoint REPEATEDLY, using device_code
+   -> ONCE the user completes step 3, the TV's NEXT poll FINALLY receives a REAL access token
+```
+Because the actual username/password entry and consent screen happen on the user's *own* phone or laptop (a device genuinely suited for typing and browsing), the smart TV itself never needs an on-screen keyboard or even a capable web browser at all — it simply displays a short code and polls in the background until the separate device confirms the user has completed authentication elsewhere.
+
+**Common Pitfall:** implementing a custom, ad-hoc "enter your username and password directly using the TV's remote control" flow for an input-constrained device — beyond being a genuinely poor user experience (typing a password character by character using arrow keys), this pattern also has no natural way to support MFA or federated login providers; the standardized Device Code flow is specifically designed to solve exactly this "no good input method" problem in a well-understood, widely-supported way.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is Mutual TLS (mTLS) as a service-to-service authentication mechanism, and how does it differ fundamentally from a bearer token in requiring BOTH sides to cryptographically verify each other's identity via certificates?**
+
+Ordinary TLS (the "S" in HTTPS) only verifies the *server's* identity to the client — the client typically remains anonymous to the server, authenticating itself separately (a bearer token, an API key) at the application layer, on top of the already-established TLS connection. Mutual TLS additionally requires the *client* to present its own certificate during the TLS handshake itself, meaning the server cryptographically verifies the client's identity as part of establishing the connection, before any application-layer request is even sent.
+
+```text
+ORDINARY TLS (one-way) -- ONLY the SERVER proves its identity, via ITS certificate:
+  Client ──(verifies SERVER's certificate)──► Server
+  -- the SERVER has NO cryptographic PROOF of WHO the client is, from TLS ALONE --
+  -- the CLIENT separately sends a BEARER TOKEN, at the APPLICATION layer, ON TOP of this connection --
+
+MUTUAL TLS (mTLS) -- BOTH sides present certificates, BOTH sides are cryptographically VERIFIED:
+  Client ──(presents ITS OWN certificate)──► Server  (verifies the CLIENT's certificate)
+  Client ◄──(verifies SERVER's certificate)── Server (presents ITS OWN certificate, as usual)
+  -- BY THE TIME the TLS HANDSHAKE itself COMPLETES, BOTH sides have CRYPTOGRAPHICALLY verified
+     WHO the OTHER party actually IS -- NO separate, APPLICATION-LEVEL token is even STRICTLY needed --
+```
+Because the client's identity is verified as part of the TLS handshake itself (using a certificate and its corresponding private key, rather than a bearer token that could potentially be stolen and replayed by a different party entirely), mTLS provides a stronger guarantee than a bearer token alone — a stolen bearer token can be used by any attacker possessing it; a stolen certificate is useless without also possessing its corresponding *private key*, which (if properly protected, e.g., in a hardware security module) is significantly harder to exfiltrate than a plain string token.
+
+**Why this is especially common specifically for service-to-service communication within a Service Mesh (covered under microservices):** a Service Mesh's sidecar proxies (covered earlier) commonly establish mTLS automatically between every pair of communicating services within the mesh, providing strong mutual authentication and encryption for internal traffic without any individual service's own application code needing to implement certificate handling itself — the mesh's infrastructure layer handles the entire mTLS handshake transparently, on behalf of the application.
+
+**Common Pitfall:** treating mTLS as a complete substitute for application-layer authorization — mTLS proves *which service* is making a call (a strong identity guarantee at the connection level), but says nothing about *what that specific request is authorized to do* once the connection is established; genuine authorization (which specific resources/actions this particular authenticated service is permitted) still typically requires an additional, application-layer authorization check on top of mTLS's connection-level identity verification, the same layered "authentication proves who, authorization decides what" distinction covered at the very start of this topic.
+
+---

@@ -983,4 +983,89 @@ Because a server is always either running a specific, known image version or has
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is a Feature Flag (Feature Toggle) at a basic level, and how does it decouple deploying code from releasing a feature to actual users?**
+
+A Feature Flag is a runtime, configurable switch wrapped around a piece of new code — deploying the code containing the flag doesn't itself expose the feature to any user at all; only separately flipping the flag "on" (often instantly, without a new deployment) actually makes the feature visible/active. This decouples "the code has shipped to production" from "users can now see/use this feature," two previously-conflated events.
+
+```csharp
+if (_featureFlags.IsEnabled("NewCheckoutFlow"))
+{
+    return NewCheckoutExperience(); // the NEW code -- ALREADY deployed to production, but NOT yet ACTIVE
+}
+return LegacyCheckoutExperience(); // the OLD, EXISTING behavior -- what users ACTUALLY see, for NOW
+```
+```text
+Day 1: NEW code (behind the flag) DEPLOYS to production -- flag is OFF -- users see NO CHANGE at all
+Day 5: flag is FLIPPED ON for 5% of users -- a GRADUAL rollout BEGINS -- NO new DEPLOYMENT needed for THIS
+Day 8: flag is FLIPPED ON for 100% -- feature is FULLY released -- STILL no additional deployment needed
+```
+Because flipping a flag doesn't require a new deployment at all, a team can deploy code continuously (even multiple times a day) while still carefully controlling *when* and *for whom* a specific feature actually becomes visible — and if a newly-enabled feature causes a problem, disabling the flag instantly reverts the user-visible behavior, without needing to roll back an actual deployment at all.
+
+**Common Pitfall:** accumulating feature flags indefinitely without ever removing the ones for features that have already been fully, permanently released to 100% of users — old flags left in the codebase forever add ongoing conditional-logic complexity and testing burden (every flag combination is technically a distinct code path); a disciplined practice removes a flag (and its now-dead "else" branch) once a feature has been fully rolled out and is no longer expected to need reverting.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is Container Image vulnerability scanning in a CI/CD pipeline, and how does scanning an image for known CVEs before deployment prevent a vulnerable base image or dependency from ever reaching production?**
+
+A CI/CD pipeline can include an explicit scanning step that inspects a freshly-built container image's operating system packages and application dependencies against a database of known vulnerabilities (CVEs) — failing the pipeline (blocking deployment) if the image contains a vulnerability above a configured severity threshold, rather than discovering the vulnerable image was already running in production only after the fact.
+
+```yaml
+# A CI pipeline STAGE -- scans the IMAGE, BEFORE it's ever ALLOWED to be deployed
+build:
+  steps:
+    - docker build -t myapi:${{ github.sha }} .
+
+security-scan:
+  needs: [build]
+  steps:
+    - name: Scan image for known vulnerabilities
+      run: trivy image --severity HIGH,CRITICAL --exit-code 1 myapi:${{ github.sha }}
+      # exit-code 1 -- FAILS the PIPELINE STEP if a HIGH/CRITICAL vulnerability is FOUND -- BLOCKS deployment
+
+deploy:
+  needs: [security-scan]  # deployment ONLY proceeds if the SCAN STEP PASSED
+```
+Because the scan runs as a required, blocking pipeline step *before* deployment, an image built from a base image with a newly-disclosed critical vulnerability (or a dependency with a known CVE) simply never reaches production at all — the pipeline itself refuses to proceed past the scan stage, catching the problem at build/deploy time rather than only discovering the exposure later, during an incident or a routine security audit.
+
+**Why running this scan continuously (not just at build time) also matters, connecting to Infrastructure Drift Detection covered earlier:** a base image considered "clean" at build time can later have a *new* CVE disclosed against a package it already contains — a periodic re-scan of already-deployed, currently-running images (not just newly-built ones) catches this after-the-fact disclosure, since the vulnerability existed in the image all along, it simply wasn't yet *known* at the original build time.
+
+**Common Pitfall:** running vulnerability scanning purely as an informational, non-blocking step (logging findings without ever failing the pipeline) — this surfaces vulnerabilities for someone to *notice*, eventually, but does nothing to actually *prevent* a genuinely severe vulnerability from reaching production; making the scan step a hard, blocking gate (as shown above) is what actually closes off the risk, rather than merely reporting on it after the deployment has already happened.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is Continuous Verification, and how does automatically analyzing metrics during a canary rollout — rather than a human eyeballing a dashboard — let a pipeline autonomously decide to roll back a bad deployment?**
+
+Continuous Verification extends Canary Deployment (covered elsewhere) by having the pipeline itself statistically compare the canary's live metrics (error rate, latency, custom business metrics) against the stable baseline's, automatically, in real time — rather than a human watching a dashboard and manually deciding "this looks bad, let's roll back," the pipeline makes that decision itself, based on a pre-defined, quantitative comparison.
+
+```yaml
+canary-analysis:
+  canary-deployment: my-api-canary   # 5% of traffic, running the NEW version
+  baseline-deployment: my-api-stable # 95% of traffic, running the CURRENT, KNOWN-GOOD version
+  metrics:
+    - name: error-rate
+      threshold: "canary error-rate MUST NOT exceed baseline error-rate by more than 2%"
+    - name: p99-latency
+      threshold: "canary p99 latency MUST NOT exceed baseline p99 latency by more than 20%"
+  analysis-interval: 60s
+  failure-action: automatic-rollback   # NO human intervention -- the PIPELINE ITSELF decides and ACTS
+```
+```text
+t=60s:  canary error-rate: 0.5% | baseline: 0.4%  -- WITHIN threshold -- ANALYSIS CONTINUES, rollout proceeds
+t=120s: canary error-rate: 8.2% | baseline: 0.4%  -- EXCEEDS threshold -- AUTOMATIC ROLLBACK TRIGGERED,
+        WITHOUT any human needing to notice a dashboard, INTERPRET it, and MANUALLY decide to intervene
+```
+Because the comparison is quantitative and automated, a bad deployment gets rolled back within seconds of crossing the defined threshold — far faster than the realistic delay of a human noticing an anomaly on a dashboard, deciding it's genuinely a problem (rather than noise), and then manually triggering a rollback, especially for an incident occurring outside of someone's active, attentive monitoring window (the middle of the night, for instance).
+
+**Why this specifically extends, rather than replaces, the human-reviewed canary process (covered under Progressive Delivery):** Continuous Verification handles the class of problem that's genuinely measurable via metrics (error rates, latency, resource consumption) — it doesn't replace human judgment for subtler, harder-to-quantify regressions (a UI that's technically error-free but confusing, a business metric that degrades gradually over a longer window than the automated analysis checks); most mature Continuous Verification setups still involve a human reviewing the *automated* decision after the fact, or being paged specifically when the automated system's own rollback trigger fires, rather than removing human oversight from the process entirely.
+
+**Common Pitfall:** setting Continuous Verification's comparison thresholds too tight (any deviation at all triggers rollback) — normal, expected statistical noise between the canary's smaller traffic sample and the baseline's larger one can easily produce spurious threshold breaches purely by chance, causing frequent, unnecessary automatic rollbacks of genuinely healthy deployments; thresholds need to be calibrated against the actual expected statistical variance in the specific metrics being compared, not set to zero tolerance.
+
+---
+
 ---

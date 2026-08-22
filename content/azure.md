@@ -935,4 +935,77 @@ Behind the scenes, every `await context.CallActivityAsync(...)` call and its res
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What are Azure Storage Account's redundancy options (LRS, ZRS, GRS, RA-GRS), and how does each represent a different point on the cost-versus-durability/availability spectrum?**
+
+Azure Storage lets you choose how many copies of your data are kept and where — more copies, spread across a wider geographic area, cost more but survive a broader range of failures, from a single disk failing all the way up to an entire region becoming unavailable.
+
+```text
+LRS (Locally Redundant Storage)  -- 3 copies, WITHIN ONE datacenter -- CHEAPEST -- survives a DISK/NODE failure,
+                                    but NOT an entire DATACENTER outage
+
+ZRS (Zone-Redundant Storage)     -- 3 copies, across DIFFERENT Availability Zones (covered elsewhere) WITHIN
+                                    ONE region -- survives an ENTIRE DATACENTER/ZONE failure
+
+GRS (Geo-Redundant Storage)      -- LRS in the PRIMARY region, PLUS an ASYNCHRONOUSLY-replicated copy
+                                    in a SEPARATE, DISTANT region -- survives an ENTIRE REGION outage
+                                    (but the SECONDARY region's data is NOT directly READABLE by default)
+
+RA-GRS (Read-Access GRS)         -- SAME as GRS, but the SECONDARY region's copy is ALSO directly
+                                    READABLE, even while the PRIMARY region is still healthy
+```
+Choosing LRS for a workload that genuinely needs to survive a regional outage would leave the application with no recourse at all if that one datacenter became unavailable — choosing the most expensive RA-GRS for data where a regional outage would be a minor, tolerable inconvenience wastes money on redundancy the workload doesn't actually need; the right choice depends entirely on how severe an outage the specific data genuinely needs to survive.
+
+**Common Pitfall:** assuming GRS's geo-replicated secondary copy is automatically usable the instant the primary region fails — GRS's failover to the secondary region is not automatic by default (it requires either a manual "storage account failover" action or, for RA-GRS, the application code being written to explicitly read from the secondary endpoint during an outage); simply choosing GRS doesn't by itself guarantee a seamless, zero-intervention failover experience.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is Azure Container Apps, and how does it let a team run containerized workloads with built-in autoscaling and Dapr integration, without directly managing a Kubernetes cluster themselves?**
+
+Azure Container Apps is a fully-managed container hosting service built on top of Kubernetes and KEDA (Kubernetes Event-Driven Autoscaling) internally, but abstracts away the cluster itself entirely — a team deploys a container image and describes its scaling rules, without ever provisioning nodes, upgrading a Kubernetes control plane, or managing any of the cluster-level concerns AKS (Azure Kubernetes Service) would require.
+
+```bash
+az containerapp create \
+  --name my-api \
+  --image myregistry.azurecr.io/my-api:latest \
+  --min-replicas 0 --max-replicas 10 \
+  --scale-rule-name http-scaling --scale-rule-type http --scale-rule-http-concurrency 50
+# NO cluster to provision, NO nodes to size, NO Kubernetes YAML to author -- JUST the container and scaling rules
+```
+Because Container Apps can scale down to *zero* replicas when idle (something AKS doesn't do natively without extra configuration) and scales based on real event sources (HTTP concurrency, a queue's message count, a Dapr pub/sub event) via its built-in KEDA integration, it's particularly well suited for workloads with bursty or intermittent traffic that don't justify a team's own dedicated Kubernetes operational expertise.
+
+**Why this specifically fits between "just an App Service" and "a full AKS cluster" on the complexity spectrum:** App Service (covered elsewhere) is simpler still but lacks Container Apps' event-driven autoscaling and Dapr-based microservices building blocks (service invocation, pub/sub, state management) — AKS provides full, direct Kubernetes API access and maximum flexibility, but requires a team to actually operate a Kubernetes cluster; Container Apps deliberately occupies the middle ground, providing many of the *benefits* microservices teams want from Kubernetes-style deployment without the *operational burden* of running Kubernetes directly.
+
+**Common Pitfall:** choosing AKS by default for a containerized workload without first considering whether Container Apps' more managed, higher-abstraction model would satisfy the same requirements with meaningfully less operational overhead — AKS's full flexibility is genuinely necessary for teams needing direct Kubernetes API access or specific CNCF ecosystem tooling, but many container workloads never actually need that level of control, making Container Apps the lower-overhead, equally valid choice for a large fraction of real-world scenarios.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is the difference between Azure Traffic Manager and Azure Front Door, and how does WHERE each one makes its routing decision (DNS resolution time versus the network edge) fundamentally change what each can actually do?**
+
+Traffic Manager operates purely at the DNS layer — when a client resolves your domain name, Traffic Manager's DNS response points to whichever backend region it decides is best, and from that point forward, the client connects *directly* to that region with no further involvement from Traffic Manager at all. Front Door (covered earlier for its Split-TCP/anycast architecture) operates at the network edge itself, actually terminating and proxying every request, giving it far more granular, per-request control.
+
+```text
+TRAFFIC MANAGER -- decision made ONCE, at DNS RESOLUTION time -- THEN the client is ON ITS OWN:
+  Client resolves "myapp.com" -> Traffic Manager's DNS returns "region-b.myapp.com's IP"
+  -> Client connects DIRECTLY to Region B -- Traffic Manager has NO further involvement in THIS request AT ALL
+  -- CANNOT react to a failure that happens AFTER DNS resolution, until the DNS entry's TTL EXPIRES --
+
+FRONT DOOR -- EVERY single request PASSES THROUGH Front Door's edge -- DECISION made PER REQUEST:
+  Client connects to Front Door's EDGE (anycast, nearest POP) -> Front Door PROXIES the request,
+  routing it (PER REQUEST) to whichever backend is CURRENTLY healthiest -- CAN react INSTANTLY,
+  request-by-request, WITHOUT waiting on DNS TTL expiration AT ALL
+```
+Because Traffic Manager's involvement ends the instant DNS resolution completes, a backend region failing *after* a client already resolved and cached that DNS answer won't be detected or rerouted around until the DNS record's TTL expires and the client re-resolves — Front Door, sitting directly in the request path for every single request, can detect a backend failure and reroute the very next request instantly, without any DNS-caching delay at all.
+
+**Why Front Door's approach costs more (in latency terms, and often financially) for this added responsiveness:** because every request genuinely passes through Front Door's proxy layer, it adds a network hop that Traffic Manager's "just point DNS, then get out of the way" model doesn't — Traffic Manager is often the simpler, lower-overhead choice for scenarios where DNS-TTL-level failover responsiveness is genuinely acceptable, while Front Door earns its added complexity/cost specifically when instant, per-request failover and other edge-level capabilities (WAF, caching, covered elsewhere) are actually needed.
+
+**Common Pitfall:** choosing Traffic Manager for a scenario demanding near-instant failover, then being surprised that clients continue reaching a now-failed region for as long as their cached DNS answer's TTL remains valid — this is an inherent structural limitation of any purely DNS-based routing approach, not a misconfiguration; Front Door's per-request, edge-level routing is the correct tool specifically when failover responsiveness faster than DNS TTL expiration is a genuine requirement.
+
+---
+
 ---
