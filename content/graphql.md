@@ -1362,4 +1362,95 @@ Because a REST response's single status code can't express "most of this succeed
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is a GraphQL Directive in general, as the underlying mechanism behind `@include`/`@skip`/`@deprecated`/`@defer` (each covered individually), and can a schema define its own custom directives?**
+
+A Directive is GraphQL's general-purpose mechanism for attaching extra instructions to a part of a query or schema — every specific directive covered individually elsewhere (`@include`, `@skip`, `@deprecated`, `@defer`) is simply one concrete application of this same underlying `@directiveName(args)` syntax, and a schema is free to define entirely new, custom directives of its own for whatever purpose it needs.
+
+```graphql
+# ALL of these are the SAME general MECHANISM -- a directive, ATTACHED to a field/fragment/type
+query GetUser($showEmail: Boolean!) {
+  user {
+    name
+    email @include(if: $showEmail)   # a BUILT-IN directive
+  }
+}
+
+type Product {
+  price: Float! @deprecated(reason: "Use priceDetails instead") # ANOTHER built-in directive
+}
+
+# a CUSTOM directive, DEFINED by the SCHEMA ITSELF, for its OWN specific purpose
+directive @auth(requires: Role = ADMIN) on FIELD_DEFINITION
+
+type Mutation {
+  deleteUser(id: ID!): Boolean @auth(requires: ADMIN) # a CUSTOM directive, ENFORCING authorization
+}
+```
+Because directives share one general, extensible syntax (`@name(argument: value)`, attachable to a field, fragment, or type definition), a schema author can define an entirely new directive (`@auth`, in the example) for a concern specific to their own application — the GraphQL server's own resolver/execution logic then reads that custom directive's presence and arguments to apply whatever custom behavior it's meant to trigger (checking a role before allowing the field to resolve, in this case).
+
+**Common Pitfall:** assuming GraphQL's directive system is limited to only the small set of built-in directives (`@include`, `@skip`, `@deprecated`, `@defer`) covered individually — the directive mechanism itself is fully extensible, and many real-world GraphQL servers define custom directives for cross-cutting schema-level concerns (authorization requirements, rate-limiting cost annotations, feature-flag-gated fields) precisely because the underlying directive syntax was designed from the start to support exactly this kind of extension.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is the distinction between a GraphQL field's Argument (defined in the schema) and a Variable (covered earlier, supplied by the client at runtime), and how do default argument values interact with a client that chooses not to supply one?**
+
+A field's Arguments are declared as part of the schema itself, defining what inputs that field accepts, optionally with default values — a Variable (covered earlier) is a client-side mechanism for supplying a *specific value* for one of those arguments at request time, rather than hardcoding it directly into the query text.
+
+```graphql
+# the SCHEMA declares the ARGUMENT, WITH a DEFAULT value
+type Query {
+  products(category: String, limit: Int = 10): [Product!]!  # 'limit' DEFAULTS to 10, if NOT supplied
+}
+```
+```graphql
+# a CLIENT query, using a VARIABLE to supply a VALUE for the 'category' argument, but OMITTING 'limit' ENTIRELY
+query GetProducts($category: String) {
+  products(category: $category) { name price }  # 'limit' is NOT provided -- the SCHEMA's DEFAULT (10) applies
+}
+```
+Because `limit` has a default value declared directly in the schema, a client that doesn't explicitly supply it (either as a literal or via a variable) simply gets that default behavior automatically — the schema's default value acts as a fallback specifically for whenever a client's query doesn't address that particular argument at all, letting a client keep its own queries simpler for the common case while still allowing an explicit override (`products(category: $category, limit: 50)`) whenever a client genuinely needs different behavior.
+
+**Common Pitfall:** assuming that omitting an argument entirely is equivalent to explicitly passing `null` for it — a schema's default value applies specifically when the argument is *not provided at all*; if a client explicitly passes `limit: null` (rather than simply omitting it), the resolver receives an actual `null` value instead of the schema's declared default, which can produce meaningfully different behavior depending on how the resolver's own logic happens to handle an explicit `null` versus a truly-omitted argument.
+
+---
+
+## Advanced — Question 13
+
+**Q13: How do GraphQL Federation's `@external` and `@requires` directives let a subgraph declare it needs a field it doesn't own, in order to compute one of its own fields — extending the Entity/@key discussion covered earlier?**
+
+A subgraph extending an entity it doesn't fully own (covered earlier, via `@key`) sometimes needs to *read* a field owned by a different subgraph in order to compute one of its own fields — `@external` marks that borrowed field as "not mine, but I need to reference it," and `@requires` declares "before resolving my own field, make sure this external field's value is available to me."
+
+```graphql
+# Subgraph A (Products service) -- OWNS the core Product entity
+type Product @key(fields: "id") {
+    id: ID!
+    price: Float!
+    weight: Float!
+}
+```
+```graphql
+# Subgraph B (Shipping service) -- EXTENDS Product, needs "weight" (OWNED by Subgraph A) to COMPUTE its OWN field
+extend type Product @key(fields: "id") {
+    id: ID! @external
+    weight: Float! @external              # "I don't OWN this field, but I NEED its VALUE"
+    shippingCost: Float! @requires(fields: "weight")  # "BEFORE resolving shippingCost, make SURE
+                                                        #  'weight' is ALREADY AVAILABLE to me"
+}
+```
+```csharp
+// Subgraph B's resolver -- can NOW safely ASSUME 'weight' is ALREADY POPULATED, thanks to @requires
+public float ResolveShippingCost([Parent] Product product) => product.Weight * 2.5f; // uses the REQUIRED field
+```
+Because `@requires(fields: "weight")` tells the Federation Gateway's query planner (covered earlier) that resolving `shippingCost` genuinely depends on `weight` first being fetched from Subgraph A, the Gateway automatically sequences its query plan to fetch `weight` from the Products subgraph *before* calling Shipping's `shippingCost` resolver — Shipping's own code never needs to make its own separate network call back to the Products service to get `weight` itself; the Gateway handles that sequencing entirely, based on the `@requires` declaration.
+
+**Why this specifically extends the Query Planning discussion covered earlier, rather than being an unrelated new mechanic:** the Gateway's query-planning step (covered earlier) already determines execution order for entity resolution across subgraphs — `@requires` is precisely the declaration that feeds additional dependency information into that same planning process, letting the planner correctly sequence not just "resolve this entity's basic fields" but "resolve this *specific* field, which itself depends on a *different* field owned by a *different* subgraph," a more granular dependency than the base `@key`-based entity resolution alone expresses.
+
+**Common Pitfall:** having Subgraph B's resolver make its own direct HTTP/gRPC call back to Subgraph A to fetch `weight` itself, rather than declaring the dependency via `@requires` and letting the Gateway handle the sequencing — this reintroduces exactly the kind of direct, service-to-service coupling Federation's Gateway-mediated composition (covered earlier) is specifically designed to avoid, bypassing the Gateway's own query-planning and forcing Subgraph B to know how to directly reach Subgraph A, rather than declaring its data dependency declaratively and letting the Gateway's planner handle the actual cross-subgraph orchestration.
+
+---
+
 ---

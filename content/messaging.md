@@ -1147,4 +1147,87 @@ Because the coordinator specifically recognizes a returning static member (rathe
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is Publisher Confirms (RabbitMQ), and how does the broker confirming receipt back to the producer let the producer know its publish actually succeeded, as distinct from consumer acknowledgment covered extensively elsewhere?**
+
+Consumer Acknowledgment (covered extensively) tells the broker "I, the consumer, successfully processed this message" — Publisher Confirms is the analogous mechanism on the *other* end of the pipeline: the broker tells the *producer* "I have durably received and stored your published message," closing a different gap — knowing whether a publish attempt actually succeeded, rather than being uncertain whether it was ever received by the broker at all.
+
+```csharp
+// WITHOUT Publisher Confirms -- the PRODUCER has NO CONFIRMATION the broker actually RECEIVED the message
+channel.BasicPublish(exchange: "orders", routingKey: "order.created", body: message);
+// -- did the BROKER actually GET this? A network BLIP right AFTER this call returns would leave
+//    the PRODUCER with NO WAY of knowing whether the message ACTUALLY arrived AT ALL --
+
+// WITH Publisher Confirms -- the BROKER explicitly ACKNOWLEDGES receipt, BACK to the PRODUCER
+channel.ConfirmSelect(); // enables CONFIRMS on this CHANNEL
+channel.BasicPublish(exchange: "orders", routingKey: "order.created", body: message);
+channel.WaitForConfirmsOrDie(TimeSpan.FromSeconds(5)); // BLOCKS until the BROKER confirms RECEIPT,
+                                                          // or THROWS if it DOESN'T within 5 seconds
+```
+Because the broker explicitly confirms it has durably received the message (rather than the producer simply assuming success once its own `BasicPublish` call returns without an immediate error), a producer using Publisher Confirms can reliably detect a publish that silently failed to reach the broker at all — closing the exact same kind of uncertainty gap on the *publish* side that Consumer Acknowledgment closes on the *processing* side, together covering both ends of the message's full journey.
+
+**Common Pitfall:** assuming that a `BasicPublish` call returning without throwing an exception means the message definitely, durably reached the broker — without Publisher Confirms explicitly enabled, a publish can silently fail to actually reach the broker (a dropped connection, a broker-side issue) with the producer having no way to detect this at all; Publisher Confirms closes exactly this blind spot, providing the producer-side equivalent of the consumer-side acknowledgment guarantee already covered extensively.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is the Fan-In pattern, and how does aggregating events from many independent producers into one stream let a single consumer process them all in one place — the structural opposite of Fan-Out, covered earlier?**
+
+Fan-Out (covered earlier) takes one event and broadcasts it to many independent consumers — Fan-In is the reverse: many independent producers (dozens of microservices, hundreds of IoT devices) all publish into the *same* shared queue/topic, letting one consumer (or one consumer group) process the combined, aggregated stream from all of them in a single, unified place.
+
+```text
+FAN-OUT (covered earlier) -- ONE event, BROADCAST to MANY independent CONSUMERS:
+  OrderPlaced event ──┬──► EmailService
+                       ├──► AnalyticsService
+                       └──► InventoryService
+
+FAN-IN -- MANY independent PRODUCERS, ALL publishing into the SAME shared stream:
+  ServiceA ──┐
+  ServiceB ──┼──► [shared "audit-events" topic] ──► ONE Audit Logging Consumer (processes ALL of them)
+  ServiceC ──┘
+```
+```csharp
+// EVERY service, INDEPENDENTLY, publishes ITS OWN audit events into the SAME shared topic
+await _eventBus.PublishAsync("audit-events", new AuditEvent { Service = "ServiceA", Action = "OrderCreated" });
+// -- MEANWHILE, ServiceB and ServiceC ALSO publish INTO this EXACT SAME topic, INDEPENDENTLY --
+
+// ONE consumer processes the ENTIRE, COMBINED stream, from EVERY producing service, in ONE place
+public async Task ProcessAuditEvent(AuditEvent auditEvent) { await _auditLog.WriteAsync(auditEvent); }
+```
+Because every producing service publishes into the same shared destination, a single consumer (a centralized audit-logging service, in this example) gets a unified, chronologically-interleaved view of activity across *every* contributing service, without needing to separately poll or subscribe to each service's own individual event stream — a common, practical pattern for centralized logging, auditing, or monitoring pipelines that need to aggregate activity from across an entire microservices architecture into one consolidated place.
+
+**Common Pitfall:** having each service publish its events to its *own*, separate topic/queue, then requiring the aggregating consumer to separately subscribe to and merge dozens of individual streams itself — this pushes the aggregation burden onto the consumer, requiring it to manage subscriptions to every individual producer's own topic; a genuine Fan-In design has producers publish into one shared destination from the start, letting the consumer subscribe just once to get the fully aggregated stream directly.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is Kafka's Transaction Coordinator, and how does it atomically commit both a transactional producer's produced messages and a consumer's offset update together, as one indivisible unit — the mechanism underlying Exactly-Once Semantics covered earlier?**
+
+Kafka's Exactly-Once Semantics (EOS, covered earlier) requires that "consume a message, process it, produce a new message, and commit the consumed offset" all succeed or fail *together*, as one atomic unit — the Transaction Coordinator is the specific broker-side component that makes this cross-operation atomicity possible, tracking a transaction's state and ensuring every part of it becomes visible together, or none of it does.
+
+```csharp
+// a TRANSACTIONAL producer -- COORDINATES a Read-Process-Write cycle as ONE ATOMIC unit
+producer.InitTransactions();
+producer.BeginTransaction();
+try
+{
+    var processedOrder = ProcessOrder(consumedMessage); // business LOGIC
+    producer.Produce("processed-orders", processedOrder); // PRODUCE the RESULT
+    producer.SendOffsetsToTransaction(consumerOffsets, consumerGroupMetadata); // the OFFSET COMMIT, AS PART OF the SAME transaction
+    producer.CommitTransaction(); // the TRANSACTION COORDINATOR makes BOTH the PRODUCE and the OFFSET COMMIT
+                                    // VISIBLE TOGETHER, ATOMICALLY -- OR NEITHER, if ANYTHING fails
+}
+catch { producer.AbortTransaction(); } // if ANYTHING fails, BOTH the produce AND the offset commit are ROLLED BACK TOGETHER
+```
+The Transaction Coordinator (a designated role held by one of the brokers, tracking transaction state in Kafka's own internal `__transaction_state` topic) ensures that a consumer reading the "processed-orders" topic with the appropriate isolation level never sees a partially-committed transaction's output — either the produced message *and* its corresponding offset commit both become visible together, or (if the transaction aborts) neither does, closing off the exact "produced a duplicate/lost message on a partial failure mid-cycle" gap EOS is specifically designed to eliminate.
+
+**Why this specifically requires broker-side coordination, rather than being achievable purely with client-side logic:** without the broker itself tracking and enforcing transaction boundaries, a crash between "produce the new message" and "commit the offset" would leave the system in an ambiguous state (was this message actually part of a completed cycle, or a half-finished one?) — the Transaction Coordinator's broker-side bookkeeping is what lets Kafka definitively resolve this ambiguity on recovery, rather than relying on the producing application's own client-side code to somehow guarantee atomicity across what are otherwise two entirely separate broker operations.
+
+**Common Pitfall:** assuming Kafka's Idempotent Producer (covered earlier, which only deduplicates producer retries) alone is sufficient for a genuine read-process-write pipeline's exactly-once guarantee — the Idempotent Producer solves a narrower problem (duplicate writes from retries); the full Transactional API, coordinated through the Transaction Coordinator, is what's actually needed to atomically tie together a consumed offset commit with the correspondingly produced output, the specific, broader guarantee genuine Exactly-Once Semantics requires.
+
+---
+
 ---

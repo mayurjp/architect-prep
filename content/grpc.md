@@ -1282,4 +1282,92 @@ Because certain failures (a missing or invalid auth token, detected immediately 
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is the difference between `Grpc.Core` (the older, C-based gRPC library) and `Grpc.Net.Client` (the modern, pure-C#, `HttpClient`-based implementation), and why did .NET move away from the native library?**
+
+`Grpc.Core` wrapped a native, C-language gRPC library (`libgrpc`) via interop — `Grpc.Net.Client` is a fully-managed, pure C# implementation built directly on top of .NET's own `HttpClient`/`SocketsHttpHandler` HTTP/2 support, eliminating the native interop layer entirely.
+
+```text
+Grpc.Core (OLDER) -- a THIN C# wrapper AROUND a NATIVE C library (libgrpc), via P/Invoke INTEROP:
+  -- required SHIPPING platform-SPECIFIC native BINARIES alongside the MANAGED .NET assemblies
+  -- DEBUGGING crossed the MANAGED/NATIVE boundary -- GENUINELY harder to DIAGNOSE issues WITHIN
+  -- COULDN'T easily benefit from IMPROVEMENTS to .NET's OWN HTTP/2 stack, since it used its OWN,
+     SEPARATE native networking IMPLEMENTATION entirely
+
+Grpc.Net.Client (MODERN) -- PURE, FULLY-MANAGED C#, built DIRECTLY on .NET's OWN HttpClient/HTTP2:
+  -- NO native binaries, NO interop boundary AT ALL -- JUST ordinary, cross-platform MANAGED code
+  -- AUTOMATICALLY benefits from EVERY improvement to .NET's OWN HTTP/2 stack (performance,
+     Kestrel integration, ETC.) SINCE it's BUILT DIRECTLY on TOP of it
+```
+Because `Grpc.Net.Client` eliminates the native interop layer entirely, it avoids the genuine cross-platform packaging complexity of shipping platform-specific native binaries, integrates natively with .NET's own diagnostic/tracing tooling (since there's no managed/native boundary to cross), and automatically benefits from every ongoing improvement to .NET's own HTTP/2 implementation — which is precisely why `Grpc.Net.Client` is the current, recommended client for modern .NET, with `Grpc.Core` now considered legacy.
+
+**Common Pitfall:** continuing to reference the older `Grpc.Core` package in a new .NET project out of habit or outdated tutorials, unaware that `Grpc.Net.Client` has been the recommended, actively-developed client for modern .NET for some time — new gRPC client development should default to `Grpc.Net.Client`, reserving `Grpc.Core` only for the narrow scenarios still requiring it (certain older platform targets it uniquely supported).
+
+---
+
+## Intermediate — Question 13
+
+**Q13: Why must gRPC calls use gRPC's own Deadline mechanism (covered earlier) rather than relying on a generic `HttpClient.Timeout`, given that gRPC's deadline propagation needs to be built directly into the protocol itself?**
+
+A generic `HttpClient.Timeout` simply aborts the client-side wait after a fixed duration, with no way to communicate that timeout to the server or to any downstream services the server itself might call — gRPC's own Deadline mechanism (covered earlier) instead transmits the deadline *as part of the request itself* (a `grpc-timeout` header), letting the server (and everything it calls) know exactly how much time remains and react accordingly, not just the client giving up locally.
+
+```csharp
+// GENERIC HttpClient.Timeout -- ONLY the CLIENT gives up locally -- the SERVER has NO IDEA a
+// timeout is even IN PLAY, and CANNOT propagate IT to ITS OWN downstream calls AT ALL
+httpClient.Timeout = TimeSpan.FromSeconds(5);
+
+// gRPC's OWN Deadline -- TRANSMITTED to the SERVER, WHICH CAN propagate the REMAINING time to
+// ITS OWN downstream calls TOO (covered earlier, under Deadline Propagation)
+var response = await client.GetOrderAsync(request, deadline: DateTime.UtcNow.AddSeconds(5));
+```
+Because gRPC's deadline is carried as an actual protocol-level header, a server receiving the call can check `ServerCallContext.Deadline` and make its own informed decisions (abort early if the deadline has already passed, propagate the *remaining* time to a downstream call, covered earlier) — a generic client-side `HttpClient.Timeout` provides none of this, since it's purely a local, client-side construct with no representation in the actual request the server receives at all.
+
+**Common Pitfall:** configuring `HttpClient.Timeout` on the underlying `HttpClient` used by a gRPC channel, assuming it provides the same behavior as gRPC's own deadline — this only aborts the client's own local wait; it does nothing to inform the server (or the server's own downstream calls) about the timeout at all, missing the entire deadline-propagation benefit (covered earlier) that's specifically why gRPC provides its own, protocol-level deadline mechanism rather than relying on a generic HTTP client timeout.
+
+---
+
+## Advanced — Question 13
+
+**Q13: How does gRPC's retry policy combine a Retryable Status Codes allowlist with exponential backoff and jitter, and how does jitter specifically avoid a "thundering herd" of synchronized retries across many clients simultaneously?**
+
+A retry policy (covered earlier) specifies which status codes are safe to retry and how long to wait between attempts — exponential backoff increases that wait time with each successive attempt, and jitter adds a small, randomized variation to that wait, specifically to prevent many clients from all retrying at the exact same synchronized moment after a shared failure.
+
+```csharp
+services.AddGrpcClient<OrderService.OrderServiceClient>()
+    .ConfigureChannel(o => o.ServiceConfig = new ServiceConfig
+    {
+        MethodConfigs = { new MethodConfig
+        {
+            RetryPolicy = new RetryPolicy
+            {
+                MaxAttempts = 4,
+                InitialBackoff = TimeSpan.FromMilliseconds(100),
+                MaxBackoff = TimeSpan.FromSeconds(2),
+                BackoffMultiplier = 2.0, // EACH retry WAITS roughly TWICE as LONG as the PREVIOUS one
+                RetryableStatusCodes = { StatusCode.Unavailable }
+            }
+        }}
+    });
+```
+```text
+WITHOUT jitter -- MANY clients, ALL experiencing the SAME broker OUTAGE SIMULTANEOUSLY, would ALL
+  compute the EXACT SAME backoff DELAY (100ms, then 200ms, then 400ms...) and ALL RETRY at the
+  EXACT SAME MOMENT -- a "THUNDERING HERD" of SYNCHRONIZED retries HITTING the (possibly
+  JUST-RECOVERING) server ALL AT ONCE, potentially KNOCKING it back DOWN again IMMEDIATELY
+
+WITH jitter -- EACH client adds a SMALL, RANDOM variation to ITS OWN computed BACKOFF delay:
+  Client A retries at: 100ms + random(0-50ms)  = ~123ms
+  Client B retries at: 100ms + random(0-50ms)  = ~137ms
+  Client C retries at: 100ms + random(0-50ms)  = ~108ms
+  -- retries are now SPREAD OUT over a SMALL WINDOW, RATHER than ALL landing at the EXACT SAME
+     INSTANT -- the RECOVERING server receives a SMOOTHED-OUT trickle of retries, NOT ONE
+     SYNCHRONIZED SPIKE --
+```
+Because jitter deliberately desynchronizes what would otherwise be many clients' identical, simultaneous retry timing, a server recovering from a brief outage receives a spread-out, gradually-increasing trickle of retry traffic rather than one massive, synchronized spike arriving in the same instant — directly preventing the retry storm itself from being the thing that knocks a just-recovering server back down again, a well-documented, genuinely important refinement on top of plain exponential backoff alone.
+
+**Common Pitfall:** implementing exponential backoff without any jitter at all, assuming the increasing delay alone is sufficient protection against overwhelming a recovering server — without jitter, every client experiencing the same shared failure computes the *exact same* sequence of backoff delays and ends up retrying in near-perfect synchrony, reproducing the thundering-herd problem at each successive retry attempt; jitter is specifically what breaks this synchronization, and is considered a standard, necessary companion to backoff, not an optional refinement.
+
+---
+
 ---
