@@ -1127,4 +1127,92 @@ The Cypher query's `(alice)-[:FRIEND]->()-[:FRIEND]->(fof)` pattern reads almost
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is Document Database Schema Validation (MongoDB's JSON Schema validation rules), and how does optionally enforcing a schema at the database level provide a middle ground between fully schemaless and a relational database's rigid schema?**
+
+A document database's core flexibility is genuinely schemaless (covered elsewhere) — but that flexibility can also allow malformed or inconsistent documents to slip in unnoticed. Schema Validation lets you optionally define rules a document must satisfy before being accepted, providing enforcement specifically where it's valuable, without reverting to a relational database's fully rigid, always-enforced schema for every single field.
+
+```javascript
+db.createCollection("products", {
+  validator: {
+    $jsonSchema: {
+      required: ["name", "price"], // THESE fields MUST be PRESENT
+      properties: {
+        name: { bsonType: "string" },
+        price: { bsonType: "number", minimum: 0 } // price MUST be a NON-NEGATIVE number
+        // -- ANY OTHER field NOT explicitly LISTED here is STILL FREELY ALLOWED, UNVALIDATED --
+      }
+    }
+  }
+});
+
+db.products.insertOne({ name: "Keyboard", price: -5 }); // REJECTED -- violates the "minimum: 0" RULE
+db.products.insertOne({ name: "Keyboard", price: 29.99, customField: "anything" }); // ALLOWED --
+// "customField" is NOT part of the SCHEMA, but is STILL PERMITTED, since VALIDATION is OPTIONAL/PARTIAL
+```
+Because validation rules can be scoped to just the specific fields that genuinely need enforcement (leaving everything else still flexible), a team gets the best of both worlds — guaranteed structural integrity for the fields that matter most (a price must be non-negative, a name must be present), while still preserving the schemaless flexibility document databases are chosen for in every other respect, a genuinely different trade-off than a relational database's all-fields-always-enforced schema.
+
+**Common Pitfall:** treating a document database's schemaless nature as a reason to skip validation entirely, even for fields where structural consistency is genuinely important (every document needing a valid `price`, for instance) — this trades away a real, low-cost safety net; Schema Validation lets a team enforce exactly the specific invariants that matter, without needing to give up the schemaless flexibility that motivated choosing a document database in the first place for everything else.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is an Aggregation Pipeline (MongoDB's `$match`/`$group`/`$project` stages), and how does chaining multiple stages let complex data transformations happen entirely within the database, rather than pulling raw data out for application-side processing?**
+
+An Aggregation Pipeline processes documents through a sequence of stages, each transforming the data before passing it to the next — filtering, grouping, reshaping — all executed directly inside the database engine, letting complex, multi-step data transformations (exactly the kind of monthly sales report covered in an earlier scenario) run without ever pulling the full, raw dataset out to the application for processing.
+
+```javascript
+db.orders.aggregate([
+  { $match: { orderDate: { $gte: ISODate("2026-01-01") } } },  // STAGE 1: FILTER to this year's orders ONLY
+  { $group: { _id: "$category", totalRevenue: { $sum: "$total" } } }, // STAGE 2: GROUP by category, SUM revenue
+  { $project: { category: "$_id", totalRevenue: 1, _id: 0 } },  // STAGE 3: RESHAPE the OUTPUT fields
+  { $sort: { totalRevenue: -1 } }  // STAGE 4: SORT by REVENUE, DESCENDING
+]);
+```
+```text
+Each STAGE'S OUTPUT feeds DIRECTLY into the NEXT stage, ENTIRELY INSIDE the database ENGINE --
+the APPLICATION never RECEIVES the RAW, UNGROUPED order documents AT ALL -- it receives ONLY
+the FINAL, ALREADY-aggregated RESULT, DIRECTLY from the LAST stage in the PIPELINE
+```
+Because every stage executes inside the database engine itself, only the final, already-transformed result ever needs to travel over the network to the application — directly avoiding the earlier scenario's problem (an application-side aggregation pulling enormous volumes of raw data out of the database, then computing sums/groupings in application code, severely degrading both database and application performance); pushing the entire multi-stage transformation down into the database engine is precisely the fix that scenario needed.
+
+**Common Pitfall:** pulling a large volume of raw documents out of the database and performing filtering/grouping/summing in application code, rather than expressing that same logic as an Aggregation Pipeline running inside the database itself — this wastes network bandwidth transferring far more raw data than the application actually needs, and forces the application server to do computational work (grouping, summing) the database engine is specifically optimized to perform far more efficiently, directly connecting to the earlier scenario covering exactly this performance problem.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is the Materialized View pattern in a NoSQL database — a pre-computed, stored aggregation kept updated via a Change Stream (covered earlier) — as an alternative to running an expensive Aggregation Pipeline live on every single read?**
+
+Running a full Aggregation Pipeline (covered earlier) on every single read recomputes the same expensive aggregation repeatedly, even when the underlying data hasn't changed since the last computation — a Materialized View instead stores the *result* of that aggregation as its own document/collection, updated incrementally whenever the underlying data actually changes (via a Change Stream, covered earlier), so a read simply fetches the already-computed result directly.
+
+```javascript
+// a Change Stream WATCHES for relevant changes, INCREMENTALLY updating a PRE-COMPUTED "materialized view"
+const changeStream = db.collection('orders').watch();
+changeStream.on('change', async (change) => {
+  if (change.operationType === 'insert') {
+    const order = change.fullDocument;
+    // INCREMENTALLY updates the PRE-COMPUTED aggregate, RATHER than RECOMPUTING the ENTIRE aggregation
+    await db.collection('categoryRevenueSummary').updateOne(
+      { category: order.category },
+      { $inc: { totalRevenue: order.total } },
+      { upsert: true }
+    );
+  }
+});
+
+// a READ against the materialized view is now a TRIVIAL, DIRECT lookup -- NO aggregation PIPELINE
+// needs to RUN at READ TIME AT ALL -- the RESULT is ALREADY sitting there, PRE-COMPUTED
+const summary = await db.collection('categoryRevenueSummary').findOne({ category: "Electronics" });
+```
+Because the aggregate result is maintained incrementally as changes occur (rather than recomputed from scratch on every read), reads against the Materialized View become simple, fast, direct document lookups — trading a small amount of ongoing write-side maintenance cost (updating the materialized view on every relevant change) for dramatically cheaper reads, directly mirroring the same CQRS Read Model pattern (covered under Clean Architecture) applied specifically within a NoSQL database's own native tooling.
+
+**Why this specifically complements (rather than replaces) the Aggregation Pipeline covered earlier:** the Aggregation Pipeline remains the right tool for ad-hoc, one-off, or infrequently-run reports where pre-computing and maintaining a materialized view wouldn't be worth the ongoing maintenance overhead — the Materialized View pattern earns its keep specifically for aggregations queried *repeatedly*, frequently enough that recomputing them live on every single read would be wasteful, exactly the same "cache aside/read model" trade-off covered elsewhere applied specifically to aggregation results.
+
+**Common Pitfall:** running the same expensive Aggregation Pipeline live, on every single page load, for a dashboard or report queried extremely frequently by many users — if the underlying data changes far less often than the aggregation is queried, a Materialized View (updated incrementally via Change Stream) trades a small amount of write-side complexity for dramatically reduced read-side cost, precisely the scenario where recomputing the same aggregation repeatedly, on every read, is a genuinely avoidable waste of database resources.
+
+---
+
 ---

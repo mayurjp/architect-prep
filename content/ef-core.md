@@ -1301,4 +1301,84 @@ Because a Complex Type carries no identity of its own, EF Core doesn't need to t
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is `IgnoreQueryFilters()`, and when would an admin-level query deliberately need to bypass a Global Query Filter's soft-delete behavior (covered earlier)?**
+
+A Global Query Filter (covered earlier) automatically excludes soft-deleted rows from every query against an entity — but occasionally, a genuinely privileged operation (an admin "view deleted items" screen, a data-recovery tool) needs to see *everything*, including the soft-deleted rows the filter would otherwise silently hide. `IgnoreQueryFilters()` lets one specific query opt out of that automatic filtering.
+
+```csharp
+modelBuilder.Entity<Order>().HasQueryFilter(o => !o.IsDeleted); // GLOBAL filter -- applies to EVERY query, by DEFAULT
+
+// an ORDINARY query -- AUTOMATICALLY excludes SOFT-DELETED orders, per the GLOBAL filter above
+var activeOrders = await _db.Orders.ToListAsync();
+
+// an ADMIN-ONLY "view deleted items" screen -- DELIBERATELY BYPASSES the filter, for THIS ONE query
+var allOrdersIncludingDeleted = await _db.Orders.IgnoreQueryFilters().ToListAsync();
+```
+Because `IgnoreQueryFilters()` is applied explicitly, per-query, rather than globally disabling the filter for the entire application, every *other* query continues automatically excluding soft-deleted rows exactly as intended — only this one, deliberately-marked admin query sees the full, unfiltered picture, keeping the safety net in place everywhere else.
+
+**Common Pitfall:** disabling a Global Query Filter entirely (removing the `HasQueryFilter` configuration) just to support one specific admin screen that needs to see deleted rows — this removes the soft-delete protection from *every* query in the application, not just the one that genuinely needed the bypass; `IgnoreQueryFilters()` is the correctly-scoped tool for this exact, narrow need.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is `IDbContextFactory<T>`, and how does it let you create multiple short-lived `DbContext` instances from one factory — useful for a Blazor app or background worker that can't rely on the usual per-HTTP-request scoped lifetime?**
+
+EF Core's usual `DbContext` lifetime (scoped, one instance per HTTP request, covered elsewhere) doesn't fit every hosting model — a Blazor Server component's lifetime doesn't map cleanly onto "one HTTP request," and a background worker (covered under ASP.NET Core's `IHostedService`) has no HTTP request context at all. `IDbContextFactory<T>` provides an explicit factory a component/worker can call whenever it needs a *fresh*, short-lived `DbContext` instance, rather than depending on the DI container's usual scoped-per-request lifetime management.
+
+```csharp
+builder.Services.AddDbContextFactory<AppDbContext>(options => options.UseSqlServer(connectionString));
+
+public class OrderProcessingWorker : BackgroundService
+{
+    private readonly IDbContextFactory<AppDbContext> _contextFactory;
+    public OrderProcessingWorker(IDbContextFactory<AppDbContext> contextFactory) => _contextFactory = contextFactory;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            using var db = _contextFactory.CreateDbContext(); // a FRESH, SHORT-LIVED context, PER ITERATION
+            var pendingOrders = await db.Orders.Where(o => o.Status == "Pending").ToListAsync(stoppingToken);
+            // ... process, using THIS one instance, THEN dispose it, and CREATE A NEW one NEXT iteration ...
+            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+        }
+    }
+}
+```
+Because the worker explicitly creates and disposes its own `DbContext` instance per iteration (rather than depending on a scoped instance the DI container would normally manage per HTTP request), it avoids the pitfall of holding one single, long-lived `DbContext` for the worker's entire lifetime — directly avoiding the earlier-covered risks of a long-lived context (unbounded Change Tracker growth, covered under `ChangeTracker.Clear()`) by simply creating a fresh instance whenever one is genuinely needed.
+
+**Common Pitfall:** injecting a normal, scoped `AppDbContext` directly into a singleton-lifetime `BackgroundService`, rather than using `IDbContextFactory<T>` — a scoped service injected into a singleton effectively becomes a captive dependency, living for the singleton's entire lifetime rather than being refreshed per logical unit of work, precisely the "using DbContext as a singleton" anti-pattern covered under an earlier scenario; `IDbContextFactory<T>` is the correct, intended mechanism for exactly this "I need fresh contexts outside the normal per-request scope" need.
+
+---
+
+## Advanced — Question 15
+
+**Q15: How does EF Core's support for SQL Server Temporal Tables (covered under SQL Server) let you query historical data via `.TemporalAsOf()` directly in LINQ, rather than writing raw `FOR SYSTEM_TIME AS OF` SQL by hand?**
+
+SQL Server's System-Versioned Temporal Tables (covered under SQL Server) automatically maintain a full history of every row's past states — EF Core provides first-class LINQ support for querying that history directly, via `.TemporalAsOf()` and related methods, translating them into the appropriate `FOR SYSTEM_TIME` SQL clause automatically.
+
+```csharp
+modelBuilder.Entity<Product>().ToTable("Products", tb => tb.IsTemporal()); // MAPS to a TEMPORAL table
+
+// querying the PRODUCT's price AS IT WAS at a SPECIFIC point in the PAST -- VIA ORDINARY LINQ
+var historicalPrice = await _db.Products
+    .TemporalAsOf(new DateTime(2026, 1, 1))
+    .Where(p => p.Id == 5)
+    .Select(p => p.Price)
+    .FirstOrDefaultAsync();
+```
+```sql
+-- the GENERATED SQL -- EF Core translates '.TemporalAsOf()' into the ACTUAL "FOR SYSTEM_TIME AS OF" clause
+SELECT [p].[Price] FROM [Products] FOR SYSTEM_TIME AS OF '2026-01-01T00:00:00.0000000' AS [p]
+WHERE [p].[Id] = 5
+```
+Because `.TemporalAsOf()` composes with the rest of ordinary LINQ (`.Where()`, `.Select()`, joins with other entities), a developer querying historical data writes exactly the same style of code as any other EF Core query — the temporal, point-in-time aspect is expressed as one additional, composable LINQ operator, rather than requiring a hand-written raw SQL query with the `FOR SYSTEM_TIME` clause manually spliced in.
+
+**Common Pitfall:** dropping to raw SQL (`FromSqlRaw`, covered elsewhere) specifically to query a temporal table's history, unaware that EF Core already provides native, composable LINQ support for exactly this via `.TemporalAsOf()` (and its siblings, `.TemporalAll()`, `.TemporalFromTo()`) — for straightforward historical queries against a temporal table, the built-in LINQ methods avoid the need to drop to raw SQL at all, keeping the query fully type-checked and composable with the rest of the LINQ query.
+
+---
+
 ---

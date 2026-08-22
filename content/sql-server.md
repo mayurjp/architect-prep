@@ -1173,4 +1173,66 @@ The escalation exists specifically to protect the server from the memory/overhea
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is a SQL Server `SEQUENCE` object, and how does it differ from an `IDENTITY` column (covered earlier) by being independent of any one specific table?**
+
+An `IDENTITY` column (covered earlier) generates auto-incrementing values scoped to *one specific table's* own column — a `SEQUENCE` is a standalone database object generating a sequence of numbers entirely independent of any single table, which multiple different tables (or application code directly) can all draw from.
+
+```sql
+CREATE SEQUENCE OrderNumberSequence START WITH 1000 INCREMENT BY 1;
+
+-- MULTIPLE, entirely DIFFERENT tables can ALL draw from the SAME shared sequence
+INSERT INTO Orders (OrderNumber, ...) VALUES (NEXT VALUE FOR OrderNumberSequence, ...);
+INSERT INTO Quotes (QuoteNumber, ...) VALUES (NEXT VALUE FOR OrderNumberSequence, ...);
+-- BOTH tables' "numbers" come from the EXACT SAME underlying sequence -- NEVER COLLIDING with EACH OTHER
+```
+Because a `SEQUENCE` isn't tied to any single table's own column, application code can also request the next value directly (`SELECT NEXT VALUE FOR OrderNumberSequence`) *before* actually inserting a row — useful when a generated number is needed for some purpose (printing on an invoice, referencing in a separate system) before the corresponding row has even been created yet, something `IDENTITY` (which only generates a value at actual insert time) cannot support.
+
+**Common Pitfall:** reaching for a `SEQUENCE` when a simple, table-scoped `IDENTITY` column would suffice — a `SEQUENCE`'s added flexibility (sharing across tables, retrieving a value before insert) comes with slightly more setup than a plain `IDENTITY` column; `SEQUENCE` earns its use specifically when a number is genuinely needed across multiple tables or before the actual insert occurs, not as a default replacement for the simpler `IDENTITY` column in the common single-table auto-increment case.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What are `TRY_CONVERT`/`TRY_CAST`, and how do they let a conversion that might fail return `NULL` instead of throwing an error that halts an entire batch mid-query?**
+
+An ordinary `CONVERT`/`CAST` throws an error the instant it encounters a value it cannot convert — in a query processing many rows, even a single unconvertible value can abort the entire batch. `TRY_CONVERT`/`TRY_CAST` instead return `NULL` for any value that fails to convert, letting the rest of the query continue processing every other row normally.
+
+```sql
+-- ORDINARY CONVERT -- a SINGLE bad value HALTS the ENTIRE QUERY with an ERROR
+SELECT CONVERT(INT, RawValue) FROM ImportedData;
+-- IF even ONE ROW's "RawValue" is "abc" (not a VALID integer), the ENTIRE QUERY FAILS, IMMEDIATELY
+
+-- TRY_CONVERT -- a BAD value SIMPLY becomes NULL -- the REST of the QUERY still COMPLETES SUCCESSFULLY
+SELECT TRY_CONVERT(INT, RawValue) AS ParsedValue FROM ImportedData;
+-- "abc" becomes NULL -- EVERY OTHER, VALID row STILL converts and RETURNS NORMALLY
+```
+Because `TRY_CONVERT` converts what it safely can and returns `NULL` for what it can't, a query processing a large batch of imported or user-supplied data (where some rows are inevitably malformed) can complete successfully, with the malformed rows clearly flagged as `NULL` for follow-up investigation, rather than the entire query failing outright the moment it encounters the very first unconvertible value.
+
+**Common Pitfall:** using ordinary `CONVERT`/`CAST` against a column of externally-sourced, not-fully-trusted data (an import, user-supplied input) where some fraction of rows are realistically expected to be malformed — a single bad row anywhere in a large batch aborts the entire query; `TRY_CONVERT`/`TRY_CAST` is specifically the right tool whenever conversion failures are a realistic, expected possibility that shouldn't halt processing of every other, valid row.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is a SQL Server Resumable Index rebuild/create operation, and how does it let a long-running index operation be paused and resumed later, without losing all progress if it needs to be interrupted?**
+
+An ordinary index rebuild is all-or-nothing — if it's interrupted partway through (a failover, a maintenance window ending, an operator needing to stop it), all progress is lost, and the operation must restart entirely from the beginning the next time it runs. A Resumable Index operation instead persists its progress, letting it be explicitly paused and later resumed from where it left off, rather than starting over.
+
+```sql
+ALTER INDEX IX_Orders_CustomerId ON Orders REBUILD WITH (ONLINE = ON, RESUMABLE = ON, MAX_DURATION = 60);
+-- runs for UP TO 60 minutes -- if it needs to be INTERRUPTED (a MAINTENANCE window ENDING, for instance):
+
+ALTER INDEX IX_Orders_CustomerId ON Orders PAUSE; -- EXPLICITLY pauses -- PROGRESS so FAR is PRESERVED
+
+-- LATER (a SUBSEQUENT maintenance window, perhaps the NEXT night) --
+ALTER INDEX IX_Orders_CustomerId ON Orders RESUME; -- CONTINUES from WHERE it LEFT OFF, NOT from SCRATCH
+```
+Because the operation's progress is durably persisted rather than discarded on interruption, a very large index rebuild that genuinely can't complete within a single maintenance window can be spread across multiple separate windows (pause at the end of one window, resume at the start of the next) without ever losing the work already done — directly useful for very large tables where a rebuild's total duration might exceed what a single maintenance window can safely accommodate.
+
+**Common Pitfall:** scheduling a large index rebuild without `RESUMABLE = ON`, then having it interrupted partway through (a failover, an operator needing to cancel it for an emergency) and having to restart the *entire* rebuild completely from scratch — for genuinely large indexes where a rebuild might take hours, `RESUMABLE = ON` provides meaningful protection against losing substantial progress to an interruption that couldn't be avoided.
+
+---
+
 ---

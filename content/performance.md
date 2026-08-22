@@ -1180,3 +1180,70 @@ By allocating pinned objects into their own dedicated segment from the start, th
 **Common Pitfall:** pinning short-lived, frequently-allocated objects directly in the ordinary heap (via `fixed` on a `new byte[1024]` that isn't specifically allocated onto the POH) in a hot, high-throughput code path — before .NET 5, this was a well-known, significant contributor to heap fragmentation in exactly the high-throughput I/O/interop scenarios where pinning is most commonly needed; explicitly allocating via `GC.AllocateArray<T>(..., pinned: true)` directs such objects onto the POH specifically, avoiding the fragmentation impact pinning them in the ordinary heap would otherwise cause.
 
 ---
+
+## Beginner — Question 14
+
+**Q14: Why is latency typically reported as percentiles (p50/p95/p99) rather than a single average, and why can a high p99 matter even when the average looks perfectly fine?**
+
+An average blends every request's latency together into one number, letting a small fraction of genuinely slow requests get diluted and hidden by the much larger number of fast ones — a percentile instead reports "the latency below which X% of requests fall," directly surfacing exactly how bad the *worst-experienced* requests actually are, information an average structurally cannot reveal.
+
+```text
+1,000 requests: 990 complete in 20ms, 10 complete in 5,000ms (a SEVERE, but RARE, slow-path issue)
+
+AVERAGE:  (990 x 20 + 10 x 5000) / 1000 = ~69ms  -- LOOKS totally FINE, barely ELEVATED at ALL
+
+p50 (MEDIAN): 20ms  -- ALSO looks FINE -- HALF of ALL requests are WELL under THIS
+p95:          20ms  -- STILL looks FINE -- 95% of requests are STILL under THIS
+p99:          5,000ms -- REVEALS the TRUTH -- the WORST 1% of requests are CATASTROPHICALLY slow
+```
+The average (69ms) and even p95 (20ms) both look entirely healthy, completely hiding the fact that 1% of requests are taking 250x longer than typical — only p99 (or an even higher percentile, depending on how rare the slow path is) actually surfaces this severe tail-latency problem, which is precisely why production monitoring dashboards report percentiles rather than relying on a single average that can mask exactly this kind of real, user-impacting issue.
+
+**Common Pitfall:** monitoring and alerting only on average latency, missing a genuine, severe tail-latency problem affecting a real (if numerically small) fraction of actual users — for a system serving millions of requests, even a "rare" 1% tail-latency issue affects a very large absolute number of real users, and average-based monitoring alone provides no visibility into this at all; p95/p99 (or higher) percentile-based monitoring is the standard, necessary practice for actually catching this class of problem.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What are `GC.GetTotalMemory` and `GC.CollectionCount(generation)`, and how do they let you observe GC behavior directly from code, without needing a full profiler attached?**
+
+While a dedicated profiler (covered elsewhere) provides the richest diagnostic detail, `GC.GetTotalMemory` and `GC.CollectionCount` are simple, built-in .NET APIs letting application code itself directly query current memory usage and how many collections have occurred per generation — useful for lightweight, in-application diagnostics or logging, without needing an external profiling tool attached at all.
+
+```csharp
+long before = GC.GetTotalMemory(forceFullCollection: false); // CURRENT estimated managed memory usage
+int gen0Before = GC.CollectionCount(0);
+int gen2Before = GC.CollectionCount(2);
+
+DoSomeWork();
+
+long after = GC.GetTotalMemory(forceFullCollection: false);
+Console.WriteLine($"Memory delta: {after - before} bytes");
+Console.WriteLine($"Gen0 collections during work: {GC.CollectionCount(0) - gen0Before}");
+Console.WriteLine($"Gen2 collections during work: {GC.CollectionCount(2) - gen2Before}"); // Gen2 GCs are FAR more expensive
+```
+Because these APIs are built directly into .NET itself, an application can log this data continuously in production (feeding it into the same metrics pipeline as other application telemetry, covered under System Design) without needing to attach a separate profiling tool at all — particularly useful for lightweight, ongoing production monitoring (alerting if Gen 2 collection frequency suddenly spikes) rather than the deep, one-off investigative detail a full profiler session provides.
+
+**Common Pitfall:** calling `GC.GetTotalMemory(forceFullCollection: true)` routinely in a hot, frequently-executed code path — forcing a full garbage collection on every single call is itself expensive and disruptive (introducing exactly the GC pause behavior covered elsewhere), completely defeating the purpose of lightweight, low-overhead diagnostic observation; `forceFullCollection: false` (or simply relying on `CollectionCount`, which requires no forced collection at all) is the appropriate choice for genuinely lightweight, ongoing monitoring.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is the `Cache-Control: stale-while-revalidate` directive, and how does it let a client/CDN serve a stale cached response immediately while asynchronously refreshing it in the background, rather than blocking the requester on a fresh fetch?**
+
+Ordinarily, once a cached response's `max-age` expires, the next request must wait for a fresh fetch from the origin server before returning anything — `stale-while-revalidate` instead lets a cache serve the *stale* (expired) response immediately, while triggering a background refresh that updates the cache for the *next* request, trading a small, bounded window of staleness for consistently fast responses with no blocking wait at all.
+
+```http
+Cache-Control: max-age=60, stale-while-revalidate=86400
+```
+```text
+t=0s:      response CACHED, FRESH for the NEXT 60 seconds (max-age)
+t=61s:     the cache has EXPIRED (past max-age) -- but STILL WITHIN the stale-while-revalidate WINDOW (86400s)
+           -> the CACHE serves the STALE response IMMEDIATELY, NO WAITING, to THIS requester
+           -> SIMULTANEOUSLY, a BACKGROUND request FETCHES a FRESH response FROM the origin
+           -> ONCE that BACKGROUND fetch COMPLETES, the CACHE is UPDATED -- the NEXT requester GETS the FRESH one
+```
+Because the requester at `t=61s` gets an immediate response (the still-reasonably-recent stale copy) rather than waiting for the origin server's fresh response to complete first, perceived latency stays consistently low even right at the moment a cached entry expires — trading a small, bounded window of serving slightly-stale data for eliminating the "someone has to wait for the slow origin fetch" cost that would otherwise fall on whichever unlucky request happens to arrive right as the cache expires.
+
+**Common Pitfall:** setting `max-age` alone without `stale-while-revalidate`, and being surprised that the request arriving *right after* expiration experiences a noticeable latency spike (having to wait for a full, synchronous origin fetch) compared to every other cached request — `stale-while-revalidate` specifically smooths over exactly this "worst-case, first request after expiration" latency spike, letting that unlucky request still get a fast (if momentarily stale) response while the refresh happens transparently in the background instead.
+
+---

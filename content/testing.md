@@ -1383,3 +1383,101 @@ Feeding the same large volume of production-representative inputs through both t
 **Common Pitfall:** using Differential Testing between two implementations that share the exact same underlying bug (both independently implemented with the identical misunderstanding of a business rule) — since Differential Testing only catches *disagreement* between the two, a bug present identically in *both* implementations produces no discrepancy at all and goes completely undetected; this technique is powerful specifically for catching divergence between genuinely independent implementations, not for validating that either one is correct against some external, absolute standard.
 
 ---
+
+## Beginner — Question 14
+
+**Q14: What is a Spy Test Double specifically — one of the named sub-types under the "Test Double" umbrella term (covered earlier) — and how does it record how it was called, letting you assert on that interaction after the fact, differently from a Mock's up-front expectation setting?**
+
+A Mock (covered under the Test Double umbrella) typically has its expected calls configured *before* the test runs, and can fail the test automatically if an expected call never happens — a Spy instead simply *records* every call made to it, without any pre-configured expectations, letting the test inspect those recorded calls afterward and decide what to assert.
+
+```csharp
+// a SPY -- just RECORDS what happened, NO pre-configured EXPECTATIONS at all
+public class EmailServiceSpy : IEmailService
+{
+    public List<(string To, string Subject)> SentEmails { get; } = new();
+    public void Send(string to, string subject) => SentEmails.Add((to, subject)); // just RECORDS the CALL
+}
+
+// the TEST -- asserts on the RECORDED interactions, AFTER the fact
+var spy = new EmailServiceSpy();
+var service = new OrderService(spy);
+service.PlaceOrder(order);
+
+Assert.Single(spy.SentEmails); // INSPECT what ACTUALLY happened, AFTER the FACT
+Assert.Equal("alice@example.com", spy.SentEmails[0].To);
+```
+Because the Spy has no pre-configured expectations at all, it simply accumulates a factual record of what was actually called — the test then decides, afterward, exactly what (if anything) to assert about that record, giving more flexibility than a Mock's typical "fail immediately if this exact expected call doesn't happen" style, at the cost of the test needing to write its own explicit assertions against the recorded data rather than relying on the double's own built-in expectation-verification machinery.
+
+**Common Pitfall:** using a mocking framework's `Mock<T>` class but only ever using its call-recording/`Verify()` capability, never its up-front expectation-setting features — this is, in practice, using the mocking framework purely as a Spy while calling it "a mock"; understanding the actual distinction between the two named Test Double sub-types clarifies what a given test is really doing, and which specific capability of a mocking framework it's actually relying on.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What hazard does xUnit's default test parallelization (test collections running in parallel) create for tests sharing a database or other external resource?**
+
+xUnit runs different test *collections* in parallel by default (tests within the same collection still run sequentially relative to each other) — this speeds up an overall test run considerably, but creates a genuine hazard for any test that touches shared, external state (a real test database, a shared file, a static in-memory cache) that a *different*, concurrently-running test collection might also be touching at the exact same time.
+
+```csharp
+// COLLECTION A -- runs IN PARALLEL with COLLECTION B, by DEFAULT
+public class OrderTests
+{
+    [Fact]
+    public async Task PlaceOrder_ReducesInventory()
+    {
+        await _db.Products.Where(p => p.Id == 5).ExecuteUpdateAsync(p => p.SetProperty(x => x.Stock, 100));
+        // ... test logic assuming Stock STARTS at 100 ...
+    }
+}
+
+// COLLECTION B -- ALSO touches the SAME product's Stock, IN PARALLEL, POTENTIALLY AT THE EXACT SAME TIME
+public class InventoryTests
+{
+    [Fact]
+    public async Task ReserveStock_DecrementsCorrectly()
+    {
+        await _db.Products.Where(p => p.Id == 5).ExecuteUpdateAsync(p => p.SetProperty(x => x.Stock, 50));
+        // -- BOTH tests are MUTATING the SAME row, in the SAME shared database, AT THE SAME TIME --
+        // -- WHICHEVER one "WINS" the RACE determines WHAT the OTHER test ACTUALLY SEES --
+    }
+}
+```
+Because both test collections can run genuinely concurrently against the exact same shared database row, either test can observe a value the *other* test just wrote (rather than the value it itself expected to have set), producing exactly the kind of intermittent, hard-to-reproduce flakiness covered under an earlier scenario (tests passing individually, but failing unpredictably when run as a full suite) — directly caused by parallel execution combined with shared, mutable external state neither test properly isolates from the other.
+
+**Common Pitfall:** disabling test parallelization entirely (`[CollectionDefinition(DisableParallelization = true)]` applied broadly, or running the whole suite with `-parallel none`) as a blanket fix for this kind of flakiness, rather than properly isolating each test's own data (a unique, per-test product ID, or a fresh, isolated database/transaction per test) — disabling parallelization sacrifices the genuine speed benefit parallel test execution provides across an entire suite, when the actual, more targeted fix is ensuring each test operates on its own isolated data rather than contending with other, concurrently-running tests over shared state.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is Fuzz Testing, and how does it differ from Property-Based Testing (covered earlier) in its actual goal — finding crashes and security vulnerabilities, rather than verifying a general correctness property?**
+
+Fuzz Testing feeds a program large volumes of random, malformed, or unexpected input specifically to find inputs that cause a crash, hang, or memory-safety violation — Property-Based Testing (covered earlier) also generates many random inputs, but checks that a specific, *known* correctness property holds for each one; Fuzz Testing has no such property to check at all — it's simply hunting for any input that makes the program misbehave, crash, or reveal a security vulnerability.
+
+```csharp
+// PROPERTY-BASED testing (covered earlier) -- checks a KNOWN property holds, for MANY random inputs
+[Property]
+public bool Sorting_Preserves_Length(int[] input) => Sort(input).Length == input.Length; // a SPECIFIC property
+
+// FUZZ testing -- NO specific property being CHECKED at all -- just HUNTING for a CRASH/VULNERABILITY
+[Fact]
+public void FuzzParseOrderXml()
+{
+    var fuzzer = new Fuzzer();
+    for (int i = 0; i < 1_000_000; i++)
+    {
+        byte[] malformedInput = fuzzer.GenerateRandomBytes(); // RANDOM, often GENUINELY MALFORMED input
+        try { ParseOrderXml(malformedInput); }
+        catch (ExpectedParsingException) { /* fine -- a CONTROLLED, EXPECTED failure */ }
+        // -- but an UNHANDLED crash, an INFINITE LOOP, or a MEMORY-SAFETY violation HERE would be
+        //    EXACTLY what FUZZING is HUNTING for -- NOT verifying ANY specific CORRECTNESS property --
+    }
+}
+```
+Fuzz Testing's random inputs are often deliberately, aggressively malformed — genuinely invalid XML, buffer-boundary-straddling byte sequences, deeply nested structures designed to trigger stack overflows — specifically probing the kinds of inputs a parser or protocol handler might not have been designed to gracefully reject, directly connecting to real-world vulnerability classes like ReDoS (covered under App Security) or buffer-related memory-safety issues, which fuzzing is a standard, widely-used technique for discovering.
+
+**Why this is a genuinely different goal from Property-Based Testing, despite both generating random inputs:** Property-Based Testing assumes the program *should* handle every generated input correctly according to some known, specified property — Fuzz Testing makes no such assumption at all; it's specifically looking for inputs the program was *never* designed to handle gracefully, treating any crash or hang as itself the finding, regardless of whether any particular "correctness property" was ever defined for that input in the first place.
+
+**Common Pitfall:** conflating Fuzz Testing with Property-Based Testing simply because both generate random test inputs — Property-Based Testing requires a well-defined property to check and is primarily a correctness-verification technique; Fuzz Testing requires no such property at all and is primarily a robustness/security technique hunting for crashes and vulnerabilities, and the two are complementary rather than interchangeable, often both employed together against the same system for their genuinely different purposes.
+
+---
