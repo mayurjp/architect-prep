@@ -1131,4 +1131,76 @@ Because `pick_first` is specifically designed for scenarios where the resolved a
 
 ---
 
+## Beginner — Question 11
+
+**Q11: Why does gRPC require HTTP/2, and why does calling gRPC over plain, unencrypted HTTP (h2c) require explicit configuration in .NET, unlike TLS-secured gRPC connections?**
+
+gRPC fundamentally relies on HTTP/2 features (multiplexing, trailers for status codes, covered elsewhere) that HTTP/1.1 simply doesn't provide — over a TLS-secured connection, the client and server automatically negotiate HTTP/2 during the TLS handshake itself (via a mechanism called ALPN), but a *plain*, unencrypted connection has no equivalent negotiation step, so .NET requires the developer to explicitly opt in to allow HTTP/2 over cleartext (h2c).
+
+```csharp
+// WITHOUT this switch, an UNENCRYPTED gRPC connection FAILS -- .NET refuses to assume h2c by DEFAULT
+AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
+
+var channel = GrpcChannel.ForAddress("http://localhost:5000"); // PLAIN HTTP -- requires the SWITCH above
+```
+```csharp
+// WITH TLS -- HTTP/2 is negotiated AUTOMATICALLY, during the TLS handshake itself, via ALPN -- NO extra switch needed
+var channel = GrpcChannel.ForAddress("https://localhost:5001");
+```
+Because TLS's ALPN (Application-Layer Protocol Negotiation) extension lets the client and server agree on HTTP/2 as part of the encrypted handshake itself, a secured gRPC connection "just works" without extra configuration — a plain HTTP connection has no equivalent negotiation mechanism available, so .NET's HTTP client defaults conservatively to HTTP/1.1 unless explicitly told it's safe to assume HTTP/2 (h2c) instead, which is exactly why local development/testing over plain HTTP requires this one extra line most production, TLS-secured deployments never need.
+
+**Common Pitfall:** forgetting to enable the `Http2UnencryptedSupport` switch when testing a gRPC client locally against a non-TLS development server, then being confused by connection failures that don't occur at all once TLS is properly configured — this is a purely .NET-client-side configuration quirk specific to cleartext HTTP/2, not a sign of anything actually wrong with the gRPC service itself.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is gRPC's message compression support, and how does it let the already-compact Protobuf binary payload be compressed further, on top of Protobuf's own encoding efficiency?**
+
+Protobuf's binary encoding (covered earlier) is already meaningfully more compact than JSON — but for larger payloads (a big list of records, a sizable file chunk), an additional compression algorithm (gzip is the most common) can still shrink the wire size further, and gRPC supports negotiating and applying this compression transparently, on top of Protobuf's own encoding.
+
+```csharp
+// Client -- requests a SPECIFIC compression algorithm for OUTGOING calls
+var channel = GrpcChannel.ForAddress("https://order-service", new GrpcChannelOptions
+{
+    CompressionProviders = { new GzipCompressionProvider(CompressionLevel.Optimal) }
+});
+var client = new OrderService.OrderServiceClient(channel);
+var callOptions = new CallOptions(headers: new Metadata { { "grpc-internal-encoding-request", "gzip" } });
+```
+```text
+The gRPC WIRE PROTOCOL negotiates compression via the "grpc-encoding"/"grpc-accept-encoding" HEADERS --
+BOTH sides must AGREE compression is supported before it's ACTUALLY applied to a given message
+```
+Because Protobuf's binary format doesn't repeat field names the way JSON does (covered under the format's core efficiency), gzip compression on top of it yields proportionally *less* additional benefit than compressing an equivalent JSON payload would (JSON's repeated field-name text compresses very well; Protobuf's already-compact binary has comparatively less easily-compressible redundancy) — but for genuinely large payloads, the additional reduction is still often worthwhile, trading a small amount of CPU time (compressing/decompressing) for reduced network transfer time, particularly valuable over higher-latency or bandwidth-constrained connections.
+
+**Common Pitfall:** enabling compression indiscriminately for every single gRPC call, including small, latency-sensitive ones — for small payloads, the CPU overhead of compressing/decompressing can exceed whatever bandwidth savings result, actually *increasing* overall latency for calls that were already small enough that compression provides little to no benefit; compression is best reserved specifically for calls with genuinely large payloads, where the bandwidth savings clearly outweigh the added CPU cost.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is gRPC's `WaitForReady` option, and how does it change a call's behavior when the underlying channel is currently in a `TRANSIENT_FAILURE` state, compared to gRPC's default fail-fast behavior?**
+
+By default, a gRPC call fails immediately (fails fast) if the channel is currently in a `TRANSIENT_FAILURE` state (the last connection attempt failed, and the channel hasn't yet successfully reconnected) — `WaitForReady=true` changes this behavior, instead having the call *wait* for the channel to transition out of that failure state and become genuinely ready, up to the call's own deadline, rather than failing immediately.
+
+```csharp
+// DEFAULT (fail-fast) -- if the CHANNEL is CURRENTLY in TRANSIENT_FAILURE, the call FAILS IMMEDIATELY
+var response = await client.GetOrderAsync(request);
+// throws RpcException(StatusCode.Unavailable) RIGHT AWAY if the channel isn't currently connected
+
+// WaitForReady=true -- the call WAITS for the channel to become READY, instead of failing IMMEDIATELY
+var callOptions = new CallOptions(deadline: DateTime.UtcNow.AddSeconds(10)).WithWaitForReady(true);
+var response = await client.GetOrderAsync(request, callOptions);
+// if the channel is CURRENTLY reconnecting, this call WAITS (up to the 10-second deadline) for
+// the channel to BECOME ready, rather than IMMEDIATELY throwing UNAVAILABLE
+```
+Because a channel transitioning through `TRANSIENT_FAILURE` is often a brief, self-resolving condition (a backend instance restarting, a load balancer briefly reassigning connections), `WaitForReady=true` lets a call tolerate this brief window by waiting rather than immediately surfacing a failure the caller would otherwise need to catch and retry manually — trading a bit of added latency (waiting out the reconnection window) for a meaningfully higher chance of the call ultimately succeeding without the caller needing its own retry logic for this specific scenario.
+
+**Why fail-fast is nonetheless the sensible default, rather than `WaitForReady` being universally preferable:** for a latency-sensitive, user-facing request, immediately surfacing "the backend is currently unavailable" (letting the caller decide how to react — show a cached response, a friendly error, or its own smarter retry logic) is often more appropriate than silently blocking the caller's own request for up to several seconds hoping the channel recovers; `WaitForReady` is best reserved for background/batch scenarios where waiting out a brief connectivity blip is preferable to the caller needing to implement its own equivalent retry-with-backoff logic.
+
+**Common Pitfall:** enabling `WaitForReady=true` broadly across a latency-sensitive, interactive API's client calls without considering the caller's own deadline — if the channel remains in `TRANSIENT_FAILURE` for longer than expected (a genuinely extended outage, not just a brief blip), the call still waits the *entire* configured deadline before finally failing, potentially making a user-facing request hang far longer than a fail-fast approach (immediately surfacing the failure, letting the caller react promptly) would have allowed.
+
+---
+
 ---

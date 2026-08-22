@@ -1161,4 +1161,111 @@ Because Reviews' contribution to `Product` depends on already knowing the produc
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is GraphQL's `__typename` meta-field, and how does it let a client discover the actual concrete type of a returned object at runtime — especially useful when a field returns a Union or Interface type?**
+
+`__typename` is a special, always-available field every GraphQL object type implicitly supports, returning the name of that object's actual concrete type as a string — indispensable specifically when a field's declared return type is a Union or Interface (covered earlier), where the client genuinely doesn't know in advance which specific concrete type each individual result actually is.
+
+```graphql
+query {
+  search(term: "keyboard") {
+    __typename    # tells the CLIENT which CONCRETE type THIS specific result actually is
+    ... on Product { name price }
+    ... on Article { title author }
+  }
+}
+```
+```json
+{
+  "data": {
+    "search": [
+      { "__typename": "Product", "name": "Keyboard", "price": 29.99 },
+      { "__typename": "Article", "title": "Best Keyboards 2026", "author": "Alice" }
+    ]
+  }
+}
+```
+Because `__typename` is included directly in each result object, client-side code (particularly a client library's normalized cache, covered earlier under Relay's Global Object Identification) can immediately branch on which concrete type each entry actually is, without needing to inspect which specific fields happen to be present to infer the type indirectly — a far more reliable approach than guessing a type from its shape, especially once two different types happen to share some overlapping field names.
+
+**Common Pitfall:** omitting `__typename` from a query that returns a Union or Interface type, then writing client-side code that tries to infer the concrete type by checking which fields happen to be present (`if (result.price) { /* must be a Product */ }`) — this breaks the moment two different types share a field name, or a field is legitimately `null` for a type that does actually have it; requesting `__typename` explicitly is the robust, standard way to know a result's actual type with certainty.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is a GraphQL Resolver's "Context" object, and how does it let cross-cutting data — the authenticated user, a DataLoader instance, a database connection — be threaded through every resolver in a single request, without each one needing it passed explicitly as an argument?**
+
+Every resolver in a GraphQL request execution shares access to a single Context object, created once per incoming request and passed implicitly to every resolver invoked while handling it — rather than every single resolver function needing "the current user" or "today's DataLoader instance" threaded through as an explicit parameter from the top of the query down to wherever it's actually needed.
+
+```csharp
+// HotChocolate -- the CONTEXT is built ONCE per request, and made available to EVERY resolver
+public class GraphQLContext
+{
+    public ClaimsPrincipal CurrentUser { get; set; }
+    public IDataLoader<int, Author> AuthorDataLoader { get; set; } // the SAME DataLoader instance, for
+                                                                    // THIS ENTIRE request -- covered earlier
+}
+
+public class Query
+{
+    // the Context is INJECTED directly -- the RESOLVER never needed the CALLER to pass it explicitly
+    public async Task<Post> GetPost(int id, [Service] GraphQLContext context)
+    {
+        if (context.CurrentUser is null) throw new UnauthorizedAccessException();
+        var post = await _repository.GetPostAsync(id);
+        post.Author = await context.AuthorDataLoader.LoadAsync(post.AuthorId); // the SAME DataLoader instance
+        return post;
+    }
+}
+```
+Because the Context object is created exactly once at the start of request execution and implicitly threaded to every resolver the GraphQL engine invokes while resolving that one query, deeply nested resolvers (a resolver for a field three levels deep in the query) still have direct access to the same authenticated user and the same DataLoader instance as the top-level resolver — without the query's own field structure needing to explicitly "pass down" this shared, cross-cutting data through every intermediate level.
+
+**Why this specifically is what makes DataLoader batching (covered earlier) work correctly across an entire request:** DataLoader's batching relies on every resolver invocation *within the same request* sharing the exact same DataLoader instance (so their individual `Load` calls accumulate into one shared batch, covered earlier) — the Context object is precisely the mechanism that guarantees this: a *new* Context (and therefore a *new* DataLoader instance) is created per request, but *within* that one request, every resolver shares the identical instance, which is exactly the scoping DataLoader's batching depends on to function correctly.
+
+**Common Pitfall:** accidentally creating a *new* DataLoader instance inside an individual resolver (rather than retrieving the one shared instance from the request's Context) — this defeats DataLoader's entire batching mechanism, since each resolver invocation would then have its own separate, unshared DataLoader with nothing to batch against, silently reintroducing the exact N+1 query problem DataLoader (covered earlier) exists specifically to prevent.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is Relay's Cursor Connection specification (`edges`/`node`/`pageInfo`) for GraphQL pagination, and how does its standardized shape differ from a simple offset/limit approach — extending the cursor-based pagination concept covered under REST into GraphQL's own standardized convention?**
+
+The Cursor Connection specification is a standardized *shape* for paginated GraphQL fields, wrapping each result in an `edges` array (each with a `node` — the actual object — and a `cursor` identifying its position) plus a `pageInfo` object describing whether more pages exist — providing the same fundamental benefit as REST's cursor-based pagination (covered elsewhere: stability against a shifting underlying dataset) in a consistent, standardized GraphQL shape any Relay-compatible client can generically understand.
+
+```graphql
+query {
+  products(first: 2, after: "cursor-abc") {
+    edges {
+      cursor            # THIS specific item's cursor -- usable to fetch the NEXT page starting AFTER it
+      node { id name price }   # the ACTUAL Product object itself
+    }
+    pageInfo {
+      hasNextPage       # is there MORE data after this page?
+      endCursor         # the CURSOR to pass as "after" for the NEXT page's request
+    }
+  }
+}
+```
+```json
+{
+  "data": {
+    "products": {
+      "edges": [
+        { "cursor": "cursor-def", "node": { "id": "5", "name": "Keyboard", "price": 29.99 } },
+        { "cursor": "cursor-ghi", "node": { "id": "6", "name": "Mouse", "price": 14.99 } }
+      ],
+      "pageInfo": { "hasNextPage": true, "endCursor": "cursor-ghi" }
+    }
+  }
+}
+```
+Because every Relay-compliant paginated field follows this exact same `edges`/`node`/`pageInfo` shape, a generic client-side pagination component (an "infinite scroll" or "load more" UI element) can be written once and reused across *any* field following this convention, rather than needing custom pagination-handling logic per field depending on whichever ad-hoc shape that particular field happens to use — directly mirroring the standardization benefit Relay's Global Object Identification convention (covered earlier) provides for object re-fetching.
+
+**Why the cursor-based approach here inherits the same underlying stability benefit covered under REST's cursor pagination:** exactly as covered for REST APIs, a cursor anchors to a specific item's identity rather than a numeric position, so items inserted or removed elsewhere in the underlying dataset between page requests don't shift a cursor's meaning the way an offset-based `skip`/`take` approach would be vulnerable to — GraphQL's Cursor Connection specification is simply the standardized, widely-adopted convention for expressing this same well-established pagination technique within a GraphQL schema's own type system.
+
+**Common Pitfall:** implementing a "paginated" GraphQL field using simple `skip`/`limit` integer arguments instead of the Cursor Connection convention, missing out on both the stability benefit cursor-based pagination provides and the ability for generic, Relay-aware client tooling to automatically understand and work with the field — a bespoke `skip`/`limit` shape works, but forfeits the standardization and tooling-compatibility benefits that following the widely-adopted Cursor Connection specification provides essentially for free.
+
+---
+
 ---

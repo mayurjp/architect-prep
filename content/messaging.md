@@ -991,4 +991,85 @@ A single snapshot of lag being non-zero isn't itself alarming (some lag is compl
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is a RabbitMQ Exchange, and how do its routing types (direct, fanout, topic) determine which queue(s) a published message actually ends up in?**
+
+In RabbitMQ, a producer never publishes directly to a queue — it publishes to an Exchange, which then routes the message to zero, one, or many bound queues based on the Exchange's type and a routing key the message carries. Different Exchange types express fundamentally different routing intents.
+
+```text
+DIRECT exchange -- routes to queue(s) bound with an EXACT matching routing key:
+  Message published with routing key "order.created" -> ONLY queues BOUND to EXACTLY "order.created" receive it
+
+FANOUT exchange -- IGNORES the routing key entirely -- broadcasts to EVERY bound queue:
+  Message published -> EVERY SINGLE queue bound to this exchange receives a COPY, regardless of any routing key
+
+TOPIC exchange -- routes using WILDCARD PATTERN matching against the routing key:
+  Message published with routing key "order.us.created"
+  -> a queue bound to pattern "order.*.created" MATCHES -- receives it
+  -> a queue bound to pattern "order.#" ALSO matches (# matches ANY number of routing-key segments)
+```
+```csharp
+channel.ExchangeDeclare("orders-exchange", ExchangeType.Topic);
+channel.QueueBind(queue: "us-orders-queue", exchange: "orders-exchange", routingKey: "order.us.*");
+channel.BasicPublish(exchange: "orders-exchange", routingKey: "order.us.created", body: message);
+```
+Choosing the right Exchange type is what expresses the actual intended routing topology — a Fanout exchange is the natural fit for the Pub/Sub broadcast pattern (covered earlier), a Direct exchange fits simple point-to-point routing by an exact key, and a Topic exchange provides flexible, pattern-based routing for more nuanced fan-out scenarios (only US-region orders, only high-priority events) without needing a separate exchange per specific routing rule.
+
+**Common Pitfall:** using a Fanout exchange when only a *subset* of bound queues should actually receive a given message — Fanout broadcasts unconditionally to every bound queue, with no way to selectively route based on the message's own content or key; a Topic (or Direct) exchange is the correct choice whenever routing needs to be conditional rather than a blanket broadcast to everyone.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is broker-level Message Deduplication (as in SQS FIFO queues' deduplication ID), and how does it differ from the consumer-side Idempotent Consumer pattern (covered earlier) in terms of WHERE duplicate prevention actually happens?**
+
+The Idempotent Consumer pattern (covered earlier) accepts that duplicates *will* occasionally arrive, and makes the *consumer's own processing* safe to run twice — broker-level deduplication instead prevents the duplicate from ever being delivered to a consumer in the first place, by having the *broker itself* recognize and discard a redundant publish attempt before it's ever queued.
+
+```csharp
+// SQS FIFO queue -- the BROKER itself deduplicates, based on a CLIENT-SUPPLIED deduplication ID
+var request = new SendMessageRequest
+{
+    QueueUrl = queueUrl,
+    MessageBody = orderJson,
+    MessageDeduplicationId = orderId.ToString() // the BROKER checks: "have I seen THIS id in the last 5 minutes?"
+};
+await sqsClient.SendMessageAsync(request);
+// IF a message with the SAME deduplication ID is published AGAIN within the DEDUPLICATION INTERVAL
+// (SQS FIFO's default: 5 minutes), the BROKER SILENTLY DISCARDS the duplicate -- it NEVER even
+// REACHES the queue, let alone a CONSUMER -- the CONSUMER never even KNOWS a duplicate attempt occurred
+```
+Because the broker itself tracks recently-seen deduplication IDs and silently drops a repeat within its configured window, a producer's retried publish (perhaps due to a network timeout uncertain whether the first attempt succeeded) never results in the message reaching a queue twice at all — the consumer-side idempotent-consumer pattern remains a valuable *complement* for duplicates the broker's own deduplication window doesn't cover (a retry occurring after the window expires, or a broker without this feature at all), but broker-level deduplication closes off a large class of duplicates before they ever reach a consumer in the first place.
+
+**Why relying on broker deduplication ALONE isn't sufficient, even where it's available:** the deduplication window is necessarily finite (SQS FIFO's is 5 minutes) — a genuine redelivery *after* that window (a consumer crash mid-processing, triggering standard at-least-once redelivery, covered earlier, well after the original publish) isn't covered by publish-time deduplication at all, since that's a fundamentally different kind of duplicate (broker-initiated redelivery, not a repeated producer publish); the consumer-side Idempotent Consumer pattern remains necessary as the actual, comprehensive safety net regardless of whether broker-level deduplication is also in place.
+
+**Common Pitfall:** relying exclusively on broker-level deduplication and skipping the consumer-side idempotent-consumer pattern entirely, believing the broker's deduplication window makes it unnecessary — broker deduplication specifically addresses *duplicate publishes* within a bounded time window; it provides no protection at all against the entirely separate case of a message being *redelivered* by the broker itself (the standard at-least-once redelivery mechanism, covered earlier), which remains a genuine possibility regardless of publish-time deduplication being in place.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is Kafka's Idempotent Producer (`enable.idempotence=true`), and how does the broker assigning each producer a unique ID and sequence number prevent duplicate messages caused specifically by producer-side retries, as distinct from the consumer-side duplicate-processing concerns covered elsewhere?**
+
+A Kafka producer retrying a failed publish (perhaps because it didn't receive an acknowledgment in time, even though the original write actually succeeded on the broker) risks writing the *same* message to the log twice — the Idempotent Producer feature has the broker assign each producer a unique Producer ID and track a per-partition sequence number, letting it recognize and discard an exact retry of a message it already successfully wrote, entirely on the *producer* (write) side, independent of any consumer-side deduplication.
+
+```text
+Producer (Producer ID = 42) sends message with sequence number 100 to Partition 0
+  -> Broker WRITES it, ACKNOWLEDGES it -- but the ACKNOWLEDGMENT is LOST in transit back to the producer
+  -> Producer, having NEVER received the ack, RETRIES -- sends the SAME message AGAIN, with
+     the SAME sequence number (100) -- since, from the PRODUCER'S perspective, it's UNCERTAIN whether
+     the FIRST attempt actually succeeded
+
+Broker's RESPONSE to the RETRY: "I ALREADY have Producer 42's sequence number 100 -- this is a
+  DUPLICATE of something I ALREADY wrote -- SILENTLY ACKNOWLEDGE it WITHOUT writing it a SECOND TIME"
+-- the LOG ends up with EXACTLY ONE copy of the message, DESPITE the producer having SENT it TWICE --
+```
+Because the broker tracks the highest sequence number it has already durably written for each specific Producer ID/partition combination, a retried publish carrying a sequence number it has already seen is recognized as an exact duplicate and safely acknowledged without being written to the log a second time — this closes off duplicates originating specifically from *producer retry* behavior, a genuinely different failure mode than the consumer redelivering an already-delivered message (covered under At-Least-Once delivery semantics) or a producer *choosing* to publish the same logical event twice through separate, distinct publish calls (which the Idempotent Producer feature has no way to detect, since it only recognizes exact retries of the *same* underlying send attempt).
+
+**Why this is a genuinely different, narrower guarantee than Kafka's broader "Exactly-Once Semantics" (EOS, covered earlier):** the Idempotent Producer specifically eliminates duplicate *writes* caused by producer-side retries within a single producer session — full EOS (covered earlier, involving Kafka transactions) additionally coordinates *consuming from one topic and producing to another* as a single atomic unit, a substantially broader guarantee; the Idempotent Producer is one narrower building block that EOS is built on top of, not the entirety of what "exactly-once" means in Kafka.
+
+**Common Pitfall:** assuming `enable.idempotence=true` alone provides full end-to-end exactly-once processing — it specifically prevents duplicate *writes from producer retries*, a real and common source of duplicates, but says nothing about a *consumer* processing a message twice (which still requires the idempotent-consumer pattern, covered earlier) or about atomically coordinating a read-process-write cycle across topics (which requires Kafka's full transactional API); the Idempotent Producer is a genuinely valuable, narrowly-scoped guarantee, not a complete substitute for the other duplicate-handling mechanisms covered throughout this topic.
+
+---
+
 ---
