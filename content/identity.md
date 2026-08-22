@@ -1473,4 +1473,82 @@ Because pinning bypasses the general "any trusted CA's signature is good enough"
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is basic Refresh Token Rotation — issuing a brand-new refresh token every time the old one is used — and how does this limit the window an attacker who steals a refresh token can actually exploit it?**
+
+Without rotation, a single refresh token remains valid and reusable indefinitely (until its own expiry) — with rotation, every time a refresh token is used to obtain a new access token, the Authorization Server also issues a *new* refresh token and invalidates the old one, meaning a stolen refresh token becomes useless the moment the legitimate client (or the attacker) next uses it, since only one of them will get to use the current valid token before it's replaced.
+
+```http
+POST /token
+grant_type=refresh_token&refresh_token=abc123
+```
+```json
+{ "access_token": "eyJhbG...", "refresh_token": "xyz789" }
+```
+```text
+The OLD refresh_token "abc123" is now IMMEDIATELY invalidated -- ONLY "xyz789" (the NEW one)
+  is VALID going forward -- if an ATTACKER had STOLEN "abc123" but the LEGITIMATE client used
+  it FIRST, the ATTACKER's copy is ALREADY dead -- if the ATTACKER used it FIRST, the
+  LEGITIMATE client's NEXT attempt with the (now STALE) "abc123" FAILS, which is exactly the
+  SIGNAL that ENABLES Reuse Detection (covered earlier) to FLAG the theft
+```
+
+Because each refresh token is single-use (immediately replaced upon use), a stolen refresh token has a much narrower window of exploitability than a long-lived, indefinitely-reusable one — and any subsequent attempt to reuse an already-rotated-away token becomes a detectable signal (covered earlier as Reuse Detection) that something has gone wrong, rather than silently succeeding for an attacker indefinitely.
+
+**Common Pitfall:** implementing refresh tokens without rotation, treating a single long-lived refresh token as acceptable since it's not sent on every request the way an access token is — a non-rotating refresh token that's stolen once remains fully usable by an attacker for its entire, often quite long, lifetime; rotation dramatically narrows this exposure window.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is the OAuth 2.0 `scope` parameter, and how does a client requesting only the specific scopes it actually needs embody the Principle of Least Privilege (covered under App Security) at the token level?**
+
+`scope` lets a client explicitly declare which specific permissions it's requesting (`orders.read`, rather than a broad, all-encompassing `full_access`) — the resulting access token is then limited to exactly those requested (and granted) scopes, meaning even if that token were somehow leaked or misused, the damage is bounded to only what it was actually authorized for, rather than everything the user's account could potentially do.
+
+```http
+GET /authorize?client_id=my-app&scope=orders.read%20profile.read&response_type=code
+```
+```text
+A token issued with scope "orders.read profile.read" CAN read orders and the user's
+  profile -- it CANNOT write orders, CANNOT read payment details, CANNOT do ANYTHING
+  outside those TWO specific, EXPLICITLY-requested scopes -- EVEN IF the underlying USER
+  ACCOUNT itself has FAR BROADER permissions across the ENTIRE system
+```
+
+Because a client requesting a narrow, task-appropriate scope produces a token whose potential blast radius (if stolen or misused) is correspondingly narrow, `scope` is the concrete mechanism by which OAuth applies Least Privilege at the token level — a client that requests a broad, unnecessary scope "just in case it's needed later" unnecessarily widens what a compromised token belonging to that client could actually do.
+
+**Common Pitfall:** requesting an overly broad scope (or a single "god mode" scope covering everything the API can possibly do) purely for developer convenience, rather than the specific, narrow set of scopes the client's actual functionality requires — this directly undermines the security benefit scoping is meant to provide, since a leaked token then carries far more potential damage than the client's genuine use case ever needed.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is Silent Authentication (an OIDC `prompt=none` request), and how does it let a Single Page Application check whether a user still has a valid session with the Identity Provider, without visibly redirecting them through a full, user-facing login page?**
+
+A normal OIDC authorization request redirects the user to the Identity Provider's own login page — `prompt=none` instead tells the Identity Provider "don't show any UI at all; if the user already has an active session (a valid IdP cookie) and consent isn't needed, silently issue a fresh authorization response; otherwise, immediately fail with an error" — letting the SPA perform this check inside a hidden iframe, invisibly, without the user ever seeing a redirect or a login screen flash by.
+
+```javascript
+// performed inside a HIDDEN iframe -- the USER never SEES this happen at all
+const silentAuthUrl = `${idpUrl}/authorize?prompt=none&client_id=...&response_type=code`;
+// IF the user STILL has a valid IdP session: a FRESH authorization code/token comes back SILENTLY
+// IF the user's session has EXPIRED (or never existed): an ERROR comes back IMMEDIATELY,
+//   WITHOUT ever SHOWING the user a login page inside the HIDDEN iframe at all
+```
+
+```text
+WITHOUT prompt=none: checking "is the user STILL logged in" would REQUIRE a FULL, VISIBLE
+  redirect through the IdP's login page -- EVEN IF the user IS still logged in, this
+  produces a JARRING, VISIBLE flash/redirect the user NOTICES
+
+WITH prompt=none: the ENTIRE check happens SILENTLY, inside a HIDDEN iframe -- the user NEVER
+  sees ANYTHING -- the SPA simply LEARNS "yes, still logged in" or "no, needs to RE-authenticate"
+```
+
+Because this check happens invisibly, an SPA can periodically (or just before an access token is about to expire) silently verify the user's session is still valid and obtain a fresh token, entirely in the background — a smoother user experience than forcing a visible re-authentication redirect merely to check whether one is even necessary.
+
+**Common Pitfall:** relying on Silent Authentication (`prompt=none`) from a third-party-cookie-blocking browser context — many modern browsers restrict third-party cookies specifically in ways that can break the hidden iframe's ability to read the IdP's session cookie, causing silent authentication to fail unpredictably depending on the browser's own privacy settings; the BFF Token Handler pattern (covered earlier) sidesteps this entire category of browser-cookie-policy fragility by keeping tokens server-side instead.
+
+---
+
 ---

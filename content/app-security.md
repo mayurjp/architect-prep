@@ -1631,4 +1631,86 @@ Because the cache's decision to cache a response is based purely on the URL's su
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is a `security.txt` file (RFC 9116), and how does publishing one at a well-known path give security researchers a standardized way to responsibly report a vulnerability they've found?**
+
+A `security.txt` file, published at `/.well-known/security.txt`, provides a standardized, machine-and-human-readable place listing exactly how to report a security vulnerability to an organization — a contact email or URL, an optional PGP key for encrypted reports, and an expiry date — removing the guesswork a researcher would otherwise face trying to figure out who to contact.
+
+```text
+# /.well-known/security.txt
+Contact: mailto:security@example.com
+Expires: 2027-01-01T00:00:00.000Z
+Encryption: https://example.com/pgp-key.txt
+Preferred-Languages: en
+```
+
+```text
+WITHOUT security.txt: a researcher who FINDS a vulnerability might have NO IDEA who to
+  contact -- they might POST it publicly (a RESPONSIBLE-disclosure FAILURE), or GIVE UP
+  entirely, or contact the WRONG department, DELAYING a FIX
+
+WITH security.txt: the researcher checks ONE STANDARDIZED, WELL-KNOWN location and
+  IMMEDIATELY finds the CORRECT contact information, REDUCING friction and ENCOURAGING
+  responsible, PRIVATE disclosure BEFORE any public details are RELEASED
+```
+
+Because this convention is standardized and machine-discoverable (many security tools and researchers specifically check `/.well-known/security.txt` as a matter of routine), publishing one is a low-effort, high-value practice that measurably increases the odds a genuine vulnerability finder chooses responsible, private disclosure over posting details publicly or simply giving up.
+
+**Common Pitfall:** having no documented, discoverable vulnerability-reporting process at all, relying instead on a researcher happening to find a generic "contact us" form buried somewhere on the website — this adds friction and delay to responsible disclosure, and a frustrated or time-pressured researcher may resort to public disclosure instead, simply because no clear, standardized reporting path was ever provided.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is Dependency Confusion, and how does an attacker publishing a malicious package under the same name as an organization's private internal package to a public registry trick a misconfigured build into pulling the attacker's version instead?**
+
+Many build tools check multiple package sources (a private, internal registry and a public one like npm/NuGet) and, if misconfigured, can prefer whichever source offers a *higher version number* for a given package name — an attacker who discovers (or guesses) the name of an organization's private internal package can publish a malicious package under that exact same name to the public registry, with an artificially high version number, tricking a misconfigured build into fetching and executing the attacker's public, malicious package instead of the organization's genuine internal one.
+
+```text
+Organization's PRIVATE internal package: "acme-internal-auth-utils", version 1.2.0,
+  published ONLY to their PRIVATE, internal package feed
+
+ATTACKER discovers this package NAME (leaked in a public GitHub repo's package.json, or
+  simply GUESSED) -- PUBLISHES a MALICIOUS package with the EXACT SAME NAME, "acme-internal-
+  auth-utils", but version 99.0.0, to the PUBLIC npm registry
+
+A MISCONFIGURED build tool, checking BOTH the private AND public registries, sees version
+  99.0.0 (PUBLIC, MALICIOUS) as "NEWER" than 1.2.0 (PRIVATE, LEGITIMATE) -- and PULLS the
+  ATTACKER'S malicious package INSTEAD -- executing WHATEVER malicious code it CONTAINS,
+  DIRECTLY inside the organization's OWN build/deployment PIPELINE
+```
+
+Because this attack exploits how a build tool resolves *which* registry wins when a package name exists in both, the defense is entirely configuration-based: explicitly scoping internal package names to only ever resolve from the private registry (never falling back to or considering the public one for those specific package names/scopes), removing the ambiguity an attacker's public, same-named package could otherwise exploit.
+
+**Common Pitfall:** publishing internal package names without any registry-scoping configuration explicitly pinning them to the private feed only — leaving a build tool free to consider a public registry as an alternative source for an internal-sounding package name reopens exactly this attack vector, regardless of how "obviously internal" the package's name might seem.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is Cache Poisoning via an Unkeyed Header, and how does a CDN/cache varying its cached response based on a header value it does NOT include in its cache key let an attacker poison the cache with a malicious response served to every subsequent visitor?**
+
+A cache's key normally determines which stored response is served for a given request — but if the *application itself* varies its response based on some header (an `X-Forwarded-Host` value used to build an absolute URL, similar to the Host Header Injection vulnerability covered earlier) while the *cache* doesn't include that header in its cache key, an attacker can send one request with a malicious header value, get a poisoned response cached under an otherwise-ordinary-looking cache key, and have that same poisoned response served to every subsequent, legitimate visitor requesting that same URL.
+
+```http
+GET /page HTTP/1.1
+X-Forwarded-Host: evil-attacker.com   <-- the APPLICATION uses THIS to build absolute URLs on the page
+```
+```text
+The APPLICATION generates a response CONTAINING links pointing at "evil-attacker.com" (based
+  on the ATTACKER-supplied X-Forwarded-Host header)
+
+The CDN/cache, which does NOT include X-Forwarded-Host in its CACHE KEY, stores THIS
+  poisoned response under the ORDINARY cache key for "/page" -- EVERY SUBSEQUENT visitor
+  requesting "/page" (WITHOUT ever supplying a malicious header THEMSELVES) receives the
+  SAME poisoned, ATTACKER-INFLUENCED response, straight from the CACHE
+```
+
+Because the vulnerability arises specifically from a mismatch between what the *application* considers when generating a response and what the *cache* considers when deciding whether two requests should get the same cached response, the fix requires either the cache including every header the application's response actually varies on in its cache key (via a correctly configured `Vary` header, covered under HTTP), or the application simply not trusting attacker-influenced headers to build security-sensitive content in the first place.
+
+**Common Pitfall:** configuring a CDN/cache's caching rules purely based on URL path, without auditing which request headers the *application itself* actually uses to influence its response content — any header the application varies its output on, but the cache doesn't account for in its key, is a potential cache-poisoning vector; this requires coordination between the application team and whoever configures the caching layer, since neither side alone has full visibility into the mismatch.
+
+---
+
 ---

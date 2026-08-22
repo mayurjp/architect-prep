@@ -1485,4 +1485,80 @@ Because a deployment command's own success/failure status only reflects whether 
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is a Release Branch strategy, and how does cutting a dedicated branch at release time let bug fixes be applied to an already-shipped version without pulling in unrelated, still-in-progress work from the main branch?**
+
+Rather than shipping directly from a constantly-moving main branch, a Release Branch is cut at the moment of release — freezing a specific point-in-time snapshot of the code — and any urgent fix needed for that already-shipped version is applied directly to the release branch (and optionally merged back into main), completely isolated from whatever new, unrelated feature work has continued on main since the release branch was cut.
+
+```text
+main branch:      ---A---B---C---D---E---F---  (ONGOING, NEW feature work CONTINUES here)
+                       \
+release/2.3 branch:     C'  (CUT from commit C, at RELEASE time)
+                          \
+                           C''  (a HOTFIX applied DIRECTLY to release/2.3, for an URGENT
+                                 bug found in the SHIPPED 2.3 version -- does NOT pull in
+                                 D, E, F -- the UNRELATED, STILL-IN-PROGRESS work on main)
+```
+
+Because a release branch is frozen at a specific point, a hotfix applied to it doesn't accidentally pull in whatever new (and potentially not-yet-stable) work has continued on main since the release — this isolation matters most for a shipped product needing a fast, low-risk patch without also, inadvertently, shipping unrelated in-progress changes alongside it.
+
+**Common Pitfall:** applying an urgent production hotfix directly on top of the current main branch (rather than a frozen release branch) when main has since accumulated significant new, unrelated, still-in-progress work — this risks the hotfix release inadvertently including unstable, unreviewed, or incomplete features that were never meant to ship yet, precisely the risk a dedicated release branch is meant to isolate against.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is a CI pipeline's "Fail Fast" stage ordering, and how does running the fastest, most-likely-to-catch-an-issue checks first reduce the average time to discover a broken build?**
+
+Rather than running every pipeline stage in some arbitrary or purely logical order, ordering stages by speed and likelihood of catching common issues (a quick linter/compile check first, slower integration tests later) means a broken build is discovered — and the developer notified — as early as possible, without waiting for slower, less-likely-to-fail stages to complete first.
+
+```yaml
+stages:
+  - lint          # SECONDS -- catches SYNTAX/STYLE issues IMMEDIATELY
+  - unit-tests     # a FEW MINUTES -- catches LOGIC bugs, still RELATIVELY fast
+  - integration-tests  # TENS of minutes -- SLOWER, but catches DEEPER issues
+  - e2e-tests      # potentially an HOUR+ -- the SLOWEST, catches the BROADEST issues
+```
+
+```text
+WITHOUT fail-fast ordering (or running EVERYTHING in PARALLEL regardless of speed): a
+  developer might WAIT the FULL hour for e2e tests to COMPLETE, only to DISCOVER a trivial
+  LINTING error that could have been CAUGHT in SECONDS, had lint run and REPORTED FIRST
+
+WITH fail-fast ordering: the LINTING error is CAUGHT and REPORTED within SECONDS -- the
+  PIPELINE can STOP immediately (or the developer is NOTIFIED immediately), WITHOUT wasting
+  an HOUR running SLOWER stages against code that was ALREADY KNOWN to be broken
+```
+
+Because a broken build is far more likely to be caught by a fast, cheap check (a linter, a compile step, a quick unit test suite) than a slow, expensive one, ordering pipeline stages to run the fast, high-signal checks first — and stopping immediately on failure, rather than continuing to run every remaining stage regardless — minimizes the *average* time a developer waits to learn their change broke something.
+
+**Common Pitfall:** running every pipeline stage to completion regardless of an early failure (or running stages in an arbitrary order unrelated to their speed/likelihood of catching common issues) — this wastes compute resources and developer waiting time on slower stages when a fast, cheap check would have caught the same problem in a fraction of the time, delaying feedback unnecessarily.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is a Rollback Window, and how does keeping the previous version's artifacts/infrastructure readily available for a defined period after a release balance rollback speed against the cost of maintaining that redundant capacity?**
+
+A Rollback Window is a deliberate policy of keeping the immediately-previous version's deployment artifacts (and, for a Blue-Green-style deployment, covered earlier, its actual running infrastructure) available and ready to reinstate for some defined period after a new release — trading the ongoing cost of maintaining that redundant capacity against the ability to roll back nearly instantly if a problem surfaces shortly after release, rather than needing to rebuild or redeploy the previous version from scratch.
+
+```text
+A Blue-Green deployment (covered earlier) with a 24-HOUR rollback window: after switching
+  traffic to "Green" (the NEW version), "Blue" (the PREVIOUS version) STAYS running,
+  fully provisioned, for 24 HOURS -- a rollback during THAT window is NEAR-INSTANT (just
+  switch traffic BACK) -- AFTER 24 hours, "Blue" is DECOMMISSIONED to STOP paying for
+  REDUNDANT, UNUSED infrastructure
+
+WITHOUT a rollback window (tearing DOWN the previous version IMMEDIATELY after cutover): a
+  rollback DISCOVERED even MINUTES later requires FULLY REBUILDING/REDEPLOYING the previous
+  version from SCRATCH -- SLOWER, and RISKIER during an ACTIVE incident
+```
+
+Because most regressions serious enough to require a rollback tend to surface relatively soon after a release (rather than days or weeks later), a deliberately-chosen rollback window balances the very real cost of maintaining redundant infrastructure against the genuine operational value of a near-instant rollback path during the highest-risk period immediately following a release.
+
+**Common Pitfall:** immediately tearing down the previous version's infrastructure the moment a new release's traffic cutover completes, in the name of cost savings — this leaves no fast rollback path available for a regression discovered shortly afterward, forcing a much slower, riskier full redeploy of the previous version during precisely the moment (an active incident) when speed matters most.
+
+---
+
 ---

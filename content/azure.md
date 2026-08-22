@@ -1390,4 +1390,77 @@ Because Multi-Region Writes trades strict consistency for the lowest possible wr
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is Azure Bastion, and how does it let an administrator securely RDP/SSH into a VM without exposing that VM's own RDP/SSH port directly to the public internet at all?**
+
+Azure Bastion is a fully-managed service deployed into a virtual network that provides RDP/SSH access to VMs *through the Azure Portal itself*, over a standard HTTPS connection — the target VM's own RDP (3389)/SSH (22) ports never need to be opened to the public internet at all, since the actual connection is proxied through Bastion, entirely within Azure's private network.
+
+```text
+WITHOUT Bastion: a VM's RDP port (3389) is OPENED directly to the PUBLIC internet (or a
+  restricted IP range) so an ADMINISTRATOR's OWN machine can connect DIRECTLY -- this port
+  is now a GENUINE, SCANNABLE attack surface, targeted CONSTANTLY by automated internet scans
+
+WITH Bastion: the VM's RDP port is NEVER exposed to the PUBLIC internet AT ALL -- the
+  ADMINISTRATOR connects to Bastion (over ordinary HTTPS, via the Azure Portal), and Bastion
+  itself PROXIES the connection to the VM ENTIRELY WITHIN the PRIVATE virtual network
+```
+
+Because the target VM's management port is never directly reachable from the public internet with Bastion in place, an entire class of attack (automated scanning and brute-forcing of exposed RDP/SSH ports, a very common real-world attack vector) is eliminated structurally — the VM's own network security group never needs to permit inbound RDP/SSH traffic from anywhere external at all.
+
+**Common Pitfall:** opening a VM's RDP/SSH port directly to the internet (even restricted to a "known" IP range) as a convenience for remote administration, rather than using Azure Bastion — an exposed management port, even one restricted by IP, remains a meaningfully larger attack surface than one that's never exposed publicly at all; Bastion (or a VPN/private-network-only access model) removes this exposure entirely.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: How does Azure Event Hubs' Partition and Consumer Group model closely mirror Kafka's own partition/consumer-group concepts (covered under Messaging) for high-throughput event streaming, as distinct from Service Bus's queue/topic model (covered earlier)?**
+
+Event Hubs is Azure's purpose-built service for high-throughput event streaming (not general-purpose messaging like Service Bus) — it partitions an event stream across multiple partitions (exactly like a Kafka topic's partitions, covered under Messaging), and multiple independent Consumer Groups can each read the entire stream at their own pace, mirroring Kafka's Consumer Group model precisely, rather than Service Bus's competing-consumers queue semantics.
+
+```text
+Event Hubs: an EVENT HUB has MULTIPLE partitions -- events are DISTRIBUTED across them
+  (typically via a PARTITION KEY, exactly like Kafka) -- MULTIPLE Consumer Groups can EACH
+  independently read the ENTIRE stream, at their OWN pace, WITHOUT affecting each other --
+  THIS is STRUCTURALLY identical to Kafka's OWN partition/consumer-group model
+
+Service Bus (covered earlier): a QUEUE delivers each message to EXACTLY one consumer
+  (competing consumers) -- a TOPIC/Subscription model delivers to MULTIPLE subscriptions,
+  but WITHOUT the SAME partition-based, HIGH-THROUGHPUT streaming architecture Event Hubs USES
+```
+
+Because Event Hubs is architecturally purpose-built for the specific high-throughput, ordered-within-partition streaming use case (telemetry ingestion, clickstream analytics — precisely Kafka's own core use case), it's the correct choice when the workload genuinely resembles a Kafka-style event stream, while Service Bus remains the better fit for more traditional message-queue semantics (guaranteed delivery to one consumer, dead-lettering, message-level transactions).
+
+**Common Pitfall:** choosing Azure Service Bus for a genuinely high-throughput event-streaming workload (millions of events per second, needing partition-based ordering and multiple independent consumer groups reading the same stream) — Service Bus's queue/topic model isn't architected for this specific access pattern the way Event Hubs (or Kafka itself) is; recognizing which Azure messaging service actually matches the workload's architectural shape avoids forcing a streaming problem into a queueing-shaped service.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is Zone-Redundant Storage (ZRS) for an Azure Storage Account, and how does synchronously replicating data across three physically separate Availability Zones within one region provide zone-level fault tolerance without the cross-region latency GRS's asynchronous replication incurs?**
+
+ZRS synchronously writes every write to three physically separate Availability Zones within the *same* region before acknowledging it as successful — providing protection against an entire zone's outage (a datacenter-level failure) without the added latency of replicating across *regions* (which GRS, covered earlier, does asynchronously, introducing a replication lag and potential for a small window of data loss during a regional failover).
+
+```text
+LRS (Locally Redundant Storage): replicates WITHIN ONE datacenter -- protects against a
+  SINGLE DISK/NODE failure, but NOT an ENTIRE datacenter/zone outage
+
+ZRS (Zone-Redundant Storage): SYNCHRONOUSLY replicates ACROSS THREE separate Availability
+  Zones WITHIN the SAME region -- protects against an ENTIRE zone's outage -- SYNCHRONOUS
+  means a WRITE isn't ACKNOWLEDGED until ALL THREE zones have the data -- ZERO data loss
+  risk from a ZONE failure, but SLIGHTLY higher WRITE latency than LRS (due to the CROSS-ZONE
+  synchronous round trip)
+
+GRS (Geo-Redundant Storage, covered earlier): ASYNCHRONOUSLY replicates to a SEPARATE,
+  DISTANT region -- protects against an ENTIRE region's outage -- but ASYNCHRONOUS replication
+  means a BRIEF window of POTENTIAL data loss EXISTS if a REGIONAL disaster strikes RIGHT
+  BEFORE the LATEST writes finish replicating to the SECONDARY region
+```
+
+Because ZRS's synchronous, same-region replication avoids the latency penalty of replicating across genuinely distant regions while still surviving a full zone-level outage (a meaningfully severe failure scope, though smaller than an entire region), it occupies a specific middle ground between LRS's single-datacenter-only protection and GRS's cross-region, but asynchronous and higher-latency, protection.
+
+**Common Pitfall:** choosing GRS by default for every storage account, assuming "more redundancy is always strictly better," without considering that ZRS already covers the common zone-level failure scenario with lower latency and zero asynchronous-replication data-loss window — GRS's cross-region protection is genuinely valuable specifically for surviving a full regional disaster, but comes with the asynchronous replication trade-off ZRS avoids for the more common, smaller-scoped zone failure.
+
+---
+
 ---

@@ -1354,4 +1354,85 @@ Because Two-Phase Locking alone only guarantees correct ordering among transacti
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is `gcloud`'s Application Default Credentials (ADC) mechanism, and how does it let local development code authenticate to GCP APIs the same way regardless of whether it's running on a developer's own machine or in a deployed GCP environment?**
+
+ADC is a standard credential-lookup convention every GCP client library follows automatically — it checks a fixed sequence of locations (a local credentials file created by `gcloud auth application-default login`, an attached service account when running on GCP infrastructure, an environment variable pointing at a service account key) without the application code itself needing to know or branch on which environment it's actually running in.
+
+```bash
+gcloud auth application-default login   # LOCAL development -- creates a credentials file on THIS machine
+```
+
+```csharp
+var storageClient = StorageClient.Create(); // the CLIENT LIBRARY automatically finds credentials via ADC --
+    // NO explicit credential-loading code needed -- WORKS IDENTICALLY whether running LOCALLY
+    // (using the file from 'gcloud auth application-default login') OR deployed on GCP (using
+    // an ATTACHED service account automatically, with ZERO code differences AT ALL)
+```
+
+```text
+Local development: ADC finds the credentials FILE created by 'gcloud auth application-default login'
+Deployed on GCP (Cloud Run, GKE, Compute Engine): ADC AUTOMATICALLY uses the ATTACHED
+  SERVICE ACCOUNT'S identity -- NO credentials FILE needed AT ALL on the DEPLOYED environment
+
+BOTH cases: the SAME application CODE works, UNCHANGED -- ADC's LOOKUP sequence HANDLES
+  the DIFFERENCE TRANSPARENTLY, WITHOUT the APPLICATION needing to KNOW which environment it's IN
+```
+
+Because the exact same client-library code path works correctly in both environments without any conditional logic, ADC removes an entire class of "how do I authenticate differently between local dev and production" complexity — directly analogous to Azure's Managed Identity (covered earlier) providing the same kind of environment-transparent authentication for Azure workloads.
+
+**Common Pitfall:** hardcoding a downloaded service account key file's path directly into application code (rather than relying on ADC's automatic lookup) — this both risks accidentally committing a sensitive key file into source control and requires different code paths (or manual configuration) for local development versus deployed environments, exactly the friction ADC is designed to eliminate.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: How does Cloud Run's automatic scaling based on concurrent requests per instance (as distinct from CPU-based autoscaling, covered under Kubernetes) directly determine how many instances a given request volume actually needs?**
+
+Cloud Run scales the number of running instances based on how many concurrent requests each existing instance is currently handling relative to its configured "concurrency" limit (how many simultaneous requests one instance is allowed to process) — rather than reacting to a CPU utilization metric, it does simple arithmetic: if instances are collectively at their concurrency ceiling, new instances are added; if well below it, instances can be scaled down.
+
+```yaml
+# Cloud Run service configuration
+containerConcurrency: 80   # EACH instance handles UP TO 80 CONCURRENT requests before a NEW instance is needed
+```
+
+```text
+100 concurrent requests arrive, containerConcurrency = 80:
+  1 instance can handle 80 of them -- the REMAINING 20 require a SECOND instance to be
+  PROVISIONED -- Cloud Run calculates this DIRECTLY from REQUEST COUNT, NOT from any CPU metric
+
+Kubernetes HPA (covered elsewhere), by CONTRAST, typically scales based on CPU/MEMORY
+  utilization (or a CUSTOM metric) -- a FUNDAMENTALLY DIFFERENT signal driving the SAME
+  general GOAL of "add more capacity when DEMAND increases"
+```
+
+Because request concurrency is a directly observable, immediately-actionable signal (Cloud Run's own routing layer already knows exactly how many concurrent requests each instance is handling), this scaling model reacts very quickly and predictably to load changes — appropriate for Cloud Run's serverless, request-driven execution model, where CPU utilization alone might not correlate as directly with "do I need more capacity" for I/O-bound workloads spending most of their time waiting rather than computing.
+
+**Common Pitfall:** setting `containerConcurrency` far too high for a workload whose actual per-request processing genuinely requires significant CPU/memory per request — packing too many truly resource-intensive concurrent requests onto one instance (rather than scaling out to more instances sooner) can degrade every one of those requests' latency simultaneously, even though the concurrency-based scaling signal itself hasn't yet "seen" a reason to add capacity.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is the difference between a Strongly Consistent Ancestor query and an Eventually Consistent non-ancestor query in GCP Datastore/Firestore, and how does the choice trade query flexibility against a consistency guarantee?**
+
+An Ancestor query (querying only within a specific entity group, defined by a shared parent-child key hierarchy) is guaranteed strongly consistent — it always reflects the very latest committed writes — while a broader, non-ancestor query spanning multiple entity groups is only eventually consistent, potentially reflecting a slightly stale view, in exchange for the flexibility to query across the entire dataset rather than being confined to one entity group.
+
+```text
+Ancestor query: "get all Orders belonging to Customer #42" (Customer #42 is the ANCESTOR,
+  Orders are its CHILDREN, in the SAME entity group) -- STRONGLY consistent -- ALWAYS reflects
+  the VERY LATEST committed writes to THAT SPECIFIC entity group
+
+Non-ancestor query: "get all Orders placed in the LAST HOUR, ACROSS ALL customers" (spans
+  MANY different entity groups) -- EVENTUALLY consistent -- MIGHT reflect a SLIGHTLY stale
+  view, since it can't be ATOMICALLY guaranteed FRESH across MANY SEPARATE entity groups AT ONCE
+```
+
+Because guaranteeing strong consistency requires the underlying storage to synchronously coordinate across whatever data the query spans, and an entity group represents a natural, physically-co-located boundary where this coordination is cheap, GCP's model draws a clear line: strong consistency is available *within* an entity group (an Ancestor query), while broader queries spanning multiple entity groups accept eventual consistency as the cost of their greater flexibility.
+
+**Common Pitfall:** assuming every query against Datastore/Firestore provides the same consistency guarantee regardless of its shape — a query's consistency guarantee depends directly on whether it's scoped to a single entity group (Ancestor, strongly consistent) or spans multiple ones (eventually consistent); a workload requiring strong consistency for a specific query pattern may need to deliberately design its entity-group/key hierarchy around that requirement, rather than assuming any arbitrary query will provide it.
+
+---
+
 ---
