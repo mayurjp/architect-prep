@@ -1103,4 +1103,74 @@ Because `INCLUDE`d columns are stored directly in the Non-Clustered Index's leaf
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is a SQL Server View created `WITH SCHEMABINDING`, and how does binding it to its underlying tables' schema prevent a column the view depends on from being dropped or altered out from under it?**
+
+An ordinary View (covered earlier) is just a stored, named query — nothing stops someone from later dropping or altering a column that view actually depends on, silently breaking the view the next time it's queried. `WITH SCHEMABINDING` locks that dependency in place, causing SQL Server to reject any attempt to modify the underlying table in a way that would break the view.
+
+```sql
+CREATE VIEW vw_ActiveOrders WITH SCHEMABINDING AS
+SELECT Id, CustomerId, Total FROM dbo.Orders WHERE Status = 'Active';
+```
+```sql
+-- LATER, someone tries to DROP a column the SCHEMABOUND view depends on:
+ALTER TABLE Orders DROP COLUMN Total;
+-- FAILS immediately: "Cannot ALTER TABLE... because it is being referenced by object 'vw_ActiveOrders'"
+-- WITHOUT schemabinding, this ALTER would have SUCCEEDED, SILENTLY breaking the VIEW the NEXT time it's QUERIED
+```
+Because SQL Server tracks the schemabound view's dependency on the exact columns it references, any attempt to drop or incompatibly alter one of those columns is rejected outright at the moment of the attempted change — surfacing the conflict immediately, at the point someone tries to make the breaking change, rather than silently breaking the view and only discovering the problem later, the next time an application actually queries it.
+
+**Common Pitfall:** creating views without `SCHEMABINDING` for anything relied upon by production application code, then being surprised when a routine schema change (dropping what seemed like an unused column) silently breaks a view nobody remembered depended on it — `SCHEMABINDING` converts this class of silent, delayed breakage into an immediate, loud failure at the exact moment the risky schema change is attempted, which is a substantially safer failure mode for schema changes on a database being actively relied upon by other objects.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is SQL Server Extended Events (XEvents), and how does its lower overhead make it suitable for capturing diagnostic data even in production, unlike the older, heavier SQL Server Profiler?**
+
+SQL Server Profiler (the older, GUI-based tracing tool) captures diagnostic events but imposes meaningful overhead on the server being traced — heavy enough that running it against a busy production server was generally discouraged. Extended Events (XEvents) is the modern replacement, engineered specifically for dramatically lower overhead, making it safe to run selectively even against a live production workload.
+
+```sql
+CREATE EVENT SESSION CaptureSlowQueries ON SERVER
+ADD EVENT sqlserver.sql_statement_completed(
+    WHERE duration > 1000000) -- only CAPTURE statements taking LONGER than 1 second (in microseconds)
+ADD TARGET package0.event_file(SET filename = 'SlowQueries.xel');
+
+ALTER EVENT SESSION CaptureSlowQueries ON SERVER STATE = START;
+```
+Because XEvents is designed around a much more efficient, low-overhead event-processing architecture (and lets you filter events *before* they're even captured, like the `duration > 1000000` predicate above, rather than capturing everything and filtering afterward), it can run continuously against a genuinely busy production server with a much smaller performance impact than the older Profiler tool ever provided — a meaningful, well-documented improvement specifically motivating Microsoft's own recommendation to use XEvents over the now-deprecated Profiler/Trace tooling going forward.
+
+**Common Pitfall:** continuing to reach for the older SQL Server Profiler out of familiarity for a production diagnostic investigation, unaware that Microsoft has deprecated it specifically in favor of Extended Events for exactly this reason — Profiler's heavier overhead makes it a genuinely risky tool to run against a live, busy production server, whereas XEvents was specifically engineered to be safe for this exact use case, making it the appropriate modern default for production-safe diagnostic data capture.
+
+---
+
+## Advanced — Question 13
+
+**Q13: How does SQL Server's Lock Escalation mechanism convert many individual row-level locks into one table-level lock once a threshold is exceeded, and what concurrency cost does that escalation impose?**
+
+Holding thousands of individual, fine-grained row-level locks consumes real memory and lock-management overhead — SQL Server's Lock Escalation automatically converts many row/page-level locks held by one transaction into a single, coarser table-level lock once a threshold (roughly 5,000 locks on a single reference) is exceeded, trading memory/overhead savings for a real loss of concurrent access for *other* transactions.
+
+```sql
+BEGIN TRANSACTION;
+UPDATE Orders SET Status = 'Archived' WHERE OrderDate < '2020-01-01'; -- matches 50,000 ROWS
+
+-- SQL Server INITIALLY acquires INDIVIDUAL ROW-level locks -- but as the COUNT of individual locks
+-- HELD by this ONE statement CROSSES the ESCALATION THRESHOLD (roughly 5,000), the ENGINE
+-- AUTOMATICALLY ESCALATES to ONE SINGLE TABLE-level lock INSTEAD, covering the ENTIRE table
+```
+```text
+CONSEQUENCE of escalation: while THIS transaction holds its (NOW table-level) lock, OTHER
+transactions trying to READ/WRITE ANY OTHER, COMPLETELY UNRELATED row in the SAME table are
+ALSO BLOCKED -- NOT just the 50,000 rows THIS transaction actually TOUCHED -- the ENTIRE table
+is NOW effectively "OWNED" by this ONE transaction UNTIL it COMMITS or ROLLS BACK
+```
+The escalation exists specifically to protect the server from the memory/overhead cost of tracking an enormous number of individual fine-grained locks simultaneously — but the trade-off is a genuine, sometimes severe concurrency cost: other transactions that would have been able to proceed against *unrelated* rows (had locking stayed at the row level) are now blocked by the escalated table-level lock instead, exactly the mechanism behind the earlier scenario where a bulk `DELETE`/`UPDATE` against a large table caused widespread blocking across seemingly unrelated queries.
+
+**Why understanding this threshold matters for designing bulk operations against large, busy tables:** breaking a large bulk operation into smaller batches (updating a few thousand rows at a time, each in its own separate transaction, rather than one single transaction touching the entire large set) keeps each individual transaction's lock count safely under the escalation threshold — avoiding the table-level lock (and its accompanying broad blocking of unrelated concurrent activity) that a single, giant transaction touching the entire set would trigger.
+
+**Common Pitfall:** running a single, large `UPDATE`/`DELETE` statement against millions of rows in one transaction, on a table that's also being actively queried by other, unrelated production traffic, without anticipating that Lock Escalation will kick in and block that unrelated traffic entirely for the duration of the bulk operation — batching the operation into smaller, separately-committed chunks (each safely under the escalation threshold) avoids this broad, table-wide blocking impact on concurrent, unrelated activity.
+
+---
+
 ---

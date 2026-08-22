@@ -1222,4 +1222,83 @@ Because this batching happens automatically, entirely inside EF Core's own `Save
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is an EF Core Keyless Entity Type (`.HasNoKey()`), and how does it let you map a query result — from a database view or raw SQL — that has no natural primary key at all?**
+
+Every ordinary EF Core entity is expected to have a primary key, used for Change Tracking's identity resolution — but some query results genuinely have no natural key at all (an aggregated report, a database view combining several tables) — a Keyless Entity Type lets EF Core map such a result into a strongly-typed C# object anyway, simply without the key-based tracking features that require one.
+
+```csharp
+public class MonthlySalesSummary // NO natural PRIMARY KEY -- it's an AGGREGATED report row, not a real ENTITY
+{
+    public string Category { get; set; }
+    public int Month { get; set; }
+    public decimal TotalRevenue { get; set; }
+}
+
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<MonthlySalesSummary>().HasNoKey().ToView("vw_MonthlySalesSummary");
+}
+
+var summaries = await _db.Set<MonthlySalesSummary>().ToListAsync(); // queries the VIEW, maps INTO strongly-typed objects
+```
+Because `MonthlySalesSummary` is marked keyless, EF Core knows not to attempt Change Tracking's normal identity-based bookkeeping for it (there's no key to track identity by) — it's automatically treated as `AsNoTracking()` (covered earlier) by default, appropriate since a query result like this is inherently read-only and has no real, updatable identity to begin with.
+
+**Common Pitfall:** trying to force an artificial "key" onto a query result that has no genuine natural key at all (assigning a row-number as a fake `Id`) purely to satisfy EF Core's usual expectation of every entity having one — a Keyless Entity Type is specifically the correct, intended tool for exactly this scenario, avoiding the need to invent a meaningless artificial key just to make the data fit EF Core's ordinary entity-mapping conventions.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is `EnableSensitiveDataLogging()`, and why is it appropriate only for development environments, given that it includes actual parameter values in EF Core's logged output alongside the generated SQL?**
+
+By default, EF Core logs the generated SQL for executed queries, but with parameter values replaced by placeholders — `EnableSensitiveDataLogging()` includes the *actual* parameter values in that log output too, which is enormously helpful for local debugging, but risks logging genuinely sensitive data (passwords, personal information, payment details) into log files if left enabled in production.
+
+```csharp
+// WITHOUT sensitive data logging -- parameter VALUES are HIDDEN, replaced with placeholders
+// SELECT * FROM Users WHERE Email = @__email_0
+
+// WITH EnableSensitiveDataLogging() -- the ACTUAL VALUE is INCLUDED directly in the log
+// SELECT * FROM Users WHERE Email = @__email_0 (@__email_0='alice@example.com')
+
+builder.UseSqlServer(connectionString)
+    .EnableSensitiveDataLogging(); // ONLY appropriate for DEVELOPMENT -- NEVER production
+```
+Seeing the actual parameter value directly in a log line is genuinely useful while debugging locally (immediately confirming exactly what value a query actually ran with) — but the exact same convenience becomes a real data-exposure risk in production, where application logs might be retained, shipped to a third-party logging service, or accessible to a broader set of people than the database itself, potentially exposing sensitive values that should never appear in log output at all.
+
+**Common Pitfall:** enabling `EnableSensitiveDataLogging()` unconditionally, without gating it specifically to development environments (via `if (env.IsDevelopment())`, covered under ASP.NET Core) — accidentally leaving it enabled in a production deployment risks logging genuinely sensitive parameter values into whatever log aggregation system the application uses, a real compliance and security exposure that's easy to introduce accidentally if this setting isn't explicitly environment-gated.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is an EF Core Complex Type (EF Core 8+), and how does it differ from an Owned Entity Type (covered earlier) by representing a value object with no identity of its own, avoiding identity-tracking overhead entirely?**
+
+An Owned Entity Type (covered earlier) still has its own conceptual identity, tracked as part of its owner — a Complex Type instead has genuinely no identity at all, matching the DDD Value Object concept (covered under Clean Architecture) more precisely, and can even be shared/reused across multiple owning entities without EF Core needing to track it as a separate, identity-bearing object.
+
+```csharp
+// a COMPLEX TYPE -- a pure VALUE, with NO identity of its own AT ALL
+public class Address
+{
+    public string Street { get; set; }
+    public string City { get; set; }
+}
+
+public class Customer { public int Id { get; set; } public Address HomeAddress { get; set; } }
+public class Warehouse { public int Id { get; set; } public Address Location { get; set; } }
+
+modelBuilder.Entity<Customer>().ComplexProperty(c => c.HomeAddress);
+modelBuilder.Entity<Warehouse>().ComplexProperty(w => w.Location);
+// BOTH 'Customer' and 'Warehouse' use the SAME 'Address' TYPE -- NEITHER instance needs its OWN
+// TRACKED IDENTITY as an "Address" -- it's PURELY a VALUE, INLINED into its OWNER's OWN row
+```
+Because a Complex Type carries no identity of its own, EF Core doesn't need to track it separately at all — it's simply mapped as a set of columns directly on its owner's table (much like an Owned Type in its simplest form), but without the owned-entity machinery (its own conceptual "key," tracked as a dependent of its owner) that an Owned Entity Type still carries internally, making Complex Types a lighter-weight option specifically for genuine, no-identity value objects.
+
+**Why this specifically matters for correctly modeling DDD Value Objects (covered under Clean Architecture) in EF Core:** DDD explicitly distinguishes Value Objects (defined purely by their values, no identity) from Entities (defined by identity, regardless of their values, covered under Clean Architecture) — before Complex Types existed, EF Core's Owned Entity Types were the closest available mapping tool, but they still carried some identity-tracking overhead that didn't quite match a true Value Object's "no identity at all" nature; Complex Types close this modeling gap more precisely.
+
+**Common Pitfall:** continuing to use Owned Entity Types for what are genuinely simple, identity-free value objects, in a codebase already using EF Core 8+, without evaluating whether the newer, lighter-weight Complex Type would be the more precisely-fitting and lower-overhead mapping choice — Owned Types remain the right tool for genuinely owned entities with their own tracked lifecycle; Complex Types are the more appropriate, newer option specifically for pure value objects with no identity concept at all.
+
+---
+
 ---

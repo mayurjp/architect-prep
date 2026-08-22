@@ -1295,3 +1295,91 @@ Each smell signals a specific, recognizable maintenance risk: Mystery Guest make
 **Common Pitfall:** treating a test suite as adequately reviewed simply because every test currently passes, without ever examining tests for these smells — a test that reliably passes today can still be a genuine liability tomorrow (a Mystery Guest test that silently breaks when unrelated external setup changes, an Assertion Roulette test that takes 20 minutes to debug once it finally does fail) — passing today is a necessary, but not sufficient, condition for a test actually being well-designed.
 
 ---
+
+## Beginner — Question 13
+
+**Q13: What is a Regression Test, and how does adding one specifically for every bug fix prevent that exact bug from ever silently reappearing later?**
+
+A Regression Test is a test written specifically to reproduce a bug that was just fixed — added to the permanent test suite so that if the same bug is ever accidentally reintroduced later (by an unrelated refactor, a careless edit), the test suite immediately catches it, rather than the bug quietly resurfacing in production a second time.
+
+```csharp
+// a BUG was found: dividing a discount by ZERO quantity CRASHED the application
+// the FIX: added a guard clause preventing division by zero
+
+public decimal CalculateDiscount(decimal amount, int quantity)
+{
+    if (quantity == 0) return 0; // the ACTUAL FIX
+    return amount / quantity;
+}
+
+// the REGRESSION TEST -- added SPECIFICALLY to PREVENT this EXACT bug from EVER SILENTLY REAPPEARING
+[Fact]
+public void CalculateDiscount_WithZeroQuantity_ReturnsZero_DoesNotThrow()
+{
+    var result = _service.CalculateDiscount(100, 0);
+    Assert.Equal(0, result); // if a FUTURE refactor ACCIDENTALLY removes the guard clause, THIS test FAILS IMMEDIATELY
+}
+```
+Without this specific regression test, a future refactor that accidentally removes or breaks the zero-quantity guard clause would have no automated signal warning that the exact same bug just reappeared — the regression test acts as a permanent, automated tripwire specifically for this one known failure mode, catching its reintroduction immediately in CI rather than only being discovered again once it reaches production a second time.
+
+**Common Pitfall:** fixing a reported bug without adding a corresponding regression test for it, relying purely on the fix itself and hoping the same mistake is never made again — without an automated test specifically targeting that exact scenario, there's nothing structurally preventing the identical bug from silently reappearing during some future refactor, since nothing in the test suite would ever catch it recurring.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is the actual Pact file (the JSON artifact a consumer's contract test generates), and how does it become the concrete input a provider's own verification test runs against?**
+
+Consumer-Driven Contract Testing (covered earlier) isn't just a concept — it produces a concrete artifact: a Pact file, a JSON document recording every interaction the consumer's test exercised against a mock of the provider (the exact requests it made, and the exact responses it expected) — this file is what actually gets published to the Pact Broker (covered earlier) and is what the provider's own verification test replays against its real implementation.
+
+```json
+// a GENERATED Pact file -- records the CONSUMER's EXPECTATIONS, as CONCRETE request/response PAIRS
+{
+  "consumer": { "name": "OrderService" },
+  "provider": { "name": "InventoryService" },
+  "interactions": [
+    {
+      "description": "a request for product 5's stock level",
+      "request": { "method": "GET", "path": "/products/5/stock" },
+      "response": { "status": 200, "body": { "productId": 5, "quantity": 42 } }
+    }
+  ]
+}
+```
+```text
+The PROVIDER's OWN verification test READS this EXACT Pact file, REPLAYS its recorded request
+("GET /products/5/stock") against the PROVIDER's REAL, ACTUAL implementation, and CHECKS that the
+REAL response MATCHES the STRUCTURE the CONSUMER recorded EXPECTING -- WITHOUT the provider EVER
+needing to spin up the CONSUMER itself, or run a FULL end-to-end integration test AT ALL
+```
+Because the Pact file is generated automatically from the consumer's *own* test run (rather than hand-written by either team), it accurately reflects exactly what that consumer genuinely relies on — no more, no less — and the provider's verification step replays those exact recorded interactions against its real implementation, confirming compatibility without either side needing the other's actual running code present during either test.
+
+**Common Pitfall:** hand-writing or manually maintaining a "contract" document describing what a consumer expects, rather than letting it be automatically generated from the consumer's own actual test execution — a hand-maintained contract can drift out of sync with what the consumer's code genuinely does, whereas an automatically-generated Pact file is guaranteed to accurately reflect the consumer's real, current behavior, since it's a direct byproduct of actually running the consumer's own tests.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is Differential Testing, and how does running the same input through two independent implementations and comparing outputs catch bugs without knowing the correct expected output in advance — a technique distinct from, though superficially similar to, Metamorphic Testing (covered earlier)?**
+
+Differential Testing runs the *same* input through two (or more) independently-written implementations of supposedly equivalent logic, then compares their outputs — a discrepancy signals a bug in *at least one* of them, without either implementation's output needing to be independently verified as "correct" in advance.
+
+```csharp
+// TWO INDEPENDENT implementations of the SAME logic (perhaps an OLD, LEGACY one and a NEW rewrite)
+var oldResult = _legacyTaxCalculator.Calculate(order);
+var newResult = _rewrittenTaxCalculator.Calculate(order);
+
+if (oldResult != newResult)
+{
+    // a DISCREPANCY -- at LEAST ONE implementation has a BUG -- WITHOUT needing to KNOW,
+    // IN ADVANCE, which SPECIFIC value is ACTUALLY "correct" for THIS particular input
+    LogDiscrepancyForInvestigation(order, oldResult, newResult);
+}
+```
+Feeding the same large volume of production-representative inputs through both the old and new implementation, then flagging every case where they disagree, surfaces exactly the inputs worth manually investigating — a genuinely practical technique for validating a rewrite/migration against its predecessor without needing to hand-compute the "correct" expected value for every single test case in advance.
+
+**Why this is a genuinely different technique from Metamorphic Testing, despite both addressing "I don't know the correct answer in advance":** Metamorphic Testing (covered earlier) checks a *relationship* between a single implementation's outputs for *related* inputs (does filtering the result set produce a subset of the unfiltered one) — Differential Testing instead compares *two separate implementations'* outputs for the *identical* input, looking for disagreement between them rather than checking an internal consistency property within one single implementation; the two techniques are complementary, not interchangeable, each catching a different class of correctness issue.
+
+**Common Pitfall:** using Differential Testing between two implementations that share the exact same underlying bug (both independently implemented with the identical misunderstanding of a business rule) — since Differential Testing only catches *disagreement* between the two, a bug present identically in *both* implementations produces no discrepancy at all and goes completely undetected; this technique is powerful specifically for catching divergence between genuinely independent implementations, not for validating that either one is correct against some external, absolute standard.
+
+---
