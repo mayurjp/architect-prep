@@ -1314,4 +1314,80 @@ Because Change Feed maintains its own ordered, append-only record of changes per
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What are Azure Resource Locks (`CanNotDelete` and `ReadOnly`), and how do they protect a critical resource from accidental deletion or modification even by someone who otherwise has sufficient RBAC permissions to do so?**
+
+A Resource Lock is applied directly to a resource (or Resource Group) and enforces its restriction *regardless* of the RBAC permissions the acting user or service principal otherwise holds — `CanNotDelete` blocks deletion while still allowing modification, and `ReadOnly` blocks both modification and deletion entirely, until the lock is explicitly removed by someone with sufficient permission to manage locks themselves.
+
+```bash
+az lock create --name "ProtectProdDB" --resource-group "prod-rg" \
+    --resource "prod-sql-server" --resource-type "Microsoft.Sql/servers" \
+    --lock-type CanNotDelete
+```
+
+```text
+A user with FULL "Owner" RBAC role on the resource group STILL cannot DELETE "prod-sql-server"
+  while a CanNotDelete lock is ACTIVE on it -- the LOCK overrides even a HIGHLY-PRIVILEGED
+  role's normal permissions -- it must be EXPLICITLY REMOVED first, as a SEPARATE, DELIBERATE step
+```
+
+Because the lock check happens independently of, and in addition to, ordinary RBAC evaluation, it provides genuine protection against an accidental deletion even by someone who has every technical permission needed to delete the resource — a deliberate extra speed bump specifically for critical production resources where an accidental `az resource delete` (or a misconfigured automation script) could otherwise cause real damage.
+
+**Common Pitfall:** relying purely on RBAC role assignments to protect a critical production resource from accidental deletion, without also applying a Resource Lock — RBAC controls *who* can do *what*, but doesn't provide the extra "are you sure, this requires a deliberate separate step" friction a lock adds specifically against accidental, automated, or scripted deletion of a resource that a user or pipeline otherwise has full technical permission to remove.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is Azure Application Gateway's Web Application Firewall (WAF), and how does its "Detection" mode differ from "Prevention" mode in whether it actually blocks a matched malicious request?**
+
+Detection mode logs a request that matches a WAF rule (a suspected SQL injection pattern, an XSS attempt) but still lets it through to the backend unmodified — Prevention mode actually blocks the matched request, returning an error response to the client instead of forwarding it, providing genuine protection rather than just visibility.
+
+```text
+Detection mode: request MATCHES a WAF rule (e.g., looks like SQL injection) -- LOGGED, but
+  STILL FORWARDED to the backend UNCHANGED -- USEFUL for TUNING rules without RISKING false-positive
+  blocking of LEGITIMATE traffic, before COMMITTING to actually enforcing them
+
+Prevention mode: the SAME matched request is BLOCKED OUTRIGHT -- the CLIENT receives an ERROR
+  response INSTEAD of reaching the backend AT ALL -- GENUINE protection, but ANY false positive
+  in a RULE now ACTIVELY blocks a LEGITIMATE user's REAL request
+```
+
+Because Detection mode provides visibility without any enforcement risk, it's the recommended starting point when first enabling WAF rules against real production traffic — observing which rules would have triggered (and confirming they're not producing false positives against genuine, legitimate traffic patterns) before switching to Prevention mode and accepting the risk of blocking a legitimate request that a poorly-tuned rule might incorrectly flag.
+
+**Common Pitfall:** switching directly to Prevention mode without first running in Detection mode long enough to observe and tune for false positives — a WAF rule that's too aggressive can block entirely legitimate traffic (a user's search query containing characters that superficially resemble an injection pattern), and discovering this only after Prevention mode is already blocking real users is a much more disruptive way to find out than catching it in Detection mode's logs first.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is Azure Cosmos DB's Multi-Region Writes (multi-master) configuration, and how does its conflict resolution policy determine which write "wins" when the same item is modified in two regions simultaneously?**
+
+With Multi-Region Writes enabled, every configured region can accept writes directly (rather than one primary region handling all writes with others as read-only replicas) — when the same item is modified concurrently in two different regions, Cosmos DB's configured conflict resolution policy (Last-Write-Wins by default, based on a system timestamp, or a custom stored procedure for application-specific merge logic) determines which version ultimately survives.
+
+```json
+// Conflict resolution policy configuration
+{
+  "mode": "LastWriterWins",
+  "conflictResolutionPath": "/_ts"   // the system timestamp property -- HIGHER value WINS by default
+}
+```
+
+```text
+Item X modified in EAST US region at 10:00:00.100 AND in WEST EUROPE region at 10:00:00.150 --
+  BOTH writes ACCEPTED locally, in THEIR OWN region, IMMEDIATELY -- Cosmos DB LATER detects
+  the CONFLICT during REPLICATION, and (with LastWriterWins) KEEPS the WEST EUROPE write
+  (LATER timestamp), DISCARDING the EAST US write ENTIRELY
+
+Custom conflict resolution: a STORED PROCEDURE can implement APPLICATION-SPECIFIC merge logic
+  INSTEAD -- e.g., MERGING both regions' changes together, rather than SIMPLY discarding one
+```
+
+Because Multi-Region Writes trades strict consistency for the lowest possible write latency in every region (each region accepts writes locally, without waiting for cross-region coordination), an application using it must explicitly decide how conflicting concurrent writes should be reconciled — Last-Write-Wins is the simplest default, but for data where silently discarding one region's legitimate write would be unacceptable, a custom conflict-resolution stored procedure (or restructuring the data using a CRDT-style approach, covered under NoSQL) is necessary instead.
+
+**Common Pitfall:** enabling Multi-Region Writes for genuinely conflict-sensitive data (an inventory count, a financial balance) while relying on the default Last-Write-Wins policy — silently discarding one region's legitimate concurrent write can produce real business-logic errors (an inventory decrement that gets lost entirely); such data either needs a custom conflict-resolution procedure, a data model designed to merge conflict-free (a CRDT-style counter, covered under NoSQL), or should avoid Multi-Region Writes and instead accept single-write-region latency for the sake of stronger consistency.
+
+---
+
 ---

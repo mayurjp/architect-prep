@@ -1393,4 +1393,84 @@ Because the exchanged token is deliberately scoped down to exactly what the down
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is the difference between a Session Cookie and a Persistent Cookie in authentication, and how does the browser handle each differently regarding whether it survives a browser restart?**
+
+A Session Cookie has no explicit expiration date set — the browser deletes it automatically when the browser itself is closed. A Persistent Cookie has an explicit `Expires`/`Max-Age` attribute, so the browser keeps it stored on disk and continues sending it on future requests even after the browser has been fully closed and reopened, until that explicit expiration is reached.
+
+```http
+Set-Cookie: sessionId=abc123; HttpOnly; Secure
+    -- NO Expires/Max-Age -- a SESSION cookie -- DELETED when the BROWSER itself CLOSES
+
+Set-Cookie: rememberMe=xyz789; HttpOnly; Secure; Max-Age=2592000
+    -- Max-Age SET (30 days) -- a PERSISTENT cookie -- SURVIVES a BROWSER RESTART, for 30 DAYS
+```
+
+```text
+Session Cookie: "stay logged in only for THIS browser session" -- closing the browser ENTIRELY
+  REQUIRES logging in AGAIN next time
+
+Persistent Cookie: "remember me" functionality -- the user STAYS logged in ACROSS browser
+  restarts, UNTIL the EXPLICIT expiration is reached (or the cookie is EXPLICITLY cleared)
+```
+
+Because whether a cookie survives a browser restart is controlled purely by the presence (or absence) of an explicit expiration attribute, a "Remember Me" checkbox on a login form typically works by choosing between issuing a Session Cookie (unchecked) versus a Persistent Cookie with a longer expiration (checked) — the same underlying cookie mechanism, just configured with a different expiration policy based on the user's own choice.
+
+**Common Pitfall:** issuing a long-lived Persistent Cookie by default for every login, without offering a genuine Session-Cookie-only option — this means a user on a shared or public computer who doesn't realize their session will persist across browser restarts remains logged in far longer than they may have intended, a real risk on any device they don't fully control.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What was the OAuth 2.0 Implicit Grant flow, and why has it been deprecated in favor of the Authorization Code flow with PKCE (covered earlier), even for the public clients (SPAs) it was originally designed for?**
+
+The Implicit Grant returned an access token directly in the browser's URL fragment, with no separate "authorization code exchange" step at all — designed originally for SPAs that couldn't safely keep a client secret confidential; it's now deprecated because returning a token directly in a URL fragment exposes it to a range of risks (browser history, referrer leakage, any script running on the page) that the Authorization Code flow with PKCE (covered earlier) avoids entirely, while achieving the exact same "no client secret required" goal through a fundamentally safer mechanism.
+
+```text
+Implicit Grant (DEPRECATED): the access token comes back DIRECTLY in the REDIRECT URL's
+  FRAGMENT -- https://app.example.com/callback#access_token=eyJhbGci... -- exposed to
+  BROWSER HISTORY, and potentially to ANY OTHER SCRIPT running on the SAME page
+
+Authorization Code + PKCE (the MODERN replacement): the redirect carries only a SHORT-LIVED,
+  SINGLE-USE "code" -- EXCHANGED for the ACTUAL token via a SEPARATE, BACK-CHANNEL request --
+  the TOKEN ITSELF never appears in a BROWSER URL at ALL
+```
+
+Because the Authorization Code flow with PKCE achieves the same core goal Implicit Grant was designed for (letting a public client that can't hold a confidential secret still complete a secure OAuth flow) without ever exposing the actual access token in a browser-visible URL, it's now the universally recommended approach for every client type, including the SPAs that Implicit Grant was originally created specifically for — leaving Implicit Grant with no remaining legitimate use case in modern guidance (including OAuth 2.1's draft spec, which removes it entirely).
+
+**Common Pitfall:** implementing a new SPA using the Implicit Grant flow because it seems simpler (no separate code-exchange step), unaware that it's deprecated specifically due to token-exposure risk — Authorization Code with PKCE is not meaningfully harder to implement with a modern OAuth client library, and provides materially better security for the exact same client type Implicit Grant targeted.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is Certificate Pinning as a mobile-app-specific defense, and how does hardcoding an expected certificate/public key hash protect against a Man-in-the-Middle attack even when the attacker holds a technically-valid but wrongly-trusted CA certificate?**
+
+Ordinary TLS validation trusts *any* certificate signed by *any* CA in the device's trust store — if an attacker (or a compromised/malicious CA) manages to issue a technically-valid certificate for your domain, ordinary TLS validation would accept it without complaint. Certificate Pinning instead hardcodes the *specific*, expected certificate (or its public key's hash) directly into the mobile app itself, rejecting any connection presenting a different certificate, even one that's otherwise perfectly validly signed by a trusted CA.
+
+```swift
+// iOS -- comparing the SERVER's presented public key hash against a HARDCODED, EXPECTED value
+let expectedPublicKeyHash = "AbCdEf123456..." // baked directly into the APP itself, at BUILD time
+if serverCertificate.publicKeyHash != expectedPublicKeyHash {
+    // REJECT the connection, EVEN THOUGH the certificate is TECHNICALLY validly signed by a TRUSTED CA
+    abortConnection()
+}
+```
+
+```text
+WITHOUT pinning: ANY certificate signed by ANY CA the DEVICE trusts is ACCEPTED -- if an
+  ATTACKER obtains (or FORGES, via a compromised CA) a VALID certificate for YOUR domain,
+  ORDINARY TLS validation has NO WAY to detect anything is WRONG
+
+WITH pinning: the APP itself EXPLICITLY checks for ONE SPECIFIC, EXPECTED certificate/key --
+  ANY OTHER certificate is REJECTED, REGARDLESS of whether it's SIGNED by a TRUSTED CA at all
+```
+
+Because pinning bypasses the general "any trusted CA's signature is good enough" trust model entirely in favor of a specific, hardcoded expectation, it closes off an entire class of Man-in-the-Middle attack that relies on a rogue or compromised CA — the trade-off is operational: rotating the server's certificate now requires a coordinated app update (or a carefully-planned pin rotation strategy with overlapping old/new pins) to avoid locking out users running an older app version that only recognizes the previous certificate.
+
+**Common Pitfall:** pinning to a single certificate with no rotation plan at all — when that certificate eventually needs to be renewed or replaced, every installed copy of the app suddenly can't connect at all until it's updated, a real operational risk; a proper pinning strategy typically pins to a longer-lived intermediate/root certificate, or maintains overlapping pins during a rotation window, specifically to avoid this self-inflicted outage.
+
+---
+
 ---

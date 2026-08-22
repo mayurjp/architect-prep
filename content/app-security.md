@@ -1549,4 +1549,86 @@ Because the server's public key is, by definition, not secret at all, an attacke
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is a "Salt" in password hashing, and how does giving each password a unique, random salt defeat a precomputed Rainbow Table attack?**
+
+A Rainbow Table is a precomputed lookup mapping common password hashes back to their original plaintext — it only works because the *same* password always produces the *same* hash. A Salt is a random value generated uniquely per password, combined with the password before hashing, so that even two users with the *identical* password end up with completely different stored hashes, making a single precomputed table useless against any of them.
+
+```csharp
+// WITHOUT a salt -- the SAME password ALWAYS produces the SAME hash
+Hash("password123") == Hash("password123") // TRUE, always -- a PRECOMPUTED rainbow table WORKS
+
+// WITH a unique, per-user salt
+Hash("password123" + salt_user1) != Hash("password123" + salt_user2) // DIFFERENT hashes,
+                                                                        // even for the IDENTICAL password
+```
+
+```text
+WITHOUT salting: an ATTACKER can PRECOMPUTE hashes for MILLIONS of common passwords ONCE, then
+  INSTANTLY look up ANY stolen hash against that TABLE -- WORKS against EVERY user sharing
+  a COMMON password, since they ALL produce the IDENTICAL hash
+
+WITH per-user salting: the ATTACKER would need a SEPARATE precomputed table PER UNIQUE salt --
+  EFFECTIVELY making a PRECOMPUTED, REUSABLE rainbow table ATTACK completely INFEASIBLE
+```
+
+Because modern password-hashing algorithms (bcrypt, Argon2, covered elsewhere) automatically generate and store a unique salt as part of their own output format, this protection is typically built in by default rather than something a developer needs to implement manually — but understanding *why* it works clarifies why using a modern, purpose-built password hashing algorithm (rather than a plain, unsalted hash of a fast general-purpose function like SHA-256) matters so much.
+
+**Common Pitfall:** implementing custom password hashing using a general-purpose hash function without any salt at all (or worse, using the same, hardcoded salt for every user) — a shared salt across all users is only marginally better than no salt: an attacker can still build one precomputed table specifically targeting that one known salt value, working against every user in the system simultaneously.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is Log Injection, and how does an attacker embedding fake log-line-breaking characters into user input let them forge fraudulent-looking entries in an application's own log files?**
+
+If user input is written directly into a log file without sanitizing characters like newlines, an attacker can embed a fake newline followed by fabricated log-entry text — making the log file appear to contain an entirely separate, legitimate-looking log line that the application never actually generated, potentially fooling an administrator reviewing logs or an automated log-parsing/alerting system.
+
+```csharp
+// VULNERABLE -- writes user input DIRECTLY into the log, with NO sanitization of newlines
+_logger.LogInformation($"User login attempt: {username}");
+```
+
+```text
+Attacker supplies username: "alice\n2026-08-23 10:00:00 INFO User admin logged in successfully"
+
+The RESULTING log file appears to contain TWO separate lines:
+  2026-08-23 09:59:58 INFO User login attempt: alice
+  2026-08-23 10:00:00 INFO User admin logged in successfully   <-- ENTIRELY FORGED by the ATTACKER,
+                                                                     but LOOKS like a GENUINE, SEPARATE
+                                                                     log entry to ANYONE reading the file
+```
+
+Because a raw newline character embedded in user input can visually split what's actually one log call into what *appears* to be multiple, separate log lines, an attacker can effectively forge fraudulent-looking entries — potentially covering their own tracks, framing another user, or injecting content designed to trigger a downstream automated log-parsing system into a false alert or action.
+
+**Common Pitfall:** logging raw, unsanitized user input directly into a text-based log file without encoding or stripping control characters (newlines, carriage returns) — structured logging (writing log entries as JSON objects with fields, rather than free-form interpolated text) sidesteps this entire vulnerability class, since a JSON field's value containing a literal newline character doesn't create a new, separate log entry the way it would in a plain-text log format.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is a Web Cache Deception attack, and how does tricking a shared cache into storing a dynamic, user-specific page under a static-looking URL let an attacker later retrieve another user's cached, sensitive response?**
+
+A shared cache (a CDN, a reverse proxy cache) often caches responses for URLs that *look* static (ending in `.css`, `.jpg`, or another typically-cacheable extension) — an attacker crafts a URL for a genuinely dynamic, user-specific page (an account details page) that happens to also match a static-looking pattern the cache is configured to cache, tricking the cache into storing that specific user's private response, which a *different* user can then retrieve simply by requesting the same crafted URL.
+
+```text
+Victim is logged in, and is TRICKED (via a malicious link) into visiting:
+  https://example.com/account/details.css
+  -- the SERVER'S routing IGNORES the fake ".css" suffix and STILL serves the REAL,
+     DYNAMIC "/account/details" page, containing the VICTIM's OWN PRIVATE account data
+
+The SHARED CACHE, seeing a ".css" extension, ASSUMES this is a STATIC, CACHEABLE asset and
+  STORES the VICTIM's PRIVATE RESPONSE under THAT exact URL
+
+The ATTACKER (or ANYONE) LATER requests the EXACT SAME URL -- the CACHE serves the STORED,
+  CACHED response DIRECTLY -- the VICTIM's PRIVATE account data, to ANY OTHER REQUESTER
+```
+
+Because the cache's decision to cache a response is based purely on the URL's surface appearance (its extension or path pattern) while the actual response content depends entirely on which authenticated user requested it, this mismatch lets an attacker exploit a cache's caching heuristics to have one victim's private, dynamic response served to entirely different, unauthorized requesters later — a vulnerability at the intersection of caching configuration and application routing, rather than a flaw in either one alone.
+
+**Common Pitfall:** configuring a shared cache to cache based purely on URL pattern/extension without coordinating with the application's own routing to ensure genuinely dynamic, user-specific responses can never be reached via a URL pattern the cache considers cacheable — the fix requires either the application correctly rejecting/redirecting requests with an unexpected trailing extension on a dynamic route, or the cache being configured to respect `Cache-Control: private`/`no-store` headers (covered under HTTP) on genuinely sensitive, per-user responses rather than caching based on URL shape alone.
+
+---
+
 ---

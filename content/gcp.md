@@ -1276,4 +1276,82 @@ Because Spanner automatically splits and rebalances data across its underlying s
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is a GCP Firewall Rule's direction (ingress/egress) and target (by network tag or service account), and how does GCP's default-deny-ingress posture differ from a traditional on-premises network?**
+
+A GCP VPC denies all incoming (ingress) traffic by default — nothing reaches a VM unless an explicit firewall rule allows it — the opposite default from many traditional on-premises networks, which often start permissive and add restrictions over time; each rule specifies a direction, and can target specific VMs by network tag or service account rather than applying network-wide.
+
+```text
+gcloud compute firewall-rules create allow-http \
+    --direction=INGRESS \
+    --action=ALLOW \
+    --rules=tcp:80 \
+    --target-tags=web-server   # ONLY applies to VMs TAGGED "web-server" -- NOT every VM in the VPC
+```
+
+```text
+GCP default: DENY ALL ingress -- a VM is COMPLETELY UNREACHABLE from OUTSIDE until an EXPLICIT
+  ALLOW rule is created for it -- a SECURE-BY-DEFAULT starting point
+
+Traditional on-prem network: OFTEN starts MORE PERMISSIVE (a flat, TRUSTED internal network),
+  with RESTRICTIONS added LATER as NEEDED -- a FUNDAMENTALLY different DEFAULT POSTURE
+```
+
+Because targeting by network tag or service account lets a firewall rule apply precisely to the specific VMs that need it (rather than the entire VPC), a team can maintain a genuinely least-privilege network posture — a "web-server" tag receiving inbound HTTP, while a "database" tag receives no direct inbound internet traffic at all, all governed by the same shared VPC's rule set without needing separate subnets per tier.
+
+**Common Pitfall:** creating an overly broad firewall rule with no `--target-tags`/`--target-service-accounts` restriction, applying it to *every* VM in the VPC when only a specific subset actually needed the access — this grants unnecessarily broad network reachability across the entire VPC, undermining the principle of least privilege that GCP's default-deny posture was specifically designed to support.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is Google Cloud Armor, and how does it provide DDoS protection and WAF-style rules at the network edge, in front of a Cloud Load Balancer?**
+
+Cloud Armor sits in front of GCP's global external HTTP(S) Load Balancer, inspecting and filtering traffic *before* it ever reaches a backend service — it provides both volumetric DDoS mitigation (absorbing and filtering large-scale attack traffic at Google's own network edge) and Layer 7 WAF-style rules (blocking requests matching known attack signatures like SQL injection or XSS patterns), similar in spirit to Azure's Application Gateway WAF (covered elsewhere).
+
+```text
+gcloud compute security-policies rules create 1000 \
+    --security-policy=my-policy \
+    --expression="evaluatePreconfiguredExpr('sqli-stable')" \
+    --action=deny-403   # BLOCKS requests matching a KNOWN SQL injection SIGNATURE
+```
+
+```text
+WITHOUT Cloud Armor: EVERY request (including a VOLUMETRIC DDoS attack, or a SQLi attempt)
+  reaches the LOAD BALANCER and POTENTIALLY the BACKEND service DIRECTLY
+
+WITH Cloud Armor: malicious traffic is FILTERED at GOOGLE's OWN GLOBAL EDGE, BEFORE it ever
+  gets ANYWHERE NEAR the actual backend -- the BACKEND never even SEES the FILTERED requests
+```
+
+Because Cloud Armor operates at Google's global network edge — the same infrastructure absorbing traffic for Google's own massive-scale services — it can filter volumetric attacks at a scale far beyond what a single application's own backend infrastructure could realistically handle on its own, in addition to providing application-layer (Layer 7) protection against common web attack patterns.
+
+**Common Pitfall:** relying solely on application-level input validation/sanitization (covered under App Security) as the only defense against attacks like SQL injection or XSS, without an edge-level WAF like Cloud Armor in front of it — defense-in-depth means both layers matter; an edge WAF catches and blocks many attack patterns before they even reach the application, reducing the load and risk surface the application-level defenses alone must handle.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is Cloud Spanner's use of Two-Phase Locking combined with TrueTime commit timestamps for read-write transactions, and how does the combination provide both strict serializability and external consistency across regions?**
+
+Spanner's read-write transactions use Two-Phase Locking (acquiring locks during execution, releasing them only at commit — the traditional pessimistic concurrency mechanism) to guarantee serializability *within* a single transaction's view — TrueTime (covered earlier) additionally assigns each transaction a globally-meaningful commit timestamp with a bounded uncertainty window, and Spanner waits out that uncertainty ("commit wait") before acknowledging the commit, guaranteeing that if transaction A commits before transaction B *starts*, A's timestamp is provably earlier than B's, even across different regions' local clocks.
+
+```text
+Two-Phase Locking: DURING a transaction's execution, it ACQUIRES locks on the rows it touches --
+  those locks are HELD until COMMIT, guaranteeing NO other transaction can interleave a
+  CONFLICTING read/write against the SAME rows WHILE this transaction is still in PROGRESS
+
+TrueTime commit-wait: Spanner ASSIGNS a commit timestamp, then WAITS OUT the CLOCK
+  UNCERTAINTY BOUND before actually ACKNOWLEDGING the commit -- GUARANTEEING that by the time
+  ANY other transaction (ANYWHERE, in ANY region) could POSSIBLY observe this commit's effects,
+  ENOUGH real time has ELAPSED that the TIMESTAMP ORDERING is PROVABLY correct, GLOBALLY
+```
+
+Because Two-Phase Locking alone only guarantees correct ordering among transactions Spanner itself directly orchestrates, while TrueTime's bounded-uncertainty commit-wait additionally guarantees that the *global, real-world* ordering of commits matches their assigned timestamps (even across geographically distant regions with imperfect clock synchronization), the combination gives Spanner both properties simultaneously — genuine serializability plus external consistency — a stronger combined guarantee than either mechanism alone would provide.
+
+**Common Pitfall:** assuming ordinary distributed Two-Phase Locking alone is sufficient to guarantee Spanner's specific External Consistency claim — locking guarantees correct ordering among the transactions it directly coordinates, but without TrueTime's bounded clock uncertainty and commit-wait mechanism, there would be no way to guarantee that transaction timestamps correctly reflect real-world, cross-region happens-before ordering; External Consistency specifically depends on both mechanisms working together, not locking alone.
+
+---
+
 ---
