@@ -2358,3 +2358,87 @@ Because a timestamp's precision is fundamentally limited by whatever granularity
 **Common Pitfall:** relying on `If-Unmodified-Since` for concurrency control specifically because `Last-Modified` timestamps are already tracked and readily available, without considering the precision ceiling that a busy resource updated multiple times per second genuinely runs into — for anything with meaningful concurrent-update risk, an ETag's version-per-change guarantee avoids this specific class of missed-conflict bug that a timestamp-based check remains vulnerable to.
 
 ---
+
+## Beginner — Question 19
+
+**Q19: What is a "self" link in a HATEOAS response (covered earlier), and how does including a link to a resource's own canonical URL let a client that received it embedded elsewhere always know how to re-fetch it directly?**
+
+A "self" link is simply the resource's own canonical URL, included as part of its own representation — a client that received this resource embedded inside a search result, a related-resource expansion, or any other context doesn't need to separately construct or guess that URL; it's handed directly, right there in the data it already has.
+
+```json
+{
+  "id": 5,
+  "name": "Wireless Mouse",
+  "_links": {
+    "self": { "href": "/api/products/5" }
+  }
+}
+```
+
+```text
+A client received THIS product as part of a LARGER search-results response, or embedded
+  inside an order's "?include=" expansion (covered earlier) -- REGARDLESS of the CONTEXT it
+  arrived in, the "self" link tells the CLIENT EXACTLY how to fetch THIS SAME resource
+  DIRECTLY, LATER, WITHOUT needing to separately KNOW or CONSTRUCT the URL pattern itself
+```
+
+Because a client following HATEOAS-style navigation (covered earlier) is meant to discover URLs from response data rather than hardcoding URL patterns itself, the "self" link provides exactly the reference point needed to re-fetch or bookmark a specific resource later, regardless of the specific context (a list, a related-resource embed) it was originally encountered in.
+
+**Common Pitfall:** omitting a "self" link from an embedded or related resource, assuming the client already "knows" the URL pattern from context — this breaks the HATEOAS principle of clients discovering URLs from response data rather than hardcoding assumptions, and forces the client to reconstruct a URL pattern the API itself should simply provide directly.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What are Rate Limit response headers (`X-RateLimit-Limit`/`X-RateLimit-Remaining`/`X-RateLimit-Reset`), and how does exposing a client's current rate-limit status let it proactively slow down before actually hitting `429 Too Many Requests`?**
+
+These headers, included on every response (not just when a limit is exceeded), tell a client exactly how many requests it's allowed in the current window, how many remain, and when the window resets — a well-behaved client can monitor these values and voluntarily throttle its own request rate as it approaches the limit, avoiding a `429` rejection entirely rather than discovering the limit only by hitting it.
+
+```http
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 5
+X-RateLimit-Reset: 1755856800
+```
+
+```text
+A CLIENT monitoring these headers sees "X-RateLimit-Remaining: 5" -- it can PROACTIVELY slow
+  DOWN its OWN request rate RIGHT NOW, BEFORE actually EXHAUSTING its remaining allowance and
+  receiving a 429 REJECTION -- turning an EVENTUAL hard failure into a PROACTIVELY AVOIDED one
+```
+
+Because these headers are included on *every* response rather than only appearing once a limit is actually exceeded, they give a well-implemented client continuous visibility into its own standing — letting it adapt its request pacing dynamically, rather than the API's rate limit being a purely reactive, surprise-based mechanism the client only discovers by triggering a rejection.
+
+**Common Pitfall:** implementing a rate limiter that only communicates the limit via a `429` response's `Retry-After` header (covered earlier) once the limit is *already* exceeded, without exposing ongoing `X-RateLimit-*` status on every response — this leaves a well-behaved client with no way to proactively pace its own requests, forcing it to learn its remaining capacity only by actually exhausting it.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is a Webhook — the inverse of ordinary polling, where the server calls the client instead — and what specific security concern does exposing a public webhook receiver endpoint introduce?**
+
+Ordinary REST interaction has the client initiate every request — a Webhook flips this: the client registers a callback URL with the API in advance, and the API itself makes an outbound HTTP request to that URL whenever a relevant event occurs, eliminating the need for the client to poll repeatedly for updates. Because the "client" now runs a publicly-reachable HTTP endpoint accepting incoming requests from the API, it must specifically verify that an incoming webhook call is genuinely from the expected API, not a forged request from an attacker who simply discovered the callback URL.
+
+```http
+POST /webhooks/order-updates HTTP/1.1
+Host: my-app.example.com
+X-Signature: sha256=7d3f9c2a1234abc9defa1b2c3d4e5f6...
+
+{ "event": "order.shipped", "orderId": 5 }
+```
+
+```text
+WITHOUT signature verification: ANY attacker who DISCOVERS (or GUESSES) the webhook receiver's
+  URL can send a FORGED request claiming to be a GENUINE event from the API -- the RECEIVER has
+  NO WAY to distinguish a REAL notification from a COMPLETELY FABRICATED one
+
+WITH signature verification: the API signs EACH webhook payload with a SHARED SECRET (known
+  ONLY to the API and the REGISTERED client) -- the RECEIVER verifies the signature MATCHES
+  BEFORE trusting the payload's CONTENT AT ALL -- FORGED requests FAIL this check and are REJECTED
+```
+
+Because a webhook receiver is, functionally, a public HTTP endpoint accepting *incoming* requests from an external, third-party source, it inherits all the same authentication concerns any public endpoint has — verifying a cryptographic signature (computed with a secret shared only between the API and the specific registered client) is the standard mechanism for confirming a received webhook genuinely originated from the expected API, rather than being simply an unauthenticated, forgeable HTTP call to a known URL.
+
+**Common Pitfall:** implementing a webhook receiver endpoint that trusts any incoming request's payload without verifying a signature or shared secret at all — since the endpoint is, by necessity, publicly reachable (the whole point of a webhook is that the external API can reach it), failing to verify authenticity means anyone who discovers the URL can send arbitrary, forged "events" that the receiving application will act on as if they were genuine.
+
+---

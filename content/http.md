@@ -1415,3 +1415,84 @@ Because computing the correct `Sec-WebSocket-Accept` value requires actually imp
 **Common Pitfall:** implementing a custom proxy or gateway that forwards a `101 Switching Protocols` response without correctly computing and forwarding a valid `Sec-WebSocket-Accept` value — a spec-compliant client library will detect the mismatch and refuse to proceed, correctly treating the connection as a failed handshake rather than silently continuing with a connection that only appears to have upgraded successfully.
 
 ---
+
+## Beginner — Question 18
+
+**Q18: What is the `X-Content-Type-Options: nosniff` header, and how does it stop a browser from trying to guess a response's content type based on its content rather than trusting the declared `Content-Type`?**
+
+Some browsers historically "sniffed" a response's actual bytes to guess its content type, sometimes overriding an explicitly declared `Content-Type` header if the content looked like something else — `X-Content-Type-Options: nosniff` tells the browser to trust the declared `Content-Type` exactly as stated, never second-guessing it based on the response body's actual content.
+
+```http
+Content-Type: text/plain
+X-Content-Type-Options: nosniff
+```
+
+```text
+WITHOUT nosniff: a browser MIGHT inspect the ACTUAL bytes of a response DECLARED as
+  "text/plain" and, if they LOOK like HTML/JavaScript, TREAT and EXECUTE it as SUCH ANYWAY --
+  potentially EXECUTING attacker-supplied CONTENT the server never INTENDED to be treated as a SCRIPT
+
+WITH nosniff: the browser TRUSTS the declared Content-Type EXACTLY -- content DECLARED as
+  "text/plain" is NEVER reinterpreted or EXECUTED as HTML/JavaScript, REGARDLESS of what its
+  ACTUAL bytes might SUPERFICIALLY resemble
+```
+
+Because MIME-sniffing could let an attacker-controlled file (uploaded as, say, an "image," but actually containing HTML/JavaScript) be reinterpreted and executed as a script by a browser ignoring the server's declared `Content-Type`, `nosniff` closes off this specific attack vector by making the browser's behavior strictly follow whatever the server explicitly declares.
+
+**Common Pitfall:** omitting `X-Content-Type-Options: nosniff` on endpoints serving user-uploaded content — without it, a maliciously crafted file uploaded with an innocuous-seeming `Content-Type` could still be sniffed and executed as HTML/JavaScript by a vulnerable browser, turning a file-upload feature into an unintended XSS vector; this header is one of the standard security headers (alongside HSTS, CSP, covered elsewhere) recommended on essentially every response.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is the standardized `Forwarded` header (RFC 7239), and why hasn't it fully replaced the earlier, non-standard `X-Forwarded-*` headers (covered earlier) in practice, despite being the official standard?**
+
+`Forwarded` consolidates the information the non-standard `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host` headers (covered earlier) separately conveyed into one single, standardized header — but because `X-Forwarded-*` was already widely deployed and supported by essentially every reverse proxy and load balancer long before `Forwarded` was standardized, most existing infrastructure and application code continues to use the older, non-standard convention out of sheer inertia and broad, established compatibility.
+
+```http
+Forwarded: for=203.0.113.5;proto=https;host=example.com
+```
+```http
+X-Forwarded-For: 203.0.113.5
+X-Forwarded-Proto: https
+X-Forwarded-Host: example.com
+```
+
+```text
+Forwarded (RFC 7239, the OFFICIAL standard): ONE header, CONSOLIDATING all THREE pieces of
+  information -- but SUPPORT across EXISTING proxies/load balancers/application FRAMEWORKS
+  is LESS UNIVERSAL than the OLDER convention
+
+X-Forwarded-* (NON-standard, but WIDELY, ALREADY deployed): THREE separate headers -- but
+  SUPPORTED essentially EVERYWHERE, having been the DE FACTO convention for MANY YEARS
+  BEFORE Forwarded was EVEN standardized
+```
+
+Because switching an entire ecosystem of already-deployed infrastructure and application code to a newer standard carries real migration cost with limited immediate benefit (both conventions carry essentially the same information), `X-Forwarded-*` remains the practically dominant convention in most real-world deployments, even though `Forwarded` is the technically "correct," standardized choice — a common pattern where an earlier, widely-adopted de facto convention persists well past a later official standard's introduction.
+
+**Common Pitfall:** implementing application code that only understands the standardized `Forwarded` header, assuming it's universally used since it's the official standard — in practice, far more real-world proxies and load balancers still send the older `X-Forwarded-*` headers; robust application code typically needs to check for both conventions (or rely on a framework's own built-in forwarded-headers middleware, which usually already handles both).
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is HTTP/2's Flow Control mechanism (per-stream and per-connection `WINDOW_UPDATE` frames), and how does it let a receiver limit how much unacknowledged data a sender can have in flight on a multiplexed connection?**
+
+HTTP/2 multiplexes many independent streams (covered earlier) over one shared TCP connection — Flow Control lets the *receiver* advertise how much data it's currently willing to accept (its "window"), both per individual stream and for the connection as a whole, and the sender must wait for a `WINDOW_UPDATE` frame replenishing that window before sending more, preventing a fast sender from overwhelming a slower receiver, or one greedy stream from starving every other stream sharing the same connection.
+
+```text
+Receiver advertises an INITIAL per-stream window of 65,535 bytes -- the SENDER can send UP TO
+  that MANY bytes on THAT stream WITHOUT waiting -- once SENT, the WINDOW SHRINKS -- the
+  sender MUST wait for a WINDOW_UPDATE frame (the RECEIVER signaling "I've PROCESSED some of
+  that data, you may SEND more now") BEFORE sending FURTHER data on that SAME stream
+
+A CONNECTION-level window ALSO exists, GOVERNING the TOTAL data ACROSS ALL streams SHARING
+  that ONE underlying TCP connection -- preventing ONE single, GREEDY stream from consuming
+  ALL available connection-level "credit," STARVING every OTHER stream MULTIPLEXED alongside it
+```
+
+Because both a per-stream and a connection-wide window exist simultaneously, HTTP/2 provides two layers of protection: a slow consumer of one specific stream's data won't be overwhelmed by that one stream alone, and no single greedy stream can monopolize the shared connection's overall capacity at every other stream's expense — directly addressing the specific challenge multiplexing introduces (many logically-independent streams genuinely sharing one physical connection's resources).
+
+**Common Pitfall:** assuming HTTP/2's stream multiplexing (covered earlier) alone is sufficient to guarantee fair, balanced resource usage across streams — without Flow Control's window-based back-pressure mechanism, one stream sending data far faster than its receiver can process it could still overwhelm the shared connection, degrading every other multiplexed stream's effective throughput; Flow Control is what actually enforces fairness and prevents this specific failure mode.
+
+---

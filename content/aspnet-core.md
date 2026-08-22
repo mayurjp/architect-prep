@@ -1665,4 +1665,88 @@ Because `IOptions<T>` is typically resolved once during a Singleton service's co
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is `app.Lifetime.ApplicationStarted`, and how does it let code run specific logic only once the application has fully finished starting, as distinct from code placed directly in `Program.cs` before `app.Run()`?**
+
+Code written directly in `Program.cs` before `app.Run()` executes during startup, but *before* the application is actually ready to receive requests — `ApplicationStarted` is a cancellation token that becomes signaled only once the host has genuinely finished starting and begun listening for requests, letting code register a callback that runs at that specific, later moment instead.
+
+```csharp
+var app = builder.Build();
+
+app.Lifetime.ApplicationStarted.Register(() =>
+{
+    Console.WriteLine("The application has FULLY started and is NOW accepting requests.");
+    // safe to do things here that GENUINELY require the app to be FULLY up and running
+});
+
+app.Run(); // this call BLOCKS -- but the callback above fires AFTER startup genuinely COMPLETES
+```
+
+```text
+Code in Program.cs, BEFORE app.Run(): runs DURING startup -- the app is NOT YET accepting requests
+ApplicationStarted callback: runs ONLY ONCE startup has GENUINELY completed -- the app IS NOW live
+```
+
+Because some initialization logic (announcing readiness to a service registry, sending a "startup complete" notification) genuinely needs to happen *after* the application is truly ready rather than merely "still starting," `ApplicationStarted` provides the correct hook for that specific timing — distinct from `IHostedService.StartAsync` (covered elsewhere), which runs *during* startup, potentially before the app is fully ready to serve traffic.
+
+**Common Pitfall:** placing logic that assumes the application is fully operational (announcing service availability, warming a cache expecting to serve real traffic) directly in `Program.cs` before `app.Run()`, rather than in an `ApplicationStarted` callback — code executed at that earlier point runs during startup, not necessarily once the application has genuinely finished becoming ready to serve requests.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is `IPostConfigureOptions<T>`, and how does it let a second piece of code run after the primary Options configuration, useful for a library needing to apply a final override regardless of what the application itself configured?**
+
+`IConfigureOptions<T>` (the ordinary Options-configuration mechanism, covered earlier) runs once, applying configuration to a settings object — `IPostConfigureOptions<T>` runs *afterward*, letting a library or a later-registered piece of code apply an additional adjustment on top, guaranteed to run after every ordinary `Configure` call, regardless of registration order.
+
+```csharp
+builder.Services.Configure<MySettings>(builder.Configuration.GetSection("MySettings")); // ORDINARY configuration
+
+builder.Services.PostConfigure<MySettings>(settings =>
+{
+    // GUARANTEED to run AFTER the ordinary Configure() call above, REGARDLESS of REGISTRATION order --
+    // useful for a LIBRARY that needs to enforce a FINAL, non-overridable adjustment
+    if (settings.MaxRetries > 10) settings.MaxRetries = 10; // ENFORCES an upper BOUND, no MATTER what the app configured
+});
+```
+
+Because `PostConfigure` callbacks are guaranteed to run after all ordinary `Configure` callbacks regardless of the order either was registered in, a library author can use it to enforce a hard constraint or apply a final adjustment that's guaranteed to take effect last — useful for validation-like enforcement (clamping a value to a safe range) that should apply *no matter what* the application itself configured earlier.
+
+**Common Pitfall:** relying on registration order alone to guarantee a particular configuration adjustment happens "last" — ordinary `Configure<T>` calls don't guarantee any specific ordering relative to each other beyond registration sequence, whereas `PostConfigure<T>` provides an explicit, guaranteed-to-run-after-everything-else hook specifically for this need, rather than relying on careful, order-dependent registration alone.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is Kestrel's explicit `ListenAnyIP`/`ListenLocalhost` endpoint configuration, and how does binding to a specific IP/port combination in code differ from relying on the `ASPNETCORE_URLS` environment variable?**
+
+`ASPNETCORE_URLS` is a simple, external configuration mechanism (an environment variable or command-line argument) specifying which URLs Kestrel should bind to — `ConfigureKestrel`'s explicit `ListenAnyIP`/`ListenLocalhost`/`Listen` calls instead configure binding directly in code, giving access to per-endpoint options (a specific TLS certificate for one endpoint, HTTP/2-only on another) that the simpler `ASPNETCORE_URLS` variable alone can't express.
+
+```csharp
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.ListenLocalhost(5000); // HTTP, LOCALHOST only -- NOT reachable from OUTSIDE the machine at all
+    options.ListenAnyIP(5001, listenOptions =>
+    {
+        listenOptions.UseHttps("cert.pfx", "password"); // THIS SPECIFIC endpoint gets its OWN TLS certificate
+    });
+});
+```
+
+```text
+ASPNETCORE_URLS="http://+:5000" -- a SIMPLE, EXTERNAL string -- binds to ALL interfaces, on
+  PORT 5000 -- CANNOT express PER-ENDPOINT options like a SPECIFIC TLS certificate PER PORT
+
+ConfigureKestrel + Listen*() calls -- FULL, CODE-LEVEL control -- DIFFERENT ports can have
+  ENTIRELY different configurations (ONE localhost-only HTTP endpoint, ANOTHER publicly-exposed
+  HTTPS endpoint with its OWN specific certificate) -- something a SIMPLE URL string can't express
+```
+
+Because `ConfigureKestrel`'s code-level API exposes far richer, per-endpoint configuration than the simple `ASPNETCORE_URLS` string can represent, it's the correct choice whenever different endpoints genuinely need different behavior (different certificates, different protocol restrictions) — `ASPNETCORE_URLS` remains a convenient, simple mechanism for the common case of "just bind to this one address," configurable externally without needing a code change or redeploy.
+
+**Common Pitfall:** trying to express complex, per-endpoint requirements (different TLS certificates on different ports, HTTP/1.1-only on one endpoint but HTTP/2 on another) purely through the `ASPNETCORE_URLS` environment variable — it simply cannot express this level of per-endpoint granularity; `ConfigureKestrel`'s code-level API is required once requirements go beyond a single, uniformly-configured listening address.
+
+---
+
 ---

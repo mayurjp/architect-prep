@@ -1594,4 +1594,79 @@ Because this provider runs once, during model metadata construction, and applies
 
 ---
 
+## Beginner — Question 17
+
+**Q17: How does MVC's convention for locating shared views (the `Views/Shared` folder) let a Layout or Partial View defined once be found automatically by any controller's own views, without repeating it per-controller?**
+
+MVC's default view-lookup convention (covered elsewhere for `View()`) checks a controller-specific folder first (`Views/{ControllerName}/`), then falls back to `Views/Shared/` if not found there — placing a Layout or a commonly-reused Partial View in `Views/Shared` means *every* controller's views can reference it by name alone, without needing to know or care which specific folder it physically lives in.
+
+```text
+Views/
+  Shared/
+    _Layout.cshtml         <-- FOUND automatically by EVERY controller's views, with NO extra configuration
+    _ProductCardPartial.cshtml
+  Products/
+    Index.cshtml           <-- can reference "_Layout" and "_ProductCardPartial" by NAME alone
+  Orders/
+    Index.cshtml           <-- ALSO can reference the SAME shared files, by the SAME simple NAMES
+```
+
+```csharp
+@{ Layout = "_Layout"; } // MVC automatically CHECKS Views/Orders/_Layout.cshtml FIRST (not found),
+                          // then FALLS BACK to Views/Shared/_Layout.cshtml (FOUND) -- NO full path needed
+```
+
+Because the convention automatically falls back to the shared folder without requiring a full, explicit path, any view anywhere in the application can reference a shared Layout or Partial using just its short name — adding a new controller doesn't require re-registering or re-referencing already-existing shared views, they're simply found automatically by the existing convention.
+
+**Common Pitfall:** duplicating a Layout or Partial View file into multiple controller-specific folders instead of placing one shared copy in `Views/Shared` — this defeats the entire purpose of the shared-view convention, requiring every future change to be manually applied to every duplicated copy rather than automatically taking effect everywhere via one single, shared file.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is `Html.Raw()`, and why does bypassing Razor's automatic HTML encoding with it reopen the exact XSS risk (covered under App Security) that encoding is specifically meant to close?**
+
+Razor automatically HTML-encodes any value rendered via `@expression` syntax, converting characters like `<` and `>` into their safe HTML-entity equivalents — `Html.Raw()` explicitly opts *out* of this automatic encoding, rendering the string's exact, literal content directly into the page's HTML, which means any unescaped `<script>` tag (or other markup) embedded in that string executes exactly as if it were hand-written into the page.
+
+```csharp
+// ORDINARY Razor output -- AUTOMATICALLY HTML-encoded -- SAFE, even if 'comment' contains malicious markup
+<p>@comment</p>  // a comment containing "<script>alert('xss')</script>" renders as HarmLESS, ESCAPED TEXT
+
+// Html.Raw() -- BYPASSES encoding ENTIRELY -- DANGEROUS if 'comment' contains ATTACKER-SUPPLIED markup
+<p>@Html.Raw(comment)</p>  // the SAME malicious comment NOW actually EXECUTES as a REAL <script> tag
+```
+
+Because `Html.Raw()` exists specifically for the rare, legitimate case where a value is *already* known-safe, pre-sanitized HTML that genuinely needs to render as markup (not escaped text) — using it on any value that could contain attacker-influenced input reopens exactly the reflected/stored XSS vulnerability class (covered under App Security) that Razor's automatic encoding exists to prevent by default.
+
+**Common Pitfall:** reaching for `Html.Raw()` as a quick fix whenever a value "isn't displaying correctly" (appears HTML-encoded when the developer expected raw markup), without verifying that the value is genuinely safe, trusted content — if there's any possibility the value originated from or was influenced by user input, `Html.Raw()` reintroduces a genuine XSS vulnerability that Razor's default encoding was specifically protecting against.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is a custom `IValidationAttributeAdapterProvider`, and how does it let a custom Data Annotation validation attribute (covered earlier) also generate the correct client-side validation script/attributes automatically?**
+
+A custom `ValidationAttribute` (covered earlier) enforces its rule server-side automatically, but MVC's client-side (unobtrusive) validation (covered earlier) needs to know how to translate that same rule into HTML `data-val-*` attributes the client-side JavaScript understands — `IValidationAttributeAdapterProvider` lets you register an adapter teaching MVC exactly how to generate those client-side attributes for your custom attribute, extending automatic client-side validation to attributes beyond the framework's own built-in set.
+
+```csharp
+public class MustBeEvenAttribute : ValidationAttribute { /* server-side validation logic, covered earlier */ }
+
+public class MustBeEvenAdapter : AttributeAdapterBase<MustBeEvenAttribute>
+{
+    public MustBeEvenAdapter(MustBeEvenAttribute attribute) : base(attribute, null) { }
+    public override void AddValidation(ClientModelValidationContext context)
+    {
+        context.Attributes.Add("data-val", "true");
+        context.Attributes.Add("data-val-musteven", "Value must be even."); // teaches the CLIENT-SIDE
+                                                                              // JS library how to VALIDATE this too
+    }
+}
+```
+
+Because this adapter bridges the gap between a server-side-only custom validation attribute and MVC's client-side unobtrusive validation mechanism (covered earlier, mirroring built-in Data Annotations automatically), registering it means a custom business rule gets the *same* immediate, no-page-reload client-side feedback that built-in attributes like `[Required]` provide out of the box — without this adapter, the custom attribute would only ever validate server-side, requiring a full form submission to surface any violation.
+
+**Common Pitfall:** writing a custom `ValidationAttribute` and assuming it automatically also participates in client-side unobtrusive validation the same way built-in attributes do — without a registered `IValidationAttributeAdapterProvider` (and corresponding client-side JavaScript understanding the generated `data-val-*` attributes), a custom attribute validates correctly on the server but provides zero immediate client-side feedback, silently falling back to a full round-trip to the server before any violation becomes visible to the user.
+
+---
+
 ---

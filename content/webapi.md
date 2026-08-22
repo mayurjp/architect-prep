@@ -1586,4 +1586,88 @@ Because `IActionFilter`'s synchronous methods have no way to `await` anything at
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is the `[NonController]` attribute, and how does it exclude a class that would otherwise be conventionally treated as a controller from actually being registered as one?**
+
+MVC's default convention treats any public class whose name ends in "Controller" (and satisfies a few other basic conditions) as a controller automatically — `[NonController]` explicitly opts a specific class out of this convention, useful for a class that happens to be named similarly but isn't actually meant to be a routable API controller at all.
+
+```csharp
+[NonController]
+public class OrderController // WOULD normally be treated as a controller by NAME CONVENTION alone --
+{                              // [NonController] explicitly EXCLUDES it from that automatic treatment
+    public void ProcessOrder() { /* just an ORDINARY helper class, NOT an API controller */ }
+}
+```
+
+```text
+WITHOUT [NonController]: MVC's naming convention ALONE ("ends in Controller") would ATTEMPT
+  to treat "OrderController" as a ROUTABLE API controller, even though it was NEVER intended as one
+
+WITH [NonController]: explicitly OPTS OUT -- MVC treats it as an ORDINARY class, NOT a controller,
+  REGARDLESS of its NAME happening to match the naming convention
+```
+
+Because MVC's controller-discovery convention is based purely on a class's name (and a few structural checks) rather than any explicit marker by default, a class that coincidentally follows the "ends in Controller" naming pattern but isn't actually meant to be an API controller needs `[NonController]` to explicitly exclude itself from that automatic, convention-based discovery.
+
+**Common Pitfall:** naming an ordinary, non-API helper class with a "Controller" suffix purely by coincidence (matching some other, unrelated naming convention in the codebase) without realizing MVC's controller-discovery convention will attempt to treat it as a routable controller — this can produce confusing behavior (unexpected routes being registered) until `[NonController]` is explicitly applied, or the class is simply renamed to avoid the naming collision entirely.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is Web API's `IApiVersionReader`, and how does it let API Versioning (covered earlier) read the requested version from a custom source, such as a header or query string, rather than only the URL segment?**
+
+`IApiVersionReader` is the abstraction the `Microsoft.AspNetCore.Mvc.Versioning` package uses to determine which API version a given request is asking for — the built-in implementations read from a URL segment, a query string parameter, or a custom header, and multiple readers can even be combined, checking each in turn until one successfully identifies a requested version.
+
+```csharp
+builder.Services.AddApiVersioning(options =>
+{
+    options.ApiVersionReader = ApiVersionReader.Combine(
+        new UrlSegmentApiVersionReader(),               // checks /api/v2/products FIRST
+        new HeaderApiVersionReader("X-Api-Version"),      // falls back to a CUSTOM header
+        new QueryStringApiVersionReader("api-version")    // falls back to a QUERY STRING parameter
+    );
+});
+```
+
+```text
+Request: GET /api/products?api-version=2.0
+  -- NO URL segment version present -- the READER falls back to CHECKING the query string --
+     FINDS "api-version=2.0" there -- the REQUEST is treated as targeting API version 2.0
+```
+
+Because `IApiVersionReader` decouples "how is the requested version actually communicated" from the rest of the versioning machinery, an API can support multiple, simultaneously-valid ways for a client to specify its desired version (a URL segment for one client, a custom header for another) without duplicating the underlying version-resolution and routing logic for each different convention.
+
+**Common Pitfall:** hardcoding version detection logic manually inside each individual action (checking a header or query string directly within the action's own code) instead of configuring `IApiVersionReader` once, centrally — this scatters versioning logic across many actions instead of centralizing it in one configurable, reusable mechanism the versioning middleware itself understands and applies consistently.
+
+---
+
+## Advanced — Question 18
+
+**Q18: How does content negotiation select among multiple registered `IOutputFormatter`s when a request's `Accept` header lists several acceptable media types, each with its own quality value (`q=`)?**
+
+When an `Accept` header lists multiple media types with differing `q=` quality values (indicating relative preference), ASP.NET Core's content negotiation sorts the client's stated preferences by quality value (highest first), then checks each one in turn against the set of registered `IOutputFormatter`s, selecting the first (highest-quality) media type that a registered formatter can actually produce.
+
+```http
+GET /api/products/5 HTTP/1.1
+Accept: application/xml;q=0.5, application/json;q=0.9, text/csv;q=0.3
+```
+
+```text
+Client's PREFERENCE order (by q value, HIGHEST first): application/json (0.9) -> application/xml (0.5)
+  -> text/csv (0.3)
+
+Server has REGISTERED formatters for: application/json, application/xml (NO CSV formatter registered)
+
+RESULT: application/json is CHOSEN -- it's the CLIENT's HIGHEST-preference media type that the
+  SERVER actually HAS a REGISTERED formatter capable of PRODUCING
+```
+
+Because the negotiation process walks the client's stated preferences in descending quality order and stops at the first one a registered formatter can actually satisfy, a client expressing a nuanced preference (accepting several formats, but preferring one) gets exactly that preference honored whenever the server supports it — falling back gracefully to a lower-preference format only when the top choice genuinely isn't available.
+
+**Common Pitfall:** registering a custom `IOutputFormatter` for a specific media type but forgetting to correctly implement `CanWriteResult`, causing the formatter to be silently skipped during negotiation even when its media type was the client's stated top preference — the negotiation process depends entirely on each formatter correctly reporting whether it can actually handle a given response type, and a formatter that incorrectly reports "no" gets bypassed in favor of a lower-preference (or default) format instead.
+
+---
+
 ---
