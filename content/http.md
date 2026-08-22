@@ -1014,3 +1014,84 @@ Chunked encoding lets a server begin sending a response *before* it has finished
 **Common Pitfall:** confusing `Transfer-Encoding: chunked` with a compression mechanism — chunking says nothing about whether the content is compressed at all; a chunked response with no `Content-Encoding` header is transmitted in pieces but not compressed, and conflating the two headers' distinct responsibilities (transmission mechanics versus content compression) leads to confusion when troubleshooting why a chunked response is either unexpectedly large (forgetting `Content-Encoding` entirely) or unexpectedly still lacking a `Content-Length` despite gzip being enabled (expecting compression to somehow also resolve the unknown-length problem it has no bearing on at all).
 
 ---
+
+## Beginner — Question 13
+
+**Q13: What is the `Content-Disposition` header, and how does it let a server tell the browser to download a response as a file, with a specific filename, rather than displaying it inline?**
+
+By default, a browser tries to render a response inline according to its `Content-Type` (displaying a PDF or image directly in the browser tab) — `Content-Disposition: attachment` overrides this, telling the browser to instead prompt a file download, and its `filename` parameter specifies what name to suggest for the saved file.
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="invoice-2026-03.pdf"
+
+<PDF bytes>
+```
+```csharp
+// ASP.NET Core -- returning a file result WITH an explicit Content-Disposition
+return File(pdfBytes, "application/pdf", "invoice-2026-03.pdf");
+// the FRAMEWORK sets Content-Disposition: attachment; filename="invoice-2026-03.pdf" AUTOMATICALLY
+```
+Without `Content-Disposition: attachment`, a browser receiving a PDF response would typically display it directly in a new tab using its built-in PDF viewer — with the header present, the browser instead triggers its normal "save file" download flow, pre-filled with the suggested filename, rather than attempting to render the content inline at all.
+
+**Common Pitfall:** setting `Content-Disposition: attachment` on responses that users would actually prefer to view inline (an image gallery, an embedded PDF preview) — forcing every such response to trigger a download prompt creates unnecessary friction; `Content-Disposition: inline` (or omitting the header entirely, which defaults to inline-friendly behavior for browser-renderable types) should be used specifically when in-browser viewing is the intended, desired experience.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is the `Expect: 100-continue` header, and how does it let a client check that a server will actually accept a request before sending a potentially large request body?**
+
+A client sending a large `POST` body (a big file upload) risks wasting significant bandwidth and time if the server was always going to reject the request anyway (missing authentication, an oversized payload rejected outright) — `Expect: 100-continue` lets the client send just its headers first, wait for the server's explicit "go ahead" (`100 Continue`), and only then actually transmit the (potentially large) body.
+
+```http
+-- STEP 1 -- client sends ONLY the headers FIRST, explicitly ASKING "should I even BOTHER sending the BODY?"
+POST /upload HTTP/1.1
+Content-Length: 500000000
+Expect: 100-continue
+
+-- STEP 2 -- the SERVER inspects the HEADERS ALONE (Content-Length, Authorization, etc.) and responds:
+HTTP/1.1 100 Continue
+-- ONLY NOW does the CLIENT actually SEND the 500MB body --
+
+-- OR, if the server can ALREADY tell from the HEADERS ALONE that it will REJECT this request:
+HTTP/1.1 413 Payload Too Large
+-- the CLIENT NEVER sends the 500MB body AT ALL -- SAVING the bandwidth/time that would have been WASTED
+```
+Because the server can inspect headers like `Content-Length`, `Authorization`, or a custom rate-limit check *before* the client has transmitted a single byte of the actual body, a request destined to be rejected anyway (oversized, unauthenticated, rate-limited) can fail fast, immediately, without the client wastefully uploading a large payload the server was never going to accept in the first place — directly connecting to the earlier scenario of a memory spike occurring "before the controller code even executes," since this header-only pre-check happens at an even earlier point in the request lifecycle.
+
+**Common Pitfall:** assuming every HTTP client automatically sends `Expect: 100-continue` for large uploads by default — support and default behavior vary across HTTP client libraries and configurations; a client genuinely wanting this fail-fast behavior for large uploads may need to explicitly enable it, and a server needs corresponding middleware/configuration support to correctly respond to the header rather than simply ignoring it and waiting for the full body regardless.
+
+---
+
+## Advanced — Question 13
+
+**Q13: How does `Vary: Accept-Encoding` matter specifically for shared/intermediate caches serving both compressed and uncompressed responses, and why does omitting it risk serving the wrong variant to a client that doesn't support compression?**
+
+A server capable of returning either a gzip-compressed or an uncompressed response (depending on whether the client's `Accept-Encoding` header indicates support for compression) creates two genuinely different valid responses for the *same* URL — an intermediate cache (a CDN, a shared proxy) that caches one of these variants and later serves it to a *different* client, without knowing the response's validity was conditional on `Accept-Encoding`, risks serving a gzip-compressed response to a client that can't decompress it at all, or vice versa.
+
+```http
+-- Client A supports gzip -- SERVER responds with a COMPRESSED body:
+GET /data HTTP/1.1
+Accept-Encoding: gzip
+
+HTTP/1.1 200 OK
+Content-Encoding: gzip
+Vary: Accept-Encoding    <-- TELLS any CACHE: "this response's validity DEPENDS on Accept-Encoding's VALUE"
+
+<gzip-compressed bytes>
+```
+```text
+WITHOUT "Vary: Accept-Encoding" -- an INTERMEDIATE cache might STORE this GZIP-compressed response,
+keyed ONLY by the URL -- then LATER serve THIS SAME cached, COMPRESSED response to Client B, who
+DIDN'T send "Accept-Encoding: gzip" at ALL -- Client B receives GARBLED, UNREADABLE compressed
+bytes it has NO IDEA how to DECOMPRESS, since it NEVER indicated it could handle gzip in the FIRST PLACE
+```
+`Vary: Accept-Encoding` tells any cache sitting between the origin server and the eventual client that responses for this URL genuinely differ based on the request's `Accept-Encoding` header — a correctly-behaving cache then keys its stored variants not just by URL, but by URL *plus* the relevant `Accept-Encoding` value, ensuring a client that didn't request gzip never receives a cached response that was actually compressed for a *different*, gzip-capable client.
+
+**Why this is the exact same underlying mechanism as the earlier `Vary` header discussion, applied to a specific, extremely common case:** the general `Vary` header concept (covered earlier: telling a cache that a URL has multiple valid representations depending on a specific request header) applies identically here — `Accept-Encoding` is simply the single most common, practically important header this matters for, since virtually every production deployment serving compressed responses needs `Vary: Accept-Encoding` correctly set to avoid exactly this cache-poisoning-adjacent, wrong-variant-served failure mode.
+
+**Common Pitfall:** enabling response compression (covered elsewhere) without ensuring `Vary: Accept-Encoding` is correctly set on the compressed responses — most modern web servers/frameworks handle this automatically when their built-in compression middleware is used correctly, but a custom or manually-configured compression setup can easily omit it, creating exactly the cache-serves-wrong-variant failure mode this header exists specifically to prevent, especially painful because it may only manifest intermittently, depending on which specific client happens to populate a shared cache first.
+
+---

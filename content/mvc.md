@@ -1162,4 +1162,97 @@ Every view needing to display an order's status badge simply writes `<status-bad
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is MVC's convention-based Razor View lookup, and how does it let `return View()` locate the correct `.cshtml` file automatically, without the action explicitly specifying a view name or path?**
+
+When an action calls `return View()` without an explicit view name, MVC searches a well-defined, conventional set of locations — first `Views/{ControllerName}/{ActionName}.cshtml`, then `Views/Shared/{ActionName}.cshtml` — automatically finding the matching file based purely on which controller and action are currently executing.
+
+```text
+A request hits: OrdersController.Details(int id)
+
+MVC's CONVENTION-BASED search order for 'return View()' (no name specified):
+  1. Views/Orders/Details.cshtml          -- CONTROLLER-SPECIFIC location -- CHECKED FIRST
+  2. Views/Shared/Details.cshtml          -- SHARED, cross-controller location -- CHECKED if #1 is missing
+-- the FIRST matching file found is used AUTOMATICALLY -- NO explicit path was ever specified in the CODE
+```
+```csharp
+public IActionResult Details(int id)
+{
+    var order = _orderService.GetById(id);
+    return View(order); // NO view NAME specified -- MVC's CONVENTION locates "Views/Orders/Details.cshtml" itself
+}
+```
+Because the view file's location is derived purely from the currently-executing controller and action names, moving or renaming a controller automatically changes where MVC looks for its views too — this convention is precisely why most MVC actions never need to hardcode a view path at all, only deviating from it (`return View("SomeOtherViewName")`) when an action genuinely needs to render a *different* view than its own name would conventionally imply.
+
+**Common Pitfall:** hardcoding an explicit view name/path in every single action, even when the conventional default would already resolve correctly — this adds unnecessary verbosity and creates a maintenance hazard if the controller or action is later renamed (the hardcoded string doesn't automatically follow the rename the way the convention-based lookup would); explicit view names should be reserved specifically for the genuine exceptions where an action needs to render a view other than its own conventional default.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: How does MVC's default Model Binder handle a complex ViewModel containing a nested collection of objects, and how do indexed name conventions (`Items[0].Name`) in form data let it correctly reconstruct the collection?**
+
+When a form posts data for a ViewModel containing a `List<T>` property, the default Model Binder relies on a specific naming convention in the form field names — an index in square brackets — to know which submitted fields belong to which specific element of the collection, correctly reconstructing the full list from otherwise-flat form data.
+
+```csharp
+public class OrderViewModel
+{
+    public string CustomerName { get; set; }
+    public List<OrderLineViewModel> Items { get; set; }
+}
+public class OrderLineViewModel { public string ProductName { get; set; } public int Quantity { get; set; } }
+```
+```html
+<!-- the FORM FIELDS -- FLAT, but NAMED using the INDEXED convention the DEFAULT BINDER recognizes -->
+<input name="CustomerName" value="Alice" />
+<input name="Items[0].ProductName" value="Keyboard" />
+<input name="Items[0].Quantity" value="1" />
+<input name="Items[1].ProductName" value="Mouse" />
+<input name="Items[1].Quantity" value="2" />
+```
+```csharp
+[HttpPost]
+public IActionResult Submit(OrderViewModel model)
+{
+    // model.Items now correctly contains TWO OrderLineViewModel entries, RECONSTRUCTED from the
+    // FLAT, INDEXED form field names -- the BINDER groups ALL "Items[0].*" fields TOGETHER into ONE
+    // OrderLineViewModel, "Items[1].*" fields into a SECOND, and so on
+}
+```
+Razor's `asp-for` Tag Helper (covered earlier) automatically generates these correctly-indexed field names when rendering a form bound to a collection (via an `@for` loop over the collection with the loop index used in each field's name) — a developer manually constructing form field names by hand needs to follow this exact `PropertyName[index].NestedPropertyName` convention precisely, or the binder will fail to correctly group the flat fields back into distinct collection elements.
+
+**Common Pitfall:** manually hand-writing form field names for a collection without following the exact indexed naming convention (using non-sequential or gapped indices, for instance, which the default binder doesn't reliably support) — the default Model Binder specifically expects sequential, zero-based indices; deviating from this convention (or relying on `asp-for` within a proper `@for` loop, which generates it correctly automatically) is a common source of "my list is empty after form submission" bugs.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is a Custom `IModelBinderProvider`, and how does it differ from directly implementing an `IModelBinder` (covered earlier), letting you conditionally select which binder applies based on the target type being bound?**
+
+A single `IModelBinder` implementation (covered earlier) provides binding logic for *one* specific scenario — an `IModelBinderProvider` sits one level above it, inspecting the *type* MVC is currently trying to bind and deciding *which* `IModelBinder` (potentially one of several) should actually handle it, letting a single provider dynamically supply different binders for different types.
+
+```csharp
+public class MoneyModelBinderProvider : IModelBinderProvider
+{
+    public IModelBinder GetBinder(ModelBinderProviderContext context)
+    {
+        if (context.Metadata.ModelType == typeof(Money)) // ONLY applies ITS binder for THIS specific type
+            return new BinderTypeModelBinder(typeof(MoneyModelBinder));
+        return null; // for EVERY OTHER type, DEFERS to the NEXT provider in the chain, DOESN'T handle it itself
+    }
+}
+
+// Program.cs -- providers are CHECKED IN ORDER, the FIRST one returning a NON-NULL binder WINS
+builder.Services.Configure<MvcOptions>(options =>
+    options.ModelBinderProviders.Insert(0, new MoneyModelBinderProvider()));
+```
+Because the provider returns `null` for any type it doesn't specifically want to handle, MVC falls through to the next provider in the chain (eventually reaching the framework's own built-in default binders) — this lets a custom binder apply *narrowly*, only to the specific type(s) it's actually designed for, without disrupting the framework's default binding behavior for every other type in the application.
+
+**Why a Provider is necessary rather than just registering an `IModelBinder` directly:** MVC's binder selection is inherently type-driven — for a *specific* action parameter or property, the framework needs to determine *which* binder applies before it can actually bind anything, and the Provider is exactly the extensibility point that lets custom, type-specific binding logic be inserted into that selection process, rather than there being one single, global default binder with no way to specialize behavior per type.
+
+**Common Pitfall:** implementing an `IModelBinder` correctly, but forgetting to also register a corresponding `IModelBinderProvider` (or forgetting to insert it early enough in the provider list) — an `IModelBinder` alone has no way of being discovered or associated with the specific type it's meant to handle; the Provider is the necessary piece of plumbing connecting a custom binder to the types it should actually apply to, and provider ordering matters since the first matching (non-null-returning) provider in the list wins.
+
+---
+
 ---

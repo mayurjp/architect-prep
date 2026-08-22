@@ -1178,4 +1178,87 @@ Because the ETag is derived directly from a hash of the actual serialized conten
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is HTTP Method Override (`X-HTTP-Method-Override`), and why might a client simulate a `PUT`/`DELETE` request via a `POST` carrying this header, in environments that restrict which HTTP verbs can actually be sent?**
+
+Some network intermediaries (older corporate proxies, certain restrictive client environments) only permit `GET` and `POST` requests, blocking `PUT`/`DELETE`/`PATCH` entirely — Method Override lets a client send an ordinary `POST` request while indicating, via a header, which "real" HTTP verb the server should treat it as, letting a RESTful API still be reached from an environment that can't send the verb directly.
+
+```http
+POST /api/orders/5 HTTP/1.1
+X-HTTP-Method-Override: DELETE
+
+-- the ACTUAL request is a POST -- but the header TELLS the SERVER to treat it AS a DELETE instead
+```
+```csharp
+// ASP.NET Core middleware -- REWRITES the request's METHOD based on the OVERRIDE header, EARLY in the pipeline
+app.UseHttpMethodOverride(); // built-in middleware -- checks for X-HTTP-Method-Override, REWRITES Request.Method
+```
+Because the middleware rewrites `HttpContext.Request.Method` before routing ever runs, the rest of the pipeline (routing, the specific action selected) behaves exactly as if a genuine `DELETE` request had arrived — letting the API's route definitions and action methods remain unaware that the request technically arrived as a `POST` at the actual network/transport level.
+
+**Common Pitfall:** relying on Method Override as a routine, default practice rather than a specific workaround for a genuinely verb-restricted environment — since the override header can be set by any client (including a malicious one), an API accepting it should apply the exact same authentication/authorization checks to the *overridden* method as it would to a genuine request of that verb; Method Override is a compatibility mechanism for a real constraint, not a general substitute for sending proper HTTP verbs when a client is fully capable of doing so.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is Content Negotiation's fallback behavior when a client's `Accept` header requests a format the API doesn't support at all, and how does the correct `406 Not Acceptable` response differ from an API that silently defaults to JSON regardless?**
+
+If a client's `Accept` header requests a format the server genuinely cannot produce (`Accept: application/xml` against an API that only ever serializes JSON), the technically correct response is `406 Not Acceptable` — explicitly telling the client no acceptable representation exists — rather than the server silently ignoring the client's stated preference and returning JSON anyway, which can mask a genuine client-side misconfiguration.
+
+```http
+GET /api/products/5 HTTP/1.1
+Accept: application/xml
+```
+```http
+-- CORRECT, per HTTP semantics -- the server GENUINELY cannot satisfy this Accept header at all
+HTTP/1.1 406 Not Acceptable
+
+-- VERSUS a server that SILENTLY returns JSON anyway, DESPITE the client explicitly asking for XML:
+HTTP/1.1 200 OK
+Content-Type: application/json
+{ "id": 5, "name": "Keyboard" }   -- the CLIENT'S actual PREFERENCE was simply IGNORED, no ERROR surfaced AT ALL
+```
+Silently ignoring the client's `Accept` header and returning JSON regardless can hide a genuine bug on the client's side (a misconfigured HTTP client library defaulting to requesting XML by mistake) — by contrast, a `406` response makes the mismatch between what the client asked for and what the server can provide immediately visible, rather than the client silently receiving a format it never actually requested and potentially failing to parse correctly downstream.
+
+**Why many real-world APIs deliberately choose the "silently default to JSON" behavior anyway, despite this being technically less correct:** for a public API where the overwhelming majority of clients only ever want JSON regardless of what their `Accept` header happens to say (sometimes sent as an unintentional default by an HTTP client library, not a deliberate client choice), strictly returning `406` for anything but an exact JSON match can cause more support friction than it resolves; this is a genuine, debatable trade-off between HTTP-spec correctness and practical real-world client behavior, not a case where one choice is unambiguously right.
+
+**Common Pitfall:** configuring an ASP.NET Core Web API's content negotiation to be strict (returning `406` for any non-configured format) without first checking what real client `Accept` header values actually look like in production traffic — a client library sending an overly broad or slightly malformed `Accept` header by default (not a deliberate request for an unsupported format) could suddenly start receiving `406` responses after a strictness change, breaking previously-working integrations that were relying on the API's prior, more lenient fallback behavior.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What are the `Sunset` and `Deprecation` HTTP response headers (RFC 8594), and how do they let a Web API formally, machine-readably communicate an endpoint's planned retirement date directly in the response itself?**
+
+Rather than relying solely on separate documentation or a changelog to announce that an API endpoint is deprecated and will eventually be removed, the `Deprecation` and `Sunset` headers let the server communicate this directly, in-band, on every single response from that endpoint — machine-readable by client tooling that can automatically detect and alert on approaching deprecation, not just human-readable in a document a developer might never actually read.
+
+```http
+HTTP/1.1 200 OK
+Deprecation: true
+Sunset: Sat, 31 Dec 2026 23:59:59 GMT
+Link: <https://api.example.com/docs/migration-v2>; rel="deprecation"
+
+{ "id": 5, "name": "Keyboard" }
+```
+```csharp
+// ASP.NET Core -- attaching these headers via a filter, applied to a SPECIFIC deprecated endpoint/controller
+public class DeprecationHeaderFilter : IActionFilter
+{
+    public void OnActionExecuted(ActionExecutedContext context)
+    {
+        context.HttpContext.Response.Headers.Append("Deprecation", "true");
+        context.HttpContext.Response.Headers.Append("Sunset", "Sat, 31 Dec 2026 23:59:59 GMT");
+    }
+    public void OnActionExecuting(ActionExecutingContext context) { }
+}
+```
+Because these headers appear on *every* actual response from the deprecated endpoint (not just in separate documentation a consuming team might overlook), automated tooling on the client side (a dependency-scanning bot, a CI pipeline check) can detect them directly and proactively flag "you're calling a deprecated endpoint with a sunset date of X" — turning API deprecation from something a consuming team discovers only when the endpoint is finally removed (or via a manually-read changelog) into something detectable automatically, well ahead of the actual removal date.
+
+**Why this specifically complements (rather than replaces) the `@deprecated` directive's role covered under GraphQL:** GraphQL's `@deprecated` directive (covered under that topic) operates at the *schema field* level, discoverable via introspection — REST has no equivalent introspection mechanism built into the protocol itself, so `Sunset`/`Deprecation` headers serve the analogous purpose specifically for REST APIs, communicating deprecation status through the one channel every REST client already inspects on every response: the HTTP headers themselves.
+
+**Common Pitfall:** deprecating an API endpoint (and even removing it entirely from developer documentation) without ever setting these headers on the endpoint's actual live responses — client teams still actively calling the endpoint have no automated, in-band signal that anything is changing, discovering the deprecation only when the endpoint is finally removed and their integration abruptly breaks, precisely the disruptive, poorly-communicated deprecation experience these standardized headers exist to prevent.
+
+---
+
 ---

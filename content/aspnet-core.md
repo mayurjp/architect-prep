@@ -1252,4 +1252,93 @@ Without `ValidateOnStart()`, an `IOptions<T>` instance is typically only actuall
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is `HttpContext.Features` (the `IFeatureCollection`), and how does it let one piece of middleware attach arbitrary, extensible data or capabilities for later middleware to use, beyond the fixed set of built-in `HttpContext` properties?**
+
+`HttpContext` exposes a well-known, fixed set of properties (`Request`, `Response`, `User`) — but middleware sometimes needs to communicate additional, custom information to *later* middleware in the pipeline, without the framework needing to bake a new property directly onto `HttpContext` itself for every possible need. `Features` is an extensible, per-request bag that any middleware can add a custom-typed entry to, and any later middleware can retrieve.
+
+```csharp
+public interface IRequestTimingFeature { DateTime StartedAt { get; } }
+public class RequestTimingFeature : IRequestTimingFeature { public DateTime StartedAt { get; } = DateTime.UtcNow; }
+
+// EARLY middleware -- ATTACHES a custom feature to THIS request
+app.Use(async (context, next) =>
+{
+    context.Features.Set<IRequestTimingFeature>(new RequestTimingFeature());
+    await next();
+});
+
+// LATER middleware (or even a CONTROLLER action) -- RETRIEVES it, WITHOUT any DIRECT reference passed between them
+app.Use(async (context, next) =>
+{
+    var timing = context.Features.Get<IRequestTimingFeature>();
+    var elapsed = DateTime.UtcNow - timing.StartedAt;
+    context.Response.Headers.Append("X-Elapsed-Ms", elapsed.TotalMilliseconds.ToString());
+    await next();
+});
+```
+Because `Features` is a general-purpose, type-keyed collection rather than a fixed set of named properties, any middleware (including third-party ones) can introduce entirely new, custom capabilities that later code retrieves by type — this is precisely the mechanism Kestrel itself uses internally to expose lower-level, server-specific capabilities (like raw connection details) without needing to add a new property to the core `HttpContext` class for every such capability.
+
+**Common Pitfall:** trying to pass custom, cross-middleware data via `HttpContext.Items` (a simple string-keyed dictionary) for what's really a well-defined, strongly-typed capability — `Items` works for simple, ad-hoc key-value data, but `Features` (with its strongly-typed `Set<T>`/`Get<T>` interface) is the more appropriate, type-safe mechanism specifically when the data being shared represents a genuine, well-defined capability or interface, rather than a loose, untyped value.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: How does a middleware component deliberately NOT calling `next()` short-circuit the request pipeline, and how does this let a single middleware handle a request completely on its own without any later middleware ever running?**
+
+Every middleware receives a reference to the *next* delegate in the pipeline — calling it passes control forward to whatever comes next; simply not calling it (returning without invoking `next()`) ends the pipeline right there, for this request, meaning no subsequent middleware, routing, or the eventual controller/endpoint ever executes at all.
+
+```csharp
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path == "/maintenance-check" && _maintenanceMode.IsActive)
+    {
+        context.Response.StatusCode = 503;
+        await context.Response.WriteAsync("Service temporarily unavailable for maintenance.");
+        return; // -- 'next()' is NEVER CALLED -- the PIPELINE STOPS HERE, for THIS request --
+        // -- routing, MVC/Minimal API endpoint execution -- NONE of it EVER runs for THIS request --
+    }
+    await next(); // for EVERY OTHER request, control PASSES FORWARD normally
+});
+```
+Because the middleware simply returns after writing its own response, without ever calling `next()`, every middleware registered *after* this one in `Program.cs` — and the eventual routed endpoint itself — never executes at all for this specific request; this is precisely the mechanism behind middleware like `UseStaticFiles()` (covered elsewhere), which short-circuits and serves a static file directly whenever a request matches a file in `wwwroot`, without the request ever reaching routing or an MVC controller.
+
+**Why understanding this explains several other middleware behaviors covered elsewhere:** rate-limiting middleware (covered elsewhere) short-circuits with a `429` response when a client exceeds its limit; authentication middleware challenges (returning a `401`) without calling `next()` when a request lacks valid credentials — every one of these behaviors is simply this same fundamental mechanism (deciding not to call `next()`) applied to a specific cross-cutting concern.
+
+**Common Pitfall:** writing a middleware that both writes a response *and* still calls `next()` afterward, assuming this is harmless — depending on what later middleware does, this can result in a response being written twice, or later middleware operating on a response that's technically already been sent/started, producing subtle, hard-to-diagnose bugs; a middleware that decides to fully handle a request itself should short-circuit deliberately, not call `next()` "just in case."
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is ASP.NET Core's Data Protection API, and why does a multi-instance deployment (a server farm, or multiple containers) require shared key storage for it to function correctly across every instance?**
+
+The Data Protection API provides a simple way to encrypt and later decrypt small pieces of application data (session-related cookies, anti-forgery tokens, covered under App Security) without the application needing to manage encryption keys manually — but because encryption and decryption require the *same* key, every instance of a horizontally-scaled application needs access to the *same* set of Data Protection keys, or one instance's encrypted output becomes undecryptable garbage to a different instance.
+
+```csharp
+var protector = _dataProtectionProvider.CreateProtector("MyApp.SomePurpose");
+string encrypted = protector.Protect("sensitive-value"); // encrypted using a KEY this SPECIFIC instance has
+
+// LATER (perhaps a DIFFERENT request, load-balanced to a DIFFERENT server instance):
+string decrypted = protector.Unprotect(encrypted); // FAILS if THIS instance doesn't have the SAME key!
+```
+```csharp
+// WITHOUT shared key storage -- each INSTANCE, by DEFAULT, generates and stores its OWN, SEPARATE keys
+// locally -- a value encrypted by Instance A CANNOT be decrypted by Instance B AT ALL
+
+// WITH shared key storage -- EVERY instance reads/writes the SAME keys from a SHARED location
+builder.Services.AddDataProtection()
+    .PersistKeysToAzureBlobStorage(blobUri) // or a shared file share, Redis, etc.
+    .SetApplicationName("MyApp"); // ENSURES all instances agree on the SAME logical "application" identity
+```
+Without explicitly configuring shared key storage, each server instance defaults to generating and persisting its own local keys — a value encrypted by Instance A (say, an anti-forgery token or an authentication cookie's protected payload) becomes completely undecryptable if a subsequent request from the same user happens to be load-balanced to Instance B, since B has no access to A's local keys at all, manifesting as mysterious, intermittent authentication or anti-forgery failures that seem to happen "randomly," correlating with which specific instance handled which request.
+
+**Why this specifically explains a class of hard-to-diagnose, intermittent production bugs in load-balanced deployments:** a bug that only occurs "sometimes" and seems to correlate with which server instance handled a particular request is a strong signal pointing at exactly this class of issue — Data Protection keys (or any per-instance, non-shared state) not being consistently shared across a server farm, causing operations that succeeded on one instance to inexplicably fail when a subsequent, related request happens to land on a different one.
+
+**Common Pitfall:** deploying an application to multiple instances/containers without configuring shared Data Protection key storage, then being confused by intermittent "the antiforgery token could not be decrypted" or "the cookie could not be unprotected" errors that seem to occur randomly — this is a classic, well-documented symptom specifically of each instance maintaining its own separate, unshared keys; the fix is always to configure a shared key-storage location (a database, Redis, blob storage, a shared file path) that every instance in the deployment reads from and writes to consistently.
+
+---
+
 ---

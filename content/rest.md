@@ -1938,3 +1938,85 @@ JSON Merge Patch's simplicity comes at a real cost: it has no way to explicitly 
 **Common Pitfall:** implementing a "PATCH" endpoint that simply accepts a partial JSON object without ever declaring which specific format (Merge Patch, JSON Patch, or an entirely bespoke, undocumented convention) it actually follows — a client has no reliable way to know whether sending `{"discontinuedReason": null}` means "remove this field" or "literally set it to null" without the API explicitly documenting (ideally via the appropriate `Content-Type`, `application/merge-patch+json` or `application/json-patch+json`) which specific, standardized convention its `PATCH` endpoint actually implements.
 
 ---
+
+## Beginner — Question 14
+
+**Q14: What is a REST API's root endpoint / Discovery Document convention (`GET /` returning links to major resources), and how does it give a client a genuine starting point for HATEOAS-style navigation?**
+
+Rather than a client needing every specific endpoint URL hardcoded in advance, a Discovery Document convention has the API's root URL (`GET /`) return a small response listing links to its major top-level resources — giving a client one well-known entry point from which it can discover everything else, directly connecting to the HATEOAS philosophy (covered earlier) of navigating an API via links rather than pre-memorized URLs.
+
+```http
+GET /
+```
+```json
+{
+  "_links": {
+    "products": { "href": "/products" },
+    "orders": { "href": "/orders" },
+    "customers": { "href": "/customers" },
+    "docs": { "href": "/docs" }
+  }
+}
+```
+A client that only knows the API's base URL can discover its major resource collections simply by requesting the root and following the returned links — rather than requiring separate, out-of-band documentation to be consulted before the client can make its very first meaningful request, the API itself provides that starting map directly, in-band, exactly the way HATEOAS's broader philosophy (covered earlier) envisions an API being navigable.
+
+**Common Pitfall:** implementing a Discovery Document at the root but then having every *other* endpoint's response omit further `_links` entirely — a single root-level discovery document without any further link-following capability deeper into the API provides only a shallow, partial version of HATEOAS's actual value; genuine link-driven navigation requires *every* response, not just the root, to consistently surface the next available actions/resources, the same broader adoption friction covered under HATEOAS's practical-limitations discussion.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: How does a `PUT` request that omits some of a resource's existing fields risk accidentally clearing them, and why does `PUT`'s "replace the entire resource" semantics make this a genuine design hazard distinct from `PATCH`'s partial-update model?**
+
+`PUT` is defined to *replace* a resource's entire representation with whatever the client sends — if a client's `PUT` request body omits a field the resource currently has a value for, a naive server implementation can interpret that omission as "the client wants this field cleared," silently nulling out data the client never actually intended to touch at all.
+
+```http
+-- the RESOURCE currently has BOTH a name AND a description
+GET /products/5
+{ "id": 5, "name": "Keyboard", "description": "A mechanical keyboard", "price": 29.99 }
+
+-- a CLIENT, wanting to update ONLY the price, sends a PUT -- but FORGETS to include "description"
+PUT /products/5
+{ "id": 5, "name": "Keyboard", "price": 34.99 }
+
+-- a NAIVE server implementation REPLACES the ENTIRE resource with EXACTLY what was sent --
+-- "description" is now SILENTLY WIPED OUT, even though the CLIENT never intended to touch it AT ALL --
+```
+Because `PUT`'s defined semantics are "this representation now IS the resource" (a full replacement, not a partial merge), any field genuinely omitted from the request body is, strictly per the semantics, being set to its absent/default state — this is precisely why `PUT` requires the client to send the resource's *complete* current representation (fetch it first, modify only the field(s) that need to change, then `PUT` the whole thing back) rather than a partial object, which is exactly the scenario `PATCH` (covered earlier, via JSON Patch/Merge Patch) exists to handle safely instead.
+
+**Why this is specifically a client-discipline risk, not a server bug to "fix":** a server correctly implementing `PUT`'s full-replacement semantics is behaving exactly as specified — the actual risk lives entirely on the client side, in a client that constructs a `PUT` request body carelessly, without first fetching the resource's complete current state; the fix isn't to make the server "smarter" about guessing which omitted fields the client "probably" didn't mean to clear (which reintroduces ambiguity `PUT`'s strict semantics are meant to avoid), but to ensure clients always `PUT` a complete representation, or use `PATCH` when only a partial update is genuinely intended.
+
+**Common Pitfall:** using `PUT` for what's conceptually a partial update, relying on client discipline to always remember to include every existing field even when only one is actually changing — this is fragile and error-prone across many different client implementations/teams; when partial updates are a common, expected client need, exposing a proper `PATCH` endpoint (using Merge Patch or JSON Patch, covered earlier) removes the "must remember to always send everything" burden from client code entirely.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is the Batch/Bulk Operation convention (`POST /orders/batch`), and how does it represent a deliberate exception to REST's one-resource-per-request convention, trading strict RESTfulness for reduced round-trips in high-volume scenarios?**
+
+Strict REST convention operates on one resource (or collection) per request — a Batch endpoint deliberately breaks from this, accepting an array of multiple operations in a single request body, executing them together, and returning an array of individual results — a pragmatic compromise specifically for scenarios where the Chattiness problem (covered earlier) makes strict one-request-per-resource impractical at scale.
+
+```http
+POST /orders/batch
+Content-Type: application/json
+
+[
+  { "method": "POST", "body": { "customerId": 1, "items": [...] } },
+  { "method": "POST", "body": { "customerId": 2, "items": [...] } },
+  { "method": "DELETE", "path": "/orders/42" }
+]
+```
+```json
+[
+  { "status": 201, "body": { "id": 101, "customerId": 1 } },
+  { "status": 201, "body": { "id": 102, "customerId": 2 } },
+  { "status": 204 }
+]
+```
+Rather than a client needing three separate HTTP round-trips (two `POST /orders` calls and one `DELETE /orders/42`), the batch endpoint lets all three operations travel together in a single request/response pair — dramatically reducing cumulative network round-trip overhead for a client that legitimately needs to perform many related operations at once (a mobile client syncing offline changes, a bulk-import job), at the cost of the endpoint no longer mapping cleanly onto REST's "one URL, one resource, one HTTP verb" model.
+
+**Why this is a deliberate, narrow exception rather than a general replacement for ordinary resource-per-request endpoints:** a batch endpoint sacrifices several REST conveniences at once — individual operations within the batch don't get their own distinct HTTP status code at the *transport* level (the outer request is typically a flat `200 OK` regardless of individual operation outcomes, with per-operation status embedded in the response body instead), and standard HTTP semantics like caching or conditional requests (covered elsewhere) don't apply meaningfully to a single request bundling several unrelated operations together; batch endpoints are best reserved specifically for genuinely high-volume, latency-sensitive scenarios where the round-trip reduction clearly outweighs these forfeited RESTful conveniences.
+
+**Common Pitfall:** exposing a generic batch endpoint as the *default*, primary way to interact with a resource collection, rather than reserving it specifically for the narrow scenarios that genuinely need it — for ordinary, everyday client interactions, individual resource-per-request endpoints remain simpler to reason about, cache, and secure; introducing batch endpoints prematurely, before the round-trip cost has actually been shown to be a real problem, adds real complexity (a bespoke request/response envelope format, non-standard per-operation status handling) without a correspondingly clear benefit.
+
+---
