@@ -1620,4 +1620,91 @@ Because a Reference Resolver's entire job is "given just the key, produce (or lo
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is a GraphQL field's default resolver behavior, and how does the framework automatically resolve a field from its parent object's matching property without a developer writing an explicit resolver for every single field?**
+
+Most GraphQL server frameworks provide a default resolver that simply looks up a property on the parent object matching the field's name — a developer only needs to write a *custom* resolver for fields requiring actual computation or a separate data fetch; every other field resolves "for free" via this default behavior.
+
+```csharp
+public class Product { public string Name { get; set; } = ""; public decimal Price { get; set; } }
+
+// Schema: type Product { name: String, price: Float }
+// NEITHER "name" NOR "price" needs an EXPLICIT resolver written -- the DEFAULT resolver
+// automatically looks up the MATCHING property ("Name", "Price") on the parent Product object
+
+// A field NEEDING custom logic DOES need an explicit resolver:
+public class ProductResolvers
+{
+    public async Task<List<Review>> GetReviews([Parent] Product product, [Service] IReviewService svc)
+        => await svc.GetReviewsForProductAsync(product.Id); // requires an ACTUAL data fetch -- CUSTOM resolver
+}
+```
+
+Because the overwhelming majority of a typical schema's fields are simple, direct property lookups, the default resolver mechanism means a developer only writes explicit resolver code for the *minority* of fields that genuinely require custom logic (a computed value, a separate database/service call) — dramatically reducing the boilerplate a GraphQL schema implementation would otherwise require if every single field needed its own hand-written resolver.
+
+**Common Pitfall:** writing an explicit, trivial "pass-through" resolver for every single field out of habit or unfamiliarity with the framework's default resolver behavior — this adds unnecessary boilerplate for fields that would have resolved correctly automatically; explicit resolvers should be reserved specifically for fields that need genuine custom computation or data-fetching logic.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is Query Batching at the HTTP transport level, and how does it differ from DataLoader's batching (covered earlier), which operates at the resolver/data-fetching level instead?**
+
+Query Batching combines *several separate GraphQL operations* into a single HTTP request (an array of queries sent together, rather than one request per query) — a transport-level optimization reducing HTTP round-trips for a client that needs to fire off multiple, otherwise-independent queries at roughly the same time; DataLoader's batching (covered earlier) instead operates *within* a single query's execution, batching many individual `.load()` calls into one combined data-fetch.
+
+```json
+// Query BATCHING at the TRANSPORT level -- a SINGLE HTTP request carrying MULTIPLE, SEPARATE operations
+[
+  { "query": "{ user(id: 1) { name } }" },
+  { "query": "{ product(id: 5) { name price } }" }
+]
+```
+
+```text
+Query Batching (transport level): combines MULTIPLE, INDEPENDENT client-initiated OPERATIONS
+  into ONE HTTP request -- reduces ROUND-TRIPS for a CLIENT firing off SEVERAL SEPARATE queries
+
+DataLoader batching (resolver level, covered earlier): combines MULTIPLE .load() calls WITHIN
+  the EXECUTION of a SINGLE query's resolvers -- reduces DATABASE round-trips for the N+1
+  problem WITHIN one query's OWN resolution -- an ENTIRELY DIFFERENT layer of the STACK
+```
+
+Because these two batching mechanisms operate at genuinely different layers — one reducing client-to-server HTTP round-trips for multiple separate operations, the other reducing server-to-database round-trips within a single operation's resolver execution — a GraphQL system can (and often does) employ both simultaneously, each solving a distinct kind of "too many round-trips" problem.
+
+**Common Pitfall:** conflating HTTP-level Query Batching with DataLoader's resolver-level batching simply because both use the word "batching" — they solve different problems at different layers of the stack; a client sending several unrelated queries together (transport batching) doesn't automatically get the N+1-avoidance benefit DataLoader provides *within* each individual query's own resolver execution, and vice versa.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is GraphQL Federation's "Contract" feature, and how does it let one underlying supergraph schema produce different, purpose-scoped published schemas for different audiences?**
+
+A Federation Contract lets you tag specific fields/types in the underlying supergraph schema (`@tag(name: "internal")`), then define a Contract that filters based on those tags — producing a *derived*, publicly-published schema variant that excludes internal-only fields, while the full, untagged supergraph continues to exist for internal consumers, all generated from the *same* underlying source schema rather than maintaining two separately-hand-written schemas.
+
+```graphql
+type Product {
+  id: ID!
+  name: String!
+  price: Float!
+  internalCostBasis: Float! @tag(name: "internal")   # TAGGED -- excluded from a "public" Contract variant
+}
+```
+
+```text
+Underlying SUPERGRAPH schema: contains EVERY field, including "internalCostBasis"
+
+"Public API" Contract (excludes fields tagged "internal"): published schema EXPOSES only
+  id, name, price -- "internalCostBasis" is COMPLETELY ABSENT from this VARIANT's schema
+
+"Internal Tooling" Contract (includes EVERYTHING): published schema EXPOSES ALL fields,
+  INCLUDING "internalCostBasis" -- BOTH variants are GENERATED from the SAME underlying source
+```
+
+Because both published variants derive automatically from one single, maintained source-of-truth schema (rather than two independently hand-maintained schema files that could drift out of sync with each other over time), a Contract guarantees the public and internal schemas always stay consistent with each other's shared, common fields — any change to a shared field automatically propagates correctly to both variants, while tagged, audience-specific fields remain correctly included or excluded per Contract.
+
+**Common Pitfall:** maintaining two entirely separate, hand-written schema files for a "public" and "internal" API instead of using Federation Contracts to derive both from one source — this creates an ongoing maintenance burden (every shared field change must be manually kept in sync across both files) and a real risk of the two schemas silently drifting apart over time, exactly the problem Contracts are designed to eliminate by generating both variants automatically from a single underlying schema.
+
+---
+
 ---

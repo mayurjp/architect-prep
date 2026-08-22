@@ -1535,4 +1535,90 @@ Because most real-world data (counters, small IDs, short lengths, enum values) s
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is a `.proto` file's field number (the integer after the `=` sign in a field declaration), and why must it never be reused or changed once a message type has already been deployed?**
+
+Protobuf's binary wire format identifies each field by its *number*, not its name — the field name exists only for human readability in the source `.proto` file and generated code; changing or reusing a field number after deployment means old, already-serialized messages (or a client/server still running the previous schema version) will misinterpret which logical field a given piece of encoded data actually belongs to.
+
+```protobuf
+message Product {
+  string name = 1;   // field NUMBER 1 -- this is what's ACTUALLY encoded on the WIRE
+  int32 price = 2;    // field NUMBER 2
+  // reserved 3;       // if a field is ever REMOVED, its NUMBER should be marked "reserved" --
+                        // NEVER reused for a DIFFERENT field later
+}
+```
+
+```text
+A message ENCODED using field number 2 for "price" -- if a LATER schema version reassigns
+  field number 2 to a DIFFERENT field (say, "category"), an OLDER client/server (or an OLD,
+  already-stored serialized message) DECODING that SAME bytes would INCORRECTLY interpret
+  the PRICE value as if it were a CATEGORY string -- SILENT DATA CORRUPTION, not an obvious crash
+```
+
+Because the wire format has no concept of field *names* at all — only numbers — reusing a number for a semantically different field creates a genuine, silent data-corruption risk for any consumer still using an older schema version (or any previously-serialized data using the old number's meaning) — this is exactly why the safe schema-evolution rules covered elsewhere (never reuse a removed field's number, mark it `reserved` instead) exist.
+
+**Common Pitfall:** removing an unused field from a `.proto` file and later reassigning its now-"free" field number to an entirely new, unrelated field — without marking the original number as `reserved`, this creates exactly the silent misinterpretation risk described above for anything still holding data serialized under the old schema; `reserved` field numbers exist specifically to prevent this by making the compiler itself reject any attempt to reuse them.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: How does gRPC communicate an RPC's actual outcome via the `grpc-status`/`grpc-message` HTTP/2 trailers, given that the HTTP status code itself is essentially always `200 OK` regardless of whether the RPC succeeded?**
+
+Because gRPC is layered on top of HTTP/2, and an RPC's actual result often isn't known until *after* the response body has already started streaming, gRPC communicates the real outcome via HTTP/2 *trailers* — metadata sent *after* the message body, rather than in the leading headers — with `grpc-status` (a gRPC-specific status code) and `grpc-message` (a human-readable description) carrying the actual RPC result, while the outer HTTP status code stays `200 OK` regardless of whether the RPC itself succeeded or failed.
+
+```text
+HTTP/2 Response:
+  HEADERS:  :status = 200                          <-- ALWAYS 200, regardless of RPC outcome
+  DATA:     [the actual response message BYTES, if the RPC succeeded]
+  TRAILERS: grpc-status = 5                          <-- the REAL outcome -- "5" = NOT_FOUND
+            grpc-message = "Product with id 42 not found"
+```
+
+```text
+WHY trailers, rather than putting the status in the LEADING headers: for a SERVER-STREAMING
+  RPC, the server might STREAM many response messages OVER TIME before it even KNOWS the
+  FINAL outcome -- trailers, sent AFTER the body, let the FINAL status be communicated ONLY
+  ONCE the ENTIRE RPC has actually CONCLUDED, rather than requiring it to be known UPFRONT
+```
+
+Because a client library abstracts this trailer-based mechanism away entirely (exposing a familiar `try`/`catch` or status-code-checking API rather than requiring application code to manually inspect HTTP/2 trailers), most gRPC application code never needs to think about this distinction directly — but understanding it clarifies why a network-level tool inspecting only the HTTP status code of a gRPC call sees `200 OK` even for a failed RPC, which can be genuinely confusing when debugging gRPC traffic with generic HTTP tooling.
+
+**Common Pitfall:** debugging a gRPC issue using a generic HTTP-level tool (a browser dev tools network tab, a simple HTTP proxy) and concluding "the request succeeded" purely because the HTTP status shows `200` — the REAL outcome lives in the `grpc-status` trailer, which many generic HTTP-inspection tools don't surface at all; a gRPC-aware tool (like `grpcurl`, covered earlier) is needed to see the actual RPC-level status rather than relying on the always-200 HTTP status code.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is a Bidirectional Streaming RPC used as a shared, long-lived stream for multiplexed request/response pairs (correlated via an ID field), and how does this pattern let a single stream handle many logically-independent concurrent operations?**
+
+A Bidirectional Streaming RPC (covered earlier) provides one long-lived, two-way connection where either side can send messages at any time — rather than using it for one continuous logical conversation, a common advanced pattern multiplexes *many separate, independent* request/response pairs over that single stream, tagging each message with a correlation ID so the receiver can match a given response back to its corresponding earlier request, despite them arriving out of order or interleaved with unrelated ones.
+
+```protobuf
+message MultiplexedRequest {
+  string correlationId = 1;   // uniquely identifies THIS specific logical request
+  oneof payload { GetProductRequest getProduct = 2; PlaceOrderRequest placeOrder = 3; }
+}
+message MultiplexedResponse {
+  string correlationId = 1;   // MATCHES the ORIGINAL request's correlationId
+  oneof payload { GetProductResponse getProduct = 2; PlaceOrderResponse placeOrder = 3; }
+}
+```
+
+```text
+ONE single, long-lived bidirectional stream carries MANY logically-INDEPENDENT operations
+  SIMULTANEOUSLY -- request A (correlationId "abc") and request B (correlationId "xyz") can
+  BOTH be IN-FLIGHT at the SAME time, over the SAME stream -- responses can arrive in ANY
+  ORDER -- the RECEIVER matches EACH response back to its ORIGINAL request PURELY via the
+  correlationId field, REGARDLESS of the ORDER things actually arrived in
+```
+
+Because establishing a new stream/connection has real overhead (a TLS handshake, HTTP/2 stream setup), multiplexing many logically-independent operations over one already-established, long-lived stream avoids repeating that overhead for every individual operation — genuinely useful for a client needing to issue many small, independent requests to the same server rapidly, trading some added application-level complexity (correlation ID bookkeeping) for reduced per-operation connection overhead.
+
+**Common Pitfall:** implementing this multiplexing pattern without a robust mechanism for matching timed-out or abandoned requests back to their correlation IDs — if a request's corresponding response never arrives (the server crashed while processing it), the client needs its own timeout/cleanup logic per correlation ID, since the underlying stream itself has no inherent concept of "this specific logical request within the stream has timed out," only gRPC's own Deadline (covered earlier) for the stream as a whole.
+
+---
+
 ---
