@@ -1307,4 +1307,87 @@ Because whichever limit is actually reached first is the one that governs a give
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a Message Broker's Durable versus Non-Durable queue/exchange setting, and what happens to unconsumed messages if the broker itself restarts?**
+
+A Durable queue/exchange has its definition persisted to disk, surviving a broker restart — a Non-Durable one exists only in memory and disappears entirely if the broker restarts, along with any messages sitting in it at the time.
+
+```csharp
+// RabbitMQ -- declaring a DURABLE queue
+channel.QueueDeclare(queue: "orders-queue", durable: true, exclusive: false, autoDelete: false);
+// durable: true -- the QUEUE's DEFINITION survives a broker RESTART
+
+channel.BasicPublish(exchange: "", routingKey: "orders-queue",
+    basicProperties: new BasicProperties { Persistent = true }, // the MESSAGE itself must ALSO be marked persistent
+    body: messageBody);
+```
+
+```text
+Durable queue + Persistent messages: BOTH the queue's definition AND its messages SURVIVE a broker restart
+Durable queue + Non-persistent messages: the QUEUE itself survives, but any UNCONSUMED messages are LOST
+Non-Durable queue: the ENTIRE queue (definition AND messages) is LOST on restart, REGARDLESS of message flags
+```
+
+Because durability for messages requires *both* a durable queue declaration *and* individually marking each message as persistent (missing either one leaves a gap), a production system relying on messages surviving a broker restart needs to deliberately configure both settings together — durability isn't an all-or-nothing broker-wide setting, but a combination of per-queue and per-message configuration that must be set up correctly at both levels.
+
+**Common Pitfall:** declaring a queue as durable but forgetting to also mark individual messages as persistent (or vice versa) — since both settings are required together for genuine message durability across a broker restart, missing either one silently leaves messages vulnerable to loss in exactly the scenario durability was meant to protect against.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is a Kafka Consumer's committed offset, and how does committing it (as distinct from merely consuming/reading a message) actually determine what "already processed" means for that consumer group?**
+
+Reading a message from a partition and committing its offset are two separate actions — a consumer can read (and even fully process) a message without yet committing its offset, meaning if the consumer crashes before committing, the next consumer to take over that partition will re-read the same message, since the broker only considers a message "processed" once its offset has actually been committed.
+
+```csharp
+var result = consumer.Consume(); // READS the next message -- does NOT yet mark it as processed
+ProcessOrder(result.Message.Value); // business logic runs
+consumer.Commit(result); // ONLY NOW is the offset actually committed -- broker now considers it "processed"
+```
+
+```text
+Consumer reads message at offset 105, but CRASHES before calling Commit() --
+  the LAST COMMITTED offset is still 104 -- the NEXT consumer taking over this partition
+  starts from offset 105 AGAIN -- REPROCESSING the SAME message the crashed consumer already handled
+
+-- this is EXACTLY why Kafka provides "At-Least-Once" delivery by DEFAULT, and why consumer
+   logic MUST be idempotent (covered earlier) to handle this SAFELY
+```
+
+Because the committed offset — not the act of reading — is what determines where a consumer group resumes after a restart or rebalance, the timing of *when* a consumer commits (immediately after reading versus only after fully processing) directly determines whether a crash mid-processing results in a message being silently skipped or safely reprocessed, tying directly into the At-Least-Once/idempotent-consumer design covered elsewhere.
+
+**Common Pitfall:** committing a message's offset immediately upon reading it, *before* actually processing it — if processing then fails or the consumer crashes partway through, the message is never retried at all (since its offset was already committed), silently losing it; committing only *after* successful processing (as shown above) is what actually provides Kafka's At-Least-Once guarantee.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Kafka's `min.insync.replicas` setting combined with a producer's `acks=all`, and how do the two together determine the actual durability guarantee for a produced message?**
+
+`acks=all` tells the producer to wait for acknowledgment from all *in-sync* replicas before considering a write successful — `min.insync.replicas` sets the minimum number of in-sync replicas that must actually exist for a write to be accepted at all; together, they determine exactly how many replicas must durably have a message before the producer considers it safely written.
+
+```properties
+# Topic configuration
+min.insync.replicas=2   # at least 2 REPLICAS must be IN-SYNC for a write to be ACCEPTED at all
+
+# Producer configuration
+acks=all                # wait for ALL in-sync replicas (at least min.insync.replicas of them) to ACKNOWLEDGE
+```
+
+```text
+A topic with replication factor 3, min.insync.replicas=2, producer acks=all:
+
+Write succeeds ONLY IF at least 2 of the 3 replicas ACKNOWLEDGE it -- if FEWER than 2 replicas
+are CURRENTLY in-sync (e.g., 2 brokers are DOWN), the PRODUCER receives an ERROR instead of
+a SILENT, UNDER-REPLICATED write -- explicitly REFUSING to accept a write it CAN'T durably guarantee
+```
+
+Because `acks=all` alone only guarantees "all *currently* in-sync replicas acknowledged," without `min.insync.replicas` a topic that's degraded down to just one healthy replica could still accept writes with `acks=all` satisfied trivially (since there's only one in-sync replica to ask) — `min.insync.replicas` closes this gap by making the broker itself reject a write outright if too few replicas are currently in sync to provide the durability the topic is configured to require.
+
+**Common Pitfall:** setting `acks=all` without a correspondingly meaningful `min.insync.replicas`, assuming `acks=all` alone provides strong durability — during a partial outage where a topic's in-sync replica set has shrunk to just one, `acks=all` alone would still happily accept writes acknowledged by that single replica, providing far weaker durability than intended; `min.insync.replicas` set to at least 2 (for a replication factor of 3) is what actually enforces a meaningful multi-replica durability floor.
+
+---
+
 ---

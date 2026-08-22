@@ -1455,4 +1455,84 @@ Because gRPC's long-lived HTTP/2 connections (covered earlier) pin to whichever 
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a gRPC "stub" (client), and how does generated client code let you call a remote method as if it were an ordinary local function call?**
+
+A stub is client-side code, generated directly from the `.proto` file, that exposes each RPC method as a regular-looking method on a class — calling it handles serializing the request, sending it over the network, and deserializing the response, all hidden behind what looks and feels like an ordinary local method call.
+
+```csharp
+var channel = GrpcChannel.ForAddress("https://localhost:5001");
+var client = new ProductService.ProductServiceClient(channel); // the generated STUB
+
+var response = await client.GetProductAsync(new GetProductRequest { Id = 5 });
+// LOOKS like an ordinary local method call -- but the STUB handles serialization, the network
+// call itself, and deserialization of the response, ENTIRELY hidden behind this ONE method call
+```
+
+Because the stub is generated automatically from the shared `.proto` contract (covered elsewhere as the single source of truth), the developer calling it never hand-writes any networking or serialization code at all — the generated code guarantees the client's understanding of the request/response shapes exactly matches what the server actually expects, since both were generated from the identical schema file.
+
+**Common Pitfall:** manually constructing gRPC requests/responses or writing custom serialization code instead of using the generated stub — this discards the entire benefit of the `.proto`-driven contract (compile-time type safety, guaranteed client/server agreement on message shapes) in favor of error-prone, hand-written networking code that the generated stub already provides correctly and automatically.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is `ServerCallContext.CancellationToken` in a gRPC service method, and how does it let server-side code react promptly when a client cancels a call or its deadline expires?**
+
+Every gRPC service method receives a `ServerCallContext`, whose `CancellationToken` becomes signaled the moment the underlying call is cancelled — whether because the client explicitly cancelled it, or because a Deadline (covered earlier) expired — letting server-side code that's aware of the token stop doing pointless work immediately, rather than continuing to compute a result nobody will ever receive.
+
+```csharp
+public override async Task<ReportResult> GenerateReport(ReportRequest request, ServerCallContext context)
+{
+    for (int i = 0; i < 1000; i++)
+    {
+        context.CancellationToken.ThrowIfCancellationRequested(); // STOPS immediately if the CLIENT gave up
+        await ProcessChunkAsync(i);
+    }
+    return new ReportResult { /* ... */ };
+}
+```
+
+```text
+WITHOUT checking CancellationToken: the server keeps computing a 30-SECOND report EVEN AFTER
+the client's deadline EXPIRED and it's ALREADY moved on -- pure WASTED server-side WORK
+
+WITH CancellationToken checked: the server STOPS as SOON as it learns the CLIENT no longer
+CARES about the result -- freeing up SERVER resources for OTHER, STILL-RELEVANT work instead
+```
+
+Because this token is wired directly into gRPC's Deadline Propagation mechanism (covered earlier), a long chain of downstream service calls can all observe the same "has the original caller given up" signal and stop wasted work at every level of the chain simultaneously — not just the immediate service the original caller directly invoked.
+
+**Common Pitfall:** writing a long-running gRPC service method that never checks `context.CancellationToken` at all — the server keeps computing a result for a client that has already given up and moved on (its deadline expired, or it explicitly cancelled), wasting server resources on work whose result will simply be discarded; passing the token through to any `async` calls the method makes (`await SomeAsync(context.CancellationToken)`) lets that wasted work stop as early as possible.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is Protobuf's Varint encoding for integers, and how does it let small numbers take fewer bytes on the wire than a fixed-width encoding would require?**
+
+Varint (variable-length integer) encoding uses fewer bytes for smaller values and more bytes for larger ones — each byte uses 7 bits for the actual value and 1 bit as a "continuation" flag signaling whether another byte follows, meaning a small number like `1` takes just 1 byte, while a full 64-bit value might take up to 10 bytes, rather than every integer field always consuming a fixed 4 or 8 bytes regardless of its actual magnitude.
+
+```text
+Fixed-width encoding: EVERY int32 ALWAYS takes EXACTLY 4 bytes, REGARDLESS of its actual value --
+  the number "1" takes the SAME 4 bytes as the number "2,000,000,000"
+
+Varint encoding: the number "1" takes JUST 1 byte -- the number "300" takes 2 bytes --
+  ONLY genuinely LARGE numbers approach (or exceed) the 4-5 bytes a FIXED-width encoding
+  would have used UNCONDITIONALLY for EVERY value, LARGE or SMALL
+```
+
+```text
+Value 1   (binary 00000001) -- Varint: 0x01                          -- 1 BYTE
+Value 300 (binary 100101100) -- Varint: 0xAC 0x02 (7 bits per byte,
+           continuation bit set on the FIRST byte, CLEAR on the LAST) -- 2 BYTES
+```
+
+Because most real-world data (counters, small IDs, short lengths, enum values) skews heavily toward small numbers rather than the full range a fixed-width integer type could represent, Varint encoding's variable byte-length trades a small amount of decoding complexity for a meaningful reduction in typical payload size — directly contributing to Protobuf's overall compactness compared to formats that always use a fixed-width representation regardless of the actual value.
+
+**Common Pitfall:** choosing Protobuf's `int32`/`int64` (which use Varint encoding) for a field expected to frequently hold *large*, essentially-random values (like a hash or a large random ID) — Varint encoding is LESS efficient than a fixed-width encoding for large values, since large numbers require the full multi-byte Varint representation; Protobuf's `sfixed32`/`sfixed64` (fixed-width) types exist specifically for this case, and choosing the wrong integer type for the actual data's typical magnitude can make encoding slightly less efficient than intended.
+
+---
+
 ---

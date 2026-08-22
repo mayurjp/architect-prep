@@ -1542,4 +1542,82 @@ Because the persisted query's hash plus its variables together form a complete, 
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a GraphQL Playground / GraphiQL in-browser tool, and how does its live schema exploration help a developer construct a query without writing one entirely from scratch?**
+
+GraphiQL/Playground is an interactive, in-browser IDE that connects directly to a running GraphQL endpoint's introspection API (covered elsewhere), giving a developer autocomplete suggestions for every available type and field, inline documentation pulled from the schema itself, and immediate query execution with live results — dramatically lowering the barrier to exploring an unfamiliar API compared to reading separate, hand-written documentation.
+
+```text
+Typing "query { user" in GraphiQL immediately AUTOCOMPLETES available fields on the "User" type,
+PULLED DIRECTLY from the schema's OWN introspection data -- NO separate documentation needed,
+and the SUGGESTIONS are ALWAYS accurate, since they come from the ACTUAL, LIVE schema itself
+```
+
+Because GraphiQL derives everything it shows directly from the live schema via introspection, its suggestions and documentation can never drift out of sync with the API's actual current shape the way separately-maintained, hand-written documentation sometimes does — a developer exploring an unfamiliar GraphQL API can construct and test a working query interactively, discovering available fields and their types as they go, rather than needing prior documentation at all.
+
+**Common Pitfall:** leaving introspection (and therefore GraphiQL/Playground) enabled on a production API without considering whether exposing the full schema publicly is appropriate — introspection is invaluable during development, but for a public-facing production API, some teams deliberately disable it to avoid revealing the complete schema (including fields not intended for public documentation) to anyone who queries it.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is a DataLoader's batching window, and how does it collect multiple individual `.load(id)` calls issued within a single execution tick before firing off one batched request?**
+
+A DataLoader doesn't execute a database call the instant `.load(id)` is called — instead, it queues the requested key and waits until the *current* tick of the JavaScript/async event loop completes, collecting every `.load()` call made during that same tick, before finally firing one single batched request covering all the collected keys at once.
+
+```csharp
+// Within the SAME resolver execution "tick" -- multiple .load() calls for DIFFERENT posts' authors
+var author1 = authorLoader.LoadAsync(post1.AuthorId); // QUEUED, not yet executed
+var author2 = authorLoader.LoadAsync(post2.AuthorId); // ALSO queued
+var author3 = authorLoader.LoadAsync(post3.AuthorId); // ALSO queued
+
+// Once the CURRENT tick completes, the DataLoader fires ONE batched call:
+// SELECT * FROM Authors WHERE Id IN (post1.AuthorId, post2.AuthorId, post3.AuthorId)
+```
+
+```text
+WITHOUT batching: 3 SEPARATE .load() calls -> 3 SEPARATE database queries (the N+1 problem, covered earlier)
+WITH a batching window: the SAME 3 .load() calls are COLLECTED, then executed as ONE SINGLE
+  batched query, REGARDLESS of how many INDIVIDUAL resolver instances happened to call .load()
+```
+
+Because resolvers for sibling fields (`post1.author`, `post2.author`, `post3.author`) typically execute within the same tick of the GraphQL execution engine's resolution process, the DataLoader's batching window naturally captures all of their individual `.load()` calls together — this is the concrete mechanism underlying the earlier-covered "DataLoader solves the N+1 problem" claim, not merely a vague caching layer.
+
+**Common Pitfall:** calling `.load()` and immediately `await`-ing its result one at a time inside a loop, rather than collecting all the promises first and awaiting them together — awaiting each one individually before starting the next can inadvertently split what should have been one batching window into several separate ones, defeating the batching benefit the DataLoader is specifically designed to provide.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is a GraphQL Federation Reference Resolver, and how does a subgraph use one to resolve an Entity by its `@key` fields when another subgraph only provided that key, not the full object?**
+
+When one subgraph returns a partial Entity representation (just its `@key` fields, covered earlier) and the Gateway's query plan needs a *different* subgraph to contribute additional fields for that same Entity, the second subgraph needs a way to "resolve" a full object starting from just the key — a Reference Resolver (`__resolveReference` / `ResolveReference`) is exactly that: a function the subgraph implements specifically to load the full entity given only its key fields.
+
+```csharp
+// Subgraph B, contributing a "Reviews" field to the "Product" entity OWNED by Subgraph A
+[ReferenceResolver]
+public static Product ResolveReference(Product productRef) // 'productRef' has ONLY the @key field(s) populated
+{
+    // productRef.Id is populated (the @key) -- everything ELSE on Product is NOT yet -- THIS
+    // resolver's job is to load whatever Subgraph B needs, USING JUST that key, to compute its OWN fields
+    return new Product { Id = productRef.Id, Reviews = LoadReviewsForProduct(productRef.Id) };
+}
+```
+
+```text
+Gateway's query plan: "the CLIENT wants Product.name (from Subgraph A) AND Product.reviews (from Subgraph B)"
+
+STEP 1: Subgraph A resolves Product { id, name }
+STEP 2: Gateway sends Subgraph B a REFERENCE containing JUST { id } -- Subgraph B's Reference
+        Resolver USES that id to compute the "reviews" field, RETURNING it back to the Gateway
+STEP 3: Gateway MERGES both subgraphs' contributions into ONE combined Product object for the CLIENT
+```
+
+Because a Reference Resolver's entire job is "given just the key, produce (or look up) enough of this entity to compute my own subgraph's contributed fields," it's the mechanism that actually makes Federation's "different subgraphs contribute different fields to the same logical entity" model work at the execution level, not merely at the schema-definition level (`@key`, covered earlier) — the schema declares *which* fields form the key, while the Reference Resolver defines *how* to actually use that key at query time.
+
+**Common Pitfall:** assuming the `@key` directive alone is sufficient for Federation to work, without implementing each contributing subgraph's own Reference Resolver — `@key` only declares which fields identify an entity; without a Reference Resolver actually implementing how to load or construct the entity from just those key fields, the Gateway has no way to actually fetch that subgraph's contributed data for a given entity reference.
+
+---
+
 ---
