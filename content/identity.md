@@ -1235,3 +1235,80 @@ Because the `code_verifier` is generated freshly for each individual authorizati
 **Common Pitfall:** implementing the Authorization Code flow for a mobile app or SPA using a traditional, static client secret embedded directly in the distributed application code (extractable by anyone who decompiles the app or inspects the SPA's own JavaScript) — a public client has no way to keep such a secret genuinely confidential at all, making a static embedded secret provide no real security benefit; PKCE's dynamically-generated, per-attempt verifier is specifically designed to solve exactly this structural limitation of public clients.
 
 ---
+
+## Beginner — Question 14
+
+**Q14: What is MFA Fatigue (MFA prompt bombing), and how does an attacker already holding a stolen password exploit it by spamming push notifications until a confused or annoyed user approves one?**
+
+MFA (covered earlier) is meant to stop an attacker who only has a stolen password — but push-notification-based MFA introduces a new attack surface: an attacker who already has valid credentials can repeatedly trigger login attempts, sending the legitimate user a barrage of "approve this login?" push notifications, hoping the user eventually taps "approve" out of confusion, annoyance, or simply to make the notifications stop.
+
+```text
+1. ATTACKER already possesses a STOLEN, VALID password (via phishing, a DATA BREACH, etc.)
+2. ATTACKER repeatedly ATTEMPTS to log in, using the STOLEN password, MANY TIMES in a ROW
+3. EACH attempt triggers a PUSH notification to the LEGITIMATE user's OWN phone: "Approve this login?"
+4. the LEGITIMATE user, RECEIVING notification AFTER notification (at 2 AM, OR during a BUSY workday),
+   EVENTUALLY taps "APPROVE" on ONE of them -- OUT of CONFUSION, ANNOYANCE, or SIMPLY to make the
+   NOTIFICATIONS STOP -- WITHOUT realizing they JUST GRANTED the ATTACKER full ACCESS
+```
+Because the underlying MFA mechanism (a push notification requiring only a tap to approve) is genuinely convenient specifically because it requires so little user effort, that same low-friction convenience is exactly what an attacker exploits — bombarding the user with enough repeated prompts that eventually, statistically, one gets approved, entirely bypassing what MFA was supposed to prevent, without ever needing to break the cryptography or guess a code at all.
+
+**Mitigations:** requiring a displayed, matching numeric code (the user must enter a number shown on the *login* screen into their *phone's* prompt, rather than a single generic "approve/deny" tap) specifically defeats blind-approval fatigue attacks, since a user aimlessly tapping "approve" without actually looking at their login screen can no longer succeed; rate-limiting how many MFA prompts can be sent within a time window is another common, complementary mitigation.
+
+**Common Pitfall:** treating "we have MFA enabled" as sufficient protection on its own, without considering the specific, well-documented MFA Fatigue attack vector against low-friction, single-tap push approval — number-matching (requiring the user to actively read and input a matching code, rather than a blind approve/deny tap) is a meaningfully stronger mitigation against this specific attack than simple push-approval MFA alone provides.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is Adaptive (Risk-Based) Authentication, and how does evaluating signals — a new device, an unusual location — to dynamically decide whether to require MFA balance security against user friction?**
+
+Rather than requiring MFA unconditionally on every single login (adding friction even for a completely routine, low-risk login from a user's usual device and location), Adaptive Authentication evaluates contextual risk signals in real time and only requires the *additional* MFA step when something genuinely looks unusual or risky — extending the narrower, action-specific Step-Up Authentication (covered earlier) into a more general, continuously-evaluated risk assessment applied to authentication itself.
+
+```text
+LOGIN attempt -- the SYSTEM evaluates SEVERAL risk SIGNALS, in REAL TIME:
+  -- is this the USER's USUAL device (recognized via a DEVICE fingerprint/cookie)?
+  -- is this the USER's USUAL, typical geographic LOCATION?
+  -- is this a TYPICAL time of day for THIS user's NORMAL login PATTERN?
+  -- has this IP address been ASSOCIATED with KNOWN malicious activity ELSEWHERE?
+
+LOW-risk login (usual device, USUAL location, NORMAL time): -> ALLOW immediately, NO extra MFA
+  step REQUIRED -- MINIMAL friction for the OVERWHELMING MAJORITY of GENUINELY legitimate logins
+
+HIGH-risk login (a BRAND-NEW device, a COMPLETELY DIFFERENT country, 3 AM local time): -> REQUIRE
+  an ADDITIONAL MFA challenge BEFORE allowing the login to PROCEED AT ALL
+```
+Because most logins genuinely are routine and low-risk (the same user, the same device, the same usual pattern), applying MFA friction *only* when a specific login's contextual signals actually look unusual lets an application dramatically reduce the *average* friction most users experience day-to-day, while still applying meaningfully stronger scrutiny specifically to the smaller fraction of logins that actually warrant it.
+
+**Why this represents a genuinely different, more general approach than the narrower, action-specific Step-Up Authentication covered earlier:** Step-Up Authentication (covered earlier) triggers additional verification for a specific, predefined *action* (viewing a bank statement, transferring funds) — Adaptive Authentication instead continuously evaluates risk at the point of *authentication itself*, based on contextual signals about the login attempt, applying to the login process generally rather than being tied to any one specific, predefined sensitive action.
+
+**Common Pitfall:** implementing MFA as a uniform, unconditional requirement for every single login regardless of context, accepting the resulting friction as simply "the cost of security" — for the large fraction of genuinely low-risk, routine logins, this friction provides comparatively little additional security benefit while measurably degrading everyday user experience; Adaptive Authentication's risk-signal-based approach concentrates that friction specifically where it actually matters, rather than applying it uniformly regardless of actual risk.
+
+---
+
+## Advanced — Question 14
+
+**Q14: How does FIDO2/WebAuthn's public/private key pair — generated per relying party — prevent a phishing site from ever obtaining a usable credential, even if the user is tricked into visiting it?**
+
+Passwordless/Passkeys (covered earlier at a conceptual level) rely specifically on the FIDO2/WebAuthn standard's key mechanism: the browser/authenticator generates a *distinct* key pair for each relying party (each specific website/domain) — cryptographically binding a credential to the exact origin it was created for, in a way a password (which a user can be tricked into typing anywhere) fundamentally cannot replicate.
+
+```text
+User REGISTERS a passkey with the GENUINE site, "https://mybank.com":
+  -> the AUTHENTICATOR (a phone, a security key) GENERATES a key pair SPECIFICALLY BOUND to
+     the ORIGIN "https://mybank.com" -- THIS EXACT key pair is USELESS ANYWHERE ELSE, BY DESIGN
+
+LATER, an ATTACKER tricks the user into VISITING a PHISHING site: "https://mybank-secure.com" (a
+LOOK-ALIKE, DIFFERENT origin):
+  -> the BROWSER/AUTHENTICATOR checks: "does a REGISTERED credential EXIST for THIS SPECIFIC origin,
+     'https://mybank-secure.com'?" -- NO -- the ONLY registered CREDENTIAL is BOUND to THE
+     DIFFERENT origin, "https://mybank.com"
+  -> the AUTHENTICATOR SIMPLY REFUSES to OFFER ANY credential AT ALL for THIS phishing SITE --
+     EVEN IF the user GENUINELY WANTS to "log in" HERE, THERE IS STRUCTURALLY NOTHING for the
+     BROWSER to OFFER -- the PHISHING attempt FAILS AUTOMATICALLY, WITH NO USER JUDGMENT INVOLVED
+```
+Because the credential is cryptographically bound to the *exact origin* it was registered against (checked automatically by the browser itself, not something a confused or rushed user could accidentally override), a passkey simply cannot be used against a different, phishing domain at all — this is a fundamentally different, structural defense than "the user should be careful to check the URL before entering their password," since it removes the user's own judgment from the security equation entirely: even a user who genuinely wants to authenticate on the phishing site cannot do so, because the browser itself has nothing valid to offer for that specific, different origin.
+
+**Why this specifically closes the entire phishing category, rather than merely making it harder:** a password (or even an OTP code) can always, in principle, be typed by a user into any site that asks, regardless of whether that site is genuine — a WebAuthn credential's origin-binding is enforced by the browser/authenticator at the protocol level, structurally, meaning there is no user action at all (no amount of being "tricked") that could make a passkey registered for one origin usable against a different one; this is precisely why Passkeys are described as *phishing-resistant* by design, not merely as a stronger form of the same "avoid being tricked" defense passwords/OTPs rely on.
+
+**Common Pitfall:** describing Passkeys as simply "a more convenient password" or "a stronger OTP," missing that their actual, structural security advantage over both is the origin-binding mechanism specifically — a user's own carefulness or training has nothing to do with why a phishing attempt against a Passkey-protected account fails; it fails because the browser/authenticator itself has structurally nothing valid to offer the phishing site, a categorically different and stronger guarantee than any user-vigilance-dependent defense.
+
+---

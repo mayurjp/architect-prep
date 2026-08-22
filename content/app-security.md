@@ -1266,6 +1266,110 @@ Because none of the individual gadgets is inherently malicious — each is a com
 
 ---
 
+## Beginner — Question 14
+
+**Q14: Why does rate-limiting by IP address alone provide weaker protection than combining it with account-based or API-key-based limiting, given an attacker can simply rotate IP addresses to bypass an IP-only limit?**
+
+Rate limiting purely by IP address assumes each IP address represents roughly one distinct client — but an attacker with access to many IP addresses (a botnet, a pool of proxy/VPN exit nodes, cloud-hosted instances they control) can simply spread their requests across many different source IPs, with each individual IP staying comfortably under the per-IP limit even while the attacker's *overall* request volume remains enormous.
+
+```csharp
+// IP-based rate limiting ALONE -- an ATTACKER with 1,000 DIFFERENT IPs TRIVIALLY bypasses THIS
+services.AddRateLimiter(options => options.AddFixedWindowLimiter("perIp",
+    opt => { opt.PermitLimit = 100; opt.Window = TimeSpan.FromMinutes(1); }));
+// -- EACH of the ATTACKER's 1,000 IPs sends ONLY 100 requests/minute -- STAYS UNDER the LIMIT,
+//    PER IP -- but the ATTACKER's TOTAL volume is 100,000 requests/minute, ACROSS all THEIR IPs --
+
+// COMBINING with ACCOUNT/API-KEY-based limiting -- CANNOT be bypassed by ROTATING IPs AT ALL
+services.AddRateLimiter(options => options.AddFixedWindowLimiter("perApiKey",
+    opt => { opt.PermitLimit = 100; opt.Window = TimeSpan.FromMinutes(1); }));
+// -- limits by the CLIENT's OWN API KEY/account -- REGARDLESS of WHICH (or HOW MANY DIFFERENT) IP
+//    addresses THAT SAME account/key HAPPENS to be USED from --
+```
+Because an API key or account identity travels *with* the client regardless of which IP address they happen to be using at any given moment, a limit scoped to that identity cannot be bypassed simply by switching IP addresses — an attacker attempting a credential-stuffing attack (covered under Identity) using one compromised account, or trying many different accounts, still hits the account/key-scoped limit regardless of how many distinct source IPs they spread the attempts across.
+
+**Common Pitfall:** relying solely on IP-based rate limiting as a complete defense against abuse, without also layering account/API-key-based limiting on top — for any attacker with access to multiple IP addresses (a genuinely low bar, given the availability of proxy services and botnets), IP-based limiting alone provides only weak, easily-circumvented protection; combining it with identity-scoped limiting (which doesn't change no matter how many IPs an attacker rotates through) closes this specific, well-known bypass.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is a Host Header Injection vulnerability, and how does an application trusting a client-supplied `Host` header — for instance, to build a password-reset link — let an attacker poison that link to point at an attacker-controlled domain?**
+
+The `Host` header (covered under HTTP) is technically client-supplied, not a value the server can inherently trust — an application that naively uses it to construct absolute URLs (a password-reset link emailed to a user) can be tricked into generating a link pointing at whatever domain the attacker supplied in their own request's `Host` header, rather than the application's genuine, intended domain.
+
+```csharp
+// VULNERABLE -- TRUSTS the client-supplied Host header to BUILD an ABSOLUTE URL, EMAILED to the USER
+[HttpPost("forgot-password")]
+public async Task<IActionResult> ForgotPassword(string email)
+{
+    var token = GeneratePasswordResetToken(email);
+    var resetLink = $"https://{Request.Host}/reset-password?token={token}"; // Request.Host -- CLIENT-SUPPLIED!
+    await _emailService.SendAsync(email, "Reset your password", $"Click here: {resetLink}");
+    return Ok();
+}
+```
+```http
+POST /forgot-password HTTP/1.1
+Host: evil-attacker-domain.com    <-- the ATTACKER supplies THIS, in THEIR OWN request, TARGETING a VICTIM's email
+```
+```text
+The RESULTING email SENT to the VICTIM contains: "Click here: https://evil-attacker-domain.com/
+reset-password?token=abc123" -- a GENUINE, VALID password-reset TOKEN, but EMBEDDED in a LINK
+POINTING at the ATTACKER's OWN domain -- IF the VICTIM clicks it, the ATTACKER's SERVER (NOT the
+REAL application) RECEIVES the VALID reset TOKEN, letting the ATTACKER COMPLETE the password RESET
+```
+Because the `Host` header is entirely under the requester's own control (it's just an ordinary HTTP header the *client* sends, not something the server generates or verifies independently), any application logic that trusts it to construct security-sensitive absolute URLs (password reset links, email verification links) can be manipulated into generating links pointing anywhere the attacker chooses — with the genuine, valid token embedded in that attacker-controlled link.
+
+**The fix — never build security-sensitive URLs from the client-supplied `Host` header; use a server-configured, trusted base URL instead:**
+```csharp
+var resetLink = $"{_options.TrustedBaseUrl}/reset-password?token={token}"; // a FIXED, SERVER-SIDE CONFIGURED value,
+                                                                            // NEVER derived from CLIENT input AT ALL
+```
+Using a base URL from the application's own trusted configuration (never from anything the requester supplies) eliminates the entire vulnerability class, since there's no longer any client-controlled input feeding into the construction of a security-sensitive link at all.
+
+**Common Pitfall:** trusting `Request.Host`/`Request.Headers["Host"]` for constructing any security-sensitive URL, reasoning that "this is just how the framework tells me my own domain" — the `Host` header is fundamentally client-supplied data, indistinguishable at the framework level from any other attacker-controllable request header, and should never be trusted for generating links whose destination matters for security (password resets, email verification, OAuth redirect URIs) without independent, server-side validation or an explicitly configured trusted value instead.
+
+---
+
+## Advanced — Question 14
+
+**Q14: How can a Race Condition in a multi-step email/OTP verification flow — submitting the same verification code via multiple concurrent requests — bypass a one-time-use check implemented without proper atomicity?**
+
+A verification flow (email confirmation, an OTP code) typically checks "has this code already been used?" before marking it used and granting the associated action (activating an account, confirming an email change) — if that check-then-mark sequence isn't atomic, sending the exact same code via several simultaneous, concurrent requests can let *all* of them pass the "not yet used" check before any of them has had a chance to mark it used, exactly the TOCTOU race condition pattern covered earlier, applied specifically to an authentication/verification flow.
+
+```csharp
+// VULNERABLE -- the CHECK and the MARK-AS-USED are SEPARATE steps, WITH a GAP an attacker can EXPLOIT
+[HttpPost("verify-email-change")]
+public async Task<IActionResult> VerifyEmailChange(string code)
+{
+    var verification = await _db.EmailVerifications.FirstAsync(v => v.Code == code);
+    if (verification.IsUsed) return BadRequest("Code already used");   // CHECK
+
+    // <-- THE GAP: if MULTIPLE CONCURRENT requests, ALL carrying the SAME code, ARRIVE HERE
+    //     SIMULTANEOUSLY, ALL of them can PASS the check ABOVE BEFORE ANY of them REACHES the MARK below
+
+    await _userService.ChangeEmailAsync(verification.UserId, verification.NewEmail); // the SENSITIVE ACTION
+    verification.IsUsed = true;                                                        // MARK as used (TOO LATE)
+    await _db.SaveChangesAsync();
+    return Ok();
+}
+```
+Sending the same verification code as, say, 20 simultaneous concurrent requests can result in the sensitive action (`ChangeEmailAsync`, in this example) executing multiple times before any single request actually marks the code as used — potentially exploitable depending on what the specific action does (a one-time discount code redeemed multiple times, an account-linking action performed redundantly in a way that creates an inconsistent state).
+
+**The fix — the SAME atomic, database-enforced check-and-mark pattern covered under the general TOCTOU discussion earlier:**
+```csharp
+var rowsAffected = await _db.Database.ExecuteSqlInterpolatedAsync(
+    $"UPDATE EmailVerifications SET IsUsed = 1 WHERE Code = {code} AND IsUsed = 0");
+if (rowsAffected == 0) return BadRequest("Code already used or invalid"); // ATOMICALLY enforced -- NO race possible
+// ONLY NOW, having ATOMICALLY confirmed EXACTLY ONE request WON the race, proceed with the SENSITIVE action
+await _userService.ChangeEmailAsync(userId, newEmail);
+```
+By collapsing the check and the mark-as-used update into one atomic database statement (exactly the general TOCTOU fix pattern covered earlier), only the single request whose `UPDATE` actually affects a row (because `IsUsed` was still `0` at the exact moment its statement executed) proceeds to perform the sensitive action — every other concurrent request attempting the same code finds `rowsAffected == 0` and is correctly rejected, regardless of how many simultaneous attempts were made.
+
+**Common Pitfall:** implementing one-time-use verification codes with a separate "check if used" query followed by a later "mark as used" update, exactly the same non-atomic check-then-act pattern already covered as a TOCTOU vulnerability in a general context — authentication/verification flows are a particularly high-value, security-sensitive target for exactly this race condition class, making the atomic check-and-update pattern especially important to apply here, not merely a generic best practice reserved for less security-critical code paths.
+
+---
+
 ---
 
 ## Beginner — Question 12

@@ -1236,4 +1236,83 @@ Because the controller never stops comparing and correcting, any unauthorized ma
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What are Deployment Frequency and Lead Time for Changes — two of the four DORA metrics — and how do they measure a team's actual software delivery performance?**
+
+DORA (DevOps Research and Assessment) metrics are four well-researched, industry-standard measures of software delivery performance — Deployment Frequency measures how often an organization successfully deploys to production, and Lead Time for Changes measures how long it takes a code commit to actually reach production — together capturing genuine delivery *speed*.
+
+```text
+DEPLOYMENT FREQUENCY -- how OFTEN does THIS team ACTUALLY deploy to PRODUCTION?
+  ELITE performers: MULTIPLE deploys PER DAY
+  LOW performers:   FEWER than ONCE per MONTH
+  -- a HIGHER frequency GENERALLY correlates with SMALLER, LOWER-RISK, easier-to-DIAGNOSE changes
+     per DEPLOYMENT, rather than INFREQUENT, LARGE, RISKY "big bang" releases
+
+LEAD TIME FOR CHANGES -- how LONG from "CODE COMMITTED" to "RUNNING in PRODUCTION"?
+  ELITE performers: LESS than ONE DAY
+  LOW performers:   MORE than SIX MONTHS
+  -- a SHORTER lead time means FASTER FEEDBACK -- a DEVELOPER learns WHETHER their change
+     ACTUALLY works CORRECTLY in PRODUCTION WITHIN hours, NOT months
+```
+Because these two metrics are measured consistently and have been correlated (through large-scale industry research, the annual "State of DevOps" reports) with genuinely better organizational outcomes — not just "feels faster," but measurably better business performance — they provide an evidence-based way to benchmark a team's delivery pipeline health, rather than relying purely on subjective impressions of "we deploy pretty often" or "our releases feel reasonably fast."
+
+**Common Pitfall:** treating "how often we deploy" as a vanity metric disconnected from actual delivery health, without recognizing that Deployment Frequency and Lead Time for Changes are specifically two of four *research-validated* metrics correlated with genuinely better organizational performance — these aren't arbitrary numbers to track for their own sake; they're specifically the metrics DORA's research identified as meaningfully distinguishing high-performing engineering organizations from low-performing ones.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What are Change Failure Rate and Mean Time to Restore (MTTR) — the remaining two DORA metrics — and how do they balance the speed-focused metrics covered above with stability and quality concerns?**
+
+Deployment Frequency and Lead Time (covered above) measure delivery *speed* — Change Failure Rate (what percentage of deployments cause a production failure) and Mean Time to Restore (how long it takes to recover once a failure does occur) measure delivery *stability*, together giving a genuinely balanced picture: a team deploying extremely fast but constantly breaking production isn't actually a high performer by DORA's own definition.
+
+```text
+CHANGE FAILURE RATE -- what PERCENTAGE of DEPLOYMENTS cause a FAILURE requiring REMEDIATION?
+  ELITE performers: 0-15%
+  LOW performers:   46-60%     (nearly HALF of ALL deployments cause a PRODUCTION problem)
+
+MEAN TIME TO RESTORE (MTTR) -- how LONG does it TAKE to RECOVER SERVICE after a FAILURE OCCURS?
+  ELITE performers: LESS than ONE HOUR
+  LOW performers:   MORE than ONE WEEK
+```
+Because these two metrics specifically capture *quality/stability*, a team can't "game" DORA's overall picture just by deploying extremely frequently — a high Deployment Frequency combined with a high Change Failure Rate reveals a team shipping fast but breaking things constantly, which DORA's research specifically found does *not* correlate with genuinely elite organizational performance; the elite performers combine high speed (Deployment Frequency, Lead Time) *with* high stability (low Change Failure Rate, fast MTTR) simultaneously.
+
+**Why all four metrics need to be considered together, rather than optimizing any single one in isolation:** optimizing purely for Deployment Frequency without regard for Change Failure Rate could actually make things worse (shipping more frequently, but with proportionally more failures) — DORA's actual research finding is that elite performers achieve *both* high speed and high stability together, not a trade-off between them, which is precisely why the framework tracks all four metrics as a connected set rather than any single one in isolation.
+
+**Common Pitfall:** focusing exclusively on the "speed" metrics (Deployment Frequency, Lead Time) as the goal, treating Change Failure Rate and MTTR as secondary or unrelated concerns — DORA's research specifically found that genuinely elite-performing organizations achieve strong results across *all four* metrics simultaneously, not fast-but-fragile delivery; optimizing speed alone while ignoring stability produces a team that looks good on half the framework while quietly failing the other half.
+
+---
+
+## Advanced — Question 14
+
+**Q14: How does Trunk-Based Development's practice of committing incomplete features directly to trunk, hidden behind a Feature Flag, avoid the long-lived feature branch problem Trunk-Based Development is specifically designed to solve?**
+
+Trunk-Based Development (covered earlier) avoids long-lived feature branches by having developers commit directly and frequently to trunk — but a genuinely large feature can't always be built and merged in one single, small commit; Feature Flags (covered earlier) resolve this tension by letting incomplete, in-progress code be committed to trunk immediately (keeping branches short-lived, as Trunk-Based Development requires) while remaining invisible/inactive to users until the flag is explicitly flipped on, once the feature is genuinely complete.
+
+```csharp
+// an INCOMPLETE, IN-PROGRESS feature -- committed DIRECTLY to trunk, TODAY, LONG before it's actually FINISHED
+if (_featureFlags.IsEnabled("NewCheckoutFlow"))
+{
+    return NewCheckoutFlow(); // STILL genuinely UNFINISHED -- but ALREADY merged to TRUNK, HIDDEN behind the FLAG
+}
+return LegacyCheckoutFlow(); // what USERS ACTUALLY see, for NOW -- COMPLETELY UNAFFECTED by the IN-PROGRESS work
+```
+```text
+WITHOUT feature flags -- a LARGE feature would REQUIRE a LONG-LIVED feature BRANCH, held OPEN for
+  WEEKS/MONTHS until the ENTIRE feature is COMPLETE -- EXACTLY the MERGE-CONFLICT-PRONE, "MERGE HELL"
+  scenario Trunk-Based Development (covered EARLIER) is SPECIFICALLY designed to AVOID
+
+WITH feature flags -- the SAME large feature is built INCREMENTALLY, COMMITTED to TRUNK IN SMALL,
+  FREQUENT pieces, THE ENTIRE TIME -- NEVER requiring a LONG-LIVED BRANCH AT ALL -- the FLAG,
+  not BRANCH ISOLATION, is WHAT keeps the INCOMPLETE work HIDDEN from USERS in the MEANTIME
+```
+Because the flag (not a separate branch) is what hides incomplete work from users, developers working on a large feature can commit their in-progress code to trunk continuously, in small pieces, exactly as Trunk-Based Development recommends — completely avoiding the long-lived branch (and its accompanying merge-conflict risk) that would otherwise be needed to keep unfinished work isolated until it's genuinely complete.
+
+**Why this combination specifically resolves a tension that neither practice alone fully addresses:** Trunk-Based Development alone struggles with genuinely large, multi-week features (forcing an awkward choice between a long-lived branch or committing obviously-broken code to trunk) — Feature Flags alone don't inherently prevent long-lived branches either (a team could still use both branches *and* flags) — combining them specifically lets large features be built incrementally, directly on trunk, safely hidden until complete, which is precisely why the two practices are so frequently adopted together in modern continuous-delivery-oriented teams.
+
+**Common Pitfall:** adopting Trunk-Based Development's "commit directly to trunk" discipline without also adopting Feature Flags for genuinely large, multi-commit features — this forces developers into an uncomfortable choice between merging visibly-incomplete, potentially-broken code directly to trunk (risking breaking things for everyone) or reverting to long-lived feature branches after all (undermining the entire point of Trunk-Based Development); Feature Flags are precisely the mechanism that resolves this tension.
+
+---
+
 ---

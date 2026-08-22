@@ -1140,4 +1140,67 @@ Because the cluster itself enforces this check at admission time (rather than re
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is a Cloud Run Revision, and how does every deployment creating a new, immutable revision, with traffic splitting between them, enable gradual rollouts?**
+
+Every time you deploy a new version to a Cloud Run service, GCP creates a brand-new, immutable Revision rather than modifying the existing one in place — the current, previous, and any number of older revisions all continue to exist, and traffic can be explicitly split between them by percentage, letting a new version be gradually rolled out rather than switched over all at once.
+
+```bash
+gcloud run deploy my-api --image gcr.io/my-project/my-api:v2
+# creates a BRAND NEW revision ("my-api-00002-xyz") -- the PREVIOUS revision ("my-api-00001-abc")
+# STILL EXISTS, UNCHANGED, and is STILL FULLY CAPABLE of serving TRAFFIC if NEEDED
+
+gcloud run services update-traffic my-api --to-revisions=my-api-00002-xyz=10,my-api-00001-abc=90
+# SPLITS traffic: 10% to the NEW revision, 90% STILL to the PREVIOUS one -- a GRADUAL, CONTROLLED rollout
+```
+Because each revision is immutable and independently addressable, rolling back is as simple as shifting traffic percentages back to an older, still-fully-intact revision — no rebuild, no redeploy needed at all — directly mirroring the same Blue-Green/Canary deployment safety benefits (covered under DevOps) but provided natively by the Cloud Run platform itself, without needing a separate deployment orchestration tool.
+
+**Common Pitfall:** shifting 100% of traffic to a brand-new revision immediately upon every deployment, without a gradual traffic-split rollout — this forgoes Cloud Run's built-in ability to validate a new revision against a small fraction of real production traffic before committing it fully, the same canary-style risk mitigation covered extensively under DevOps, here available as a simple, built-in platform feature rather than requiring separate tooling.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is GCP Cloud Scheduler, and how does it let you trigger a Cloud Run service or Cloud Function on a cron schedule — the GCP equivalent of a Kubernetes CronJob (covered elsewhere)?**
+
+Cloud Scheduler is a fully-managed cron-job service that invokes a target (an HTTP endpoint, a Cloud Run service, a Pub/Sub topic) on a specified schedule — providing the same "run this on a recurring schedule" capability a Kubernetes `CronJob` (covered elsewhere) provides, but without needing a Kubernetes cluster running at all.
+
+```bash
+gcloud scheduler jobs create http nightly-billing-job \
+  --schedule="0 2 * * *" \       # cron SYNTAX -- EVERY night at 2 AM
+  --uri="https://my-billing-service-xyz.run.app/process" \
+  --http-method=POST
+```
+Because Cloud Scheduler is a fully-managed service (no cluster or dedicated compute to provision or maintain just to run scheduled jobs), it's a natural fit for triggering a serverless Cloud Run service or Cloud Function on a recurring schedule — the exact same recurring-execution need a Kubernetes `CronJob` addresses, here available without needing Kubernetes involved at all.
+
+**Common Pitfall:** provisioning a full Kubernetes cluster (or a dedicated, always-running VM) purely to run one or two simple, infrequent scheduled jobs — for workloads that are genuinely serverless-compatible (an HTTP-triggerable Cloud Run service or Function), Cloud Scheduler provides the same recurring-trigger capability without the operational overhead of running and maintaining a cluster or VM purely for that narrow purpose.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is the difference between GCP VPC Peering and Shared VPC, as two different ways to connect or share networking across multiple GCP projects?**
+
+VPC Peering (covered under Azure's VNet Peering discussion, as the GCP equivalent) connects two *separate*, independently-owned VPC networks, letting resources in each communicate privately — Shared VPC instead has *one* project own a single VPC network, with *other* projects attaching their own resources directly into that same, shared network, a fundamentally more centralized model than peering two independent networks together.
+
+```text
+VPC PEERING -- TWO SEPARATE, INDEPENDENTLY-OWNED VPCs, CONNECTED together:
+  Project A's VPC ──(peered)──► Project B's VPC
+  -- EACH project STILL OWNS and MANAGES its OWN, SEPARATE network INDEPENDENTLY --
+  -- peering just lets THEM communicate PRIVATELY, WITHOUT MERGING their ADMINISTRATION AT ALL
+
+SHARED VPC -- ONE project OWNS the network; OTHER projects' RESOURCES join IT DIRECTLY:
+  "Host" Project: OWNS the ONE, SHARED VPC network
+  "Service" Project A's VMs -- DEPLOYED DIRECTLY INTO the HOST project's SHARED network
+  "Service" Project B's VMs -- ALSO deployed DIRECTLY INTO the SAME SHARED network
+  -- a CENTRAL networking TEAM manages ONE network; MULTIPLE APPLICATION teams' PROJECTS
+     ATTACH their OWN resources DIRECTLY into IT, RATHER than EACH owning a SEPARATE network
+```
+VPC Peering suits a scenario where two genuinely separate, independently-administered networks occasionally need to communicate — Shared VPC suits an organization wanting centralized network administration (one team owns firewall rules, subnets, IP allocation for the entire network) while still letting multiple different application teams deploy their own resources (in their own separate GCP projects, for billing/IAM isolation) directly into that one, centrally-managed network.
+
+**Common Pitfall:** using VPC Peering to connect many different application teams' projects together, when what the organization actually wants is centralized network administration — Peering keeps each project's network genuinely independent (each with its own firewall rules, subnets, administered separately), which can result in inconsistent network policy across projects; Shared VPC is the correct choice specifically when centralized, consistent network governance across many project teams is the actual goal.
+
+---
+
 ---

@@ -1157,4 +1157,82 @@ Because RUs are allocated per underlying physical partition (derived from the lo
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is an Azure App Service Deployment Slot, and how does swapping slots let you deploy a new version with already-warmed-up instances and zero downtime, verifiable before it ever goes live?**
+
+A Deployment Slot is a separate, fully-functional instance of an App Service running alongside the production slot — deploying a new version to a "staging" slot lets it fully start up, warm up (JIT-compile hot paths, populate caches), and be manually verified, all before a "swap" operation atomically exchanges staging and production, sending live traffic to the already-warmed-up new version instantly.
+
+```bash
+az webapp deployment slot create --name my-api --resource-group my-rg --slot staging
+
+# deploy the NEW version to STAGING -- production traffic is UNAFFECTED, STILL running the OLD version
+az webapp deployment source config-zip --resource-group my-rg --name my-api --slot staging --src app.zip
+
+# VERIFY staging is HEALTHY (browse it directly, run smoke tests) -- BEFORE it EVER receives REAL traffic
+
+az webapp deployment slot swap --name my-api --resource-group my-rg --slot staging --target-slot production
+# the SWAP is essentially INSTANT -- staging (ALREADY warmed up) BECOMES production -- ZERO cold-start
+# delay for REAL users, since the NEW version had ALREADY been RUNNING and WARM, just NOT receiving TRAFFIC yet
+```
+Because the new version has already been running (just not receiving live traffic) before the swap occurs, it's already past the cold-start penalty (covered elsewhere) by the time real users are routed to it — and if something's wrong, swapping back is just as instant, providing the same near-zero-downtime rollback safety net covered under Blue-Green Deployment (under DevOps), here provided natively by the App Service platform itself.
+
+**Common Pitfall:** deploying directly to the production slot without using a staging slot first — this means the very first real user requests hit a version that hasn't been warmed up at all (paying the full cold-start cost live, covered under an earlier scenario) and hasn't been verified as actually working correctly, exactly the risk deployment slots are specifically designed to eliminate.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: How do Azure Functions' Consumption, Premium, and Dedicated (App Service) hosting plans differ in cold-start behavior and scaling model?**
+
+The Consumption plan scales to zero when idle (cheapest, but every "cold" invocation pays a real cold-start cost, covered elsewhere) — the Premium plan keeps a configurable number of instances "pre-warmed" at all times (eliminating cold starts for typical traffic, at a higher baseline cost) — the Dedicated (App Service) plan runs on VMs you're already paying for regardless of Functions usage, with scaling behavior tied to that existing App Service Plan's own rules.
+
+```text
+CONSUMPTION plan -- scales to ZERO when idle -- CHEAPEST, but EVERY "cold" invocation (AFTER a
+  period of no traffic) pays a REAL cold-start PENALTY (JIT warmup, DEPENDENCY loading, covered elsewhere)
+
+PREMIUM plan -- maintains a CONFIGURABLE number of "pre-warmed" instances, ALWAYS ready -- ELIMINATES
+  cold starts for TYPICAL traffic patterns, at a HIGHER baseline COST (paying for IDLE, pre-warmed CAPACITY)
+
+DEDICATED (App Service) plan -- runs on VMs ALREADY being PAID FOR regardless of FUNCTIONS usage --
+  scaling follows the SAME rules as an ORDINARY App Service Plan (covered elsewhere), NOT
+  Functions-specific EVENT-DRIVEN autoscaling AT ALL
+```
+For a genuinely bursty, infrequent workload (a nightly batch job), Consumption's scale-to-zero cost model is the most economical, accepting occasional cold starts as a reasonable trade-off — for a latency-sensitive, frequently-invoked workload (a synchronous API backing a live user-facing feature) where cold starts are genuinely unacceptable, Premium's pre-warmed instances eliminate that risk at a correspondingly higher baseline cost.
+
+**Common Pitfall:** choosing the Consumption plan by default for every Azure Functions workload, including a latency-sensitive, frequently-invoked one where an occasional cold-start penalty genuinely matters to real users — for workloads where cold-start latency has a real, user-facing impact, the Premium plan's pre-warmed instances directly address that risk, at a cost trade-off worth making for exactly those latency-sensitive scenarios.
+
+---
+
+## Advanced — Question 14
+
+**Q14: How does an Azure VM/App Service actually acquire a token via its Managed Identity, internally, without any credential ever being stored anywhere at all?**
+
+Managed Identity (covered earlier) sounds almost too good to be true — no stored secret, yet the application can still authenticate to other Azure services — the actual mechanism relies on the Azure platform's own internal metadata endpoint (IMDS, Instance Metadata Service), reachable only from within the specific VM/App Service instance itself, which Azure's own infrastructure — not the application — is responsible for securing.
+
+```csharp
+// the APPLICATION code -- NEVER handles ANY credential DIRECTLY AT ALL
+var credential = new DefaultAzureCredential(); // INTERNALLY, THIS is what ACTUALLY happens:
+```
+```text
+1. the SDK makes an HTTP request to a SPECIAL, LOCAL-ONLY endpoint: http://169.254.169.254/metadata/identity/...
+   -- this ADDRESS is ONLY REACHABLE from WITHIN this SPECIFIC VM/App Service instance ITSELF --
+   NO OTHER machine, ANYWHERE, can REACH this SAME endpoint AT ALL
+
+2. AZURE's OWN underlying INFRASTRUCTURE (NOT the application, NOT ANY code the DEVELOPER wrote)
+   RECOGNIZES which SPECIFIC VM/instance is MAKING this request (based on the NETWORK-LEVEL
+   context of WHERE the request PHYSICALLY originated FROM)
+
+3. Azure's infrastructure ISSUES a SHORT-LIVED access TOKEN, SCOPED to WHATEVER Azure RESOURCES
+   this SPECIFIC identity has been GRANTED access TO -- RETURNED directly in the RESPONSE
+
+4. the SDK CACHES this SHORT-LIVED token IN MEMORY, AUTOMATICALLY REFRESHING it BEFORE it EXPIRES
+   -- NO credential was EVER typed, STORED in CONFIG, or PERSISTED to DISK, ANYWHERE, AT ANY POINT
+```
+Because the IMDS endpoint is only reachable from *within* the specific VM/instance itself (an ordinary network request from anywhere else simply cannot reach it at all), Azure's infrastructure can safely use "which instance is asking" as proof of identity — no secret ever needs to be transmitted, stored, or typed anywhere, since the *network-level* fact of "this request genuinely originated from inside VM X" is itself the authentication mechanism.
+
+**Common Pitfall:** assuming Managed Identity involves some hidden, cleverly-obscured secret that's simply hidden from view rather than genuinely nonexistent — there is no secret anywhere in this flow at all; the security guarantee instead comes entirely from IMDS's network-level unreachability from outside the specific instance, a genuinely different (and, when correctly understood, more robust) security model than "a secret exists somewhere, just well-hidden."
+
+---
+
 ---
