@@ -1414,4 +1414,93 @@ Because HTTP/3 requires an entirely separate underlying transport (UDP-based QUI
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is Endpoint Metadata (`.WithMetadata()`), and how does it let arbitrary, extensible data be attached to a specific routed endpoint, readable by middleware or filters later in the pipeline?**
+
+Every mapped endpoint (a Minimal API route, a controller action) can carry arbitrary metadata objects — attached via `.WithMetadata()` or a corresponding attribute — that later middleware can inspect via `HttpContext.GetEndpoint()?.Metadata`, letting cross-cutting middleware make decisions based on per-endpoint configuration without that middleware needing to know about every specific endpoint individually.
+
+```csharp
+public class RequiresApiKeyAttribute : Attribute { } // a MARKER metadata TYPE (covered under Design Patterns)
+
+app.MapGet("/admin/reports", GetReports).WithMetadata(new RequiresApiKeyAttribute());
+app.MapGet("/public/products", GetProducts); // NO such metadata attached
+
+// MIDDLEWARE -- checks for the METADATA, WITHOUT needing to know ANYTHING about SPECIFIC routes/paths
+app.Use(async (context, next) =>
+{
+    var endpoint = context.GetEndpoint();
+    if (endpoint?.Metadata.GetMetadata<RequiresApiKeyAttribute>() is not null)
+    {
+        // ONLY enforce the API-key check for ENDPOINTS that actually CARRY this metadata
+        if (!IsValidApiKey(context.Request.Headers["X-Api-Key"])) { context.Response.StatusCode = 401; return; }
+    }
+    await next();
+});
+```
+Because the middleware queries the *current endpoint's* metadata rather than hardcoding a list of specific paths it should apply to, adding the same requirement to a *new* endpoint later is as simple as attaching the same metadata to it — no change to the middleware itself is ever needed, and this is precisely the same underlying mechanism ASP.NET Core's own built-in `[Authorize]`/`[AllowAnonymous]` attributes use internally to communicate their requirements to the authorization middleware.
+
+**Common Pitfall:** having cross-cutting middleware hardcode a list of specific route paths/patterns it should apply special handling to, rather than checking for endpoint metadata — a hardcoded path list requires updating the middleware itself every time a new endpoint needs the same special handling; metadata-based checks let each endpoint opt in/out independently, without the shared middleware needing any awareness of specific paths at all.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is a custom `IAuthorizationHandler` in ASP.NET Core, and how does a requirement-based authorization policy let you express logic beyond simple role membership checks?**
+
+Simple `[Authorize(Roles = "Admin")]` checks only role membership — a custom `IAuthorizationHandler` paired with a custom `IAuthorizationRequirement` lets you express arbitrary, genuinely custom logic (checking a resource's ownership, a time-of-day restriction, a combination of claims) as a reusable, named policy, evaluated the same way any built-in authorization check would be.
+
+```csharp
+public class MinimumAgeRequirement : IAuthorizationRequirement { public int MinimumAge { get; } = 18; }
+
+public class MinimumAgeHandler : AuthorizationHandler<MinimumAgeRequirement>
+{
+    protected override Task HandleRequirementAsync(AuthorizationHandlerContext context, MinimumAgeRequirement requirement)
+    {
+        var dobClaim = context.User.FindFirst(c => c.Type == "DateOfBirth");
+        if (dobClaim is not null && CalculateAge(DateTime.Parse(dobClaim.Value)) >= requirement.MinimumAge)
+            context.Succeed(requirement); // EXPLICITLY marks the REQUIREMENT as SATISFIED
+        return Task.CompletedTask;
+    }
+}
+
+// Program.cs
+builder.Services.AddAuthorization(options =>
+    options.AddPolicy("Over18", policy => policy.Requirements.Add(new MinimumAgeRequirement())));
+builder.Services.AddSingleton<IAuthorizationHandler, MinimumAgeHandler>();
+
+// USAGE -- reads EXACTLY like a built-in role check, but ENCAPSULATES genuinely CUSTOM logic
+[Authorize(Policy = "Over18")]
+public IActionResult ViewRestrictedContent() { /* ... */ }
+```
+Because the custom logic lives entirely inside `MinimumAgeHandler`, the action method itself stays completely unaware of *how* the age check is actually performed — it simply declares which named policy applies, exactly the same way `[Authorize(Roles = "Admin")]` would, letting genuinely arbitrary authorization logic (not just "is this user in role X") be expressed, tested, and reused through the exact same declarative `[Authorize]` attribute mechanism.
+
+**Common Pitfall:** embedding custom authorization logic (checking resource ownership, business-specific eligibility rules) directly inside individual action methods via manual `if` checks, rather than expressing it as a reusable `IAuthorizationHandler`/policy — this scatters the same conceptual check across many action methods independently, each potentially implementing it slightly differently, rather than centralizing it once as a named, reusable, independently-testable policy applied consistently via `[Authorize(Policy = "...")]` wherever it's actually needed.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is `IHostedLifecycleService` (.NET 8+), and how does it add more granular startup/shutdown hooks beyond the basic `IHostedService.StartAsync`/`StopAsync`?**
+
+`IHostedService` (covered earlier) provides only two lifecycle hooks — `StartAsync` and `StopAsync` — `IHostedLifecycleService` extends this with four additional, more granular hooks (`StartingAsync`, `StartedAsync`, `StoppingAsync`, `StoppedAsync`), letting a hosted service distinguish "about to start" from "have started," and "about to stop" from "have stopped," rather than each phase being one single, combined step.
+
+```csharp
+public class OrderProcessingWorker : IHostedLifecycleService
+{
+    public Task StartingAsync(CancellationToken ct) { /* runs BEFORE StartAsync -- e.g., PRE-FLIGHT checks */ return Task.CompletedTask; }
+    public Task StartAsync(CancellationToken ct) { /* the MAIN startup logic, exactly as BEFORE */ return Task.CompletedTask; }
+    public Task StartedAsync(CancellationToken ct) { /* runs AFTER StartAsync -- e.g., signal READINESS */ return Task.CompletedTask; }
+
+    public Task StoppingAsync(CancellationToken ct) { /* runs BEFORE StopAsync -- e.g., STOP accepting NEW work */ return Task.CompletedTask; }
+    public Task StopAsync(CancellationToken ct) { /* the MAIN shutdown logic */ return Task.CompletedTask; }
+    public Task StoppedAsync(CancellationToken ct) { /* runs AFTER StopAsync -- e.g., FINAL cleanup/logging */ return Task.CompletedTask; }
+}
+```
+Because these finer-grained hooks run at well-defined, distinct points *across all registered hosted services* (every service's `StartingAsync` runs before any service's `StartAsync`, for instance), an application with multiple hosted services can coordinate startup/shutdown ordering more precisely than the original two-hook model allowed — a service needing to run genuinely *before* any other service's main startup logic begins can use `StartingAsync` for exactly that, rather than needing to encode ordering some other way.
+
+**Common Pitfall:** implementing `IHostedLifecycleService` but assuming its four additional hooks run in some arbitrary or service-specific order — the framework guarantees a specific, well-defined ordering across *all* registered services (every service's "starting" phase completes before any service's "start" phase begins, and so on) — misunderstanding this ordering guarantee can lead to startup-sequencing bugs if a service assumes its own hooks run in isolation from every other registered hosted service's corresponding hooks.
+
+---
+
 ---

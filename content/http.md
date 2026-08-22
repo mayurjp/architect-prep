@@ -1179,3 +1179,75 @@ Because the original priority scheme's dependency-tree model proved difficult to
 **Common Pitfall:** assuming HTTP/2's original stream priority hints reliably and consistently control server-side transmission order across any server/proxy combination — given the scheme's advisory nature and inconsistent real-world implementation, relying on it for genuinely critical prioritization behavior is unreliable; the newer, simpler Extensible Prioritization scheme (RFC 9218) is the more current, broadly-consistent mechanism for applications that genuinely need this kind of prioritization signal today.
 
 ---
+
+## Beginner — Question 15
+
+**Q15: What is the `Origin` request header, and how does it differ from `Referer` (covered earlier) — why does CORS specifically rely on `Origin` rather than `Referer` to determine a request's source?**
+
+`Origin` sends only the scheme, host, and port of the page making a request (`https://example.com`) — `Referer` (covered earlier) sends the *full URL* of the referring page, including its path and query string, and can be entirely absent (stripped by a privacy setting, or simply not sent for certain request types) in ways `Origin` specifically is not, for the cross-origin requests CORS actually cares about.
+
+```http
+-- a CROSS-ORIGIN fetch() call FROM https://myapp.com/dashboard/page?query=1, TO api.example.com:
+Origin: https://myapp.com                              <-- JUST scheme+host+port -- ALWAYS present for CORS-relevant requests
+Referer: https://myapp.com/dashboard/page?query=1       <-- the FULL URL -- can be STRIPPED by privacy settings/policies
+```
+Because `Origin` is specifically designed to be sent reliably for exactly the cross-origin requests CORS needs to evaluate (and deliberately omits path/query details that aren't relevant to an origin-based security decision), it's a more dependable, purpose-built signal than `Referer`, which can be missing entirely (a `Referrer-Policy`, covered elsewhere, configured to omit it; certain navigation types that never send it) and carries more information than a same-origin-check actually needs.
+
+**Common Pitfall:** implementing a custom, hand-rolled CORS-like check based on parsing the `Referer` header rather than using the standard `Origin` header (or, better, the framework's built-in CORS middleware, covered under ASP.NET Core) — `Referer` can legitimately be absent for reasons entirely unrelated to any malicious intent, causing a `Referer`-based check to incorrectly reject legitimate requests, whereas `Origin` is the header actually designed and reliably sent specifically for this exact cross-origin-identification purpose.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is the difference between `Cache-Control: private` and `Cache-Control: public`, and how does it determine whether a shared/intermediate cache (a CDN) is allowed to cache a response at all, versus only the requesting browser's own cache?**
+
+`private` tells any cache that this response is specific to *one particular user* and must never be stored by a shared, intermediate cache (a CDN, a corporate proxy) serving multiple different users — only the requesting browser's own, private cache may store it. `public` explicitly permits a shared cache to store and later serve the *same* cached response to different users entirely.
+
+```http
+-- a response CONTAINING one SPECIFIC user's OWN account details -- MUST NOT be shared ACROSS users
+Cache-Control: private, max-age=300
+-- a SHARED/intermediate cache (a CDN) MUST NOT store THIS -- ONLY the requesting BROWSER's OWN,
+   PRIVATE cache may -- PREVENTING User B from EVER accidentally receiving User A's CACHED response
+
+-- a response containing GENERIC, PUBLIC product catalog data -- SAFE to share ACROSS every user
+Cache-Control: public, max-age=3600
+-- a CDN CAN cache THIS ONE response and serve it to MANY DIFFERENT users, SINCE its CONTENT is
+   IDENTICAL and APPROPRIATE for ANY requester, REGARDLESS of WHO they ARE
+```
+Marking a genuinely user-specific response as `public` by mistake would let a shared, intermediate cache serve *one* user's personal data to a *completely different* user requesting the same URL — a serious data-leakage risk; `private` is the correct, safe default for anything containing user-specific data, while `public` should be reserved specifically for responses that are genuinely identical and appropriate for any requester regardless of who they are.
+
+**Common Pitfall:** marking a response `public` (or omitting the `private`/`public` distinction entirely, which can default differently depending on other headers present) for content that's actually personalized per-user — this risks a shared, intermediate cache (a CDN sitting in front of the application) inadvertently serving one user's private, cached response to an entirely different user who happens to request the exact same URL, a genuine, serious data-exposure risk that the `private` directive is specifically designed to prevent.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What are the `Sec-Fetch-*` family of headers (`Sec-Fetch-Site`, `Sec-Fetch-Mode`, `Sec-Fetch-Dest`), and how do they let a server distinguish a genuine, same-site navigation from a cross-site request — an additional, browser-enforced signal beyond `SameSite` cookies (covered elsewhere) for defense against CSRF and similar attacks?**
+
+The browser itself automatically attaches these headers to every request, describing exactly how and why the request was made — information the browser vouches for directly (unlike a header a client could freely fake), giving a server a genuinely trustworthy signal about a request's actual context, beyond what `SameSite` cookies alone communicate.
+
+```http
+-- a GENUINE navigation, the USER clicking a LINK, WITHIN the SAME site:
+Sec-Fetch-Site: same-origin
+Sec-Fetch-Mode: navigate
+Sec-Fetch-Dest: document
+
+-- a request TRIGGERED FROM a COMPLETELY DIFFERENT site (e.g., an image tag on evil.com POINTING at YOUR site):
+Sec-Fetch-Site: cross-site
+Sec-Fetch-Mode: no-cors
+Sec-Fetch-Dest: image
+```
+```csharp
+// a SERVER can INSPECT these headers DIRECTLY, REJECTING a request that's CLEARLY cross-site and
+// clearly NOT the kind of REQUEST this SPECIFIC endpoint should EVER legitimately receive
+if (Request.Headers["Sec-Fetch-Site"] == "cross-site" && Request.Headers["Sec-Fetch-Mode"] == "navigate")
+{
+    // a CROSS-SITE NAVIGATION hitting an endpoint that should ONLY EVER be reached via a SAME-SITE
+    // FORM SUBMISSION or FETCH call -- SUSPICIOUS -- REJECT, or apply ADDITIONAL scrutiny
+}
+```
+Because these headers are set entirely by the browser itself (a script running on a page cannot override or forge them), they provide a genuinely trustworthy, additional signal about a request's actual origin and context — complementing (not replacing) `SameSite` cookies and anti-forgery tokens (covered under App Security) as one more layer of defense-in-depth, specifically valuable because it's enforced at the browser level, entirely outside any attacker-controlled page's own ability to manipulate.
+
+**Common Pitfall:** relying on `Sec-Fetch-*` headers as a complete, standalone CSRF defense, without also maintaining the more established, broadly-supported defenses (anti-forgery tokens, `SameSite` cookies, covered under App Security) — `Sec-Fetch-*` support, while now broad across modern browsers, is a comparatively newer mechanism than the more established defenses; it's best used as an additional, complementary layer of defense-in-depth, not as a sole replacement for the well-established, more universally-relied-upon CSRF protections already in place.
+
+---

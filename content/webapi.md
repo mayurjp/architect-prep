@@ -1348,4 +1348,80 @@ Because the custom formatter is registered alongside the built-in JSON one, cont
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is the `[ProducesResponseType]` attribute, and how does declaring an action's possible response types and status codes — separately from what actually gets returned — help Swagger/OpenAPI document every possible outcome, not just the one the compiler can infer?**
+
+An action's actual return type (`ActionResult<Product>`) tells the compiler what *can* be returned, but often can't fully express every distinct outcome (a `200` with a `Product`, a `404` with nothing, a `400` with validation errors) — `[ProducesResponseType]` lets you explicitly declare each of these possible outcomes, giving the OpenAPI/Swagger generator (covered earlier) enough information to document all of them, not just whatever the compiler's own type inference happens to reveal.
+
+```csharp
+[HttpGet("{id}")]
+[ProducesResponseType(typeof(Product), StatusCodes.Status200OK)]
+[ProducesResponseType(StatusCodes.Status404NotFound)]
+public async Task<ActionResult<Product>> GetProduct(int id)
+{
+    var product = await _repository.FindAsync(id);
+    return product is null ? NotFound() : Ok(product);
+}
+```
+Without these explicit attributes, Swagger's generated documentation might only show the `200` response (since that's what the method's declared return type most directly suggests), leaving a consumer with no documented indication the endpoint can also return a `404` — `[ProducesResponseType]` makes every genuinely possible outcome explicit in the generated API documentation, so a client integrating against this API can see and handle every documented response shape, not just the "happy path" the compiler's type system alone would reveal.
+
+**Common Pitfall:** relying purely on an action's C# return type to communicate every possible response shape to API consumers, without explicitly declaring less-obvious outcomes (`404`, `400` with a validation-error body) via `[ProducesResponseType]` — this leaves generated API documentation incomplete, potentially leading integrating client teams to build code that doesn't correctly anticipate or handle a response shape their generated client/documentation never actually surfaced.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What are the `[RequestSizeLimit]`/`[RequestFormLimits]` attributes, and how do they let you override the global maximum request size for one specific endpoint — such as a file upload action needing a larger limit than the rest of the API?**
+
+ASP.NET Core (and Kestrel) enforce a global default maximum request body size, protecting the application from the kind of memory-exhaustion risk covered under an earlier file-upload scenario — but a legitimate file-upload endpoint often genuinely needs a larger limit than the rest of the API should ever allow; `[RequestSizeLimit]`/`[RequestFormLimits]` let you override that global default for one specific action, without loosening the protective limit for every other endpoint.
+
+```csharp
+// the GLOBAL default applies to EVERY OTHER endpoint, UNCHANGED -- protecting them from OVERSIZED requests
+[HttpPost("upload")]
+[RequestSizeLimit(100_000_000)] // 100 MB -- ONLY for THIS SPECIFIC action, NOT the entire API
+public async Task<IActionResult> UploadFile(IFormFile file)
+{
+    // ... process the uploaded file ...
+}
+```
+Because the override applies only to this one action, every other endpoint in the API continues to be protected by the smaller, safer global default — an attacker can't exploit the larger limit intended for the legitimate file-upload endpoint by sending an oversized payload to some *unrelated* endpoint that was never meant to accept large request bodies at all, directly closing the gap the earlier memory-exhaustion scenario described while still accommodating the genuine, larger-payload needs of the specific upload endpoint.
+
+**Common Pitfall:** raising the *global* maximum request size configuration to accommodate one specific file-upload endpoint's needs, rather than scoping the larger limit to just that one action — this leaves every other endpoint in the API vulnerable to the same oversized-payload risk the global limit was originally protecting against, when only the one specific upload endpoint genuinely needed the larger allowance in the first place.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is a custom Minimal API `IResult`, and how does it serve as the Minimal-API-specific parallel to MVC's Custom `ActionResult` (covered earlier)?**
+
+Just as a Custom `ActionResult` (covered earlier) lets an MVC controller action return a result type with entirely custom response-writing logic, a custom `IResult` implementation provides the same capability for Minimal API endpoints — encapsulating exactly how a specific kind of response gets written to the HTTP response, reusable across multiple endpoints.
+
+```csharp
+public class CsvResult : IResult
+{
+    private readonly IEnumerable<object> _data;
+    public CsvResult(IEnumerable<object> data) => _data = data;
+
+    public async Task ExecuteAsync(HttpContext httpContext)
+    {
+        httpContext.Response.ContentType = "text/csv";
+        var csv = string.Join("\n", _data.Select(SerializeRowAsCsv));
+        await httpContext.Response.WriteAsync(csv);
+    }
+}
+
+public static class ResultsExtensions // a CONVENIENCE factory, mirroring "Results.Ok()"'s own STYLE
+{
+    public static IResult Csv(IEnumerable<object> data) => new CsvResult(data);
+}
+
+app.MapGet("/products/export", () => ResultsExtensions.Csv(GetAllProducts()));
+```
+Because `CsvResult` implements the same `IResult` interface every built-in Minimal API result type (`Results.Ok()`, `Results.NotFound()`) implements, it's used identically to any built-in result — any Minimal API endpoint needing a CSV response simply returns `ResultsExtensions.Csv(...)`, with the actual CSV-writing logic centralized in one reusable class, exactly the same encapsulation benefit a Custom `ActionResult` (covered earlier) provides for MVC controllers.
+
+**Common Pitfall:** writing the same custom response-formatting logic (building a CSV string, setting specific headers) directly inline inside every individual Minimal API endpoint delegate that needs it, rather than encapsulating it once as a reusable custom `IResult` — this duplicates the exact same response-construction logic across every endpoint needing that format, precisely the kind of duplication a shared, reusable `IResult` implementation (mirroring MVC's Custom `ActionResult` pattern) is meant to eliminate.
+
+---
+
 ---

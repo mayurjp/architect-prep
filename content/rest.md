@@ -2108,3 +2108,88 @@ Without `If-Match`, a `PATCH` request could apply its partial change on top of a
 **Common Pitfall:** assuming `PATCH`'s partial-update nature makes it inherently immune to lost-update races, and therefore skipping `If-Match` entirely for `PATCH` endpoints while still using it for `PUT` — a `PATCH` operation can be just as vulnerable to acting on stale, superseded context as a full `PUT`, and deserves the exact same `If-Match`-based optimistic concurrency protection whenever the operation's correctness genuinely depends on the resource's state not having changed since it was last read.
 
 ---
+
+## Beginner — Question 16
+
+**Q16: What is the `X-Total-Count` (or similarly-named) response header convention for paginated results, and how does it let a client know the total number of items without the response body needing an Envelope (covered elsewhere)?**
+
+An Envelope (covered elsewhere) wraps a paginated response body with metadata like a total count — an alternative convention instead keeps the response body a plain, bare array of items, and communicates the total count (and other pagination metadata) via a response *header* instead, avoiding the extra nesting an envelope introduces.
+
+```http
+GET /products?page=2&pageSize=20
+
+HTTP/1.1 200 OK
+X-Total-Count: 347
+Link: <https://api.example.com/products?page=3&pageSize=20>; rel="next"
+
+[
+  { "id": 21, "name": "Keyboard" },
+  { "id": 22, "name": "Mouse" }
+  // ... a PLAIN, BARE array -- NO envelope wrapping AT ALL
+]
+```
+A client needing the total item count (to render "Page 2 of 18," for instance) reads it from `X-Total-Count` rather than needing to unwrap an envelope object first — this keeps the response body itself exactly the shape a client would expect for "just the items," while still surfacing pagination metadata through a standard, predictable header any client can check for, without altering the fundamental response body shape at all.
+
+**Common Pitfall:** mixing both conventions inconsistently across an API's different endpoints — some paginated endpoints returning a bare array with metadata in headers, others wrapping the same kind of data in an envelope object — forcing client code to handle two entirely different response shapes depending on which specific endpoint happens to be called; an API should commit to one consistent pagination-metadata convention across all its paginated endpoints, not mix the two approaches arbitrarily.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is the `Prefer` request header (RFC 7240), and how does it let a client hint at preferred handling — like `Prefer: respond-async` or `Prefer: return=minimal` — without requiring the server to honor it?**
+
+The `Prefer` header lets a client express an optional *preference* for how a request should be handled, which the server may honor or simply ignore — unlike a mandatory instruction, a `Prefer` header is explicitly advisory, giving a client a standardized way to hint at a preference without breaking compatibility with servers that don't support or choose not to honor that specific preference.
+
+```http
+POST /orders
+Prefer: return=minimal
+
+-- a SERVER HONORING this preference returns a MINIMAL response (JUST a Location header, no BODY):
+HTTP/1.1 201 Created
+Location: /orders/42
+Preference-Applied: return=minimal    <-- CONFIRMS it WAS honored
+
+-- a SERVER that DOESN'T support this preference SIMPLY IGNORES it, returning its NORMAL, FULL response:
+HTTP/1.1 201 Created
+Location: /orders/42
+{ "id": 42, "customerId": 5, "items": [...], "total": 99.99 }   <-- the FULL body, as USUAL
+```
+```http
+POST /reports
+Prefer: respond-async
+-- HINTS the CLIENT would PREFER an ASYNCHRONOUS (202 Accepted, covered earlier) response, rather
+   than WAITING synchronously for a POTENTIALLY LONG-RUNNING operation to FULLY complete
+```
+Because `Prefer` is explicitly advisory (the server is never *required* to honor it, and can simply proceed with its normal, default behavior), a client can safely send this header against any server, whether or not that server actually understands or supports the specific preference — servers that do support it can echo back a `Preference-Applied` header confirming which preference was actually honored, while non-supporting servers simply behave exactly as they would have without the header present at all.
+
+**Common Pitfall:** designing a client that *requires* a specific `Prefer`-requested behavior to actually occur, treating it as a mandatory instruction rather than the advisory hint the header is specifically designed to be — a client depending on `return=minimal` actually being honored, without a fallback path for a server that ignores the preference and returns its normal, full response instead, misunderstands the header's fundamentally optional, best-effort nature.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is Long Polling, and how does a server holding a request open until data becomes available differ from ordinary polling's fixed interval, as a middle-ground technique for near-real-time updates without WebSockets?**
+
+Ordinary polling (covered elsewhere) has a client repeatedly send a new request every fixed interval, mostly receiving "nothing new yet" responses — Long Polling instead has the server *hold the connection open*, without responding, until either new data actually becomes available or a timeout is reached, at which point the client immediately issues a new long-polling request, repeating the cycle.
+
+```text
+ORDINARY POLLING -- client asks EVERY fixed interval, REGARDLESS of whether anything's ACTUALLY new:
+  GET /notifications  (t=0s)   -> "nothing new"
+  GET /notifications  (t=5s)   -> "nothing new"
+  GET /notifications  (t=10s)  -> "nothing new"
+  GET /notifications  (t=15s)  -> FINALLY, something new arrived AT t=12s, but the CLIENT doesn't
+                                   find OUT until its NEXT scheduled poll, at t=15s -- UP TO A
+                                   FULL POLLING INTERVAL of UNNECESSARY DELAY
+
+LONG POLLING -- the SERVER HOLDS the connection OPEN, responds THE MOMENT something is ACTUALLY new:
+  GET /notifications  (t=0s)  -- SERVER holds this CONNECTION open, WITHOUT responding YET...
+                              -- new DATA arrives at t=12s -- SERVER responds IMMEDIATELY, at t=12s
+  GET /notifications  (t=12s) -- CLIENT immediately issues the NEXT long-poll request, REPEATING the cycle
+```
+Because the server only responds once genuinely new data exists (rather than the client needing to wait for its next scheduled poll interval), Long Polling delivers updates with much lower latency than ordinary fixed-interval polling, while still working over plain HTTP request/response semantics — no WebSocket upgrade, no persistent bidirectional connection, no additional protocol beyond ordinary HTTP — making it a genuine, lower-complexity middle ground between simple polling's latency cost and a full WebSocket/SSE connection's added protocol complexity.
+
+**Why this remains a legitimate technique even with WebSockets and SSE (covered under ASP.NET Core) available:** Long Polling works transparently through any ordinary HTTP infrastructure (proxies, load balancers) that might not correctly support WebSocket upgrades or long-lived SSE connections — for environments with restrictive network intermediaries, or clients/scenarios not justifying a full persistent-connection technology, Long Polling remains a genuinely useful, simpler fallback providing meaningfully better latency than fixed-interval polling without requiring any protocol beyond plain HTTP.
+
+**Common Pitfall:** implementing Long Polling without a reasonable server-side timeout, letting connections hang indefinitely waiting for data that might never arrive — this can exhaust server-side connection/thread resources (many requests held open simultaneously, waiting); a well-designed Long Polling implementation always includes a timeout (returning an empty/no-op response after, say, 30 seconds), at which point the client simply issues a fresh long-poll request, preventing connections from being held open truly indefinitely.
+
+---

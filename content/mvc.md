@@ -1340,4 +1340,93 @@ Because the attribute is applied directly to this one action parameter, only *th
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is MVC's `TempData`, and how does it let data persist across exactly one redirect, unlike `ViewData`/`ViewBag` (covered earlier), which don't survive a redirect at all?**
+
+`ViewData`/`ViewBag` (covered earlier) only live for the duration of a single request — if that request ends in a redirect, their data is gone entirely by the time the browser follows the redirect to a new request. `TempData` is specifically designed to survive exactly one redirect, stored temporarily (in a cookie or session) between the redirecting request and the very next one, then automatically cleared.
+
+```csharp
+[HttpPost]
+public IActionResult DeleteOrder(int id)
+{
+    _orderService.Delete(id);
+    TempData["SuccessMessage"] = "Order deleted successfully."; // SURVIVES the UPCOMING redirect
+    return RedirectToAction("Index"); // a REDIRECT -- a BRAND NEW request FOLLOWS -- ViewData/ViewBag WOULD be LOST
+}
+
+public IActionResult Index()
+{
+    ViewBag.Message = TempData["SuccessMessage"]; // STILL available HERE, in THIS NEXT request
+    return View();
+} // AFTER this READ, TempData's entry is MARKED for removal -- won't SURVIVE a SECOND redirect
+```
+Because `TempData` is persisted somewhere that outlives a single request (typically session state or a cookie), it bridges exactly the "redirect" gap `ViewData`/`ViewBag` cannot cross — letting a success/error message set right before a redirect still be displayed on the page the user actually lands on next, the classic use case behind the Post-Redirect-Get pattern (covered elsewhere).
+
+**Common Pitfall:** trying to use `ViewData`/`ViewBag` to pass a message across a redirect, then being confused why it's always empty on the following page — neither survives a redirect at all, since a redirect is a genuinely new, separate HTTP request/response cycle; `TempData` exists specifically to solve this one, narrow "persist across exactly one redirect" problem that `ViewData`/`ViewBag` were never designed to handle.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is the Post-Redirect-Get (PRG) pattern, and how does redirecting after a successful POST prevent a form resubmission if the user refreshes the resulting page?**
+
+If a `POST` request's response is rendered directly (rather than redirecting), refreshing that page in the browser re-submits the exact same `POST` request — potentially re-processing a form submission (creating a duplicate order, for instance) the user only intended to submit once. Post-Redirect-Get avoids this by having the `POST` handler respond with a redirect to a separate `GET` endpoint, so a subsequent page refresh only re-issues the harmless `GET`, never the original `POST`.
+
+```csharp
+// WITHOUT PRG -- the POST handler RENDERS a view DIRECTLY -- REFRESHING the page RE-SUBMITS the POST
+[HttpPost]
+public IActionResult PlaceOrder(OrderViewModel model)
+{
+    _orderService.Create(model);
+    return View("Confirmation", model); // a BROWSER REFRESH here RE-POSTS the ENTIRE ORDER AGAIN
+}
+
+// WITH PRG -- the POST handler REDIRECTS to a SEPARATE GET action -- REFRESHING only RE-ISSUES the GET
+[HttpPost]
+public IActionResult PlaceOrder(OrderViewModel model)
+{
+    var orderId = _orderService.Create(model);
+    return RedirectToAction("Confirmation", new { id = orderId }); // REDIRECTS -- browser's ADDRESS BAR now shows a GET URL
+}
+
+[HttpGet]
+public IActionResult Confirmation(int id) => View(_orderService.GetById(id)); // REFRESHING this is HARMLESS
+```
+Because the browser's address bar (and its "last request" the refresh button would re-issue) now points at the `GET Confirmation` action rather than the original `POST`, refreshing the confirmation page simply re-fetches the same order's confirmation details harmlessly — it can never accidentally resubmit and re-process the original order-placement form data a second time.
+
+**Common Pitfall:** having a `POST` action render its result view directly, without redirecting, "to save a round trip" — this leaves the browser's most recent request as the `POST` itself, meaning a refresh (or a user clicking "back" and then "forward") re-submits that same `POST` again, a well-known source of duplicate form-submission bugs that the Post-Redirect-Get pattern exists specifically to eliminate.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is a custom `IViewLocationExpander`, and how does it let you customize MVC's conventional view-lookup paths (covered earlier) — for instance, to support tenant-specific view overrides in a multi-tenant application?**
+
+MVC's conventional view lookup (covered earlier: `Views/{Controller}/{Action}.cshtml`, then `Views/Shared/`) is itself extensible — an `IViewLocationExpander` lets you inject *additional* candidate paths into that search, checked before the conventional defaults, letting a multi-tenant application look for a tenant-specific override view before falling back to the shared, default one.
+
+```csharp
+public class TenantViewLocationExpander : IViewLocationExpander
+{
+    public IEnumerable<string> ExpandViewLocations(ViewLocationExpanderContext context, IEnumerable<string> viewLocations)
+    {
+        var tenant = context.Values["tenant"]; // set EARLIER, e.g. from a MIDDLEWARE reading a SUBDOMAIN
+        // PREPEND a TENANT-SPECIFIC candidate PATH, CHECKED BEFORE the ORDINARY conventional locations
+        yield return $"/Views/Tenants/{tenant}/{{1}}/{{0}}.cshtml";
+        foreach (var location in viewLocations) yield return location; // THEN fall back to the USUAL defaults
+    }
+    public void PopulateValues(ViewLocationExpanderContext context) =>
+        context.Values["tenant"] = context.ActionContext.HttpContext.Items["TenantName"]?.ToString();
+}
+
+// Program.cs
+builder.Services.Configure<RazorViewEngineOptions>(options =>
+    options.ViewLocationExpanders.Add(new TenantViewLocationExpander()));
+```
+Because the custom expander's candidate path is checked *before* the ordinary conventional locations, a specific tenant with a customized checkout page finds `/Views/Tenants/AcmeCorp/Checkout/Index.cshtml` first — while every *other* tenant, lacking that specific override file, transparently falls through to the ordinary, shared `Views/Checkout/Index.cshtml`, all without any change needed to the controller action itself, which simply calls `return View()` exactly as it always would.
+
+**Common Pitfall:** implementing tenant-specific (or otherwise environment-specific) view variations by scattering conditional `if (tenant == "AcmeCorp") return View("AcmeCorpCheckout"); else return View("Checkout");` logic directly inside every controller action that might need a tenant override — this duplicates the same conditional logic across many actions; an `IViewLocationExpander` centralizes the "check for a tenant-specific override first" logic in exactly one place, keeping every controller action's own code completely unaware of multi-tenancy concerns.
+
+---
+
 ---
