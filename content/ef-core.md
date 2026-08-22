@@ -1550,4 +1550,99 @@ Because `DetectChanges()`'s cost scales with the number of currently-tracked ent
 
 ---
 
+## Beginner — Question 17
+
+**Q17: Why must a navigation property be declared `virtual` for EF Core's Lazy Loading proxies (covered earlier) to actually work, and why does omitting it silently disable lazy loading for that property with no error at all?**
+
+Lazy Loading proxies (covered earlier) work by generating a runtime proxy class that inherits from your entity, overriding navigation property getters to trigger a database query on first access — overriding a property requires it to be `virtual` (a basic C# rule for any override, not something EF Core invented); a non-virtual navigation property simply can't be intercepted this way, silently falling back to always being `null` until explicitly loaded some other way, with no exception or warning raised.
+
+```csharp
+public class Author
+{
+    public int Id { get; set; }
+    public virtual ICollection<Book> Books { get; set; } = new List<Book>(); // virtual -- LAZY LOADING works
+    public NonVirtualNav Extra { get; set; } // NOT virtual -- LAZY LOADING SILENTLY does NOT apply to THIS one
+}
+```
+
+```text
+"Books" (virtual): accessing it TRIGGERS the proxy's OVERRIDDEN getter -- FIRES a database
+  query AUTOMATICALLY, the FIRST time it's accessed -- Lazy Loading WORKS as EXPECTED
+
+"Extra" (NOT virtual): the PROXY CANNOT override a non-virtual member AT ALL -- accessing it
+  simply returns WHATEVER its CURRENT in-memory value is (often NULL) -- NO query is EVER
+  triggered, and NO exception/warning EVER indicates this is HAPPENING
+```
+
+Because this silent fallback produces no error at all — just a `null` (or otherwise unloaded) navigation property — a developer relying on Lazy Loading for a property they forgot to mark `virtual` can spend real debugging time before realizing the actual cause is a missing keyword, rather than any deeper logic bug.
+
+**Common Pitfall:** forgetting `virtual` on a navigation property intended to lazy-load, then debugging a confusing `null`/empty collection issue without immediately suspecting the missing keyword — since there's no compiler warning or runtime exception pointing at the actual cause, this is a genuinely easy mistake to make and a non-obvious one to diagnose without already knowing Lazy Loading's `virtual` requirement.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is `AddDbContextPool`, and how does reusing a pool of pre-constructed `DbContext` instances across requests avoid the construction cost EF Core pays creating a fresh instance every time?**
+
+Ordinarily, ASP.NET Core's Scoped `DbContext` registration (`AddDbContext`) constructs a brand-new `DbContext` instance for every single HTTP request — `AddDbContextPool` instead maintains a pool of already-constructed instances, "renting" one out per request and resetting its internal state for reuse afterward, rather than constructing (and later garbage-collecting) a new instance for every request.
+
+```csharp
+builder.Services.AddDbContextPool<AppDbContext>(options =>
+    options.UseSqlServer(connectionString), poolSize: 128); // maintains a POOL of up to 128 REUSABLE instances
+
+// Per-request: a DbContext is RENTED from the pool (its internal state RESET first),
+// used normally for THAT request, then RETURNED to the pool at the end -- rather than
+// being CONSTRUCTED fresh and later GARBAGE COLLECTED, for EVERY single request
+```
+
+```text
+WITHOUT pooling: EVERY request CONSTRUCTS a brand-new DbContext -- a SMALL, but NON-ZERO cost,
+  REPEATED for EVERY single request, ACROSS the ENTIRE application's lifetime
+
+WITH pooling: a DbContext instance is REUSED across MANY requests -- the CONSTRUCTION cost is
+  paid ONCE, UPFRONT (when the POOL is initially populated), rather than REPEATEDLY per-request
+```
+
+Because the construction savings are typically modest per individual request, `DbContextPool` earns its adoption specifically for very high-throughput applications where even a small per-request saving, multiplied across a very large request volume, becomes meaningful — it's not a universally-necessary optimization for every application, but a targeted one for genuinely high-request-volume scenarios.
+
+**Common Pitfall:** using `AddDbContextPool` while also holding onto a captured `DbContext` reference beyond its normal per-request lifetime (a background thread capturing it, or a singleton service incorrectly retaining a reference) — since pooled instances are reset and reused for a *different* request afterward, any code still referencing a "returned" pooled instance risks operating on stale, unexpectedly-reset state belonging to an entirely different, later request.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What are EF Core Skip Navigations (EF Core 5+), and how do they let a many-to-many relationship be modeled without explicitly defining the join table's own entity class, unless extra data on the relationship itself is needed?**
+
+Before EF Core 5, modeling a many-to-many relationship required explicitly defining a join entity class representing the linking table — Skip Navigations let you declare a many-to-many relationship directly between two entities, with EF Core automatically creating and managing an implicit join table behind the scenes, without you ever needing to define or interact with that join entity's class directly (unless the relationship itself needs extra data, like a timestamp of when the association was created).
+
+```csharp
+public class Student
+{
+    public int Id { get; set; }
+    public ICollection<Course> Courses { get; set; } = new List<Course>(); // SKIP navigation -- NO explicit join entity needed
+}
+public class Course
+{
+    public int Id { get; set; }
+    public ICollection<Student> Students { get; set; } = new List<Student>(); // SKIP navigation, the OTHER side
+}
+// EF Core AUTOMATICALLY creates and manages an IMPLICIT "StudentCourse" join table BEHIND the scenes --
+// you NEVER need to define OR directly interact with a "StudentCourse" C# class AT ALL
+```
+
+```text
+BEFORE EF Core 5: modeling MANY-to-many REQUIRED an EXPLICIT join entity class (StudentCourse),
+  with ITS OWN DbSet, EVEN if the relationship carried NO extra data beyond the two foreign keys
+
+WITH Skip Navigations (EF Core 5+): the SAME many-to-many relationship needs ONLY the TWO
+  collection navigation properties shown ABOVE -- EF Core handles the JOIN TABLE entirely
+  IMPLICITLY, UNLESS you EXPLICITLY need to add EXTRA data (like "EnrollmentDate") to it
+```
+
+Because most many-to-many relationships genuinely don't need any data beyond the two foreign keys linking them, Skip Navigations eliminate boilerplate for the common case — an explicit join entity is still fully supported (and necessary) the moment the relationship itself needs to carry its own extra data, at which point you configure it explicitly rather than relying on the implicit table.
+
+**Common Pitfall:** defining an explicit join entity class for a many-to-many relationship that genuinely needs no extra data beyond the two foreign keys, out of habit from pre-EF-Core-5 modeling conventions — Skip Navigations handle this common case with meaningfully less boilerplate, and an explicit join entity should be reserved specifically for relationships that actually need additional data attached to the association itself.
+
+---
+
 ---

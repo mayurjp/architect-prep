@@ -1400,4 +1400,86 @@ Because the encryption/decryption happens entirely on the client side, using key
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is a SQL Server `DEFAULT` constraint, and how does it let a column automatically receive a specified value when an `INSERT` statement doesn't explicitly provide one?**
+
+A `DEFAULT` constraint specifies a fallback value SQL Server automatically inserts into a column whenever an `INSERT` statement omits that column entirely — the application (or the person writing an ad-hoc `INSERT`) doesn't need to explicitly specify a value for every single column, as long as sensible defaults exist for the ones being omitted.
+
+```sql
+CREATE TABLE Orders (
+    Id INT IDENTITY PRIMARY KEY,
+    Status NVARCHAR(20) NOT NULL DEFAULT 'Pending',
+    CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE()
+);
+
+INSERT INTO Orders (Id) VALUES (DEFAULT); -- omits Status AND CreatedAt entirely --
+-- SQL Server AUTOMATICALLY fills them with 'Pending' and the CURRENT UTC time, RESPECTIVELY
+```
+
+```text
+INSERT explicitly PROVIDING a value: THAT explicit value is used, the DEFAULT is IGNORED
+INSERT OMITTING the column entirely: the DEFAULT constraint's value is used AUTOMATICALLY
+```
+
+Because the default is enforced at the database level rather than relying on every single application code path remembering to supply a sensible starting value, a `DEFAULT` constraint guarantees consistent behavior even for an ad-hoc query, a data migration script, or any other code path that might not know or care about the "right" default value for that column.
+
+**Common Pitfall:** relying purely on application-level code to always supply a sensible default value for a column, without a database-level `DEFAULT` constraint as a backstop — a raw SQL script, a data migration tool, or a different application entirely (bypassing the original app's own logic) could insert a row without going through the code path that would have supplied the intended default, resulting in an unintended `NULL` or an inconsistent value that a database-level `DEFAULT` constraint would have prevented.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is `sys.dm_os_wait_stats`, and how does examining what a server's threads spend time waiting on — rather than just raw CPU usage — reveal a genuinely different class of performance bottleneck?**
+
+CPU usage alone only shows how busy the processor is — it says nothing about time threads spend *waiting* for something else (a lock held by another session, a slow disk I/O operation, network latency) — `sys.dm_os_wait_stats` aggregates exactly this waiting time by wait type, revealing bottlenecks that low CPU usage alone would completely hide.
+
+```sql
+SELECT TOP 10 wait_type, wait_time_ms, waiting_tasks_count
+FROM sys.dm_os_wait_stats
+ORDER BY wait_time_ms DESC;
+```
+
+```text
+A server showing LOW CPU usage (say, 20%) could STILL be performing TERRIBLY, if threads
+  are spending the OTHER 80% of their time WAITING on something -- CPU usage alone would
+  SUGGEST "the server has PLENTY of spare capacity," while wait_stats REVEALS the ACTUAL
+  bottleneck: e.g., "PAGEIOLATCH_SH" (waiting on DISK reads) or "LCK_M_X" (waiting on LOCKS)
+```
+
+Because a query's actual end-to-end latency is the sum of both the time it spends *actively executing* on CPU and the time it spends *waiting* for various resources, a server with low CPU usage but high aggregate wait time is still genuinely slow from a user's perspective — `sys.dm_os_wait_stats` is often the very first place an experienced DBA looks when troubleshooting "the server feels slow, but CPU/memory graphs look fine," since it directly identifies which specific *kind* of waiting is actually dominating.
+
+**Common Pitfall:** diagnosing a "slow server" purely by watching CPU and memory utilization graphs, concluding "there's no problem" simply because both look healthy — a server can be severely bottlenecked on locking, disk I/O, or network waits while CPU/memory usage remain comfortably low; `sys.dm_os_wait_stats` (and its cumulative, since-last-restart nature, best interpreted as *deltas* over a specific time window) is the tool that actually surfaces this class of bottleneck.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is SQL Server's In-Memory OLTP (Hekaton) — memory-optimized tables — and how do their lock-free, optimistic concurrency internals avoid the page-latch contention a normal disk-based table can suffer under extreme concurrent write load?**
+
+Ordinary disk-based tables use latches (lightweight internal locks) to protect in-memory data pages during concurrent access — under extremely high write concurrency, contention for these latches itself becomes a bottleneck. Memory-optimized tables (In-Memory OLTP) use an entirely different, latch-free row-versioning architecture: each row modification creates a new row version rather than updating in place, with optimistic multi-version concurrency control resolving conflicts without ever taking a traditional lock or latch at all.
+
+```sql
+CREATE TABLE OrderQueue (
+    Id INT NOT NULL PRIMARY KEY NONCLUSTERED,
+    Status NVARCHAR(20) NOT NULL
+) WITH (MEMORY_OPTIMIZED = ON, DURABILITY = SCHEMA_AND_DATA);
+```
+
+```text
+Ordinary disk-based table under EXTREME concurrent write load: MANY threads CONTEND for the
+  SAME page's LATCH -- the LATCH itself becomes a BOTTLENECK, EVEN if the underlying DATA
+  changes themselves are SMALL and FAST
+
+Memory-optimized table: EACH row modification creates a NEW row VERSION -- NO latch is EVER
+  taken on the row/page AT ALL -- CONCURRENT transactions PROCEED entirely LATCH-FREE, with
+  CONFLICTS resolved OPTIMISTICALLY (a TRANSACTION detecting a CONFLICT at COMMIT time simply RETRIES)
+```
+
+Because latch-free row-versioning eliminates the specific contention point that plagues disk-based tables under extreme concurrency (many threads all fighting over the same page's latch), In-Memory OLTP can sustain dramatically higher transaction throughput for workloads specifically bottlenecked on this kind of contention — a targeted solution for a narrow but genuinely severe class of high-concurrency OLTP workload, not a universal replacement for ordinary disk-based tables.
+
+**Common Pitfall:** migrating every table in a database to In-Memory OLTP expecting a universal performance win — memory-optimized tables earn their complexity (and memory cost — the entire table must fit in memory) specifically for tables genuinely bottlenecked on latch contention under extreme write concurrency; for typical, moderate-concurrency OLTP workloads, ordinary disk-based tables with well-designed indexes usually perform perfectly adequately without the added operational complexity Hekaton introduces.
+
+---
+
 ---

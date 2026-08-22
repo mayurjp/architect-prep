@@ -1355,4 +1355,87 @@ Because a CRDT's merge function is mathematically guaranteed to be conflict-free
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is a Document Database's client-generatable ID convention (as opposed to a relational database's server-generated `IDENTITY` column, covered under SQL Server), and how does a client-generated ID (like a UUID) let a document be created without a round trip to the database first?**
+
+A relational `IDENTITY` column requires the database to actually assign the next value, meaning a client must complete an `INSERT` before it even knows the new row's ID — many document databases instead let (or expect) the client to generate its own unique identifier (a UUID/GUID) *before* ever contacting the database, since the ID's uniqueness doesn't depend on any server-side sequence at all.
+
+```csharp
+// Client generates its OWN unique ID -- BEFORE ever contacting the database
+var newProduct = new { id = Guid.NewGuid().ToString(), name = "Widget", price = 29.99 };
+await container.CreateItemAsync(newProduct); // the ID is ALREADY KNOWN, even BEFORE this call completes
+```
+
+```text
+Relational IDENTITY: the ID is ONLY known AFTER the INSERT actually completes -- the CLIENT
+  must WAIT for the DATABASE's response to learn the ASSIGNED value
+
+Document DB client-generated ID (UUID): the ID is KNOWN IMMEDIATELY, BEFORE any database
+  call is even MADE -- a UUID's uniqueness comes from its OWN mathematical properties
+  (an astronomically low collision probability), NOT from a CENTRALIZED, SERVER-SIDE sequence
+```
+
+Because a UUID's uniqueness doesn't depend on any centralized coordination (unlike an auto-incrementing `IDENTITY` sequence, which inherently requires the database to hand out the next value), a client can generate one locally and immediately reference it (linking it to other in-flight objects, queuing follow-up work) without waiting for a round trip to confirm what ID the database assigned — genuinely useful in distributed systems where reducing round-trips and coordination points matters.
+
+**Common Pitfall:** relying on a database-generated sequential ID for a document database when the application architecture would actually benefit from client-generated IDs (avoiding a round trip before referencing the new item elsewhere) — while some document databases do support server-generated IDs, client-generated UUIDs are the more common, distributed-systems-friendly convention specifically because they eliminate the coordination round-trip a sequential ID would otherwise require.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is a NoSQL storage engine's own Write-Ahead Log (WAL) at a single-node level, and how does flushing it to durable storage before acknowledging a write protect against data loss from a sudden process crash?**
+
+Before actually applying a write to its main data structures (which might involve complex, multi-step internal bookkeeping), a storage engine first appends a compact record of the *intended* change to a sequential, append-only Write-Ahead Log, and flushes that log entry to durable disk storage — only *then* does it acknowledge the write as successful; if the process crashes immediately afterward, the WAL entry (already safely on disk) lets the engine replay and correctly reapply that change on restart, even though the main data structures never got updated before the crash.
+
+```text
+Write request arrives -- storage engine's SEQUENCE:
+  1. APPEND a compact record of the INTENDED change to the WAL (a SIMPLE, SEQUENTIAL append -- FAST)
+  2. FLUSH that WAL entry to DURABLE disk storage -- ONLY NOW is the write ACKNOWLEDGED as successful
+  3. (LATER, ASYNCHRONOUSLY) actually apply the change to the MAIN, more complex data structures
+
+IF the process CRASHES between steps 2 and 3: on RESTART, the engine REPLAYS the WAL entries
+  that were DURABLY written but NOT YET applied to the MAIN structures -- NO acknowledged
+  write is EVER LOST, even though the MAIN data structures hadn't been updated YET at CRASH time
+```
+
+Because the WAL's simple, sequential append-and-flush is far cheaper than immediately performing the full, potentially complex update to the main data structures, this two-phase approach (fast, durable WAL append first; slower, full application of the change later) is both fast *and* crash-safe — a write is durably recorded the moment its WAL entry is flushed, regardless of whether the more expensive, full update to the main data structures has actually happened yet.
+
+**Common Pitfall:** assuming a storage engine acknowledging a write means the data has already been fully applied to its final, queryable data structures — in many engines, acknowledgment specifically means "durably recorded in the WAL," with the actual application to queryable structures happening slightly afterward; this distinction matters for understanding exactly what guarantee an acknowledged write actually provides at the moment of acknowledgment.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is Cassandra's Tunable Consistency via per-query consistency levels (`ONE`, `QUORUM`, `ALL`), and how does choosing a different level for different queries against the same table let an application balance latency against consistency per operation, rather than accepting one global setting?**
+
+Rather than a database-wide, fixed consistency guarantee, Cassandra lets each individual read or write specify its own required consistency level — `ONE` (fastest, only one replica needs to respond), `QUORUM` (a majority of replicas, balancing speed and consistency), or `ALL` (every replica, strongest consistency but slowest and least fault-tolerant) — letting the same application choose a different trade-off for different operations based on their specific accuracy needs.
+
+```csharp
+// A "like" count -- APPROXIMATE accuracy is FINE -- use the FASTEST, LEAST consistent level
+session.Execute(new SimpleStatement("UPDATE Posts SET likes = likes + 1 WHERE id = ?", postId)
+    .SetConsistencyLevel(ConsistencyLevel.One));
+
+// A financial balance update -- CANNOT tolerate weak consistency -- use QUORUM
+session.Execute(new SimpleStatement("UPDATE Accounts SET balance = ? WHERE id = ?", newBalance, accountId)
+    .SetConsistencyLevel(ConsistencyLevel.Quorum));
+```
+
+```text
+ConsistencyLevel.ONE: FASTEST, most AVAILABLE (tolerates the MOST replica failures) -- but
+  a READ immediately AFTER a write MIGHT hit a replica that HASN'T yet received that write
+
+ConsistencyLevel.QUORUM: a MAJORITY of replicas must RESPOND -- BALANCES latency/availability
+  against a STRONGER consistency guarantee -- the MOST COMMON choice for GENUINELY important data
+
+ConsistencyLevel.ALL: EVERY single replica must RESPOND -- STRONGEST consistency, but the
+  SLOWEST, and LEAST fault-tolerant (ANY one replica being DOWN blocks the ENTIRE operation)
+```
+
+Because this choice is made per-query rather than being a single, fixed, database-wide setting, the exact same application (and even the exact same table) can apply different consistency/latency trade-offs to different kinds of data based on their actual business sensitivity — a "like" counter tolerating eventual consistency for speed, while a financial balance update insists on a stronger guarantee, all within the same Cassandra cluster.
+
+**Common Pitfall:** applying a single, uniform consistency level (often the weakest, fastest option, `ONE`) across an entire application regardless of each specific operation's actual sensitivity to staleness or conflicting writes — genuinely sensitive operations (financial balances, inventory counts) deserve a stronger per-query consistency level even if it costs some additional latency, while genuinely tolerant operations (analytics counters, "like" counts) can use the fastest option without meaningful business risk.
+
+---
+
 ---

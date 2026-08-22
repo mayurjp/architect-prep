@@ -1398,3 +1398,102 @@ Because each thread's copy is entirely private and independent, Thread-Local Sto
 **Common Pitfall:** reaching for `[ThreadStatic]`/`ThreadLocal<T>` for state that actually needs to be shared or aggregated across threads (a running total counter meant to reflect all threads' combined work) — since each thread's copy is completely isolated, this doesn't give you a coordinated shared value at all; a proper aggregation step (summing each thread's own thread-local value, or using `Interlocked`, covered earlier, on genuinely shared state instead) is needed for that use case.
 
 ---
+
+## Beginner — Question 17
+
+**Q17: What is the code-level requirement (statelessness) that must be true for "Scaling Out" (adding more instances) to actually work, as distinct from Vertical Scaling's hardware ceiling?**
+
+Vertical Scaling hits a hard physical ceiling (there's only so much CPU/RAM a single machine can have) — Scaling Out avoids that ceiling by running many instances instead, but this only works correctly if the application itself is stateless: any given request must be servable by *any* instance, with no request depending on in-memory state that happens to live only on one specific instance from an earlier request.
+
+```csharp
+// STATEFUL -- BREAKS when scaled OUT across MULTIPLE instances
+private static Dictionary<string, ShoppingCart> _cartsInMemory = new(); // lives ONLY on THIS instance
+
+// STATELESS -- WORKS correctly REGARDLESS of WHICH instance handles a GIVEN request
+var cart = await _distributedCache.GetAsync<ShoppingCart>(cartId); // shared, EXTERNAL store --
+                                                                     // ANY instance can retrieve THIS SAME cart
+```
+
+```text
+Scaling OUT with STATEFUL code: a user's request LANDS on Instance A, which builds UP
+  in-memory state -- their NEXT request LANDS on Instance B (a LOAD BALANCER has NO reason to
+  route it BACK to A) -- Instance B has NO IDEA about the state Instance A built up -- BROKEN
+
+Scaling OUT with STATELESS code: ANY instance can handle ANY request, because ALL the
+  NECESSARY state lives in a SHARED, EXTERNAL store (a database, a distributed cache) that
+  EVERY instance can EQUALLY access -- SCALING OUT works CORRECTLY, TRANSPARENTLY
+```
+
+Because Vertical Scaling never requires this architectural constraint (there's still only ever one instance, so in-memory state is never an issue), the statelessness requirement is specifically what Scaling Out demands in exchange for escaping the vertical ceiling — this is exactly why session/cart state living in-memory (as covered under Kubernetes' `sessionAffinity` discussion) is a genuine architectural liability once an application needs to scale horizontally.
+
+**Common Pitfall:** designing an application assuming a single, ever-present instance (storing meaningful state in static, in-memory fields) and only later discovering that Scaling Out for increased capacity silently breaks functionality depending on that state — retrofitting statelessness after the fact (moving state to a shared external store) is real, avoidable rework that designing for it from the start would have sidestepped entirely.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is HTTP Response Compression's CPU-versus-bandwidth trade-off, and how does choosing a compression level let you tune where on that trade-off curve a specific endpoint sits?**
+
+Compressing a response trades CPU time (spent compressing) for reduced network bandwidth (a smaller payload to transmit) — most compression algorithms (Gzip, Brotli, covered elsewhere) offer multiple compression *levels*: a low level compresses quickly but produces a somewhat larger output, while a high level squeezes out a smaller payload at the cost of noticeably more CPU time spent compressing.
+
+```csharp
+services.AddResponseCompression(options =>
+{
+    options.Providers.Add<BrotliCompressionProvider>();
+});
+services.Configure<BrotliCompressionProviderOptions>(options =>
+{
+    options.Level = CompressionLevel.Fastest; // LOW compression ratio, but MINIMAL CPU cost per request
+    // vs. CompressionLevel.SmallestSize -- BEST compression ratio, but MEASURABLY MORE CPU per request
+});
+```
+
+```text
+CompressionLevel.Fastest: LOW CPU cost per request, SOMEWHAT larger compressed payload --
+  appropriate for a HIGH-THROUGHPUT endpoint where CPU is the SCARCER resource
+
+CompressionLevel.SmallestSize: HIGHER CPU cost per request, SMALLEST possible payload --
+  appropriate for a LOW-THROUGHPUT endpoint (or a BANDWIDTH-CONSTRAINED client, like MOBILE)
+  where NETWORK transfer size matters MORE than the EXTRA CPU cost of COMPRESSING more AGGRESSIVELY
+```
+
+Because CPU and bandwidth are genuinely different, independently-scarce resources depending on the specific deployment (a CPU-bound server versus bandwidth-constrained mobile clients), the "right" compression level isn't universal — a high-throughput API server handling enormous request volume might prefer a faster, lower-ratio compression level to conserve CPU, while a service specifically serving bandwidth-constrained clients might accept the extra CPU cost for a smaller payload.
+
+**Common Pitfall:** defaulting to the maximum compression level everywhere "for the smallest possible payloads," without considering that this trades away real CPU capacity on every single request — for a CPU-bound, high-throughput service, this can become a genuine, self-inflicted bottleneck; the appropriate compression level should reflect which resource (CPU or bandwidth) is actually the more scarce/expensive one for that specific deployment.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is `Utf8JsonReader`-based zero-allocation JSON parsing, and how does reading directly from a `ReadOnlySpan<byte>` avoid the string-allocation overhead a naive `JsonDocument.Parse(string)` call would otherwise incur?**
+
+Parsing JSON from a `string` first requires that string to already exist in memory (itself an allocation), and further requires decoding UTF-16 `char` data — `Utf8JsonReader` instead reads directly from raw UTF-8 bytes (a `ReadOnlySpan<byte>`), letting you parse network-received or file-read JSON data without ever allocating an intermediate `string` at all, and without a UTF-16 conversion step.
+
+```csharp
+ReadOnlySpan<byte> jsonUtf8Bytes = GetRawJsonBytesFromNetwork(); // raw UTF-8 bytes, AS RECEIVED --
+                                                                    // NO string ever constructed AT ALL
+
+var reader = new Utf8JsonReader(jsonUtf8Bytes);
+while (reader.Read())
+{
+    if (reader.TokenType == JsonTokenType.PropertyName && reader.ValueTextEquals("price"))
+    {
+        reader.Read();
+        decimal price = reader.GetDecimal(); // reads DIRECTLY from the UTF-8 bytes -- ZERO string allocation
+    }
+}
+```
+
+```text
+Naive approach: raw BYTES -> DECODE to a UTF-16 string (an ALLOCATION) -> JsonDocument.Parse(string)
+  (potentially MORE allocations, for the parsed document TREE itself)
+
+Utf8JsonReader approach: raw BYTES -> read DIRECTLY, TOKEN by TOKEN -- NO intermediate string
+  EVER allocated, NO UTF-16 conversion step AT ALL -- the LOWEST-allocation parsing path available
+```
+
+Because network payloads and file contents are typically already UTF-8 bytes, converting them to a UTF-16 `string` purely to then parse that string is an avoidable round-trip through an intermediate representation — `Utf8JsonReader`'s low-level, forward-only, token-based API sacrifices the convenience of a full document-tree object model in exchange for genuinely zero-allocation parsing, appropriate for the most allocation-sensitive, high-throughput JSON-processing hot paths.
+
+**Common Pitfall:** reaching for `Utf8JsonReader`'s low-level, manual token-by-token API for ordinary, non-performance-critical JSON deserialization — its forward-only, imperative style is meaningfully more verbose and error-prone to use correctly than simply deserializing into a strongly-typed object via `JsonSerializer.Deserialize<T>`; the zero-allocation benefit is worth the added complexity specifically for genuinely hot, high-throughput parsing paths, not as a universal default for all JSON handling.
+
+---
