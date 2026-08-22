@@ -1349,3 +1349,126 @@ Because both teams now depend on the exact same shared type, a change to it can 
 **Common Pitfall:** reaching for a Shared Kernel reflexively, whenever two Bounded Contexts happen to need a conceptually similar type, without weighing the ongoing coordination cost against simply letting each context maintain its own independent version (even if that means some duplicated code) — a Shared Kernel that grows to include more than a small, genuinely stable set of types quietly reintroduces the exact tight coupling between teams that Bounded Contexts' usual full isolation exists specifically to prevent, undermining the independence that's the entire point of splitting into separate contexts in the first place.
 
 ---
+
+## Beginner — Question 13
+
+**Q13: Why does keeping Domain layer logic as pure functions — free of direct database calls or other I/O — make it trivially unit-testable without mocks at all?**
+
+A pure function's output depends only on its inputs, with no hidden dependency on external state (a database, the current time, a file) and no side effects — Domain logic written this way can be tested by simply calling it with specific inputs and asserting on its return value, with no mock objects, no test database, and no setup/teardown of any external dependency needed at all.
+
+```csharp
+// IMPURE -- reaches OUT to a database DIRECTLY -- testing THIS requires MOCKING a database dependency
+public class Order
+{
+    public decimal CalculateTotal(IDiscountRepository discountRepo) // an I/O DEPENDENCY, baked directly IN
+    {
+        var discount = discountRepo.GetDiscountForCustomer(CustomerId); // a DATABASE CALL, INSIDE domain logic
+        return Subtotal * (1 - discount);
+    }
+}
+
+// PURE -- depends ONLY on its OWN inputs -- NO I/O, NO hidden external dependency AT ALL
+public class Order
+{
+    public decimal CalculateTotal(decimal discountRate) // the DISCOUNT is simply PASSED IN, as a plain VALUE
+    {
+        return Subtotal * (1 - discountRate); // PURE computation -- SAME inputs ALWAYS produce the SAME output
+    }
+}
+
+// TESTING the pure version -- NO MOCKS needed AT ALL -- just CALL it, with SPECIFIC inputs
+[Fact]
+public void CalculateTotal_AppliesDiscountCorrectly()
+{
+    var order = new Order { Subtotal = 100 };
+    Assert.Equal(80, order.CalculateTotal(discountRate: 0.2m)); // PLAIN, DIRECT assertion -- NO mocking AT ALL
+}
+```
+Because the pure version receives the discount rate as a plain parameter rather than reaching out to a repository itself, testing it requires nothing beyond calling the method directly with a specific input and checking the output — the *impure* version, by contrast, needs a mock `IDiscountRepository` just to verify simple arithmetic, adding real test-setup overhead for logic that's fundamentally just a calculation.
+
+**Why this specifically connects to Clean Architecture's Dependency Rule (covered earlier):** keeping I/O dependencies out of Domain-layer logic entirely (pushing them to Application-layer orchestration, which fetches the data and passes it in as plain values) isn't just a testability nicety — it's a direct consequence of correctly applying the Dependency Rule, since a Domain class calling `IDiscountRepository` directly would need to depend on an interface whose *implementation* lives in an outer layer, exactly the inward-dependency violation the Dependency Rule prohibits.
+
+**Common Pitfall:** injecting repository/service interfaces directly into Domain entities "for convenience," so the entity can fetch whatever data it needs itself — beyond violating the Dependency Rule, this makes the entity's logic impure and meaningfully harder to test in isolation, requiring mocks for what would otherwise be simple, direct, mock-free assertions on a pure function's output.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is a CQRS Read Model, and how does a separate, denormalized projection — updated asynchronously from Domain Events — let the read side avoid navigating the write side's own Aggregate boundaries?**
+
+CQRS's write side (covered earlier) is often organized around Aggregates, each enforcing its own consistency boundary and business rules — but a read query often needs data spanning *multiple* Aggregates, in a shape convenient for display, not the shape the write side's Aggregate boundaries happen to enforce. A Read Model is a separate, denormalized data structure, specifically shaped for reads, kept up to date asynchronously as Domain Events (covered earlier) occur on the write side.
+
+```csharp
+// the WRITE side -- an Order AGGREGATE, enforcing its OWN consistency boundary
+public class Order { public int Id; public List<OrderLine> Lines; /* business RULES enforced HERE */ }
+// a SEPARATE Customer aggregate, in an ENTIRELY different part of the write model
+
+// the READ MODEL -- a SEPARATE, DENORMALIZED projection, SHAPED specifically for ONE SCREEN's needs
+public class OrderSummaryReadModel
+{
+    public int OrderId; public string CustomerName; public string CustomerTier;
+    public decimal Total; public int ItemCount;
+    // -- COMBINES data from BOTH Order AND Customer aggregates, ALREADY FLATTENED, ALREADY JOINED --
+}
+
+// an EVENT HANDLER updates the READ MODEL, ASYNCHRONOUSLY, WHENEVER a relevant DOMAIN EVENT occurs
+public class OrderPlacedEventHandler : INotificationHandler<OrderPlacedDomainEvent>
+{
+    public async Task Handle(OrderPlacedDomainEvent domainEvent, CancellationToken ct)
+    {
+        await _readModelDb.OrderSummaries.AddAsync(new OrderSummaryReadModel { /* ... POPULATED from the event ... */ });
+    }
+}
+```
+Because the Read Model is a genuinely separate data structure (potentially even a separate database/table), a query against it never needs to navigate or reconstruct the write side's own Aggregate boundaries at all — it's already flattened, already joined, already shaped exactly for what a specific screen or report needs, updated incrementally as Domain Events occur, rather than the read side needing to query multiple separate Aggregates and combine them at read time, every single time.
+
+**Why this specifically avoids forcing an artificial "God Aggregate" spanning multiple bounded concerns just to satisfy read convenience:** without a separate Read Model, a team might be tempted to widen an Aggregate's boundary (making `Order` directly include full `Customer` data) purely to make a read query simpler — but this conflates the write side's genuine consistency-boundary concerns with the read side's display-convenience concerns, two genuinely different needs; a dedicated Read Model lets the write side's Aggregates stay correctly, narrowly scoped to their actual consistency requirements while the read side gets its own independently-shaped, denormalized projection instead.
+
+**Common Pitfall:** widening a write-side Aggregate's boundary specifically to make read queries more convenient, rather than introducing a dedicated Read Model — this conflates two genuinely different concerns (transactional consistency boundaries versus display/query convenience), and often produces an Aggregate that's simultaneously too large for correct transactional behavior and still not perfectly shaped for every read need it was stretched to accommodate.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is Event Sourcing, and how does storing a sequence of domain events — rather than current state — as an Aggregate's source of truth change how that Aggregate is reconstructed every time it's loaded?**
+
+Ordinary persistence stores an Aggregate's *current* state directly (an `Orders` table row holding the order's present values) — Event Sourcing instead stores the complete, ordered sequence of every domain event that ever happened to that Aggregate, and reconstructs its current state by replaying that entire event history from the beginning, every single time it's loaded.
+
+```csharp
+// ORDINARY persistence -- stores CURRENT STATE directly
+// Orders table: Id=5, Status='Shipped', Total=99.99   <-- just the PRESENT values, HISTORY is LOST
+
+// EVENT SOURCING -- stores the ENTIRE SEQUENCE of events that LED to the current state
+// EventStore for Order #5:
+//   1. OrderCreatedEvent      { OrderId: 5, Total: 0 }
+//   2. ItemAddedEvent         { OrderId: 5, Item: "Keyboard", Price: 29.99 }
+//   3. ItemAddedEvent         { OrderId: 5, Item: "Mouse", Price: 14.99 }
+//   4. OrderShippedEvent      { OrderId: 5 }
+
+public class Order
+{
+    public static Order Rehydrate(IEnumerable<IDomainEvent> events)
+    {
+        var order = new Order();
+        foreach (var e in events) order.Apply(e); // REPLAYS each event, IN ORDER, RECONSTRUCTING current state
+        return order;
+    }
+
+    private void Apply(IDomainEvent e)
+    {
+        switch (e)
+        {
+            case OrderCreatedEvent oc: Id = oc.OrderId; break;
+            case ItemAddedEvent ia: Total += ia.Price; break;
+            case OrderShippedEvent: Status = "Shipped"; break;
+        }
+    }
+}
+```
+Loading Order #5 doesn't read a single stored row reflecting its current state at all — it reads the *entire* sequence of the four events above, from the very beginning, and replays each one through `Apply()` to arrive back at the exact same current state an ordinary "just store the current row" approach would have given directly, but with the *complete history* of every intermediate state genuinely preserved and available, not just the final result.
+
+**Why this is a genuinely different, more radical technique than "CQRS" alone (already covered together conceptually under Microservices), and not automatically required just because CQRS is in use:** CQRS (separating read and write models) and Event Sourcing (storing events as the source of truth rather than current state) are frequently used together, but are actually independent decisions — you can build a CQRS system whose write side stores ordinary current-state rows (no Event Sourcing at all), and Event Sourcing itself provides genuine additional benefits (a complete audit trail, the ability to reconstruct state "as of" any past point in time, natural support for Domain Events already being the system's fundamental unit) at the real cost of added complexity (rehydration performance for aggregates with long event histories, needing a snapshot strategy for very long-lived aggregates) that plain CQRS alone doesn't necessarily require.
+
+**Common Pitfall:** adopting Event Sourcing as an assumed, automatic requirement simply because a system already uses CQRS and Domain Events, without a genuine, specific need for Event Sourcing's particular benefits (a complete audit history, temporal "as of" queries) that would justify its added complexity — Event Sourcing is a significant, independent architectural commitment with real ongoing costs (rehydration performance, event schema evolution over time, needing periodic snapshots for aggregates with very long histories), not a natural or required consequence of simply having adopted CQRS and Domain Events elsewhere in the same system.
+
+---

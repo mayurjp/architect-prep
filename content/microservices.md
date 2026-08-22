@@ -1781,4 +1781,97 @@ Because the Integration Event is a separately-designed type (not simply the inte
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is a Facade/Composite Service, and how does it differ from an API Gateway (covered earlier) by encapsulating actual business logic about how to combine results, rather than just routing?**
+
+An API Gateway (covered earlier) primarily routes and forwards requests to the appropriate backend service — a Facade (or Composite) Service goes further, calling *several* backend services itself and combining their results according to genuine business logic, presenting one simplified, purpose-built response the caller never has to assemble itself.
+
+```csharp
+// FACADE SERVICE -- calls MULTIPLE backend services, COMBINES results with GENUINE business logic
+public class OrderSummaryFacadeService
+{
+    public async Task<OrderSummaryDto> GetOrderSummary(int orderId)
+    {
+        var order = await _orderServiceClient.GetOrderAsync(orderId);
+        var customer = await _customerServiceClient.GetCustomerAsync(order.CustomerId);
+        var shipping = await _shippingServiceClient.GetEstimateAsync(order.Id);
+
+        // GENUINE business logic -- deciding HOW to COMBINE these into ONE coherent summary
+        return new OrderSummaryDto
+        {
+            CustomerName = customer.IsVip ? $"{customer.Name} (VIP)" : customer.Name,
+            EstimatedDelivery = shipping.IsExpressEligible ? shipping.ExpressDate : shipping.StandardDate,
+            // ... further COMBINING/DECISION logic HERE ...
+        };
+    }
+}
+```
+An API Gateway simply forwards a request to whichever backend owns it — a Facade Service actively orchestrates *multiple* backend calls and applies its own business rules to decide how to combine, transform, or reconcile their results into one purpose-built response, a genuinely different (and more substantial) responsibility than a Gateway's comparatively thin routing/cross-cutting-concerns role.
+
+**Why this distinction matters for where business logic should actually live:** a Gateway accumulating this kind of combining/business logic gradually becomes an undocumented, hard-to-test business-logic dumping ground disguised as "just routing infrastructure" — recognizing when routing logic has actually grown into genuine business logic is exactly the signal that a dedicated Facade Service (a proper, testable, independently-deployable service in its own right) is the more appropriate home for it, rather than continuing to bolt it onto the Gateway layer.
+
+**Common Pitfall:** letting an API Gateway's configuration gradually accumulate genuine business logic (conditional response transformations, multi-service orchestration) under the assumption that "it's just part of the Gateway" — this blurs the line between infrastructure-level routing and genuine business logic, making that logic harder to test, version, and reason about independently; extracting it into a dedicated Facade Service keeps the Gateway itself focused on its narrower, infrastructure-level responsibilities.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is Correlation ID propagation across service boundaries, and how does attaching the same ID to every log line/span across a multi-service request let you reconstruct the entire request's journey, even without full distributed tracing infrastructure?**
+
+A Correlation ID is a single, unique identifier generated at the very start of a request (typically at the API Gateway or the first service touched) and passed along, unchanged, to every downstream service call that request triggers — every one of those services includes the same Correlation ID in its own log output, letting anyone searching logs across the entire system filter by that one ID and see the complete, chronological story of exactly what happened across every service the request touched.
+
+```csharp
+// the API GATEWAY (or the FIRST service touched) generates a Correlation ID, if one doesn't ALREADY exist
+var correlationId = context.Request.Headers["X-Correlation-Id"].FirstOrDefault() ?? Guid.NewGuid().ToString();
+
+// EVERY log line THIS service writes INCLUDES it
+_logger.LogInformation("Processing order {OrderId}, CorrelationId={CorrelationId}", orderId, correlationId);
+
+// EVERY downstream call THIS service makes PROPAGATES the SAME id FORWARD, UNCHANGED
+_httpClient.DefaultRequestHeaders.Add("X-Correlation-Id", correlationId);
+```
+```text
+Searching a CENTRALIZED log aggregation system for CorrelationId=abc-123 returns EVERY log line,
+from EVERY SERVICE this ONE request touched, in ONE combined, CHRONOLOGICALLY-orderable view --
+EVEN WITHOUT a FULL distributed tracing system (OpenTelemetry spans, covered under System Design)
+already IN PLACE
+```
+Because the same identifier appears in every service's own logs for this one request, an engineer investigating an incident can search a centralized log aggregator for that one ID and immediately see the complete cross-service story — a genuinely useful, low-effort precursor (or complement) to full distributed tracing, since it requires nothing more than propagating one header and including it in log statements, without needing a complete tracing infrastructure (spans, trace context propagation, a tracing backend) already deployed.
+
+**Why this is specifically valuable as an incremental first step, even for teams that eventually adopt full distributed tracing:** full distributed tracing (covered under System Design) provides much richer information (timing breakdowns, span hierarchies) — but Correlation ID propagation can be implemented immediately, with minimal engineering effort, providing genuine cross-service debugging value long before a team has invested in a complete tracing infrastructure, and remains useful even afterward as a simple, human-readable log-correlation mechanism alongside more sophisticated tracing tools.
+
+**Common Pitfall:** generating a *new* Correlation ID at each service, rather than propagating the *same* one received from an upstream caller — this defeats the entire purpose, since each service's logs would then carry a different, unrelated ID, making it impossible to correlate them back into one coherent, cross-service request story; a service should always check for and forward an existing Correlation ID from an incoming request before generating a new one, and only ever generate a fresh ID for a request that's genuinely originating fresh, with no upstream ID already present.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is Service Mesh Traffic Splitting, and how does it let a mesh route a percentage of traffic to a different service version based on request headers/rules, independently of how many Pod replicas exist for each version?**
+
+A Service Mesh's sidecar proxies (covered earlier) can inspect and route individual requests based on rules entirely independent of the underlying replica count — letting you split traffic between two versions of a service (90% to v1, 10% to v2) by *percentage* or by specific request attributes (a header, a cookie), regardless of whether v1 has 10 replicas and v2 has only 1.
+
+```yaml
+# Istio VirtualService -- SPLITS traffic BY PERCENTAGE, INDEPENDENTLY of REPLICA COUNT
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: my-api
+spec:
+  hosts: [my-api]
+  http:
+    - route:
+        - destination: { host: my-api, subset: v1 }
+          weight: 90   # 90% of TRAFFIC -- REGARDLESS of how MANY Pod replicas v1 ACTUALLY has
+        - destination: { host: my-api, subset: v2 }
+          weight: 10   # 10% of TRAFFIC -- EVEN if v2 has ONLY ONE replica, RUNNING ALONGSIDE v1's TEN
+```
+Because the mesh's proxies make this routing decision at the request level (not by simply distributing evenly across however many replicas of each version happen to exist), traffic can be split by an *explicit, deliberately-chosen percentage* completely decoupled from replica count — running a canary with just one v2 replica receiving a genuinely controlled 10% of traffic, without needing nine additional v2 replicas just to naturally receive that same proportion through ordinary round-robin load balancing.
+
+**Why this specifically differs from (and can complement) deployment-level Canary/Progressive Delivery, covered under DevOps:** deployment-level Canary controls traffic split indirectly, through *replica count* (a canary with 1 of 11 total replicas naturally receives roughly 1/11th of traffic via ordinary load balancing) — Service Mesh Traffic Splitting controls it *directly and explicitly*, via routing rules, entirely decoupled from replica count, and can additionally route based on specific request attributes (only requests from internal employees, or carrying a specific test header) rather than a purely random percentage-based split, giving finer-grained control than replica-count-based canary alone provides.
+
+**Common Pitfall:** relying purely on replica-count ratios to approximate a desired traffic split percentage (running 1 canary replica alongside 9 stable replicas to approximate "10% canary traffic") when a Service Mesh capable of genuine, explicit traffic-splitting rules is already available — this ties the achievable split granularity to how many replicas can practically be run, and couples a deployment decision (replica count) to a traffic-routing decision (split percentage) that a mesh could otherwise control directly and independently, with far finer control over both the percentage and which specific requests get routed to which version.
+
+---
+
 ---

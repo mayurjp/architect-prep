@@ -1610,4 +1610,83 @@ Active-Passive completely avoids the write-conflict problem (only one region eve
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is a Write-Ahead Log (WAL), and how does writing an intended change to a log before actually applying it let a system recover its exact state after a crash?**
+
+A Write-Ahead Log records a description of an intended change *before* that change is actually applied to the system's real, in-place data structures — if the system crashes partway through, replaying the log on restart reconstructs exactly what was in progress, letting the system recover to a consistent state rather than being left with partially-applied, corrupted data.
+
+```text
+WITHOUT a WAL -- a crash MID-WRITE can leave data in an INCONSISTENT, PARTIALLY-APPLIED state:
+  Update in progress: "change Balance from 100 to 50" -- CRASH occurs HALFWAY through writing this
+  -- the DATA FILE might now hold some GARBLED, PARTIALLY-WRITTEN value -- NEITHER 100 NOR 50 --
+
+WITH a WAL -- the INTENDED change is LOGGED FIRST, THEN applied:
+  1. WRITE to the LOG (sequentially, FAST): "intend to change Balance from 100 to 50"  <- WAL entry
+  2. THEN apply the ACTUAL change to the real DATA structure
+  -- IF a CRASH occurs BETWEEN steps 1 and 2: on RESTART, the SYSTEM reads the LOG, sees the
+     INTENDED-but-unconfirmed change, and CAN SAFELY RE-APPLY it (or determine it was ALREADY
+     applied) -- RECOVERING to a CONSISTENT state, EITHER WAY --
+```
+Because the log entry is written *before* the actual data structure is modified, and log writes are simple, sequential appends (fast and less prone to partial-write corruption than modifying a complex, in-place data structure), a crash at any point still leaves enough information in the log to determine exactly what was in progress and correctly recover — either by completing the interrupted change or safely rolling it back, rather than being left with genuinely ambiguous, corrupted state.
+
+**Why this is the same underlying mechanism behind SQL Server's Transaction Log (covered elsewhere) and Kafka's own append-only log (covered under Messaging):** both are, at their core, applications of the same Write-Ahead Logging principle — a relational database's transaction log records intended changes before they're applied to the actual data pages, providing crash recovery; Kafka's log-structured storage (covered under NoSQL's LSM Tree discussion) similarly relies on sequential, append-first writes as its foundational durability mechanism — WAL is a genuinely foundational pattern underlying durability guarantees across many different kinds of systems, not a niche, database-specific detail.
+
+**Common Pitfall:** assuming a system's crash-recovery guarantees come from some vague, unspecified "the database handles it" magic, without understanding the concrete mechanism (writing intent before mutating actual state) that actually makes recovery possible — recognizing WAL as the specific, common underlying technique demystifies crash-recovery behavior across many different systems (relational databases, log-structured NoSQL stores, message brokers) that might otherwise each seem to have their own unrelated, opaque durability mechanism.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is the difference between Sharding by Range and Sharding by Hash, and what trade-off — efficient range queries versus even data distribution — distinguishes the two shard-key strategies?**
+
+Range-based sharding assigns contiguous ranges of a key's values to each shard (all customer IDs 1-1000 on Shard A, 1001-2000 on Shard B) — Hash-based sharding instead applies a hash function to the key, scattering values essentially randomly and evenly across shards, regardless of their original ordering.
+
+```text
+RANGE-based sharding -- CONTIGUOUS ranges assigned PER shard:
+  Shard A: customer IDs 1-1000        Shard B: customer IDs 1001-2000
+  -- "get all customers between ID 100 and 200" -- EASILY served by ONE shard (Shard A) ALONE --
+  -- BUT: if customer IDs are ASSIGNED SEQUENTIALLY (newest customers get the HIGHEST IDs), ALL
+     NEW customer WRITES land on the SAME "newest" SHARD -- a HOT SHARD, receiving ALL recent traffic
+
+HASH-based sharding -- hash(key) DETERMINES the shard, SCATTERING values EVENLY, REGARDLESS of ORDER:
+  hash(customerId) % numShards -- customer 100 and customer 101 could land on COMPLETELY DIFFERENT shards
+  -- WRITES are EVENLY distributed ACROSS ALL shards, REGARDLESS of ID ordering -- NO hot shard --
+  -- BUT: "get all customers between ID 100 and 200" now requires QUERYING EVERY SINGLE shard,
+     since THOSE customers are SCATTERED RANDOMLY ACROSS ALL of them, NOT contiguously on ONE
+```
+Range-based sharding excels at range queries (a single shard can answer "everything between X and Y" directly) but risks a hot shard if writes aren't naturally spread across the full key range (sequential IDs concentrating all new writes on one "current" shard) — Hash-based sharding solves the hot-shard problem by scattering writes evenly, but sacrifices the ability to serve a range query from a single shard, since a query spanning a range of values must now fan out to every shard and merge results.
+
+**Why this decision should be driven by the application's actual, dominant query patterns:** an application whose primary access pattern is genuinely range-based (time-series data, queried by date range) benefits significantly from range-based sharding's single-shard range-query efficiency, accepting the hot-shard risk as a separate problem to manage (perhaps via a less naturally-ordered key) — an application whose primary access pattern is point lookups by ID, with writes needing to spread evenly, is usually better served by hash-based sharding instead.
+
+**Common Pitfall:** choosing hash-based sharding by default (for its appealing even-distribution property) without considering that the application's dominant query pattern genuinely needs efficient range queries — discovering only after the fact that "get everything in this date range" now requires fanning out to every single shard and merging results, a substantially more expensive operation than the single-shard range query a range-based scheme would have provided for exactly this access pattern.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is PACELC, and how does it extend the CAP Theorem (covered earlier) by asserting that even without a network partition, a system must still trade latency against consistency?**
+
+CAP (covered earlier) only describes the trade-off during a network Partition — PACELC extends this: "if Partition (P), then trade off Availability vs. Consistency (A/C); Else (E), trade off Latency vs. Consistency (L/C)" — asserting that *even during entirely normal operation, with no partition occurring at all*, a distributed system still faces a genuine, unavoidable trade-off between how quickly it can respond and how strongly consistent that response actually is.
+
+```text
+CAP alone: "DURING a partition, choose Availability OR Consistency" -- says NOTHING about NORMAL,
+           NON-PARTITIONED operation AT ALL
+
+PACELC:    "IF a Partition occurs (P) -> choose Availability OR Consistency (A/C), EXACTLY as CAP says
+            ELSE (E, normal operation, NO partition) -> STILL must choose LATENCY OR Consistency (L/C)"
+
+EXAMPLE, during COMPLETELY NORMAL operation (NO partition anywhere):
+  Strongly CONSISTENT read: must WAIT for a QUORUM of replicas to CONFIRM the LATEST value -- SLOWER
+  EVENTUALLY consistent read: can return WHATEVER the NEAREST replica CURRENTLY has -- FASTER,
+    but POSSIBLY slightly STALE, even though NOTHING is actually "PARTITIONED" or "FAILING" at ALL
+```
+Because even a perfectly healthy, fully-connected distributed system still has to choose between waiting for genuine cross-replica confirmation (higher consistency, higher latency) or returning a potentially-slightly-stale local answer immediately (lower latency, weaker consistency), PACELC captures a trade-off CAP's partition-focused framing entirely omits — a system's *everyday*, un-partitioned behavior still requires making this same fundamental consistency-versus-speed choice, not just its behavior during the comparatively rare event of an actual network partition.
+
+**Why this specifically matters for evaluating a database's actual, real-world behavior more completely than CAP alone provides:** two databases might make the *identical* CAP trade-off during a partition (both choosing Availability over Consistency, for instance) while making *completely different* Latency/Consistency trade-offs during entirely normal, non-partitioned operation — PACELC gives a more complete, two-dimensional vocabulary for actually characterizing and comparing a distributed database's real-world behavior, rather than CAP's single dimension which only describes the comparatively rare partition scenario.
+
+**Common Pitfall:** evaluating or choosing a distributed database purely by its CAP classification ("it's AP" or "it's CP") without also considering its everyday, non-partitioned Latency/Consistency behavior (the "PA/EL" versus "PC/EC" style classification PACELC provides) — a system's behavior during the rare partition event and its behavior during everyday, normal operation are genuinely separate design dimensions, and CAP's classification alone says nothing at all about the latter, which is what a system actually experiences the vast majority of the time.
+
+---
+
 ---

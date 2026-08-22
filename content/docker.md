@@ -1074,4 +1074,67 @@ Because `tini` is specifically designed and tested to correctly fulfill PID 1's 
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is a Docker Image Digest (a content-addressable SHA256 hash), as distinct from a Tag, and why does pinning a deployment to a digest guarantee exactly which image bytes will run?**
+
+A Tag (like `myapi:latest` or `myapi:1.2.0`) is a mutable, human-readable label that can be *reassigned* to point at a different image at any time — a Digest is an immutable SHA256 hash computed directly from the image's actual content, so it can never be reassigned to point at different bytes; the exact same digest always refers to the exact same image content, forever.
+
+```bash
+docker pull myapi:latest
+# resolves to WHATEVER image "latest" CURRENTLY points to -- this can CHANGE the NEXT time
+# someone PUSHES a NEW image and RETAGS it "latest" -- the SAME TAG name, DIFFERENT actual BYTES
+
+docker pull myapi@sha256:a1b2c3d4e5f6...
+# resolves to EXACTLY these SPECIFIC bytes, ALWAYS -- this can NEVER "silently" change, EVER --
+# the DIGEST is COMPUTED FROM the image's OWN CONTENT -- DIFFERENT content ALWAYS produces a DIFFERENT digest
+```
+Because a tag is just a mutable pointer (someone could push a completely different image and reassign `myapi:1.2.0` to point at it, whether accidentally or maliciously), deploying based on a tag alone doesn't guarantee the exact same bytes run every time — pinning a deployment to a specific digest instead guarantees, cryptographically, that the exact same image content is what actually runs, regardless of what any tag might be reassigned to point at afterward.
+
+**Common Pitfall:** deploying production workloads pinned only to a mutable tag (`myapi:latest`, or even a seemingly-specific version tag like `myapi:1.2.0`, which can *still* technically be retagged to point elsewhere) rather than an immutable digest — for genuinely reproducible, auditable deployments (knowing with certainty exactly what code ran during an incident, weeks later), pinning to the digest is the only guarantee that what's documented as having been deployed is actually, verifiably what ran, since a tag alone provides no such cryptographic guarantee against having been silently reassigned.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What is `docker diff`, and how does it let you inspect exactly which files were added, changed, or deleted inside a running container's writable layer, relative to its original image?**
+
+Every running container has a thin, writable layer on top of its read-only image layers (covered under Docker's layered filesystem) — `docker diff` shows exactly what's actually been modified in that writable layer since the container started, which is invaluable for understanding what a container has actually done to its own filesystem at runtime, beyond what the image itself originally contained.
+
+```bash
+docker diff my-running-container
+# A /app/logs/error.log       <-- ADDED since the container started (NOT part of the ORIGINAL image)
+# C /app/config/settings.json <-- CHANGED (modified AFTER the container started running)
+# D /tmp/old-cache-file        <-- DELETED (existed in the IMAGE, but has SINCE been removed)
+```
+This is particularly useful for debugging "why does this container behave differently than I expect from its image" — perhaps an application is unexpectedly writing to a location that should have been in a mounted volume, or a configuration file was modified at runtime in a way that wasn't intended — `docker diff` surfaces exactly what's changed, without needing to manually inspect the entire filesystem by hand.
+
+**Common Pitfall:** assuming a container's filesystem exactly matches its source image at all times, without realizing application code (or a misconfigured startup script) might be writing unexpected files directly into the container's own writable layer rather than an intended, persistent volume — `docker diff` is a quick, direct way to confirm exactly what's actually changed at runtime, surfacing exactly this kind of unexpected write behavior for investigation.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What are Docker's `--cap-add`/`--cap-drop` flags (Linux Capabilities), and how does dropping unnecessary capabilities from a container's default set reduce its privilege without requiring it to run as a non-root user at all?**
+
+Linux Capabilities break up the traditional all-or-nothing "root" privilege into dozens of individually-grantable, narrower permissions (binding to a privileged port, changing file ownership, loading kernel modules) — Docker containers run with a default *subset* of these capabilities already, and `--cap-drop` lets you remove specific ones a container genuinely doesn't need, reducing its effective privilege even if the process inside still technically runs as root.
+
+```bash
+# a container that DOESN'T need to bind LOW-numbered (<1024) privileged ports, or CHANGE file OWNERSHIP
+docker run --cap-drop=NET_BIND_SERVICE --cap-drop=CHOWN myapi
+# EVEN IF the process INSIDE runs as ROOT, it can NO LONGER perform EITHER of these TWO SPECIFIC actions --
+# NARROWING its EFFECTIVE privilege, WITHOUT needing to switch to a NON-ROOT user AT ALL
+
+# the MOST aggressive approach -- DROP essentially EVERYTHING, then explicitly ADD BACK only what's GENUINELY needed
+docker run --cap-drop=ALL --cap-add=NET_BIND_SERVICE myapi
+# this container can ONLY bind privileged PORTS -- EVERY OTHER traditionally-root-level capability is GONE
+```
+Because Capabilities operate at a finer granularity than the simple root-versus-non-root binary distinction, a container can have exactly the narrow set of elevated permissions it genuinely needs (perhaps just binding a privileged port) while having every *other* traditionally-root-level capability explicitly stripped away — meaningfully reducing what an attacker who compromises the containerized process could actually do, even if that process technically still runs as the root user internally.
+
+**Why this specifically complements (rather than replaces) running as a non-root user, covered under App Security's Docker hardening discussion:** running as non-root and dropping unnecessary capabilities address overlapping but distinct concerns — a non-root user already lacks most root-level capabilities by the nature of the Linux permission model itself, but some applications have legacy reasons requiring root (binding a low port, for instance) where capability-dropping lets you narrow *exactly which* root-level powers remain, rather than needing to either grant full root or nothing at all.
+
+**Common Pitfall:** running every container with Docker's full default capability set "because it's simpler," without evaluating which specific capabilities a given container's application genuinely needs — most containerized applications need none of the more dangerous default capabilities at all (`SYS_ADMIN`, `NET_ADMIN`), and dropping unused ones by default (or adopting a `--cap-drop=ALL` plus explicit `--cap-add` allowlist approach) is a straightforward, low-effort hardening step that meaningfully reduces the potential impact of a container compromise.
+
+---
+
 ---

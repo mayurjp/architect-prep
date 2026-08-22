@@ -1205,4 +1205,95 @@ Because VPA operates on the *size* of each individual Pod rather than *how many*
 
 ---
 
+## Beginner — Question 13
+
+**Q13: What is a Kubernetes `EndpointSlice`, and how does it represent the actual, current list of Pod IPs a Service routes to, updated automatically as Pods come and go?**
+
+A Service's label selector (covered earlier) determines *which* Pods match, but something has to actually track and maintain the resulting list of those Pods' current IP addresses — `EndpointSlice` objects are exactly that: automatically maintained by Kubernetes, updated the instant a matching Pod is created, destroyed, or becomes unready, without any manual intervention.
+
+```bash
+kubectl get endpointslices -l kubernetes.io/service-name=my-api-service
+# NAME                     ADDRESSTYPE   PORTS   ENDPOINTS
+# my-api-service-x7f2k     IPv4          80      10.1.2.3,10.1.2.4,10.1.2.5
+```
+```text
+WHEN a matching Pod is CREATED:            its IP is AUTOMATICALLY ADDED to the EndpointSlice
+WHEN a matching Pod is DELETED/CRASHES:     its IP is AUTOMATICALLY REMOVED from the EndpointSlice
+WHEN a matching Pod FAILS its READINESS PROBE (covered earlier): it's TEMPORARILY marked NOT READY,
+  EXCLUDED from the EndpointSlice's list of ACTIVELY-ROUTABLE addresses, WITHOUT being REMOVED
+  ENTIRELY (it can REJOIN automatically ONCE it passes READINESS again)
+```
+Because `kube-proxy` (the component actually implementing a Service's load-balancing on each node) reads directly from the current `EndpointSlice` to know which Pod IPs to route traffic to, this object is the actual, concrete, continuously-updated source of truth behind a Service's label-selector-based membership (covered earlier) — the label selector determines the *rule*, and `EndpointSlice` is where Kubernetes continuously materializes that rule's *current, actual result*.
+
+**Common Pitfall:** assuming a Service's routing updates instantaneously and unconditionally the moment a new Pod starts running — a Pod only actually appears in the `EndpointSlice` (and therefore starts receiving traffic) once it passes its Readiness Probe (covered earlier), which is precisely why a Pod's `Ready` status, not merely its `Running` status, is what actually determines whether Kubernetes has started routing traffic to it.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is a Kubernetes Job's `backoffLimit`, and how does it cap how many times a failed Job's Pod is retried before the Job itself is marked as failed?**
+
+A `Job` (covered earlier) is expected to run to completion — but if its Pod fails (crashes, exits non-zero), Kubernetes retries it automatically; `backoffLimit` caps how many such retries are allowed before Kubernetes gives up entirely and marks the whole Job as failed, rather than retrying indefinitely forever.
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nightly-billing-job
+spec:
+  backoffLimit: 4   # RETRY a FAILING Pod up to 4 TIMES -- THEN mark the ENTIRE Job as FAILED
+  template:
+    spec:
+      containers:
+        - name: billing
+          image: billing-job:latest
+      restartPolicy: OnFailure
+```
+```text
+Attempt 1: Pod FAILS -- Kubernetes RETRIES (with an INCREASING back-off DELAY between attempts)
+Attempt 2: Pod FAILS AGAIN -- RETRIES again
+Attempt 3: Pod FAILS AGAIN -- RETRIES again
+Attempt 4: Pod FAILS AGAIN -- backoffLimit (4) is now REACHED
+-- the JOB is marked FAILED -- Kubernetes STOPS retrying, WON'T attempt a 5th time --
+```
+Without a bounded `backoffLimit`, a Job whose underlying task has a genuine, persistent bug (a poison-message-style failure, mirroring the Poison Message concept covered under Messaging) would retry indefinitely, consuming cluster resources on an attempt that will never actually succeed — `backoffLimit` bounds this exactly the same way a Dead Letter Queue bounds message-processing retries, giving up after a reasonable number of attempts and surfacing the failure explicitly (via the Job's `Failed` status) rather than retrying forever.
+
+**Common Pitfall:** leaving `backoffLimit` at an unnecessarily high default value (or relying on the cluster's own default) for a Job whose task is known to either succeed quickly or fail deterministically — a persistently-failing Job with a high retry limit wastes cluster compute resources retrying a task that has no realistic chance of eventually succeeding, exactly the same wasted-effort concern covered for unbounded message-queue retries under Messaging's Poison Message discussion.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is a Kubernetes Admission Webhook's `failurePolicy` (`Fail` versus `Ignore`), and how does choosing the wrong setting turn a misbehaving webhook into either a cluster-wide outage or a silently unenforced policy gap?**
+
+An Admission Webhook (covered earlier) must respond to every matching resource request — but what happens if the webhook itself is unreachable or times out? `failurePolicy: Fail` blocks the resource operation entirely if the webhook can't be reached; `failurePolicy: Ignore` lets the operation proceed anyway, as if the webhook had approved it — two very different failure modes for the exact same underlying problem.
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+webhooks:
+  - name: enforce-resource-limits.example.com
+    failurePolicy: Fail   # if THIS webhook is UNREACHABLE, BLOCK the resource operation ENTIRELY
+    # -- vs failurePolicy: Ignore -- if UNREACHABLE, ALLOW the operation to PROCEED ANYWAY --
+```
+```text
+WITH failurePolicy: Fail -- IF the webhook SERVICE ITSELF crashes or becomes UNREACHABLE:
+  -- EVERY SINGLE resource creation MATCHING this webhook's RULES is now BLOCKED, CLUSTER-WIDE --
+  -- a BUG in ONE SMALL admission webhook can CASCADE into an ENTIRE CLUSTER OUTAGE, blocking
+     ALL Pod creation, deployments, ETC. -- until the webhook itself is FIXED or REMOVED
+
+WITH failurePolicy: Ignore -- IF the webhook becomes UNREACHABLE:
+  -- resource operations SIMPLY PROCEED, AS IF the webhook had APPROVED them -- NO OUTAGE --
+  -- BUT: whatever POLICY the webhook was supposed to ENFORCE is now SILENTLY, INVISIBLY
+     UNENFORCED for AS LONG as the webhook remains UNREACHABLE -- a SECURITY/COMPLIANCE GAP,
+     with NO VISIBLE SIGNAL that ANYTHING is WRONG AT ALL
+```
+`Fail` prioritizes strict policy enforcement over availability (an outage is loud and immediately noticed, but the policy is never silently bypassed) — `Ignore` prioritizes availability over strict enforcement (the cluster keeps functioning, but a webhook outage becomes an invisible policy gap that might go unnoticed for a long time); choosing between them requires weighing which failure mode is actually worse for the specific policy that webhook enforces.
+
+**Why this decision should be made deliberately, per webhook, rather than defaulting uniformly:** a webhook enforcing a genuinely critical security policy (rejecting Pods running as root, for instance) might reasonably justify `Fail`'s availability risk, since silently allowing a security violation could be worse than a temporary outage — a webhook enforcing a purely cosmetic convention (requiring a specific label format) is a much better candidate for `Ignore`, since blocking the entire cluster over a missing label is a disproportionate response to a low-stakes policy.
+
+**Common Pitfall:** setting every Admission Webhook to `failurePolicy: Fail` uniformly, without considering that a bug or outage in any one of them can now cascade into blocking cluster-wide resource creation entirely — a webhook's `failurePolicy` should be a deliberate decision weighing the actual severity of the policy it enforces against the operational risk of it becoming an unexpected single point of failure for the entire cluster's ability to create resources at all.
+
+---
+
 ---
