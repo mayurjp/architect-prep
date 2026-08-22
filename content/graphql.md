@@ -1268,4 +1268,98 @@ Because every Relay-compliant paginated field follows this exact same `edges`/`n
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What are GraphQL's three Root Operation Types (Query, Mutation, Subscription), and how does every valid GraphQL operation start from exactly one of them?**
+
+A GraphQL schema defines up to three special root types, each serving as the single entry point for one category of operation — every request a client sends is fundamentally one of these three, and the schema's `Query`/`Mutation`/`Subscription` types are where field resolution for that request actually begins.
+
+```graphql
+schema {
+  query: Query           # the ENTRY POINT for every READ operation
+  mutation: Mutation      # the ENTRY POINT for every WRITE operation (covered earlier)
+  subscription: Subscription  # the ENTRY POINT for every REAL-TIME streaming operation (covered earlier)
+}
+
+type Query { product(id: ID!): Product }
+type Mutation { updateProductPrice(id: ID!, newPrice: Float!): Product }
+type Subscription { orderStatusChanged(orderId: ID!): Order }
+```
+```graphql
+query   { product(id: "5") { name } }              # STARTS from the Query root
+mutation { updateProductPrice(id: "5", newPrice: 39.99) { price } }  # STARTS from the Mutation root
+subscription { orderStatusChanged(orderId: "5") { status } }         # STARTS from the Subscription root
+```
+Every field a client ultimately requests, no matter how deeply nested, traces back to exactly one of these three root types as its starting point — a `query` operation can only ever begin resolving from a field declared on `Query`, never on `Mutation` or `Subscription`, which is precisely what keeps read operations, write operations, and real-time subscriptions structurally distinct within the same overall schema.
+
+**Common Pitfall:** placing a field with a genuine side effect (something that modifies data) under the `Query` root type rather than `Mutation` — while technically nothing stops a resolver under `Query` from having side effects, doing so violates the schema's own self-documenting convention (a `query` operation should be safely, repeatably read-only) and can mislead client tooling or other developers who reasonably assume every `Query`-rooted field is side-effect-free, exactly the "programming to convention" hazard covered under REST's own verb-semantics discussions.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is GraphQL's Nullability convention (fields nullable by default, `!` marking non-null), and how does a nullable field failing to resolve let the rest of a query still return partial data, rather than failing the entire response?**
+
+By default, every GraphQL field is nullable — meaning if that specific field's resolver throws an error, GraphQL can simply set *that one field* to `null` and continue resolving everything else in the query normally, rather than the entire response failing outright. A field marked `!` (non-null) removes this safety net for that specific field: if a non-null field fails, the `null` has to propagate upward until it reaches a nullable field (or the root), potentially discarding much more of the response.
+
+```graphql
+type Product {
+  id: ID!            # NON-NULL -- if THIS fails, null propagates UPWARD, discarding the ENTIRE Product
+  name: String!       # NON-NULL -- SAME risk
+  reviews: [Review!]  # NULLABLE -- if the reviews RESOLVER fails, ONLY "reviews" becomes null -- EVERYTHING else survives
+}
+```
+```json
+// the "reviews" resolver THREW an exception -- but because "reviews" is NULLABLE, the REST of the
+// response STILL comes back SUCCESSFULLY, with "reviews" SIMPLY set to null, and an error REPORTED separately
+{
+  "data": { "product": { "id": "5", "name": "Keyboard", "reviews": null } },
+  "errors": [ { "message": "Reviews service timed out", "path": ["product", "reviews"] } ]
+}
+```
+Because `reviews` is nullable, its resolver's failure is contained to just that one field — the client still receives the product's `id` and `name` successfully, with `reviews` explicitly `null` and a corresponding entry in the `errors` array explaining why — a graceful degradation that a stricter, all-non-null schema design would not provide, since a non-null field's failure forces `null` to bubble up to the nearest nullable ancestor, potentially discarding much more of the response than just the one field that actually failed.
+
+**Why marking too many fields `!` (non-null) can make a schema less resilient to partial failures, not more strict/safe in a purely beneficial way:** while non-null fields do provide a genuine, useful guarantee ("if you get this field at all, it's never null"), overusing `!` on fields whose resolvers *can* genuinely fail independently (an external service call, a potentially-missing related record) means a single failing field forces null-propagation to discard much more of the response than necessary — schema designers must deliberately balance non-null's "this is guaranteed present" contract against nullable's "a failure here doesn't have to sink the whole response" resilience benefit, field by field.
+
+**Common Pitfall:** marking every field non-null (`!`) reflexively, treating it as simply "stricter is always better," without considering that a resolver failure on any one of those non-null fields forces null-propagation potentially all the way up to the query's root — fields backed by resolvers that can genuinely and independently fail (an external API call, a lookup that might legitimately not find a match) are usually better left nullable, reserving `!` specifically for fields that are truly guaranteed to always resolve successfully whenever their parent object exists at all.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is GraphQL's "Partial Failure" response shape — a single response containing both a `data` object and an `errors` array simultaneously — and how does this differ fundamentally from REST's all-or-nothing HTTP status code model?**
+
+A REST response (covered extensively) is fundamentally all-or-nothing at the HTTP level — one status code describes the *entire* response's outcome (`200` success, `500` failure) — GraphQL's response shape instead allows `data` (however much of the query successfully resolved) and `errors` (describing whatever specifically failed) to coexist in the *same* response, at the *same* HTTP status code (typically always `200 OK`, regardless of whether some fields failed).
+
+```json
+// a GraphQL response can be BOTH "partially successful" AND "partially failed," SIMULTANEOUSLY,
+// UNLIKE a REST response's single, ALL-OR-NOTHING HTTP status code
+{
+  "data": {
+    "product": { "name": "Keyboard", "price": 29.99 },
+    "reviews": null
+  },
+  "errors": [
+    { "message": "Reviews service unavailable", "path": ["reviews"] }
+  ]
+}
+```
+```text
+REST's model -- ONE status code describes the ENTIRE response's fate:
+  200 OK              -- EVERYTHING succeeded
+  500 Internal Server Error -- SOMETHING failed -- but WHICH PART, exactly? The STATUS CODE ALONE doesn't say
+
+GraphQL's model -- data AND errors can BOTH be present, describing DIFFERENT PARTS of the SAME response:
+  HTTP 200 (ALMOST ALWAYS, REGARDLESS of whether SOME fields failed) -- but the RESPONSE BODY ITSELF
+  distinguishes EXACTLY which parts succeeded (in "data") and WHICH specific parts failed (in "errors"),
+  DOWN TO THE EXACT FIELD PATH that failed
+```
+Because a REST response's single status code can't express "most of this succeeded, but this one specific nested piece failed" the way GraphQL's `data`+`errors` combination can, a REST client encountering a `500` has to guess or separately investigate what actually went wrong — a GraphQL client instead gets a structured, field-path-precise account of exactly what succeeded and exactly what failed, within one single response, letting the client render the successful parts of the UI while specifically handling just the failed piece, without needing to treat the entire response as an undifferentiated failure.
+
+**Why this specifically requires GraphQL clients to be written differently than typical REST clients, checking `errors` even on an HTTP `200`:** a REST client can generally treat "HTTP status is 200" as "the request succeeded, trust the body" — a GraphQL client cannot make that same assumption, since an HTTP `200` response might still carry a populated `errors` array describing a partial failure; correctly-written GraphQL client code must always inspect the `errors` array explicitly, regardless of the HTTP status code, which is a genuinely different mental model than most REST client code is typically written around.
+
+**Common Pitfall:** writing GraphQL client code that only checks the HTTP status code (treating `200` as unconditional success, the way REST client code typically does), without also inspecting the response body's `errors` array — this can cause a client to silently miss a genuine partial failure (a `null` field, with a corresponding error explaining why) since the HTTP-level signal alone gives no indication anything went wrong at all; robust GraphQL client code must treat `errors`-array inspection as a mandatory, separate check, not an optional afterthought layered on top of HTTP-status-based success/failure logic.
+
+---
+
 ---

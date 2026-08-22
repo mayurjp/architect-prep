@@ -1072,4 +1072,79 @@ Because the broker tracks the highest sequence number it has already durably wri
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is a Message Broker's "Visibility Timeout," and how does it determine how long a received-but-unacknowledged message stays hidden from other consumers?**
+
+When a consumer receives a message, the broker doesn't immediately delete it — it hides ("locks") the message from other consumers for a configured Visibility Timeout window, expecting the consumer to either explicitly delete/acknowledge it (processing succeeded) or let the timeout expire, at which point the message becomes visible again for another consumer to pick up.
+
+```text
+Consumer A receives Message X -- the BROKER hides Message X from EVERYONE ELSE for the NEXT 30 SECONDS
+  (the configured Visibility Timeout)
+
+CASE 1 -- Consumer A finishes processing and ACKNOWLEDGES/DELETES the message WITHIN 30 seconds:
+  -- Message X is PERMANENTLY removed -- NO other consumer EVER sees it
+
+CASE 2 -- Consumer A is STILL processing when the 30-SECOND timeout EXPIRES (a genuinely SLOW job):
+  -- Message X becomes VISIBLE AGAIN -- a DIFFERENT consumer (Consumer B) can NOW receive and
+     process the SAME message -- POTENTIALLY resulting in a DUPLICATE, exactly the scenario
+     covered earlier for a 3-minute report-generation job exceeding a 1-minute visibility window
+```
+Setting the Visibility Timeout appropriately — long enough to comfortably cover the expected processing time, but not so long that a genuinely crashed consumer leaves a message needlessly hidden for an excessive duration — is precisely the tuning knob at the heart of the earlier scenario where a report-generation job's processing time exceeded its queue's configured visibility window.
+
+**Common Pitfall:** leaving a Visibility Timeout at its default value without adjusting it to match the actual expected processing duration of a specific queue's workload — a queue processing genuinely long-running jobs needs a correspondingly longer visibility window (or a mechanism to actively extend it mid-processing), or every sufficiently slow job risks exactly this kind of duplicate-processing scenario as the timeout expires while work is still legitimately ongoing.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is a Poison Message, and why doesn't simply retrying it indefinitely represent a viable processing strategy?**
+
+A Poison Message is one that consistently fails processing no matter how many times it's retried — perhaps its payload is malformed in a way the consumer can never successfully parse, or it triggers a genuine bug in the consumer's own processing logic — meaning retrying it isn't a matter of "eventually it'll succeed," since the failure is deterministic and reproducible on every single attempt.
+
+```csharp
+public async Task ProcessMessage(OrderMessage message)
+{
+    var discount = message.DiscountPercentage / message.ItemCount; // POISON if ItemCount is EVER zero --
+    // this DIVISION-BY-ZERO fails DETERMINISTICALLY, EVERY SINGLE TIME, NO MATTER how MANY times retried
+}
+```
+```text
+WITHOUT a Dead Letter Queue (covered earlier) -- this message gets REDELIVERED and RETRIED
+FOREVER, consuming CONSUMER resources INDEFINITELY, NEVER actually succeeding, and (depending
+on broker/queue configuration) POTENTIALLY blocking OTHER, healthy messages BEHIND it in the SAME queue
+```
+Because the failure is deterministic (the same malformed data or the same underlying bug triggers the identical failure on every attempt), no number of retries will ever eventually succeed — this is precisely why the Dead Letter Queue (covered earlier) exists: after some bounded number of retry attempts, the message is routed *out* of the main processing queue entirely, letting the queue's other, healthy messages continue being processed while the poison message awaits separate, manual investigation.
+
+**Common Pitfall:** configuring unlimited retries for a queue's messages, reasoning that "we should keep trying until it works" — for a genuinely transient failure (a temporarily-unavailable downstream dependency), retrying makes sense; for a poison message, unlimited retries simply waste resources indefinitely on a message that will never succeed, which is exactly why a bounded retry count followed by DLQ routing (rather than infinite retries) is the standard, correct configuration.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is Kafka's Static Group Membership (`group.instance.id`), and how does assigning a consumer a stable, persistent identity avoid triggering a full rebalance (covered extensively) during a brief, planned restart?**
+
+Ordinary consumer group membership (covered under Rebalancing) treats every consumer instance as anonymous — when an instance leaves (even briefly, for a planned restart) and rejoins, the group coordinator sees this as "one member left, a new one joined," triggering a full rebalance. Static Group Membership assigns each consumer instance a persistent, configured identity (`group.instance.id`), letting the coordinator recognize "this is the *same* member, briefly restarting" rather than treating it as membership churn.
+
+```properties
+# consumer.properties -- a STABLE, PERSISTENT identity, SURVIVING restarts
+group.instance.id=consumer-instance-3
+```
+```text
+WITHOUT Static Membership -- a BRIEF, PLANNED restart (a rolling deployment, covered earlier) LOOKS
+  IDENTICAL to a genuine departure -- TRIGGERS a FULL REBALANCE, with ALL the duplicate-processing
+  risk covered under the earlier Rebalancing discussion
+
+WITH Static Membership -- the COORDINATOR recognizes "group.instance.id=consumer-instance-3 is
+  BACK" -- WITHIN a configured session timeout window -- and SIMPLY RESTORES its PREVIOUS partition
+  assignment, WITHOUT triggering a REBALANCE across the ENTIRE group AT ALL
+```
+Because the coordinator specifically recognizes a returning static member (rather than treating its brief absence as a genuine departure), a rolling deployment restarting consumer instances one at a time no longer needs to trigger a full group rebalance for every single instance restart — directly addressing the root cause of the earlier "duplicate emails during a rolling deployment" scenario, specifically for the case where instances are only briefly restarting (not genuinely, permanently leaving the group).
+
+**Why this specifically targets planned, brief restarts rather than genuine departures or crashes:** if a statically-configured member doesn't return within the configured session timeout (a genuine crash, or the instance being permanently decommissioned), the coordinator eventually gives up waiting and *does* trigger a rebalance anyway — Static Membership specifically optimizes for the common case of brief, planned restarts (deployments, routine maintenance) without disabling the group's ability to still correctly detect and rebalance around a genuinely permanent departure.
+
+**Common Pitfall:** assuming Static Group Membership eliminates rebalancing entirely, for every kind of membership change — it specifically smooths over brief, planned restarts within the configured session timeout window; a genuine, permanent departure (a crashed instance that never returns, or a deliberate scale-down) still triggers a full rebalance exactly as before, since the coordinator can't distinguish "gone forever" from "briefly restarting" until the session timeout has actually elapsed.
+
+---
+
 ---

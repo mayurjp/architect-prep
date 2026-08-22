@@ -1203,4 +1203,83 @@ Because a channel transitioning through `TRANSIENT_FAILURE` is often a brief, se
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is a `.proto` file's `package` declaration, and how does it namespace generated types to avoid collisions when multiple `.proto` files define types with the same name?**
+
+Just as C# namespaces prevent two unrelated classes both named `Order` from colliding, a `.proto` file's `package` declaration scopes its defined message/service names, so two entirely separate `.proto` files can each define an `Order` type without conflict, as long as they declare different packages.
+
+```protobuf
+// orders.proto
+package orders.v1;
+message Order { int32 id = 1; }
+```
+```protobuf
+// inventory.proto
+package inventory.v1;
+message Order { int32 id = 1; string warehouseCode = 2; } // a COMPLETELY DIFFERENT "Order" -- NO collision
+```
+```csharp
+// the GENERATED C# code uses the package to produce DISTINCT NAMESPACES -- NO collision AT ALL
+Orders.V1.Order ordersOrder = new();
+Inventory.V1.Order inventoryOrder = new();
+```
+Because `protoc` (the Protobuf compiler) maps each `.proto` file's `package` declaration onto a corresponding namespace in the generated code (a C# namespace, a Java package), two entirely unrelated `Order` message types defined in different `.proto` files can coexist in the same generated codebase without any naming conflict, exactly the same purpose namespaces serve for hand-written C# code.
+
+**Common Pitfall:** omitting the `package` declaration across multiple `.proto` files that happen to define types with the same name, then encountering generated-code naming collisions once those files are compiled together into the same project — always declaring an explicit, sufficiently distinct package name (typically including a version segment, like `orders.v1`) for every `.proto` file avoids this entirely, and is standard practice specifically to keep growing collections of `.proto` files collision-free as a schema surface expands over time.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is `MaxConcurrentStreams`, and how does it limit how many simultaneous gRPC calls a single HTTP/2 connection can actually multiplex, with calls beyond that limit queuing rather than failing outright?**
+
+HTTP/2's multiplexing (covered earlier) lets many gRPC calls share one connection simultaneously — but not unboundedly; `MaxConcurrentStreams` (a value the server advertises, and the client respects) caps how many streams can be genuinely concurrent on one connection at once, with additional calls beyond that limit queuing client-side rather than immediately failing.
+
+```csharp
+// Kestrel (the SERVER) -- configuring the MAXIMUM concurrent streams it will ALLOW per HTTP/2 connection
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.Http2.MaxStreamsPerConnection = 100; // this SERVER allows AT MOST 100 concurrent streams
+});
+```
+```text
+A CLIENT with 150 concurrent gRPC calls IN FLIGHT, over ONE shared channel/connection, against a
+SERVER advertising MaxConcurrentStreams=100:
+  -- the FIRST 100 calls proceed CONCURRENTLY, genuinely multiplexed over the ONE connection
+  -- the REMAINING 50 calls QUEUE, client-side, WAITING for one of the FIRST 100 to COMPLETE and
+     FREE UP a "slot" -- they do NOT immediately FAIL -- they simply WAIT their TURN
+```
+Because exceeding the limit causes calls to queue rather than fail outright, a client issuing a sudden burst of many more concurrent calls than the server's configured `MaxConcurrentStreams` allows will experience increased latency (calls waiting in queue for a stream slot to free up) rather than outright errors — a subtle, easy-to-overlook source of latency under bursty load that doesn't manifest as any explicit error at all, just as unexpectedly slow response times for the queued calls.
+
+**Why this specifically matters for a client relying on a single shared channel (covered earlier) under genuinely high concurrent load:** the "reuse one channel" guidance (covered earlier) is generally correct, but a channel isn't infinitely capable of multiplexing — a workload issuing enough truly concurrent calls to exceed the server's `MaxConcurrentStreams` limit may benefit from either increasing that server-side limit (if the server can genuinely handle more concurrent work) or using multiple channels/connections to spread the load, rather than assuming one single channel can multiplex an unlimited number of simultaneous calls with no consequence.
+
+**Common Pitfall:** diagnosing unexpectedly high latency under bursty concurrent load by looking only at server-side processing time (which may look perfectly fine per-call), without considering that calls might simply be queuing client-side, waiting for a stream slot to free up on an already-saturated connection — `MaxConcurrentStreams` queuing is an easy-to-miss contributor to end-to-end latency specifically because it produces no error and doesn't show up in typical server-side processing-time metrics at all.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is a gRPC "Trailers-Only" response, and how does it differ from an ordinary response that includes both an actual message and trailers, specifically for a call that fails before ever producing a response message at all?**
+
+An ordinary successful gRPC response includes headers, the actual response message body, and trailers (carrying the final status code) — a Trailers-Only response is a special, more minimal response shape used when an RPC fails *before* it ever produces any response message at all (an immediate authentication failure, for instance), consisting of just the trailers, with no message body ever sent.
+
+```text
+ORDINARY response -- headers, THEN a message BODY, THEN trailers (with the FINAL status):
+  HEADERS: (content-type: application/grpc, etc.)
+  MESSAGE: <the actual Protobuf-encoded response message BODY>
+  TRAILERS: grpc-status: 0 (OK)
+
+TRAILERS-ONLY response -- used when the RPC fails IMMEDIATELY, BEFORE any message is EVER produced:
+  TRAILERS (sent essentially AS the ONLY frame): grpc-status: 16 (UNAUTHENTICATED)
+  -- NO message body was EVER sent AT ALL -- the CALL failed BEFORE reaching the point of PRODUCING one
+```
+Because certain failures (a missing or invalid auth token, detected immediately by an interceptor, covered earlier, before the actual service method ever runs) are known before any response message could possibly be produced, gRPC's wire protocol allows sending just the trailers directly, skipping the otherwise-expected headers/message sequence entirely — a genuine protocol-level optimization for the specific case of "this call fails immediately, with no message ever forthcoming."
+
+**Why understanding this distinction matters for anyone implementing low-level gRPC tooling (a proxy, a custom interceptor, a protocol analyzer):** code that assumes every gRPC response always includes an actual message body before its trailers would mishandle a Trailers-Only response incorrectly — recognizing that a legitimate, well-formed gRPC response can consist of *only* trailers (for an immediate failure) is necessary for correctly implementing anything that needs to parse or reason about the raw gRPC wire protocol directly, rather than relying entirely on a higher-level client library that already handles this distinction transparently.
+
+**Common Pitfall:** writing custom, low-level gRPC-protocol-aware tooling (a debugging proxy, a custom load balancer inspecting gRPC traffic) that assumes every response necessarily includes a message body, mishandling the Trailers-Only case for immediate failures — most application-level code never needs to think about this distinction at all, since standard gRPC client libraries handle it transparently, but anything operating at the raw protocol level needs to correctly account for both response shapes.
+
+---
+
 ---
