@@ -881,4 +881,84 @@ Because writes never need to locate and modify a specific existing on-disk locat
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is "Denormalization via an Embedded Counter" (a materialized aggregate field, updated atomically alongside the data it summarizes), and how does it let a NoSQL application avoid an expensive count/aggregate query on every read?**
+
+Rather than counting related items on every single read (a `COUNT(*)`-style query, expensive at scale), a NoSQL document can store a pre-computed counter field directly, updated atomically each time a related item is added or removed — trading a small amount of write-side bookkeeping for dramatically cheaper reads, since the count is already sitting right there in the document.
+
+```json
+// A Product document -- "reviewCount" is a MATERIALIZED, PRE-COMPUTED field, NOT calculated on EVERY read
+{
+  "productId": "5",
+  "name": "Keyboard",
+  "reviewCount": 142,      // updated ATOMICALLY whenever a review is ADDED or REMOVED
+  "averageRating": 4.3
+}
+```
+```javascript
+// MongoDB -- an ATOMIC increment, updating the counter AS PART OF adding the new review, in ONE operation
+db.products.updateOne({ productId: "5" }, { $inc: { reviewCount: 1 }, $push: { reviews: newReview } });
+```
+Reading a product's review count becomes a simple field access (`product.reviewCount`), no aggregation required at read time at all — the cost of maintaining that count moves entirely to write time, where a single atomic `$inc` operation keeps the counter accurate without needing a separate `COUNT()` query across the reviews collection every single time a product's page is viewed.
+
+**Common Pitfall:** updating the counter as a *separate*, non-atomic step (reading the current count, incrementing it in application code, writing it back) rather than using the database's own atomic increment operation — this reintroduces exactly the race-condition risk covered under the TOCTOU/race-condition discussions (two concurrent reviews being added simultaneously could both read the same starting count, incrementing to the same final value instead of correctly landing two higher), which the database's built-in atomic increment operation avoids entirely by design.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is a Compound (Composite) Index in a NoSQL database, and how does the ORDER of fields within it determine which query patterns it can actually serve efficiently?**
+
+A Compound Index indexes multiple fields together, in a specific declared order — much like a SQL Server composite index (covered elsewhere), the *order* of fields in a NoSQL compound index directly determines which queries can actually make efficient use of it, since the index is effectively sorted first by its first field, then by its second field within each value of the first, and so on.
+
+```javascript
+// MongoDB -- a COMPOUND index on (category, price), in THIS SPECIFIC ORDER
+db.products.createIndex({ category: 1, price: 1 });
+
+// EFFICIENTLY served by this index -- filters on category FIRST (the index's LEADING field), THEN price
+db.products.find({ category: "Electronics", price: { $gt: 100 } }); // FAST -- uses the index EFFECTIVELY
+
+// NOT efficiently served by the SAME index -- filters ONLY on price, SKIPPING the LEADING field entirely
+db.products.find({ price: { $gt: 100 } }); // SLOW -- the index's LEADING field (category) isn't even USED here
+```
+Because the index is physically organized first by `category` and only *then* by `price` within each category, a query filtering by `category` first (matching the index's leading field) can efficiently narrow down to the relevant portion of the index — a query filtering *only* by `price`, skipping the leading `category` field entirely, generally can't make efficient use of this same index at all, since the index's physical ordering doesn't group documents by price alone.
+
+**Why field order should match the MOST common, MOST selective query pattern, not be chosen arbitrarily:** a compound index genuinely useful for one query shape can be nearly useless for a different one filtering on a different leading field — designing compound indexes requires analyzing the application's actual, real query patterns and ordering fields to match the most frequent and most selective filters first, exactly the same underlying principle covered for SQL Server's own composite index column ordering.
+
+**Common Pitfall:** creating a compound index with fields ordered to match how a developer happened to think about the data conceptually, rather than analyzing which field is actually filtered on *most often* and *most selectively* across the application's real query patterns — an index whose leading field rarely appears as the primary filter in actual queries provides far less benefit than one whose field order was deliberately chosen to match genuine, observed query patterns.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is Anti-Entropy repair (as distinct from the Read Repair mechanism covered earlier), and how does a background process using Merkle Trees efficiently find and fix diverged replica data without comparing every single row directly?**
+
+Read Repair (covered earlier) opportunistically fixes stale data as a side effect of an ordinary read — but data that's never read again might never get repaired that way at all. Anti-Entropy is a separate, proactive background process that periodically compares replicas' *entire* datasets against each other to find and fix any divergence, using Merkle Trees to do this comparison efficiently, without literally comparing every individual row between replicas (which would be prohibitively expensive at scale).
+
+```text
+A MERKLE TREE -- a TREE of HASHES, letting TWO REPLICAS compare LARGE datasets EFFICIENTLY:
+
+  Replica A's Merkle Tree:                Replica B's Merkle Tree:
+         [Root Hash A]                           [Root Hash B]
+         /          \                            /          \
+    [Hash A1]    [Hash A2]                  [Hash A1]    [Hash B2]  <-- DIFFERS from A2!
+    /      \      /      \                  /      \      /      \
+ [H1] [H2] [H3] [H4]                     [H1] [H2] [H3'] [H4]      <-- H3 DIFFERS
+
+COMPARISON process:
+  1. Compare ROOT hashes -- DIFFER -- SOMETHING has diverged SOMEWHERE (but WHERE, exactly, is STILL unknown)
+  2. Compare the NEXT LEVEL DOWN -- [Hash A1] MATCHES, [Hash A2] vs [Hash B2] DIFFER -- narrow the search to HALF
+  3. KEEP DESCENDING ONLY into the BRANCHES that ACTUALLY differ -- SKIP entire matching sub-trees ENTIRELY
+  4. EVENTUALLY isolate the EXACT specific row(s) that ACTUALLY diverged -- WITHOUT ever comparing
+     the MANY OTHER rows underneath the MATCHING branches AT ALL
+```
+Because each parent hash summarizes everything beneath it in the tree, two replicas can compare just their root hashes first, then descend *only* into the specific branches whose hashes actually differ — entire matching subtrees (potentially covering millions of identical rows) are skipped without ever being individually compared, letting Anti-Entropy efficiently pinpoint exactly which small subset of data has actually diverged, even across a massive dataset.
+
+**Why this specifically catches divergence Read Repair alone would miss:** Read Repair only fixes staleness for data that's actually *read* — a rarely-accessed row that silently diverged due to a missed write (a node that was briefly unreachable, covered under Hinted Handoff) might never be read again, and would remain permanently inconsistent without some other mechanism proactively checking it; Anti-Entropy's periodic, comprehensive comparison catches exactly this kind of "never read again" divergence that Read Repair's read-triggered mechanism structurally cannot.
+
+**Common Pitfall:** relying on Read Repair alone and assuming it's sufficient for eventual consistency across an entire dataset — Read Repair's coverage is inherently limited to whatever data actually gets read; Anti-Entropy (via Merkle Tree comparison) is the complementary mechanism specifically needed to catch and repair divergence in data that isn't necessarily being actively read, closing a real gap Read Repair alone leaves open.
+
+---
+
 ---

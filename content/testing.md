@@ -1116,3 +1116,87 @@ Because the assertion is about a *relationship* between two related inputs/outpu
 **Common Pitfall:** dismissing Metamorphic Testing as inapplicable because "I can't write a metamorphic relation for my code" without searching hard enough for one — many systems that seem to have no checkable correctness property beyond "eyeball the output" actually do have a genuine, checkable metamorphic relation once analyzed carefully (as the search-engine filtering example shows); it typically requires more upfront analytical effort to identify a project's specific metamorphic relations than to write ordinary example-based assertions, which is the main practical reason the technique remains comparatively underused despite its genuine applicability to exactly the class of "no known correct answer" testing problems traditional assertions can't handle.
 
 ---
+
+## Beginner — Question 11
+
+**Q11: What is a "Smoke Test," and how does a small, fast set of checks run immediately after a deployment quickly verify the system is minimally functional, before a full regression suite even runs?**
+
+A Smoke Test is a small, fast subset of checks (can the app start? does the homepage load? can a user log in?) run immediately after a deployment — named after the practice of powering on new hardware and checking for smoke before running more thorough tests, it exists to catch a badly broken deployment within seconds or minutes, rather than waiting for a full, lengthy regression suite to eventually reveal the same catastrophic failure.
+
+```csharp
+// A tiny SMOKE TEST suite -- runs in SECONDS, checks ONLY the most CRITICAL, "is anything ALIVE" paths
+[Fact]
+public async Task HomePage_Loads_Successfully()
+{
+    var response = await _client.GetAsync("/");
+    response.EnsureSuccessStatusCode(); // just: DID the app respond AT ALL, with a SUCCESS status
+}
+
+[Fact]
+public async Task HealthCheck_ReportsHealthy()
+{
+    var response = await _client.GetAsync("/health"); // covered under ASP.NET Core
+    Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+}
+```
+A deployment pipeline typically runs smoke tests immediately after deploying to a new environment, *before* running the full (potentially hours-long) regression suite — if the smoke tests fail, the deployment is immediately rolled back or flagged, without wasting time running a full suite against a build that's obviously, catastrophically broken from the very first request.
+
+**Common Pitfall:** treating smoke tests as a substitute for a full test suite, rather than a fast, narrow, first-line check — smoke tests deliberately check only the most critical, coarse-grained "is the system alive at all" paths; they're not meant to catch subtle regressions in specific business logic, which remains the job of the full unit/integration test suite that (ideally) still runs afterward, just not gated on the same tight, immediate-post-deployment feedback loop.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What are Equivalence Partitioning and Boundary Value Analysis, and how do they provide a systematic method for choosing which specific example-based test inputs to write, rather than picking them arbitrarily?**
+
+Rather than guessing at test inputs, Equivalence Partitioning groups all possible inputs into partitions that should behave *the same way* (testing one representative from each partition is as good as testing every value in it) — Boundary Value Analysis then specifically targets the *edges* of those partitions, since off-by-one errors are disproportionately likely to occur exactly at a boundary rather than somewhere safely in the middle of a partition.
+
+```csharp
+// A method accepting an age, valid for 0-120 -- EQUIVALENCE PARTITIONS: "invalid low," "valid," "invalid high"
+public bool IsValidAge(int age) => age >= 0 && age <= 120;
+
+// EQUIVALENCE PARTITIONING -- ONE representative test PER partition (NOT exhaustively every possible value)
+[Theory]
+[InlineData(-5, false)]   // representative of the "INVALID, too LOW" partition
+[InlineData(50, true)]    // representative of the "VALID" partition
+[InlineData(150, false)]  // representative of the "INVALID, too HIGH" partition
+
+// BOUNDARY VALUE ANALYSIS -- SPECIFICALLY targets the EDGES, where OFF-BY-ONE bugs actually tend to hide
+[InlineData(-1, false)]   // ONE BELOW the lower boundary
+[InlineData(0, true)]     // EXACTLY the lower boundary
+[InlineData(120, true)]   // EXACTLY the upper boundary
+[InlineData(121, false)]  // ONE ABOVE the upper boundary
+public void ValidatesAge(int age, bool expected) => Assert.Equal(expected, IsValidAge(age));
+```
+Testing `age = 50` and `age = 60` both provide essentially the same confidence (both are safely inside the "valid" partition, unlikely to reveal anything the other wouldn't) — but testing `age = 120` versus `age = 121` specifically targets the exact boundary where an off-by-one mistake (`age < 120` instead of `age <= 120`) would actually be caught, which testing only "safely middle" values from each partition would never reveal.
+
+**Why this systematic approach produces meaningfully better test coverage than arbitrarily-chosen examples:** picking test inputs by intuition alone tends to cluster around "obviously valid" and "obviously invalid" values, precisely the values *least* likely to reveal an off-by-one bug — Equivalence Partitioning ensures every meaningfully distinct behavior category gets at least one representative test, while Boundary Value Analysis deliberately targets exactly the specific values where subtle implementation bugs statistically tend to actually hide.
+
+**Common Pitfall:** writing many redundant test cases that are all representative of the *same* equivalence partition (testing ages 10, 30, 50, 70, all safely "valid") while never actually testing the boundaries themselves — this produces a large number of tests that all effectively verify the identical thing, providing a false sense of thorough coverage while the actual boundary conditions (where bugs are statistically most likely) remain completely untested.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is an "Equivalent Mutant" in Mutation Testing (covered earlier), and why does its existence represent a fundamental, theoretically unfixable limitation of mutation testing's own scoring accuracy?**
+
+Mutation Testing (covered earlier) introduces small artificial bugs ("mutants") into source code and checks whether the test suite catches them — an Equivalent Mutant is a mutation that changes the code's *text* but produces *exactly the same observable behavior* for every possible input, meaning no test suite, no matter how thorough, could ever possibly "catch" it, since there's genuinely no difference in behavior to detect.
+
+```csharp
+// ORIGINAL code
+public int GetDiscount(int quantity) => quantity > 10 ? 20 : 0;
+
+// MUTANT 1 -- a GENUINE, catchable mutation -- changes ACTUAL BEHAVIOR for input quantity=10
+public int GetDiscount(int quantity) => quantity >= 10 ? 20 : 0; // OFF-BY-ONE -- a GOOD test WOULD catch THIS
+
+// MUTANT 2 -- an EQUIVALENT MUTANT -- LOOKS different, but behaves IDENTICALLY for EVERY possible input
+public int GetDiscount(int quantity) => quantity > 10 ? 20 : (quantity > 10 ? 20 : 0); // REDUNDANT, but SAME OUTPUT ALWAYS
+-- NO test could EVER distinguish this from the ORIGINAL -- their OBSERVABLE BEHAVIOR is TRULY IDENTICAL --
+```
+Mutant 1 represents a genuine behavioral difference (quantity exactly 10 now gets the discount, where it previously didn't) — a test case using `quantity = 10` as a boundary value (directly connecting to Boundary Value Analysis, covered earlier) would correctly catch this mutant, correctly counting as "killed." Mutant 2, despite being textually different code, produces the *exact same* output for every conceivable input — no test, however well-designed, could ever distinguish it from the original, since there's no actual behavioral difference to observe at all.
+
+**Why this specifically caps a mutation testing tool's own reported "mutation score" below 100%, even for a genuinely excellent test suite:** a mutation testing tool has no general, automated way to *prove* a given mutant is equivalent (this is provably undecidable in the general case, related to the halting problem) — surviving equivalent mutants get counted as "not killed" by the tool's reporting, artificially lowering the reported mutation score even when the actual test suite is genuinely excellent, meaning a team should expect and account for some irreducible number of equivalent-mutant survivors rather than chasing an impossible 100% score.
+
+**Common Pitfall:** treating a mutation testing tool's reported score as a hard, precise target that should reach 100% — because equivalent mutants are a genuine, unavoidable category (not a test-suite deficiency), a mature team typically manually reviews *surviving* mutants specifically to classify each one as "a genuine test gap, worth writing a new test for" versus "an equivalent mutant, appropriately un-killable and safe to ignore," rather than mechanically chasing a mutation score that mathematically cannot reach 100% for most realistic codebases.
+
+---

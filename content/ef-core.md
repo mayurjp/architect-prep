@@ -1062,4 +1062,76 @@ Because `FromSqlInterpolated`/`SqlQuery<T>` still use C#'s string interpolation 
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is `AsNoTracking()`, and how does opting a query out of EF Core's Change Tracking (covered earlier) meaningfully improve performance for read-only queries?**
+
+By default, every entity EF Core loads gets registered with the `DbContext`'s Change Tracker, which takes a snapshot of the entity's original values so it can later detect what changed — for a query whose results will only ever be read and displayed, never modified and saved back, this tracking overhead is pure waste. `AsNoTracking()` tells EF Core to skip it entirely.
+
+```csharp
+// TRACKED (the default) -- EF Core snapshots EVERY property, for CHANGE DETECTION later -- WASTED, for a read-only query
+var products = await _db.Products.Where(p => p.Category == "Electronics").ToListAsync();
+
+// NO-TRACKING -- skips the snapshot/tracking overhead ENTIRELY -- for a query that will NEVER be saved back
+var products = await _db.Products.AsNoTracking().Where(p => p.Category == "Electronics").ToListAsync();
+```
+For a query backing a read-only API endpoint (`GET /products`) that simply serializes results to JSON and returns them, there's no later `SaveChanges()` call that would ever need the Change Tracker's snapshot to detect modifications — `AsNoTracking()` skips that entirely unnecessary bookkeeping, reducing both memory usage (no snapshot copies retained) and CPU overhead (no tracking machinery engaged) for queries whose results are genuinely never going to be modified and persisted.
+
+**Common Pitfall:** leaving every query in a read-heavy application tracked by default, without ever applying `AsNoTracking()` to the (often large majority of) queries that are genuinely read-only — for a typical web API, most GET endpoints never modify what they fetch, making `AsNoTracking()` (or configuring `QueryTrackingBehavior.NoTrackingWithIdentityResolution` as the `DbContext`-wide default) one of the most broadly-applicable, low-effort EF Core performance improvements available.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is `DbSet<T>.Local`, and how does it let you inspect a `DbContext`'s currently-tracked entities in memory, without triggering a database round trip?**
+
+`DbSet<T>.Local` exposes the subset of entities the `DbContext`'s Change Tracker currently holds in memory — entities already loaded (or newly added, not yet saved) within this specific context instance — letting code inspect or search through them without issuing a new query against the database at all.
+
+```csharp
+var order = new Order { Id = 999, CustomerName = "Alice" };
+_db.Orders.Add(order); // TRACKED in memory -- NOT yet saved to the database at all
+
+// 'Local' finds it WITHOUT hitting the database -- it's ALREADY tracked, in MEMORY, right NOW
+var found = _db.Orders.Local.FirstOrDefault(o => o.Id == 999); // found -- NO database round trip needed
+
+// Compare: a REGULAR query WOULD hit the database, and (with default tracking) MIGHT return the
+// SAME tracked instance via EF Core's identity resolution, but it STILL issues an ACTUAL SQL query
+var queried = await _db.Orders.FirstOrDefaultAsync(o => o.Id == 999);
+```
+Because `Local` operates purely against the in-memory Change Tracker's current contents, it's specifically useful for checking "have I already added/loaded this specific entity in this context instance" before deciding whether to `Add()` a duplicate, or for iterating over pending changes before calling `SaveChanges()` — genuinely different from an ordinary LINQ query against `DbSet<T>` itself, which always translates to and executes actual SQL against the database.
+
+**Common Pitfall:** using `Local` expecting it to also search entities that exist in the database but haven't yet been loaded into *this specific* `DbContext` instance's tracker — `Local` only reflects what's *currently tracked in memory*, not the full database; a genuine "does this row exist in the database" check still requires an actual query, and confusing the two can lead to code that incorrectly assumes an entity doesn't exist at all, simply because it hasn't happened to be loaded into this particular context instance yet.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is EF Core's `TagWith()`, and how does annotating a LINQ query with a readable comment that appears directly in the generated SQL help correlate a slow query observed in a SQL Server profiler back to the exact C# call site that produced it?**
+
+In a large codebase, dozens of different LINQ queries can all translate into similarly-shaped SQL, making it genuinely difficult to tell, just by looking at a slow query captured in SQL Server Profiler or Query Store (covered under SQL Server), exactly *which line of C# code* actually issued it. `TagWith()` lets you attach a literal comment to a specific LINQ query, which EF Core embeds directly into the generated SQL text, providing that missing traceability.
+
+```csharp
+var slowProducts = await _db.Products
+    .TagWith("GetActiveProductsForDashboard - ProductController.GetDashboard")
+    .Where(p => p.IsActive)
+    .Include(p => p.Reviews)
+    .ToListAsync();
+```
+```sql
+-- The GENERATED SQL -- the TAG appears as a LITERAL SQL COMMENT, right at the TOP of the query text
+-- GetActiveProductsForDashboard - ProductController.GetDashboard
+
+SELECT [p].[Id], [p].[Name], [p].[IsActive], [r].[Id], [r].[Rating]
+FROM [Products] AS [p]
+LEFT JOIN [Reviews] AS [r] ON [p].[Id] = [r].[ProductId]
+WHERE [p].[IsActive] = CAST(1 AS bit)
+```
+When this exact query shows up as a top offender in SQL Server's Query Store or a profiling tool, the DBA/developer investigating it sees the tag's comment text directly in the captured SQL — immediately identifying which specific C# call site (`ProductController.GetDashboard`) produced it, rather than needing to pattern-match the SQL's shape back to a guess at which of potentially dozens of similar-looking LINQ queries in the codebase might have generated it.
+
+**Why this specifically matters more as an application and its query surface grow larger:** in a small application with only a handful of distinct queries, identifying the source of a slow query by its shape alone is usually straightforward — in a large, mature codebase with hundreds of LINQ queries (many superficially similar, differing only in a filter condition or included navigation), `TagWith()` removes the guesswork entirely, turning "which of our many similar queries is this?" from an investigation into an immediate, direct answer.
+
+**Common Pitfall:** adding `TagWith()` calls only after a performance investigation has *already* become painful and time-consuming trying to identify a mystery slow query's origin — tagging is cheap to add proactively (particularly on queries known to be performance-sensitive or frequently modified) and provides essentially free diagnostic value later; waiting until an active incident to start tagging means the very query you're trying to diagnose right now still lacks the traceability that would have made the investigation immediate.
+
+---
+
 ---

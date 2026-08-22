@@ -948,4 +948,76 @@ Because the history-tracking happens entirely inside the database engine itself 
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is the difference between a SQL Server Scalar Function and a Table-Valued Function, in terms of what each one returns and how it's used in a query?**
+
+A Scalar Function returns a single value (an `int`, a `varchar`) and is called wherever a single value would be expected, like an ordinary column expression — a Table-Valued Function returns an entire result set (a table) and is used in the `FROM` clause, exactly as if it were itself a table.
+
+```sql
+-- SCALAR function -- returns ONE single value
+CREATE FUNCTION dbo.CalculateAge(@birthDate DATE) RETURNS INT
+AS BEGIN RETURN DATEDIFF(YEAR, @birthDate, GETDATE()) END;
+
+SELECT Name, dbo.CalculateAge(BirthDate) AS Age FROM Users; -- used LIKE an ORDINARY column expression
+
+-- TABLE-VALUED function -- returns an ENTIRE RESULT SET (a TABLE)
+CREATE FUNCTION dbo.GetOrdersByCustomer(@customerId INT) RETURNS TABLE
+AS RETURN (SELECT * FROM Orders WHERE CustomerId = @customerId);
+
+SELECT * FROM dbo.GetOrdersByCustomer(42); -- used in the FROM CLAUSE, LIKE an ORDINARY table
+```
+Because a Table-Valued Function can be referenced directly in a `FROM` clause (and even joined against other tables), it's effectively a reusable, parameterized *view* — while a Scalar Function is more like a reusable, named calculation, referenced inline wherever a single computed value is needed.
+
+**Common Pitfall:** using a Scalar Function inside a `WHERE` clause or `SELECT` list applied row-by-row across a large table, unaware of its potential performance cost — a Scalar Function called once per row (rather than being evaluated in a single, set-based operation) can force the query optimizer into row-by-row execution for that expression, which is often dramatically slower than an equivalent inline expression or Table-Valued Function for large tables; this is a well-documented SQL Server performance pitfall specifically tied to Scalar Functions used this way.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is `sp_executesql`, and how does it let you build and execute dynamic SQL (a query whose exact structure isn't known until runtime) while still safely parameterizing values — as opposed to unsafely concatenating them directly into the SQL string?**
+
+Sometimes a query's *structure* genuinely needs to vary at runtime (an optional filter that may or may not be included, a dynamically-chosen sort column) — `sp_executesql` lets you build such a query as a string while still passing actual *values* as genuine, separate parameters, preserving the same safety and plan-reuse benefits parameterized queries provide, rather than falling back to unsafe string concatenation for the entire query.
+
+```sql
+-- UNSAFE -- concatenating the VALUE directly into the query STRING -- SQL Injection risk, covered under App Security
+DECLARE @sql NVARCHAR(MAX) = 'SELECT * FROM Users WHERE Username = ''' + @username + '''';
+EXEC (@sql);
+
+-- SAFE -- the QUERY STRUCTURE is built dynamically, but the VALUE is passed as a GENUINE, SEPARATE PARAMETER
+DECLARE @sql NVARCHAR(MAX) = N'SELECT * FROM Users WHERE Username = @username';
+EXEC sp_executesql @sql, N'@username NVARCHAR(50)', @username = @username;
+```
+Because `sp_executesql` accepts the query text and its parameter definitions separately from the actual parameter values, the database engine treats `@username` as genuine parameterized data (exactly like an ordinary parameterized query, covered under App Security) rather than as literal text spliced into the SQL — closing off the injection risk that directly concatenating `@username`'s value into the query string would create, while still allowing the query's overall *shape* to be assembled dynamically at runtime.
+
+**Why this matters for query plan reuse, beyond just safety:** because the parameterized query text stays identical across different `@username` values (only the separately-passed parameter value changes), SQL Server can reuse the same cached execution plan across many calls — direct string concatenation instead produces a *different* literal query string for every different value, defeating plan caching entirely and forcing a fresh compilation for every single distinct value ever queried.
+
+**Common Pitfall:** using `sp_executesql` but still concatenating a *value* (rather than a genuine parameter) into the dynamically-built query string, mistakenly believing that using `sp_executesql` at all is automatically sufficient protection — `sp_executesql` itself doesn't provide any safety benefit unless the actual untrusted values are passed through as its separate, genuine parameters; using it while still concatenating values directly into the string reintroduces exactly the same injection risk as plain dynamic SQL, just with an extra, non-protective layer of indirection.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is SQL Server's Adaptive Query Processing (specifically Memory Grant Feedback), and how does the engine learning from a PREVIOUS execution's ACTUAL memory usage let it adjust the memory grant for FUTURE executions of the same query?**
+
+Before executing a query, SQL Server estimates how much memory it will need (a "memory grant," primarily for sort/hash operations) based on the query optimizer's row-count estimates — Memory Grant Feedback lets the engine compare that *estimated* grant against what the query *actually* used during execution, and adjust the grant for *future* executions of the same query accordingly, without requiring a manual query hint or a DBA's intervention.
+
+```text
+FIRST execution of a query: optimizer ESTIMATES it needs 500MB of memory for a SORT operation
+  -- ACTUAL execution uses only 50MB -- the ESTIMATE was WAY too HIGH (perhaps due to stale statistics,
+     covered elsewhere, or an inherently hard-to-estimate predicate)
+  -- Memory Grant Feedback NOTICES this significant DISCREPANCY
+
+NEXT execution of the SAME query: SQL Server AUTOMATICALLY ADJUSTS the memory grant DOWNWARD,
+  closer to the 50MB ACTUALLY needed, based on the PREVIOUS execution's REAL, OBSERVED usage
+  -- frees up the OTHER ~450MB for OTHER CONCURRENT queries running on the SAME server
+```
+An over-estimated memory grant isn't just "safely generous" — memory granted to one query is unavailable to other concurrent queries until it completes, so a persistently over-estimated grant can genuinely starve other queries of memory they need, even though the over-estimating query itself never actually used what it reserved; Memory Grant Feedback directly addresses this by learning from real, observed behavior across executions, rather than relying solely on the optimizer's static, pre-execution estimate every single time.
+
+**Why this specifically complements (rather than replaces) the earlier Parameter Sniffing mitigations:** Parameter Sniffing (covered earlier) concerns the optimizer choosing a *bad execution plan shape* based on the specific parameter value seen during compilation — Memory Grant Feedback operates on a different, narrower dimension (adjusting the *memory grant size* for an already-chosen plan shape, based on genuinely observed actual usage), and the two mechanisms can operate together: a query might have the "right" plan shape but still an over/under-estimated memory grant, which Memory Grant Feedback corrects independently of whatever plan-shape concerns Parameter Sniffing mitigations address.
+
+**Common Pitfall:** assuming Adaptive Query Processing features like Memory Grant Feedback eliminate the need to ever investigate genuinely problematic query plans or stale statistics — Memory Grant Feedback specifically smooths out memory-grant-sizing mismatches over successive executions; it doesn't fix an underlying bad plan shape, stale statistics causing wildly wrong row-count estimates in the first place, or a genuinely poorly-designed query — it's a targeted, narrow-scope adaptive mechanism, not a general substitute for actual query tuning and root-cause investigation.
+
+---
+
 ---

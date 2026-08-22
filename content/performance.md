@@ -938,3 +938,93 @@ In the Array-of-Structs layout, iterating just the `X` field still pulls each pa
 **Common Pitfall:** restructuring data from Array-of-Structs to Struct-of-Arrays throughout an entire codebase preemptively, before profiling has actually confirmed a specific hot loop's performance is meaningfully limited by cache utilization — this is a genuinely more awkward, less object-oriented way to organize data (harder to pass "one particle" around as a single unit), and its benefit is specifically concentrated in large-data, cache-bound hot loops; applying it broadly without profiling evidence trades real code ergonomics for a performance benefit that may not even apply to most of the codebase's actual data access patterns.
 
 ---
+
+## Beginner — Question 11
+
+**Q11: What is the difference between User-Perceived Response Time and Server Processing Time, and how does Network Latency/Time-to-First-Byte account for the gap between what a server logs and what a user actually experiences?**
+
+Server Processing Time is what the server's own logs measure — the time from receiving a request to finishing generating a response. User-Perceived Response Time is what the user actually experiences — including network transit time in both directions, connection setup, and the browser's own rendering time — meaning a server logging "40ms" and a user experiencing "2 seconds" aren't necessarily a contradiction at all.
+
+```text
+User clicks a button
+  │
+  ├─ Network: request travels to the server ────────────────── (network LATENCY, NOT logged by the SERVER)
+  │
+  ├─ Server: receives, PROCESSES, responds ───────────────────── 40ms (THIS is what SERVER LOGS show)
+  │
+  ├─ Network: response travels BACK to the user ──────────────── (network LATENCY, AGAIN not server-side)
+  │
+  └─ Browser: RECEIVES, PARSES, RENDERS the response ──────────── (CLIENT-side time, ALSO not server-side)
+
+TOTAL user-perceived time = ALL of the above, ADDED together -- the SERVER's 40ms log entry
+                              captures ONLY ONE piece of this ENTIRE chain
+```
+A mobile user on a slow, high-latency cellular connection can easily experience 1-2 seconds of pure network transit time in each direction, plus client-side rendering time, on top of a server that genuinely only took 40ms to do its own work — the server's logs are entirely accurate about *its own* portion, but they simply don't (and structurally can't) capture the network and client-side portions of the total experience.
+
+**Common Pitfall:** treating server-side processing time as if it were the complete measure of "how fast the application is," dismissing user complaints about slowness as unfounded when server logs show a fast response — genuinely diagnosing a user-perceived slowness complaint requires measuring (or at least accounting for) the full chain, not just the server's own slice of it, which is exactly why distributed tracing and client-side timing headers (covered elsewhere) exist specifically to bridge this measurement gap.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is Lock-Free programming using `Interlocked` operations, and how does Compare-And-Swap (CAS) let multiple threads safely update a shared variable without the overhead of an actual lock?**
+
+Lock-Free programming updates shared state using atomic, hardware-level CPU instructions (`Interlocked.CompareExchange`, the .NET wrapper around Compare-And-Swap) instead of a traditional `lock` — for simple, single-variable updates, this avoids the overhead of lock acquisition/release (and the possibility of one thread blocking while waiting for another) entirely.
+
+```csharp
+// WITH a traditional lock -- a THREAD can BLOCK, waiting for ANOTHER thread to release it
+private readonly object _lockObj = new();
+private int _counter;
+public void Increment() { lock (_lockObj) { _counter++; } }
+
+// LOCK-FREE, using Interlocked -- NO thread EVER blocks waiting for another AT ALL
+private int _counter;
+public void Increment() => Interlocked.Increment(ref _counter);
+
+// Compare-And-Swap DIRECTLY -- the underlying MECHANISM Interlocked.Increment uses internally
+public void IncrementManually()
+{
+    int originalValue, newValue;
+    do
+    {
+        originalValue = _counter;
+        newValue = originalValue + 1;
+        // ATOMICALLY: "IF _counter STILL equals originalValue, SET it to newValue -- ELSE, RETRY the WHOLE thing"
+    } while (Interlocked.CompareExchange(ref _counter, newValue, originalValue) != originalValue);
+}
+```
+`CompareExchange` atomically checks "does the variable still hold the value I originally read?" and, only if so, updates it — if a *different* thread changed the value in between (a race), the operation fails and the loop simply retries with the now-current value, rather than any thread ever being *blocked* waiting on a lock; the CPU's own atomic instruction guarantees this check-and-update happens as one indivisible step, eliminating the TOCTOU-style race a naive read-then-write would otherwise have.
+
+**Why this specifically outperforms a `lock` for simple, high-contention, single-variable updates:** a `lock` involves kernel-level synchronization primitives that can suspend a thread entirely (a genuinely expensive operation if it actually blocks) — `Interlocked` operations execute as a single, uninterruptible CPU instruction with no possibility of blocking a thread at all, making them significantly cheaper specifically for simple updates to one variable, though they don't generalize to protecting multiple, related pieces of state that must change together atomically (which still genuinely needs a lock or an equivalent coordination mechanism).
+
+**Common Pitfall:** trying to extend a lock-free, `Interlocked`-based approach to protect multiple related fields that must be updated together atomically (updating both a counter and a related timestamp "together") — `Interlocked` operations only guarantee atomicity for a *single* variable; coordinating multiple related fields atomically genuinely requires a lock (or a more sophisticated lock-free data structure specifically designed for that case), since chaining several independent `Interlocked` calls provides no guarantee the fields stay consistent with each other between the separate atomic operations.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is Amdahl's Law, and how does it quantify the diminishing returns of adding more parallel threads/cores when a portion of a program's work is inherently sequential?**
+
+Amdahl's Law states that a program's maximum possible speedup from parallelization is fundamentally limited by the fraction of its work that *cannot* be parallelized at all — no matter how many additional cores/threads you throw at the parallelizable portion, the inherently sequential portion imposes a hard ceiling on the total possible speedup, one that more parallelism can never break through.
+
+```text
+Amdahl's Law: Speedup = 1 / ((1 - P) + P/N)
+  where P = the PROPORTION of work that CAN be parallelized, N = the number of PROCESSORS/threads
+
+Example: a program where 90% of the work CAN be parallelized (P = 0.9), the OTHER 10% is INHERENTLY sequential
+
+With N=2 processors:  Speedup = 1 / (0.1 + 0.9/2)  = 1 / 0.55  ≈ 1.8x
+With N=10 processors: Speedup = 1 / (0.1 + 0.9/10) = 1 / 0.19  ≈ 5.3x
+With N=100 processors:Speedup = 1 / (0.1 + 0.9/100)= 1 / 0.109 ≈ 9.2x
+With N=∞ processors:  Speedup = 1 / (0.1 + 0)       = 1 / 0.1  = 10x -- THIS is the ABSOLUTE, HARD CEILING
+-- EVEN with INFINITE processors, the speedup can NEVER exceed 10x, because of that INHERENTLY
+   SEQUENTIAL 10% -- ADDING MORE and MORE cores produces RAPIDLY DIMINISHING RETURNS, approaching
+   but NEVER REACHING this ceiling --
+```
+Going from 10 to 100 processors only improves speedup from roughly 5.3x to 9.2x — a massive 10x increase in processor count yields far less than a proportional increase in actual speedup, precisely because the fixed, inherently sequential 10% of the work increasingly dominates the total execution time as the parallel portion keeps shrinking toward zero with more and more processors thrown at it.
+
+**Why this matters directly for deciding whether adding more parallelism to a specific workload is actually worth the engineering effort:** before investing significant effort into parallelizing a piece of code further (adding more worker threads, more distributed compute nodes), Amdahl's Law provides a way to reason about whether doing so will actually yield meaningful returns — a workload with a large inherently-sequential portion (a lot of setup, coordination, or a serial bottleneck like a single database write) will see its parallelization efforts hit diminishing returns much sooner than a workload that's genuinely almost entirely parallelizable.
+
+**Common Pitfall:** assuming that doubling the number of threads/cores/machines applied to a problem should roughly double its throughput or halve its execution time, without accounting for the inherently sequential fraction of the actual work — this optimistic assumption (sometimes informally called "just throw more hardware at it") runs directly into Amdahl's Law's hard ceiling, and identifying and specifically reducing the *sequential* portion of a workload (not just adding more parallel capacity) is often the more effective lever for genuinely improving a heavily-parallelized system's throughput further.
+
+---
