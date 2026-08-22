@@ -1230,4 +1230,81 @@ The Transaction Coordinator (a designated role held by one of the brokers, track
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is a Delayed/Scheduled Message (Azure Service Bus's `ScheduledEnqueueTimeUtc`, or SQS delay queues), and how does letting a message sit unavailable until a specific future time enable a "remind me in 24 hours" feature without a separate scheduler service?**
+
+A Delayed Message is enqueued immediately but remains invisible to consumers until a specified future time arrives — letting an application schedule future work (a reminder, a timeout check, a delayed retry) simply by publishing a message now with a future delivery time, rather than building and operating a separate scheduling service just to track "what needs to happen later."
+
+```csharp
+// Azure Service Bus -- SCHEDULES a message to become VISIBLE to consumers 24 HOURS from NOW
+var message = new ServiceBusMessage(reminderPayload)
+{
+    ScheduledEnqueueTime = DateTimeOffset.UtcNow.AddHours(24) // INVISIBLE to consumers UNTIL this TIME arrives
+};
+await sender.SendMessageAsync(message);
+// -- the MESSAGE sits in the QUEUE, UNAVAILABLE to ANY consumer, for the NEXT 24 HOURS --
+// -- EXACTLY at (or shortly after) that TIME, it BECOMES visible, and a CONSUMER PICKS it up NORMALLY --
+```
+Because the broker itself handles the "wait until this time" logic natively, an application never needs to build its own separate scheduling/polling infrastructure just to track "what needs to fire later" — a "send a follow-up reminder if the user hasn't completed checkout within 24 hours" feature becomes a single, ordinary message publish with a future delivery time, rather than a separate cron job or scheduler service that would need its own persistence and reliability guarantees.
+
+**Common Pitfall:** building a custom scheduling mechanism (a database table of "things to do later," polled by a background job) to implement delayed/reminder-style functionality, when the message broker already in use natively supports scheduled delivery — this duplicates infrastructure and reliability guarantees (durability, retry behavior) the broker already provides, when a simple scheduled message publish would accomplish the exact same outcome with far less custom code to build and maintain.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: Is Kafka's Consumer Group model the same underlying concept as RabbitMQ's Competing Consumers (covered earlier), or are they genuinely different?**
+
+Both describe multiple consumer instances collectively processing messages from a shared source without duplicating work — but the underlying mechanism differs meaningfully: RabbitMQ's Competing Consumers compete for individual messages from one shared queue (the broker hands each message to whichever available consumer asks next) — Kafka's Consumer Group instead statically assigns entire *partitions* to specific consumer instances (covered under Kafka's partitioning discussion), with each consumer owning and sequentially processing its assigned partition(s) rather than competing message-by-message.
+
+```text
+RABBITMQ Competing Consumers -- consumers COMPETE, MESSAGE BY MESSAGE, for WHATEVER's NEXT in ONE shared queue:
+  Queue: [msg1, msg2, msg3, msg4, msg5, ...]
+  Consumer A and Consumer B BOTH listen to the SAME queue -- the BROKER hands EACH message to
+  WHICHEVER consumer HAPPENS to be AVAILABLE NEXT -- NO fixed, PRE-ASSIGNED OWNERSHIP of ANY
+  SPECIFIC subset of messages AT ALL
+
+KAFKA Consumer Group -- consumers are ASSIGNED entire PARTITIONS, NOT individual MESSAGES:
+  Topic with 4 partitions: [P0] [P1] [P2] [P3]
+  Consumer A is ASSIGNED P0 and P1 -- Consumer B is ASSIGNED P2 and P3 -- THIS ASSIGNMENT is
+  FIXED (until a REBALANCE, covered earlier) -- Consumer A NEVER "COMPETES" for A MESSAGE
+  in P2 -- it SIMPLY DOESN'T OWN that PARTITION AT ALL, PERIOD
+```
+Because Kafka's assignment is partition-level (not message-by-message), ordering *within* a partition is naturally preserved (covered under Kafka's message-ordering discussion) since exactly one consumer processes each partition sequentially — RabbitMQ's message-by-message competition provides no equivalent per-partition ordering guarantee at all, since any available consumer might grab any next message regardless of ordering relative to other messages.
+
+**Why this distinction matters for correctly reasoning about ordering guarantees across different broker types:** a developer moving from a RabbitMQ-based system (Competing Consumers, no inherent ordering) to a Kafka-based one (Consumer Groups, partition-level ordering) needs to understand this isn't merely a naming difference — the two models provide genuinely different guarantees, and code relying on Kafka's partition-level ordering would behave incorrectly if naively ported to RabbitMQ's message-by-message competition model without accounting for this structural difference.
+
+**Common Pitfall:** assuming "Consumer Group" and "Competing Consumers" are simply two different vendors' names for the identical underlying mechanism — while both achieve the same high-level goal (multiple consumers collectively processing a shared workload without duplication), their actual assignment granularity (partition-level versus message-level) differs in ways that directly affect ordering guarantees, a distinction worth understanding precisely rather than treating the two terms as interchangeable synonyms.
+
+---
+
+## Advanced — Question 14
+
+**Q14: How does Kafka's Log Retention govern data by both time (`retention.ms`) and size (`retention.bytes`) simultaneously, and which limit takes effect when a topic has both configured?**
+
+Kafka retains a topic's messages for as long as *both* configured limits allow — `retention.ms` bounds how long messages are kept regardless of volume, and `retention.bytes` bounds how much total data is kept regardless of age; when both are configured together, whichever limit is reached *first* triggers deletion of the oldest messages, exactly like two independent ceilings, the lower of which actually governs behavior in practice.
+
+```properties
+retention.ms=604800000      # 7 DAYS -- messages OLDER than THIS are ELIGIBLE for DELETION
+retention.bytes=10737418240 # 10 GB PER PARTITION -- if the PARTITION EXCEEDS this SIZE, OLDEST messages are DELETED
+```
+```text
+SCENARIO A -- a LOW-VOLUME topic, NEVER actually reaching 10GB WITHIN 7 days:
+  -- the TIME limit (7 days) is WHAT ACTUALLY GOVERNS -- messages are DELETED once THEY turn 7 DAYS
+     old, REGARDLESS of the (never-reached) SIZE limit
+
+SCENARIO B -- a VERY HIGH-VOLUME topic, REACHING 10GB WITHIN JUST 2 days:
+  -- the SIZE limit (10GB) is WHAT ACTUALLY GOVERNS -- OLDEST messages get DELETED ONCE the
+     PARTITION HITS 10GB, EVEN THOUGH they're still WELL UNDER 7 days OLD -- the TIME limit
+     NEVER even GETS a CHANCE to be the BINDING CONSTRAINT, in THIS SCENARIO
+```
+Because whichever limit is actually reached first is the one that governs a given topic's real-world retention behavior, a topic's *effective* retention window can vary significantly depending on its actual message volume — a suddenly much busier topic (an unexpected traffic spike) can find its effective retention window shrinking dramatically below the configured `retention.ms`, purely because `retention.bytes` was reached first due to the higher volume.
+
+**Why this matters for correctly reasoning about "how far back can I replay this topic's history," directly connecting to Log Compaction covered earlier:** a team assuming they can always replay the "last 7 days" of a topic (based purely on `retention.ms`) can be surprised to find much less history actually available, if the topic's volume has grown enough that `retention.bytes` now kicks in first — correctly reasoning about a topic's actual retention requires considering both limits together, and specifically monitoring which one is the binding constraint for that topic's real, observed volume, not just assuming the time-based limit alone determines what's actually retained.
+
+**Common Pitfall:** configuring only `retention.ms` (assuming time alone governs retention) for a topic whose volume can grow unpredictably, without also setting a `retention.bytes` ceiling — an unexpected volume spike (a traffic surge, a misbehaving producer flooding the topic) can then cause unbounded disk usage growth for that topic, since nothing bounds how much *total data* accumulates within the time window; setting both limits together provides a genuine safety net against both "too old" and "too much" scenarios.
+
+---
+
 ---

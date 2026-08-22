@@ -1370,4 +1370,89 @@ Because jitter deliberately desynchronizes what would otherwise be many clients'
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is `protoc`'s code-generation plugin model, and how does one `.proto` file generate code for many different languages via different plugins?**
+
+`protoc` (the Protobuf compiler) itself only parses a `.proto` file's structure — it doesn't inherently know how to generate C#, Java, or Python code at all; that language-specific generation is delegated to separate plugins (`protoc-gen-csharp`, `protoc-gen-java`, `protoc-gen-grpc`), each responsible for translating the same, parsed `.proto` structure into idiomatic code for one specific target language.
+
+```bash
+protoc --csharp_out=./generated --grpc_out=./generated --plugin=protoc-gen-grpc=grpc_csharp_plugin order.proto
+# -- protoc PARSES order.proto ONCE -- then INVOKES the csharp PLUGIN to generate C# MESSAGE classes,
+#    and the grpc PLUGIN to generate C# CLIENT/SERVER STUBS, FROM that SAME PARSED STRUCTURE
+
+protoc --python_out=./generated --grpc_python_out=./generated order.proto
+# -- the EXACT SAME order.proto file, PARSED THE SAME WAY -- but THIS time, DIFFERENT PLUGINS
+#    (python-specific ONES) generate PYTHON code INSTEAD
+```
+Because the actual code-generation logic lives in separate, per-language plugins rather than being baked directly into `protoc` itself, adding support for a brand-new target language doesn't require modifying `protoc`'s own core parsing logic at all — it simply requires writing a new plugin that consumes the same, already-parsed `.proto` structure and emits code for that new language, which is precisely the extensibility model that lets gRPC/Protobuf support such a wide range of target languages from the exact same schema files.
+
+**Common Pitfall:** assuming `protoc` itself contains built-in, hardcoded knowledge of every target language's specific code-generation rules — the actual language-specific logic lives entirely in the separate, pluggable generator plugins; `protoc`'s own job is limited to parsing the `.proto` file's structure and handing that parsed representation off to whichever plugins are invoked, a clean separation that's what makes the whole ecosystem's broad multi-language support practical to maintain and extend.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: How does a gRPC Interceptor add a custom trailer after the actual RPC method has already completed, using `ServerCallContext.ResponseTrailers`?**
+
+An interceptor (covered earlier) wraps a call both before and after the actual method executes — `ServerCallContext.ResponseTrailers` specifically lets an interceptor add its own custom trailer metadata *after* the wrapped method has already run and produced its result, letting cross-cutting information (a computed processing-time value, a correlation ID) be attached to the response's trailers without the actual business-logic method needing any awareness of it at all.
+
+```csharp
+public class TimingTrailerInterceptor : Interceptor
+{
+    public override async Task<TResponse> UnaryServerHandler<TRequest, TResponse>(
+        TRequest request, ServerCallContext context, UnaryServerMethod<TRequest, TResponse> continuation)
+    {
+        var sw = Stopwatch.StartNew();
+        var response = await continuation(request, context); // the ACTUAL method runs, PRODUCES its result
+        sw.Stop();
+
+        // AFTER the method has ALREADY completed -- ADD a CUSTOM trailer to the RESPONSE
+        context.ResponseTrailers.Add("x-processing-time-ms", sw.ElapsedMilliseconds.ToString());
+        return response;
+    }
+}
+```
+```csharp
+// CLIENT-SIDE -- reads the TRAILER, AFTER the CALL completes, WITHOUT the SERVER's OWN business
+// LOGIC method EVER needing to know ANYTHING about TIMING/TRAILERS AT ALL
+var call = client.GetOrderAsync(request);
+var response = await call.ResponseAsync;
+var trailers = call.GetTrailers();
+var processingTime = trailers.GetValue("x-processing-time-ms");
+```
+Because the trailer is added by the interceptor *after* the wrapped method returns, the actual business-logic method (`GetOrder`, in this example) never needs to know anything about timing, trailers, or any other cross-cutting concern at all — it simply does its own job, and the interceptor transparently layers additional response metadata around it, exactly the same separation-of-concerns benefit interceptors provide more generally (covered earlier).
+
+**Common Pitfall:** trying to modify response trailers from *inside* the actual business-logic method itself, scattering cross-cutting trailer-setting logic across every individual RPC implementation — an interceptor is specifically the right layer for this concern, since it can add the same trailer uniformly across every RPC method without each one needing its own duplicated trailer-setting code.
+
+---
+
+## Advanced — Question 14
+
+**Q14: Why does gRPC's `pick_first` client-side load-balancing default interact poorly with an ordinary Kubernetes Service — which presents a single virtual IP — and why does a Headless Service (covered under Kubernetes) matter for this specifically?**
+
+An ordinary Kubernetes `Service` (covered elsewhere) presents *one* single virtual IP/DNS name, regardless of how many Pod replicas actually back it — a gRPC client resolving that DNS name sees only that one virtual IP, never the individual Pod IPs behind it, meaning `pick_first`/`round_robin` client-side load balancing (covered earlier) has nothing meaningful to load-balance *across* at all, since DNS resolution returns only one address no matter how many replicas actually exist.
+
+```text
+ORDINARY Kubernetes Service -- DNS resolves to ONE single, SHARED virtual IP, REGARDLESS of REPLICA COUNT:
+  nslookup my-api-service.default.svc.cluster.local
+  -- returns: 10.96.45.12  (ONE VIP -- kube-proxy ITSELF load-balances BEHIND this ONE address)
+  -- a gRPC CLIENT'S OWN client-side load balancing (pick_first/round_robin) has NOTHING to
+     CHOOSE BETWEEN -- DNS gave it ONLY ONE address -- ALL gRPC traffic goes through ONE
+     LONG-LIVED CONNECTION to WHATEVER SINGLE POD kube-proxy HAPPENED to route THAT CONNECTION to
+
+HEADLESS Service (covered under Kubernetes) -- DNS resolves DIRECTLY to EVERY individual POD IP:
+  nslookup my-api-headless.default.svc.cluster.local
+  -- returns: 10.1.2.3, 10.1.2.4, 10.1.2.5  (EVERY INDIVIDUAL POD's ACTUAL IP, DIRECTLY)
+  -- NOW gRPC's OWN client-side load balancing has SOMETHING GENUINE to CHOOSE FROM -- it can
+     ACTUALLY multiplex CALLS ACROSS MULTIPLE, SEPARATE connections to MULTIPLE, DIFFERENT PODS
+```
+Because gRPC's long-lived HTTP/2 connections (covered earlier) pin to whichever single backend they initially connect to, and an ordinary Service's single VIP gives the client only one address to ever connect to in the first place, all of a client's gRPC traffic ends up funneled through one connection to effectively one Pod (whichever one `kube-proxy` happened to route that one connection to) — directly reproducing the exact same "long-lived connection pinning defeats load balancing" problem covered earlier, specifically because the client never even sees the other replicas' individual addresses to choose between.
+
+**Why this is a genuinely common, easy-to-overlook gotcha specifically for gRPC (as opposed to ordinary HTTP/1.1-based services) in Kubernetes:** a typical HTTP/1.1 REST API, with its shorter-lived connections cycling more frequently, incidentally gets reasonable load distribution through `kube-proxy`'s own per-connection balancing, even behind an ordinary Service's single VIP — gRPC's deliberately long-lived connections (a genuine feature, covered extensively elsewhere) specifically defeat this incidental balancing, making the Headless-Service-plus-client-side-load-balancing combination a specifically gRPC-relevant configuration requirement that a team migrating a REST service to gRPC needs to explicitly account for.
+
+**Common Pitfall:** deploying a gRPC service in Kubernetes behind an ordinary (non-headless) Service, then being confused about why load appears heavily skewed toward a small subset of Pod replicas despite Kubernetes reporting all replicas as healthy — the fix requires exposing the service via a Headless Service (covered under Kubernetes) combined with explicit client-side load balancing configuration (covered earlier), not simply adding more replicas or investigating application-level load-balancing bugs that don't actually exist.
+
+---
+
 ---

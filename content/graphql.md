@@ -1453,4 +1453,93 @@ Because `@requires(fields: "weight")` tells the Federation Gateway's query plann
 
 ---
 
+## Beginner — Question 14
+
+**Q14: What is a GraphQL Operation Name (the optional name after `query`/`mutation`), and why is naming operations considered best practice even though it's technically optional?**
+
+A GraphQL operation can be sent entirely anonymously (`query { product(id: "5") { name } }`) or with an explicit name (`query GetProductName { product(id: "5") { name } }`) — the name has no effect on the actual data returned, but provides genuinely valuable identification for debugging, logging, and tooling that an anonymous operation lacks entirely.
+
+```graphql
+# ANONYMOUS -- WORKS FINE, but provides NO IDENTIFYING information AT ALL
+query {
+  product(id: "5") { name price }
+}
+
+# NAMED -- IDENTICAL result, but NOW carries a MEANINGFUL, HUMAN-READABLE identifier
+query GetProductDetails {
+  product(id: "5") { name price }
+}
+```
+```text
+In SERVER-SIDE LOGS, a NETWORK request INSPECTOR, or an APM tool's TRACE view:
+  ANONYMOUS: "POST /graphql" -- gives NO indication WHATSOEVER of WHAT this SPECIFIC query
+             actually DOES, WITHOUT opening and READING its ENTIRE body
+  NAMED:     "POST /graphql (GetProductDetails)" -- IMMEDIATELY identifiable, AT A GLANCE, in
+             LOGS, NETWORK TABS, and APM TRACES, WITHOUT needing to INSPECT the FULL query BODY
+```
+Because every GraphQL request technically hits the exact same URL (`POST /graphql`, unlike REST's distinct per-resource URLs), an operation's name is often the *only* practical way to distinguish one specific kind of request from another when looking at server logs, browser network tabs, or APM tracing tools — an anonymous query is indistinguishable from any other anonymous query at the network/logging level, forcing whoever's debugging to open and read the entire request body just to know what it actually does.
+
+**Common Pitfall:** sending GraphQL operations anonymously as a matter of habit, especially in client-side code generation tools that don't enforce naming — this makes production debugging and log analysis significantly harder, since every anonymous request looks identical at the network/APM level; naming every operation (most GraphQL client libraries and codegen tools support or even require this) costs nothing and pays off substantially the first time someone needs to actually investigate a specific query's behavior in production logs.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: How does a GraphQL client library's Normalized Cache — storing every object by its Global ID (covered earlier) — let an update to one object automatically reflect everywhere it's referenced in the UI, without manual cache invalidation?**
+
+Rather than caching each query's response as one opaque blob, a Normalized Cache (Apollo Client, Relay) breaks every response apart into its individual objects, storing each one exactly once, keyed by its Global ID (covered earlier) — any *other* query or UI component that references that same object (by the same Global ID) automatically sees the update the instant it changes, since they're all reading from the exact same single, shared cache entry rather than separate, duplicated copies.
+
+```graphql
+# QUERY 1 -- the PRODUCT LIST page
+query { products { id name price } }
+
+# QUERY 2 -- an ENTIRELY DIFFERENT page, a PRODUCT DETAIL view -- happens to REFERENCE the SAME product
+query { product(id: "5") { id name price reviews { rating } } }
+```
+```text
+WITHOUT normalization -- EACH query's RESPONSE is CACHED SEPARATELY, as its OWN INDEPENDENT blob:
+  Cache entry for Query 1: { products: [{ id: "5", name: "Keyboard", price: 29.99 }, ...] }
+  Cache entry for Query 2: { product: { id: "5", name: "Keyboard", price: 29.99, reviews: [...] } }
+  -- TWO SEPARATE COPIES of PRODUCT #5's data -- UPDATING one DOESN'T affect the OTHER AT ALL
+
+WITH normalization -- BOTH queries' RESPONSES REFERENCE the SAME, SINGLE, SHARED cache entry:
+  Normalized cache: { "Product:5": { id: "5", name: "Keyboard", price: 29.99, reviews: [...] } }
+  Query 1's result and Query 2's result BOTH simply POINT AT this ONE SHARED entry
+  -- a MUTATION updating Product #5's price UPDATES this ONE entry -- BOTH the LIST page AND
+     the DETAIL page's UI AUTOMATICALLY re-render with the NEW price, INSTANTLY, with ZERO
+     manual CACHE-invalidation CODE written ANYWHERE --
+```
+Because both queries' results ultimately reference the exact same normalized cache entry (`Product:5`, identified by its Global ID), a mutation updating that product's price only ever needs to update *one* place in the cache — every UI component anywhere in the application that happens to display that same product automatically re-renders with the fresh data, entirely automatically, without any explicit "also refresh the product list page" invalidation logic needing to be written anywhere.
+
+**Why this specifically depends on the Global Object Identification convention covered earlier:** normalization only works if the client can reliably recognize "this object in Query 1's response and this object in Query 2's response are actually the *same* underlying entity" — the Global ID (covered earlier, encoding the type directly into a globally-unique identifier) is precisely what lets the client library make that determination reliably across arbitrarily different queries, which is why Relay/Apollo's normalized caching depends so directly on consistently following that convention.
+
+**Common Pitfall:** manually writing cache-invalidation/refetch logic after every mutation ("also refetch the product list query after updating a product"), unaware that a properly normalized cache already handles this automatically via shared Global-ID-keyed entries — this duplicates work the client library's own normalization already provides for free, and is a common sign that Global Object Identification isn't being followed consistently enough across the schema's types for normalization to actually take effect everywhere it could.
+
+---
+
+## Advanced — Question 14
+
+**Q14: How does combining a Persisted Query (covered earlier) with a CDN let a GraphQL response be cached at the HTTP/CDN level — something an ordinary POST-based GraphQL request normally cannot benefit from at all?**
+
+Ordinary GraphQL requests are typically sent as `POST` requests (since a full query document, potentially large, doesn't fit comfortably in a URL) — but HTTP caching infrastructure (CDNs, browser caches, covered under HTTP) generally only caches `GET` requests, keyed by URL. A Persisted Query's short hash (covered earlier) is small enough to fit directly in a URL, letting a GraphQL request be expressed as a cacheable `GET`, with the hash itself serving as the cache key.
+
+```http
+-- ORDINARY GraphQL -- a POST request, WITH the FULL query in the BODY -- HTTP/CDN caches GENERALLY
+-- DON'T cache POST requests, and even IF they DID, the BODY isn't PART of the STANDARD cache KEY
+POST /graphql
+{ "query": "query GetProduct($id: ID!) { product(id: $id) { name price } }", "variables": { "id": "5" } }
+
+-- PERSISTED QUERY, expressed as a GET -- the HASH and VARIABLES are ENCODED directly in the URL ITSELF
+GET /graphql?extensions={"persistedQuery":{"sha256Hash":"abc123"}}&variables={"id":"5"}
+-- THIS is a GENUINE, CACHEABLE GET request -- a CDN can CACHE this EXACT URL's response DIRECTLY,
+-- EXACTLY the SAME way it WOULD cache ANY ordinary, CACHEABLE REST GET endpoint's response
+```
+Because the persisted query's hash plus its variables together form a complete, deterministic URL (the same hash + same variables always produces the exact same URL), a CDN can cache the resulting response keyed by that URL exactly as it would for any ordinary REST `GET` endpoint — a capability a `POST`-based GraphQL request structurally cannot provide at all, since HTTP caching infrastructure doesn't cache `POST` request bodies as part of a standard cache key.
+
+**Why this specifically closes a long-standing gap between GraphQL and REST's caching story:** REST APIs benefit naturally from HTTP-level caching (a `GET /products/5` request is trivially cacheable by any standard HTTP cache) — GraphQL's typical `POST`-based request model forfeits this entirely, forcing teams to build custom, application-level caching instead; GET-based Persisted Queries specifically restore HTTP-level cacheability for GraphQL, letting a CDN transparently cache GraphQL responses exactly the same way it already caches REST responses, without any GraphQL-aware logic needed in the CDN itself at all.
+
+**Common Pitfall:** assuming GraphQL is fundamentally incompatible with standard HTTP/CDN caching due to its `POST`-based request model, and building bespoke, application-level response caching instead — GET-based Persisted Queries specifically solve this exact problem using entirely standard, GraphQL-unaware HTTP caching infrastructure, avoiding the need for custom caching logic that a plain `POST`-based GraphQL API would otherwise require.
+
+---
+
 ---
