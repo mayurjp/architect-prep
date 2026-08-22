@@ -927,3 +927,90 @@ Because the preload list is compiled directly into the browser's own binary/upda
 **Common Pitfall:** submitting a domain to the HSTS preload list without first verifying that literally every subdomain (including ones not yet built, or third-party-hosted ones) can genuinely serve valid HTTPS — preload's `includeSubDomains` requirement applies HSTS enforcement sitewide, and an overlooked subdomain lacking valid HTTPS becomes completely unreachable for any browser that has the domain preloaded, a mistake that's especially painful given how slowly preload-list removals actually propagate.
 
 ---
+
+## Beginner — Question 12
+
+**Q12: What is the HTTP `TRACE` method, and why is it rarely used in practice and often explicitly disabled, due to the Cross-Site Tracing (XST) risk?**
+
+`TRACE` asks a server to simply echo back the exact request it received, unmodified — originally intended as a diagnostic tool for seeing exactly what a request looked like after passing through any intermediate proxies — but because it echoes the request *exactly as received*, including any `Cookie` or `Authorization` headers, it creates a real security risk if combined with another vulnerability (like XSS) that lets an attacker's script trigger it.
+
+```http
+TRACE / HTTP/1.1
+Host: example.com
+Cookie: session=abc123secretvalue
+
+-- the SERVER'S response ECHOES the ENTIRE request BACK, INCLUDING the Cookie header VERBATIM:
+HTTP/1.1 200 OK
+Content-Type: message/http
+
+TRACE / HTTP/1.1
+Host: example.com
+Cookie: session=abc123secretvalue    <-- ECHOED BACK, READABLE by whoever RECEIVES this RESPONSE
+```
+The Cross-Site Tracing (XST) attack combines `TRACE` with an XSS vulnerability elsewhere on the same site: even if `HttpOnly` (covered elsewhere) prevents JavaScript from directly reading a cookie via `document.cookie`, a malicious script injected via XSS can still issue a `TRACE` request itself and read the cookie back out of the *echoed response body* instead — sidestepping the `HttpOnly` protection entirely, since the cookie's value appears in the response body's text, not through the JavaScript cookie API `HttpOnly` actually restricts.
+
+**Common Pitfall:** assuming `HttpOnly` cookies are fully immune to any JavaScript-based exfiltration technique — `HttpOnly` specifically blocks `document.cookie` access, but doesn't prevent an XSS payload from separately triggering a `TRACE` request and reading the cookie value out of its echoed response instead, which is exactly why disabling the `TRACE` method entirely at the web server level is a standard, recommended hardening step regardless of `HttpOnly` already being set.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What are the `X-Forwarded-For` and `X-Forwarded-Proto` headers, and how does a reverse proxy use them to communicate the original client's real IP address and protocol to the backend application sitting behind it?**
+
+When a reverse proxy (covered under System Design) sits in front of a backend application, the backend's own connection appears to come *from the proxy*, not the original client — `X-Forwarded-For` and `X-Forwarded-Proto` are headers the proxy adds, carrying the original client's real IP address and the original protocol (`http` or `https`) the client actually used, so the backend application can recover that information despite no longer seeing the client's connection directly.
+
+```text
+Client (203.0.113.42, using HTTPS) ──► Reverse Proxy ──► Backend App (sees ONLY the PROXY's OWN IP, e.g. 10.0.0.5)
+
+The PROXY adds these headers BEFORE forwarding to the backend:
+  X-Forwarded-For: 203.0.113.42      -- the ORIGINAL client's REAL IP address
+  X-Forwarded-Proto: https           -- the ORIGINAL protocol the CLIENT actually used
+```
+```csharp
+// ASP.NET Core -- Forwarded Headers Middleware reads these headers, correctly REPOPULATING
+// HttpContext.Connection.RemoteIpAddress and Request.Scheme AS IF the app saw the CLIENT directly
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+});
+```
+Without this middleware correctly configured, application code checking `Request.IsHttps` or logging the client's IP address would see the *proxy's* values instead of the real client's — `Request.IsHttps` might incorrectly report `false` (since the proxy-to-backend hop is often plain HTTP even though the client's original connection was HTTPS), and IP-based rate limiting or geolocation logic would incorrectly treat every request as coming from the proxy's single IP address rather than each individual client's own.
+
+**Common Pitfall:** trusting `X-Forwarded-For` blindly from any source, without restricting which upstream proxies are actually allowed to set it — since it's just an ordinary HTTP header, a malicious client connecting *directly* to the backend (bypassing the legitimate proxy entirely, if the backend is still reachable directly) could forge an arbitrary `X-Forwarded-For` value to spoof their apparent origin IP; `ForwardedHeadersOptions.KnownProxies`/`KnownNetworks` should be configured to only trust this header when it genuinely comes from the actual, known reverse proxy, not from an arbitrary, untrusted direct connection.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is the difference between HTTP's `Content-Encoding` and `Transfer-Encoding` headers, and what specific problem does Chunked Transfer Encoding solve that `Content-Encoding` alone cannot?**
+
+`Content-Encoding` describes how the message *body's content* is encoded (gzip/Brotli compression, covered elsewhere) — `Transfer-Encoding` describes how the message is encoded for *transmission over the wire* itself, and specifically, `Transfer-Encoding: chunked` solves a problem `Content-Encoding` has no bearing on at all: sending a response whose total length isn't known in advance, before the entire body has actually been generated.
+
+```http
+-- ORDINARY response -- total length KNOWN upfront, BEFORE sending -- Content-Length is SET
+HTTP/1.1 200 OK
+Content-Length: 1256
+Content-Encoding: gzip
+
+<1256 bytes of gzip-compressed body>
+```
+```http
+-- CHUNKED response -- total length UNKNOWN upfront (e.g., a LIVE, STREAMING response being GENERATED on the fly)
+HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+
+7\r\n
+Mozilla\r\n
+9\r\n
+Developer\r\n
+0\r\n
+\r\n
+-- EACH "chunk" is sent AS IT BECOMES available -- the SERVER never needed to know the TOTAL length UPFRONT --
+```
+Chunked encoding lets a server begin sending a response *before* it has finished generating the entire body — genuinely necessary for a response being produced incrementally (a live SSE stream, covered under ASP.NET Core, or a large report generated on the fly) where the final total size simply isn't known at the moment the response headers must be sent; `Content-Length` requires knowing the exact total byte count in advance, which is fundamentally incompatible with a response whose size isn't determined until generation completes.
+
+**Why the two headers can combine, and why that combination matters:** a chunked response's individual chunks can *also* each be compressed (`Transfer-Encoding: chunked` alongside `Content-Encoding: gzip`) — the two headers operate at genuinely different layers (compression of content versus the mechanics of how the body is transmitted in pieces), meaning a streaming response can still benefit from compression, chunk by chunk, without needing the total compressed size known upfront the way an ordinary `Content-Length`-based response would.
+
+**Common Pitfall:** confusing `Transfer-Encoding: chunked` with a compression mechanism — chunking says nothing about whether the content is compressed at all; a chunked response with no `Content-Encoding` header is transmitted in pieces but not compressed, and conflating the two headers' distinct responsibilities (transmission mechanics versus content compression) leads to confusion when troubleshooting why a chunked response is either unexpectedly large (forgetting `Content-Encoding` entirely) or unexpectedly still lacking a `Content-Length` despite gzip being enabled (expecting compression to somehow also resolve the unknown-length problem it has no bearing on at all).
+
+---

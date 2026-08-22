@@ -1083,4 +1083,99 @@ Because `X-Api-Key` is checked by middleware rather than declared as an explicit
 
 ---
 
+## Beginner — Question 12
+
+**Q12: What is the `[BindNever]` attribute (and `[ValidateNever]`), and how does explicitly excluding a property from model binding provide defense-in-depth against Mass Assignment, beyond using a narrow DTO (covered earlier) alone?**
+
+`[BindNever]` marks a specific property as one the model binder should never populate from incoming request data, regardless of whether the request happens to include a matching field — an extra, explicit layer of protection on top of using a narrow DTO, useful specifically for a type that, for other reasons, still exposes a sensitive property alongside the client-settable ones.
+
+```csharp
+public class UpdateProfileRequest
+{
+    public string Name { get; set; }
+    public string Email { get; set; }
+
+    [BindNever] // even if an attacker's JSON includes "isAdmin": true, the BINDER simply REFUSES to populate this
+    public bool IsAdmin { get; set; }
+}
+```
+```csharp
+[HttpPut("profile")]
+public IActionResult UpdateProfile(UpdateProfileRequest request)
+{
+    // 'request.IsAdmin' is GUARANTEED to remain its DEFAULT VALUE (false), NO MATTER what the client submits --
+    // the MODEL BINDER itself refuses to populate it, REGARDLESS of the incoming JSON's content
+}
+```
+Even though `IsAdmin` technically still exists as a property on `UpdateProfileRequest` (perhaps because the same class is reused, or reflection-based code elsewhere expects it to exist), `[BindNever]` guarantees the model binder will never populate it from request data, no matter what an attacker includes in the payload — a second, explicit safeguard layered on top of the primary defense (a properly narrow DTO, covered earlier).
+
+**Common Pitfall:** relying on `[BindNever]` as the *sole* defense against Mass Assignment, applied to an otherwise broad type that mirrors a full entity — `[BindNever]` is best understood as defense-in-depth *on top of* using a properly narrow, purpose-built DTO in the first place; a type that already exposes far more fields than a client should ever set is still a design smell even with select fields individually marked `[BindNever]`, since every *other* field on that same broad type remains bindable by default.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: How can an Action Filter implement Idempotency-Key handling for a Web API's POST endpoint, letting a client safely retry a request without risking a duplicate side effect — the concrete, framework-level implementation of the Idempotency Key concept covered under REST?**
+
+The Idempotency Key concept (covered under REST) is implemented concretely in ASP.NET Core as an Action Filter that intercepts every request carrying an `Idempotency-Key` header — checking whether that specific key has already been processed, and if so, returning the *original* cached response directly, without ever re-executing the actual action method's side-effecting logic a second time.
+
+```csharp
+public class IdempotencyFilter : IAsyncActionFilter
+{
+    public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
+    {
+        if (!context.HttpContext.Request.Headers.TryGetValue("Idempotency-Key", out var key))
+        {
+            await next(); // no key provided -- proceed NORMALLY, WITHOUT idempotency protection
+            return;
+        }
+
+        var cached = await _cache.GetAsync<CachedResponse>($"idempotency:{key}");
+        if (cached is not null)
+        {
+            context.Result = new ObjectResult(cached.Body) { StatusCode = cached.StatusCode }; // SHORT-CIRCUITS --
+            return; // the ACTION METHOD is NEVER actually invoked A SECOND TIME for this SAME key
+        }
+
+        var executedContext = await next(); // FIRST time seeing this key -- let the action ACTUALLY run
+        if (executedContext.Result is ObjectResult result)
+            await _cache.SetAsync($"idempotency:{key}", new CachedResponse(result), TimeSpan.FromHours(24));
+    }
+}
+```
+Because the filter checks the cache *before* calling `next()` (which invokes the actual action method), a client retrying a `POST /api/payments` request with the *same* `Idempotency-Key` (perhaps because the original response was lost to a network drop, covered under HTTP) receives the *cached* result of the original, already-completed charge — the payment logic itself never runs a second time, closing off exactly the "network drops after the charge succeeded, client retries, customer charged twice" scenario covered under HTTP's idempotency discussion, at the framework level rather than requiring every individual endpoint to implement this check by hand.
+
+**Common Pitfall:** implementing idempotency-key caching with an unbounded or excessively long retention window — every unique key consumes cache/storage space indefinitely; a reasonable, bounded retention window (long enough to cover realistic client retry windows, short enough not to accumulate unbounded storage) is the standard, practical middle ground, directly connecting to the "how long should a server remember a given key" design question covered under REST's Idempotency Key discussion.
+
+---
+
+## Advanced — Question 12
+
+**Q12: How can a Web API generically compute an ETag automatically from a response body's content hash (rather than requiring each endpoint to manually construct one), and what does this buy over the manual ETag-setting approach?**
+
+Rather than requiring every individual action to manually compute and set its own `ETag` header (error-prone, and easy to forget on a newly-added endpoint), a Web API can implement this as a Result Filter or middleware that hashes the *serialized response body itself* after the action produces it, setting the resulting hash as the `ETag` automatically for every JSON response, uniformly.
+
+```csharp
+public class AutoETagFilter : IAsyncResultFilter
+{
+    public async Task OnResultExecutionAsync(ResultExecutingContext context, ResultExecutionDelegate next)
+    {
+        if (context.Result is ObjectResult objectResult && objectResult.Value is not null)
+        {
+            var json = JsonSerializer.Serialize(objectResult.Value);
+            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
+            context.HttpContext.Response.Headers.ETag = $"\"{hash}\""; // COMPUTED, not MANUALLY set per endpoint
+        }
+        await next();
+    }
+}
+```
+Because the ETag is derived directly from a hash of the actual serialized content, two requests returning genuinely identical data automatically produce the exact same ETag — and any change to the underlying data automatically produces a different hash, without any individual action method needing to know how to compute or maintain its own versioning/hash logic; every endpoint using this filter gets correct, automatic ETag support uniformly.
+
+**Why this specifically differs from, and complements, a manually-set ETag tied to a database concurrency token (covered under EF Core):** a manually-set ETag (often derived from an entity's `RowVersion`/concurrency token) directly reflects the underlying *data's* actual version, which is ideal for `If-Match`-based optimistic concurrency on updates (covered under REST) — a content-hash-based ETag instead reflects the *exact serialized response*, which is well-suited for read-side caching/conditional-GET scenarios (covered under HTTP's conditional requests) even for computed/aggregated responses that don't map to a single entity with its own concurrency token at all.
+
+**Common Pitfall:** computing a content-hash ETag over a response body that includes non-deterministic elements (a timestamp reflecting "when this response was generated," rather than the actual underlying data) — this produces a *different* ETag on every single request even when the underlying data hasn't actually changed at all, defeating the entire purpose of ETag-based conditional requests (the client's cached copy would never be considered still valid), so the hashed content must reflect only the genuinely meaningful, change-relevant parts of the response.
+
+---
+
 ---

@@ -1856,3 +1856,85 @@ Because most production APIs stop at Level 2 (genuinely useful HTTP verb/status-
 **Common Pitfall:** treating "RESTful" as a single, binary yes/no property of an API, leading to unproductive debates about whether a Level 2 API (extremely common, and often perfectly fit-for-purpose) "really counts" as REST — the Maturity Model's actual value is replacing that binary framing with a precise, gradated one, letting a team make an explicit, deliberate choice about which level of maturity is actually worth investing in for their specific API's real consumers, rather than treating Level 3 as an unstated, ill-defined bar every "true" REST API must clear.
 
 ---
+
+## Beginner — Question 13
+
+**Q13: What is the convention of Nested Resource URLs (`/customers/5/orders`) versus a flat top-level resource with a filter (`/orders?customerId=5`), and when does nesting genuinely make sense?**
+
+Nesting a resource under its "parent" in the URL path (`/customers/5/orders`) signals a genuine ownership/containment relationship — the orders being requested only make sense *in the context of* customer 5 — while a flat resource with a filter (`/orders?customerId=5`) treats orders as a standalone collection that merely happens to support filtering by customer.
+
+```text
+NESTED -- signals "these orders ONLY exist in the CONTEXT of THIS customer":
+  GET /customers/5/orders          -- customer 5's orders, specifically
+  POST /customers/5/orders         -- create a NEW order, BELONGING to customer 5
+
+FLAT, with a FILTER -- treats orders as its OWN independent, top-level collection:
+  GET /orders?customerId=5         -- orders, FILTERED to customer 5 -- but ORDERS exist as their OWN concept
+```
+Nesting reads naturally when the child resource's identity is genuinely scoped to its parent (an order line item only makes sense within one specific order) — but nesting too deeply (`/customers/5/orders/42/items/3/reviews`) becomes unwieldy, and a resource that's meaningfully independent (an Order might be queried across all customers by an admin dashboard) is often better exposed as its own flat, filterable top-level collection instead.
+
+**Common Pitfall:** nesting resources purely to mirror how the database's foreign keys happen to relate two tables, rather than asking whether the *URL* genuinely needs to express that containment — over-nesting produces long, brittle URLs that break if the "parent" relationship ever needs to change, and often needlessly limits a resource from also being queried independently of its "parent" when a legitimate use case (an admin viewing all orders across every customer) actually requires it.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is Cursor-Based Pagination, and how does using an opaque cursor token (rather than a page number) avoid the skipped-or-duplicated-row problem that Offset-Based Pagination suffers when the underlying data changes between page requests?**
+
+Offset-Based Pagination (`?page=2&pageSize=10`, effectively `OFFSET 10 FETCH NEXT 10`, covered under SQL Server) assumes the underlying result set stays stable between requests — if a row is inserted or deleted between fetching page 1 and page 2, the offset-based "skip 10, take 10" arithmetic can skip a row entirely or return the same row twice. Cursor-Based Pagination instead uses an opaque token pointing to "the last item you saw," immune to this shifting problem.
+
+```text
+OFFSET-based -- a row DELETED between page 1 and page 2 SHIFTS everything, causing a SKIPPED row:
+  Page 1: OFFSET 0  FETCH 10  -- returns rows 1-10
+  -- row #7 gets DELETED by someone else, in between requests --
+  Page 2: OFFSET 10 FETCH 10  -- now returns what WAS rows 12-21 (everything SHIFTED down by one) --
+  -- row #11 (the ORIGINAL row 11) was NEVER shown -- SILENTLY SKIPPED, due to the SHIFT --
+
+CURSOR-based -- the cursor points to a SPECIFIC row's identity, IMMUNE to shifts elsewhere in the set:
+  Page 1: GET /orders?limit=10                    -> returns rows, plus a cursor: "next=eyJpZCI6MTB9"
+  Page 2: GET /orders?limit=10&cursor=eyJpZCI6MTB9 -> "give me the NEXT 10 rows AFTER the row THIS cursor points to"
+  -- REGARDLESS of what got inserted/deleted ELSEWHERE in the set, THIS specific boundary is STABLE --
+```
+The cursor (typically an opaque, encoded value referencing the last-seen row's own sort key, like `WHERE id > 10 ORDER BY id LIMIT 10` under the hood) anchors the *next* page to a specific row's identity rather than a numeric position that can shift — a row inserted or deleted anywhere else in the result set has no effect on which specific row the cursor still correctly points to.
+
+**Why this matters specifically for APIs backing infinite-scroll feeds or high-churn datasets:** a social media feed or a live order queue where rows are constantly being added/removed is exactly the scenario where offset-based pagination's shifting problem is most likely to actually manifest and be noticed by users (a duplicate post appearing twice while scrolling, or a post seemingly skipped) — cursor-based pagination is the standard mitigation precisely for this class of frequently-changing, sequentially-consumed dataset.
+
+**Common Pitfall:** implementing cursor-based pagination but constructing the cursor from a non-unique or non-stable sort key (like a `CreatedDate` with many rows sharing the exact same timestamp) — if the cursor's underlying sort key isn't guaranteed unique, rows sharing that value can still be skipped or duplicated across pages; a robust cursor typically needs a genuinely unique (or a compound, tie-broken) sort key to fully eliminate the instability offset-based pagination suffers from.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is the difference between JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7396) for expressing a partial update via HTTP `PATCH`, and how do their two fundamentally different formats trade off expressiveness against simplicity?**
+
+Both formats let a client describe a *partial* change to a resource via `PATCH` (rather than `PUT`'s full-replacement semantics, covered elsewhere) — but they express that partial change in fundamentally different ways: JSON Patch is a sequence of explicit, imperative *operations*; JSON Merge Patch is simply a *partial object* to be shallow-merged into the existing resource.
+
+```http
+# JSON Merge Patch (RFC 7396) -- a PARTIAL OBJECT, simply MERGED into the existing resource
+PATCH /products/5
+Content-Type: application/merge-patch+json
+
+{ "price": 39.99 }
+-- MEANING: "merge THIS partial object in -- price becomes 39.99, EVERYTHING ELSE stays UNCHANGED"
+-- SIMPLE, reads NATURALLY -- but CANNOT express "remove this field" or "insert into an ARRAY at position 2"
+```
+```http
+# JSON Patch (RFC 6902) -- an EXPLICIT SEQUENCE of IMPERATIVE operations
+PATCH /products/5
+Content-Type: application/json-patch+json
+
+[
+  { "op": "replace", "path": "/price", "value": 39.99 },
+  { "op": "remove", "path": "/discontinuedReason" },
+  { "op": "add", "path": "/tags/2", "value": "clearance" }
+]
+-- MEANING: THREE EXPLICIT operations -- REPLACE one field, REMOVE another, INSERT into an ARRAY at a SPECIFIC index
+-- FAR more EXPRESSIVE (can target ARRAY positions, EXPLICITLY remove fields) -- but MORE VERBOSE, LESS intuitive
+```
+JSON Merge Patch's simplicity comes at a real cost: it has no way to explicitly express "remove this field" versus "I simply didn't mention it" in every case (setting a field to `null` is its convention for removal, which conflates "delete this field" with "set this field's value to null," a genuine ambiguity for a field that legitimately *can* hold `null` as a valid value) — JSON Patch's explicit `remove` operation has no such ambiguity, at the cost of a much more verbose, operation-sequence-based request body for even a single-field change.
+
+**Why most real-world APIs choose Merge Patch's simplicity despite JSON Patch's greater expressiveness:** the vast majority of partial-update use cases are genuinely simple ("change this one field's value"), where Merge Patch's plain, intuitive partial-object syntax reads far more naturally to API consumers than JSON Patch's operation-sequence format — JSON Patch's additional expressiveness (array-position-specific operations, explicit removal) matters mainly for APIs with genuinely complex partial-update needs, which is a comparatively narrow slice of real-world API design overall.
+
+**Common Pitfall:** implementing a "PATCH" endpoint that simply accepts a partial JSON object without ever declaring which specific format (Merge Patch, JSON Patch, or an entirely bespoke, undocumented convention) it actually follows — a client has no reliable way to know whether sending `{"discontinuedReason": null}` means "remove this field" or "literally set it to null" without the API explicitly documenting (ideally via the appropriate `Content-Type`, `application/merge-patch+json` or `application/json-patch+json`) which specific, standardized convention its `PATCH` endpoint actually implements.
+
+---

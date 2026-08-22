@@ -1050,4 +1050,116 @@ Because the anti-forgery system is explicitly configured to also read the token 
 
 ---
 
+## Beginner — Question 11
+
+**Q11: What is a ViewModel, and why does MVC convention favor a purpose-built ViewModel per view rather than passing a Domain Entity directly to Razor?**
+
+A ViewModel is a class shaped specifically for what one particular view needs to render — distinct from a Domain Entity (which models the business domain) or an EF Core entity (shaped for the database), a ViewModel combines exactly the data a view needs, sometimes from multiple different sources, in exactly the shape that view's Razor markup expects.
+
+```csharp
+// the DOMAIN ENTITY -- shaped for BUSINESS logic and the DATABASE, NOT for THIS specific VIEW
+public class Order { public int Id; public decimal Total; public int CustomerId; public List<OrderLine> Lines; }
+
+// a VIEWMODEL -- shaped SPECIFICALLY for what the "Order Confirmation" VIEW actually needs to DISPLAY
+public class OrderConfirmationViewModel
+{
+    public string OrderNumber { get; set; }         // FORMATTED differently than the entity's raw Id
+    public string CustomerName { get; set; }         // comes from a DIFFERENT entity (Customer) entirely
+    public string FormattedTotal { get; set; }       // pre-formatted AS a currency STRING, for the VIEW
+    public bool ShowGiftWrapOption { get; set; }     // a UI-ONLY flag, has NO equivalent on the Order entity AT ALL
+}
+```
+```csharp
+public IActionResult Confirmation(int orderId)
+{
+    var order = _orderService.GetOrder(orderId);
+    var customer = _customerService.GetCustomer(order.CustomerId);
+    var viewModel = new OrderConfirmationViewModel
+    {
+        OrderNumber = $"ORD-{order.Id:D6}",
+        CustomerName = customer.FullName,
+        FormattedTotal = order.Total.ToString("C"),
+        ShowGiftWrapOption = order.Total > 50
+    };
+    return View(viewModel);
+}
+```
+The controller assembles data from two entirely separate sources (`Order` and `Customer`) and adds view-specific concerns (a formatted currency string, a UI-only boolean flag) that have no natural home on either underlying entity — a ViewModel is exactly the place these view-specific concerns belong, keeping the Razor view simple (just displaying properties, no formatting/business logic of its own) while keeping the domain entities themselves free of view-rendering concerns they shouldn't need to know about.
+
+**Common Pitfall:** passing a Domain Entity (or worse, an EF Core-tracked entity) directly to a Razor view — beyond the Mass Assignment-adjacent risk of accidentally exposing fields never meant to reach the view, this couples the view's markup directly to the entity's exact shape, meaning a change to the database schema (renaming a column, covered under EF Core) can directly break Razor markup, whereas a dedicated ViewModel insulates the view from changes to the underlying entity shape entirely.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What is MVC's Client-Side Validation (unobtrusive validation), and how does it automatically mirror the SAME Data Annotations rules (covered earlier) in the browser, without duplicating the validation logic by hand in JavaScript?**
+
+Client-Side Validation lets a form show validation errors immediately in the browser, before ever submitting to the server — MVC's Tag Helpers automatically emit `data-val-*` HTML attributes derived directly from a model's Data Annotations, and a bundled JavaScript library (jQuery Validate, via `jquery.validate.unobtrusive.js`) reads those attributes to perform the exact same validation rules client-side, with no separately hand-written JavaScript validation logic at all.
+
+```csharp
+public class RegisterViewModel
+{
+    [Required(ErrorMessage = "Email is required")]
+    [EmailAddress]
+    public string Email { get; set; }
+}
+```
+```html
+<!-- Razor Tag Helper -- AUTOMATICALLY emits data-val-* attributes DERIVED from the model's OWN Data Annotations -->
+<input asp-for="Email" />
+<!-- rendered HTML: -->
+<input data-val="true" data-val-required="Email is required" data-val-email="..." id="Email" name="Email" />
+```
+```javascript
+// jquery.validate.unobtrusive.js -- READS those data-val-* attributes, performs the SAME validation IN THE BROWSER,
+// showing an error message IMMEDIATELY, WITHOUT a round trip to the server AT ALL
+```
+Because the same `[Required]`/`[EmailAddress]` attributes drive *both* server-side `ModelState` validation (covered earlier) and the client-side JavaScript validation (via the `data-val-*` attributes Tag Helpers automatically generate), there's exactly one place the validation rule is actually defined — changing `[Required]` to include a custom error message updates both the server-side check and the browser's immediate feedback simultaneously, with no risk of the two drifting out of sync.
+
+**Why server-side validation must still happen regardless of client-side validation being enabled:** client-side validation is purely a UX convenience — a malicious or simply non-browser client (a script directly POSTing to the endpoint) bypasses it entirely, since it only runs inside a JavaScript-executing browser; the server-side `ModelState.IsValid` check (covered earlier) remains the actual, authoritative security boundary, with client-side validation existing purely to give a legitimate user faster feedback without a round trip.
+
+**Common Pitfall:** disabling server-side validation checks under the assumption that "client-side validation already covers it" — since client-side validation is trivially bypassed by any client not running the actual browser-rendered JavaScript, skipping the server-side check entirely (`if (!ModelState.IsValid)`) leaves the endpoint with no genuine validation enforcement at all against a client that skips or tampers with the client-side layer.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What is a Custom Tag Helper, and how does writing your own (rather than relying only on built-in ones like `asp-for`) let you encapsulate reusable, server-rendered HTML-generation logic behind clean, HTML-like Razor syntax?**
+
+A Custom Tag Helper lets you define your own HTML-like element or attribute that, when processed server-side during view rendering, generates whatever markup you specify — encapsulating potentially complex, reusable rendering logic behind a syntax that reads like ordinary HTML, rather than requiring every view needing the same UI pattern to duplicate raw markup or a Razor helper method call.
+
+```csharp
+[HtmlTargetElement("status-badge")] // a CUSTOM element -- <status-badge> -- NOT a built-in HTML tag at all
+public class StatusBadgeTagHelper : TagHelper
+{
+    public string Status { get; set; }
+
+    public override void Process(TagHelperContext context, TagHelperOutput output)
+    {
+        output.TagName = "span";
+        var cssClass = Status switch
+        {
+            "Pending" => "badge badge-warning",
+            "Shipped" => "badge badge-info",
+            "Delivered" => "badge badge-success",
+            _ => "badge badge-secondary"
+        };
+        output.Attributes.SetAttribute("class", cssClass);
+        output.Content.SetContent(Status);
+    }
+}
+```
+```html
+<!-- Razor view -- reads like PLAIN HTML, but ENCAPSULATES the status-to-CSS-class MAPPING logic ENTIRELY -->
+<status-badge status="@order.Status"></status-badge>
+<!-- renders AS: <span class="badge badge-info">Shipped</span> -->
+```
+Every view needing to display an order's status badge simply writes `<status-badge status="@order.Status">` — the mapping from status string to the correct CSS class lives in exactly one place (the Tag Helper's `Process` method), rather than being copy-pasted as an inline `switch`/`if` expression inside every Razor view that happens to need to render a status badge.
+
+**Why this specifically differs from a plain Razor Partial View or a C# helper method for the same reusability goal:** a Custom Tag Helper's syntax integrates directly into Razor's own IntelliSense and tooling (autocomplete for its own custom attributes, like `status`) the same way built-in Tag Helpers (`asp-for`) do — providing a more discoverable, strongly-typed-feeling authoring experience than either a Partial View (needing an explicit `@await Html.PartialAsync(...)` call) or a raw C# helper method producing a string of HTML.
+
+**Common Pitfall:** writing a Custom Tag Helper for markup generation that's genuinely simple and used in only one single place — the overhead of defining a whole `TagHelper` class (with its own file, registration in `_ViewImports.cshtml`) is worth it specifically when the same rendering logic is reused across multiple views/pages; for a one-off piece of markup, inline Razor or a simple Partial View is usually the more proportionate, lower-ceremony tool.
+
+---
+
 ---
