@@ -1322,3 +1322,96 @@ Because the background revalidation happens without the requesting client ever w
 **Common Pitfall:** assuming `stale-while-revalidate` guarantees every client always sees perfectly fresh data — it deliberately trades a bounded window of staleness for consistently low latency; for data where even a brief, bounded staleness window is unacceptable (a real-time balance check), this directive is the wrong tool, and a `no-cache`-style always-revalidate approach is more appropriate despite its added latency cost.
 
 ---
+
+## Beginner — Question 17
+
+**Q17: What is the `Content-Length` header, and why must it accurately reflect the actual body size for HTTP/1.1 persistent (keep-alive) connections to correctly delimit one response from the next?**
+
+`Content-Length` declares exactly how many bytes the message body contains — on a persistent connection reused for multiple sequential requests/responses (covered elsewhere), the receiving side relies on this number to know precisely where the current response ends and the next one begins, since there's no other delimiter marking a response's boundary on a shared, ongoing TCP stream.
+
+```http
+HTTP/1.1 200 OK
+Content-Length: 15
+
+{"status":"ok"}
+```
+
+```text
+IF Content-Length is WRONG (too SMALL): the RECEIVER stops reading TOO EARLY -- the REMAINING
+  bytes of THIS response get MISINTERPRETED as the START of the NEXT response on the SAME
+  connection -- CORRUPTING both messages
+
+IF Content-Length is WRONG (too LARGE): the receiver KEEPS WAITING for bytes that will NEVER
+  arrive -- the connection appears to HANG, waiting for a BODY that's already FULLY sent
+```
+
+Because a persistent connection carries multiple messages back-to-back with no built-in separator between them, `Content-Length` (or `Transfer-Encoding: chunked`, covered elsewhere, as the alternative for when the size isn't known upfront) is the *only* mechanism telling the receiver exactly where one message ends — an incorrect value doesn't just affect the current response, it desynchronizes the entire connection's framing for every subsequent message too.
+
+**Common Pitfall:** manually constructing an HTTP response (in a custom proxy, a hand-rolled server) and miscalculating `Content-Length` — a mismatch between the declared length and the actual body bytes sent corrupts not just that one response, but the framing of every subsequent message on the same persistent connection, since the receiver's notion of "where does this message end" is now permanently out of sync with reality.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is the `Accept-Ranges` response header, and how does a server advertising it tell a client whether Range requests (covered earlier) are actually supported for a given resource?**
+
+`Accept-Ranges: bytes` tells a client the server supports byte-range requests for this resource (letting it use `Range`, covered earlier, to resume a partial download or fetch just a portion) — `Accept-Ranges: none` (or simply omitting the header) tells the client not to bother attempting a range request at all, since the server won't honor one.
+
+```http
+GET /video.mp4 HTTP/1.1
+```
+```http
+HTTP/1.1 200 OK
+Accept-Ranges: bytes
+Content-Length: 500000000
+```
+
+```text
+Client sees "Accept-Ranges: bytes" -- it KNOWS it CAN later send "Range: bytes=100000000-" to
+  RESUME a PARTIAL download, or a video PLAYER can SEEK to a SPECIFIC timestamp WITHOUT
+  re-downloading the ENTIRE file from the START
+
+Client sees NO Accept-Ranges header (or "none") -- it KNOWS NOT to BOTHER attempting a Range
+  request -- the SERVER will likely just IGNORE it and return the FULL resource ANYWAY
+```
+
+Because a client can check this header upfront (typically from an initial `HEAD` request) before attempting a `Range` request, it avoids wastefully trying range-based resume/seek logic against a server that doesn't actually support it — genuinely useful for a media player or download manager deciding upfront whether resumable/seekable behavior is even worth attempting for a given resource.
+
+**Common Pitfall:** a client blindly sending `Range` requests against every resource without first checking `Accept-Ranges`, assuming range support is universal — many resources (dynamically generated responses, some API endpoints) don't support ranges at all, and a server ignoring an unsupported `Range` header simply returns the full `200 OK` response instead of the expected `206 Partial Content`, which client code needs to handle gracefully rather than assuming the range request always succeeds.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is the `Sec-WebSocket-Key`/`Sec-WebSocket-Accept` handshake exchange, and how does it cryptographically confirm the server actually understood and intentionally agreed to a WebSocket upgrade request?**
+
+The client sends a random, base64-encoded `Sec-WebSocket-Key` in its upgrade request — the server must respond with `Sec-WebSocket-Accept`, computed by concatenating that key with a fixed, spec-defined GUID, taking the SHA-1 hash, and base64-encoding the result; a client checks this computed value matches before considering the WebSocket handshake genuinely successful, confirming the responding server specifically understands the WebSocket protocol (rather than, say, a caching proxy or misconfigured server blindly echoing back a `101` status without actually supporting WebSocket at all).
+
+```http
+GET /chat HTTP/1.1
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+```
+```http
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+```
+
+```text
+Sec-WebSocket-Accept = base64( SHA1( Sec-WebSocket-Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" ) )
+-- a FIXED, SPEC-DEFINED "magic" GUID, KNOWN to any GENUINE WebSocket-aware server implementation
+
+-- a NAIVE intermediary that BLINDLY forwards a "101 Switching Protocols" status WITHOUT actually
+   understanding WebSocket would NOT know to compute THIS specific value CORRECTLY -- the CLIENT's
+   verification of Sec-WebSocket-Accept CATCHES this, refusing to proceed with an INVALID handshake
+```
+
+Because computing the correct `Sec-WebSocket-Accept` value requires actually implementing this specific, standardized transformation (not just echoing back arbitrary headers), a client verifying it provides real assurance that the responding endpoint is a genuine, protocol-aware WebSocket server — protecting against a misconfigured or naive intermediary accidentally appearing to accept an upgrade it doesn't actually support.
+
+**Common Pitfall:** implementing a custom proxy or gateway that forwards a `101 Switching Protocols` response without correctly computing and forwarding a valid `Sec-WebSocket-Accept` value — a spec-compliant client library will detect the mismatch and refuse to proceed, correctly treating the connection as a failed handshake rather than silently continuing with a connection that only appears to have upgraded successfully.
+
+---

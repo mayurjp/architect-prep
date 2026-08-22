@@ -1508,4 +1508,90 @@ Because this entire graph is constructed once, during startup, and is fully muta
 
 ---
 
+## Beginner — Question 16
+
+**Q16: When an action parameter's name matches both a route value and a query string key, how does MVC decide which source actually wins?**
+
+MVC's default model binding checks several sources in a defined precedence order for a simple-type parameter without an explicit `[From...]` attribute — route values are checked before the query string, form data, or the request body, meaning a name collision between a route value and a query string key resolves in favor of the route value.
+
+```csharp
+[HttpGet("products/{id}")]
+public IActionResult GetProduct(int id) => Ok(id);
+
+// Request: GET /products/5?id=999
+// 'id' binds to 5 (from the ROUTE), NOT 999 (from the QUERY STRING) -- route values are checked FIRST
+```
+
+```text
+Default binding source precedence (for a SIMPLE type parameter, no explicit [From...] attribute):
+  1. Route values     -- CHECKED FIRST
+  2. Query string      -- checked if NOT found in the route
+  3. Form data          -- for a POST with a FORM body
+```
+
+Because route values take precedence over the query string by default, a URL with a query string parameter accidentally sharing a name with a route placeholder doesn't override the route value — this is rarely an issue in practice (a name collision like this is usually unintentional), but understanding the precedence order matters when debugging why a query string value seems to be "ignored."
+
+**Common Pitfall:** naming an action parameter the same as an unrelated route placeholder elsewhere in a route template, then being confused why a query string value with that same name never seems to take effect — explicitly attributing the parameter with `[FromQuery]` (covered under Web API) removes the ambiguity entirely, forcing MVC to bind from the query string regardless of any route value with the same name.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is a custom `IModelBinderProvider`'s use of `BindingSource` metadata, and how does a binder provider inspect a parameter's binding source to decide whether it should apply at all?**
+
+An `IModelBinderProvider` (covered earlier) doesn't just look at a parameter's *type* to decide whether to supply a custom binder — it can also inspect the parameter's `BindingInfo.BindingSource` (whether the parameter was annotated `[FromQuery]`, `[FromBody]`, etc.) to apply conditionally, only stepping in for parameters bound from a specific source, and deferring to the default binder otherwise.
+
+```csharp
+public class CommaSeparatedListBinderProvider : IModelBinderProvider
+{
+    public IModelBinder? GetBinder(ModelBinderProviderContext context)
+    {
+        // ONLY apply this CUSTOM binder for List<string> parameters EXPLICITLY marked [FromQuery] --
+        // let EVERYTHING ELSE (including a List<string> from the BODY) use the DEFAULT binder instead
+        if (context.Metadata.ModelType == typeof(List<string>) &&
+            context.BindingInfo?.BindingSource == BindingSource.Query)
+        {
+            return new BinderTypeModelBinder(typeof(CommaSeparatedListBinder));
+        }
+        return null; // defer to the NEXT provider / the DEFAULT binder
+    }
+}
+```
+
+Because a binder provider can inspect both the *type* and the *declared binding source* together, it can apply narrowly — a custom comma-separated-list parser for query-string list parameters specifically, without accidentally hijacking a `List<string>` parameter that's actually meant to be bound from a JSON request body using the framework's ordinary JSON deserialization.
+
+**Common Pitfall:** writing a custom `IModelBinderProvider` that matches purely on parameter *type*, without also checking `BindingSource` — this can cause the custom binder to apply too broadly, intercepting a parameter of the matching type regardless of whether it was actually meant to come from the query string, the route, or the body, potentially breaking a case the custom binder was never designed to handle.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is a custom `IDisplayMetadataProvider` in MVC, and how does it let you apply a cross-cutting display convention across many models without repeating Data Annotations attributes on every one?**
+
+`IDisplayMetadataProvider` runs during MVC's metadata-building phase (parallel to how `IApplicationModelConvention`, covered earlier, applies conventions to the Application Model) — it lets you programmatically set display-related metadata (a default display format, a convention like "every `decimal` property displays with two decimal places") across every model in the application, rather than annotating each property individually with `[DisplayFormat]`.
+
+```csharp
+public class DefaultDecimalFormatProvider : IDisplayMetadataProvider
+{
+    public void CreateDisplayMetadata(DisplayMetadataProviderContext context)
+    {
+        if (context.Key.ModelType == typeof(decimal) || context.Key.ModelType == typeof(decimal?))
+        {
+            // applies to EVERY decimal property, ACROSS every model, WITHOUT repeating [DisplayFormat]
+            context.DisplayMetadata.DisplayFormatString = "{0:C2}";
+        }
+    }
+}
+
+// Registered once in Program.cs
+builder.Services.AddControllersWithViews(options =>
+    options.ModelMetadataDetailsProviders.Add(new DefaultDecimalFormatProvider()));
+```
+
+Because this provider runs once, during model metadata construction, and applies its rule to *every* property matching its condition across the entire application, a convention like "every decimal displays as currency" is enforced consistently everywhere without any individual model needing an explicit `[DisplayFormat]` attribute — new models automatically pick up the convention the moment they're created, with zero additional annotation effort.
+
+**Common Pitfall:** annotating every single `decimal` property across dozens of models individually with `[DisplayFormat(DataFormatString = "{0:C2}")]` to achieve a consistent currency display convention — this is exactly the kind of repeated, scattered boilerplate a custom `IDisplayMetadataProvider` is designed to centralize into one place, applied automatically and consistently, rather than relying on every developer remembering to add the same attribute to every new decimal property going forward.
+
+---
+
 ---

@@ -1585,4 +1585,84 @@ Because these limits apply before a request is ever routed to a specific action,
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is the difference between `IWebHostEnvironment.ContentRootPath` and `WebRootPath`, and why does the distinction matter for locating non-served configuration/data files versus publicly servable static files?**
+
+`ContentRootPath` is the application's overall base directory — where `appsettings.json`, the compiled application, and any non-public data files live — while `WebRootPath` is specifically the `wwwroot` folder, the *only* directory `UseStaticFiles()` (covered earlier) actually serves to the public.
+
+```csharp
+var app = builder.Build();
+Console.WriteLine(app.Environment.ContentRootPath); // e.g. "/app" -- the WHOLE application's root
+Console.WriteLine(app.Environment.WebRootPath);      // e.g. "/app/wwwroot" -- ONLY the PUBLICLY servable subfolder
+
+// Reading a PRIVATE data file NOT meant to be publicly downloadable:
+var path = Path.Combine(app.Environment.ContentRootPath, "private-data", "seed.json");
+```
+
+```text
+ContentRootPath ("/app")             -- appsettings.json, compiled DLLs, PRIVATE data files
+  └── WebRootPath ("/app/wwwroot")   -- ONLY files INSIDE here are servable via UseStaticFiles() --
+                                        anything OUTSIDE wwwroot is NEVER directly downloadable by a client
+```
+
+Because only files under `WebRootPath` are ever reachable via a direct HTTP request, deliberately keeping sensitive or non-public files (configuration, private data seeds, internal templates) under `ContentRootPath` but *outside* `WebRootPath` ensures they can never be accidentally exposed through the static file middleware — a file placed inside `wwwroot` by mistake, by contrast, becomes immediately, directly downloadable by anyone who guesses its path.
+
+**Common Pitfall:** placing sensitive files (a seed data JSON file with test credentials, an internal configuration template) directly inside `wwwroot` for convenience during development — since `UseStaticFiles()` serves *everything* under `wwwroot` by default, any file placed there becomes publicly downloadable the moment the middleware is active, regardless of whether a link to it exists anywhere in the application's own UI.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: How does a Minimal API route handler's automatic parameter binding (from route, query, or body) differ from MVC's explicit `[FromRoute]`/`[FromQuery]`/`[FromBody]` attributes (covered under Web API) in terms of what's inferred versus what's explicit?**
+
+A Minimal API endpoint infers a parameter's binding source automatically based on simple rules (a parameter matching a route template's placeholder name comes from the route; a simple type not matching a route parameter is assumed to come from the query string; a complex type is assumed to come from the body) — MVC's `[ApiController]`-annotated controllers apply similar inference too, but Minimal APIs make it the *only* mechanism by default, without the same explicit attribute vocabulary always being necessary.
+
+```csharp
+// Minimal API -- 'id' matches the route template -> bound from the ROUTE automatically
+app.MapGet("/products/{id}", (int id, string? sortBy) =>
+{
+    // 'id' -- bound from the ROUTE placeholder {id}, inferred by NAME MATCH
+    // 'sortBy' -- a SIMPLE type NOT matching any route placeholder -> inferred as a QUERY parameter
+    return Results.Ok();
+});
+
+app.MapPost("/products", (Product product) => Results.Created($"/products/{product.Id}", product));
+    // 'product' -- a COMPLEX type -> inferred as coming from the REQUEST BODY, automatically
+```
+
+Because Minimal API binding relies entirely on these naming/type-shape inference rules (with explicit `[FromRoute]`/`[FromQuery]`/`[FromBody]` attributes available but rarely needed), a parameter's binding source can occasionally be less immediately obvious from the method signature alone than in an MVC controller where the attributes are more commonly written out explicitly — understanding the inference rules themselves becomes more important for correctly predicting Minimal API binding behavior.
+
+**Common Pitfall:** assuming a Minimal API parameter's binding source purely by guessing from its type without knowing the actual inference rules (route placeholder name match, simple-type-implies-query, complex-type-implies-body) — a subtle naming mismatch between a parameter and its intended route placeholder can silently cause it to be inferred as a query parameter instead, producing a confusing `400` or unexpected `null` value rather than an immediately obvious binding error.
+
+---
+
+## Advanced — Question 16
+
+**Q16: How does ASP.NET Core's `IConfiguration` reload-on-change behavior for `appsettings.json` actually work, and how does `IOptionsMonitor<T>` (covered earlier) differ from a plain injected `IOptions<T>` in reacting to that reload?**
+
+`AddJsonFile("appsettings.json", reloadOnChange: true)` sets up a file-system watcher that reloads the underlying configuration the moment the file changes on disk — but `IOptions<T>` (injected once, typically as a Singleton) captures a *snapshot* at the time it's first resolved and never updates afterward, while `IOptionsMonitor<T>` stays "live," always reflecting the current configuration and supporting an `OnChange` callback (covered earlier) fired whenever it actually changes.
+
+```csharp
+builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+
+public class MyService
+{
+    private readonly IOptions<MySettings> _staticOptions;   // SNAPSHOT -- NEVER updates after first resolution
+    private readonly IOptionsMonitor<MySettings> _liveOptions; // ALWAYS reflects the CURRENT configuration
+
+    public void DoWork()
+    {
+        var stale = _staticOptions.Value;      // the SAME value FOREVER, even after appsettings.json CHANGES
+        var current = _liveOptions.CurrentValue; // ALWAYS the LATEST value, RIGHT NOW
+    }
+}
+```
+
+Because `IOptions<T>` is typically resolved once during a Singleton service's construction and simply holds onto whatever value it received at that moment, an `appsettings.json` change on disk after that point has zero effect on an already-injected `IOptions<T>` value — `IOptionsMonitor<T>.CurrentValue` instead re-reads the live, current configuration on every access, making it the correct choice for any long-lived service that needs to observe configuration changes without an application restart.
+
+**Common Pitfall:** injecting `IOptions<T>` into a long-lived Singleton service and expecting it to reflect a subsequent `appsettings.json` edit made while the application keeps running — `IOptions<T>`'s value is fixed at first resolution and never changes afterward regardless of `reloadOnChange: true`; `IOptionsMonitor<T>` (or `IOptionsSnapshot<T>` for Scoped services, covered elsewhere) is required specifically when configuration needs to be observed live, without restarting the application.
+
+---
+
 ---

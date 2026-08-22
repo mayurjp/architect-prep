@@ -2277,3 +2277,84 @@ Because the client explicitly opts into which related resources it needs embedde
 **Common Pitfall:** implementing `?include=` by having the server ALWAYS eagerly load and embed every possible related resource regardless of what the client actually asked for — this defeats the entire purpose of making inclusion opt-in, and reintroduces the N+1-avoidance benefit's inverse problem: bloated responses for clients that only wanted the base resource; the query parameter's whole value lies in the CLIENT controlling exactly what gets embedded, not the server deciding unilaterally.
 
 ---
+
+## Beginner — Question 18
+
+**Q18: What is a REST API's `405 Method Not Allowed` response (with an `Allow` header), and how does it differ from `404 Not Found` for a client trying an unsupported HTTP verb on an otherwise-valid URL?**
+
+`404` means the URL itself doesn't correspond to any resource at all — `405` means the URL is entirely valid and does correspond to a real resource, but the specific HTTP method attempted isn't one that resource supports, with the `Allow` header telling the client exactly which methods *are* supported instead.
+
+```http
+DELETE /api/reports/5 HTTP/1.1
+```
+```http
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, PATCH
+```
+
+```text
+404: the URL "/api/reports/5" doesn't exist AT ALL -- NO resource matches this path, PERIOD
+405: the URL "/api/reports/5" IS a REAL, VALID resource -- it simply DOESN'T support DELETE --
+     the Allow header tells the CLIENT exactly WHICH methods it DOES support (GET, PATCH)
+```
+
+Because `405` explicitly confirms the resource exists (just not for that verb) while `404` says nothing about the resource's existence at all, correctly distinguishing the two gives a client (or a developer debugging an integration) genuinely useful information — a `404` suggests checking the URL itself, while a `405` suggests checking which HTTP method the endpoint actually supports.
+
+**Common Pitfall:** returning a generic `404` for every routing failure, including cases where the resource exists but the attempted method simply isn't supported — this conflates two genuinely different failure conditions, forcing a client to guess whether the problem is "wrong URL" or "wrong verb"; returning the more specific `405` (with its `Allow` header) when the resource is valid but the method isn't gives much clearer, more actionable feedback.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: Why is an `Idempotency-Key` typically sent as an HTTP header rather than a field inside the request body, and how does this placement make it easier for generic middleware/proxies to inspect and deduplicate on?**
+
+Putting the idempotency key in a header (rather than buried inside a JSON body whose structure varies per endpoint) lets generic, endpoint-agnostic infrastructure (an API Gateway, a reverse proxy, a shared middleware component) read and act on it uniformly across every endpoint, without needing to understand or parse each endpoint's specific body schema.
+
+```http
+POST /api/payments HTTP/1.1
+Idempotency-Key: 7d3f9c2a-1234-4abc-9def-a1b2c3d4e5f6
+Content-Type: application/json
+
+{ "amount": 99.99, "currency": "USD" }
+```
+
+```text
+Header-based Idempotency-Key: a GENERIC middleware component can read "Idempotency-Key" from
+  ANY request, REGARDLESS of what that specific endpoint's BODY schema looks like -- ONE piece
+  of shared, REUSABLE deduplication logic works ACROSS every endpoint in the API UNIFORMLY
+
+Body-based idempotency field: EACH endpoint's body has a DIFFERENT shape -- a shared middleware
+  component would need to PARSE and UNDERSTAND every DIFFERENT body schema just to FIND the key
+```
+
+Because headers are structurally uniform regardless of what an endpoint's specific request body contains, a single piece of shared infrastructure (middleware, a gateway policy) can implement idempotency-key deduplication generically, applied consistently across an entire API's many differently-shaped endpoints, without needing endpoint-specific knowledge of each one's body structure.
+
+**Common Pitfall:** embedding an idempotency key as just another field inside each endpoint's own JSON body — this works for that one endpoint, but any shared, cross-cutting deduplication logic would need custom parsing per endpoint's distinct body shape; a header-based convention lets the same generic logic apply uniformly, which is why most real-world APIs (Stripe, for instance) standardize on `Idempotency-Key` as a header.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is Conditional PATCH via `If-Unmodified-Since` as an alternative to ETag-based optimistic concurrency (covered extensively), and why is ETag-based validation generally preferred despite `If-Unmodified-Since` being simpler to implement naively?**
+
+`If-Unmodified-Since` lets a client submit an update conditioned on the resource not having changed since a specific *timestamp* — similar in spirit to `If-Match`/ETag (covered earlier), but based on a `Last-Modified` date rather than an opaque version identifier; ETag is generally preferred because a timestamp only has whatever precision the server chooses to track (often just seconds), meaning two genuinely different updates occurring within the same second are indistinguishable to a date-based check, while an ETag can encode a genuinely unique version per actual change regardless of timing.
+
+```http
+PATCH /api/orders/5 HTTP/1.1
+If-Unmodified-Since: Wed, 22 Aug 2026 10:15:00 GMT
+```
+```text
+PROBLEM: if TWO separate updates happen WITHIN the SAME SECOND (a common occurrence under real
+concurrent load), BOTH share the IDENTICAL Last-Modified TIMESTAMP -- If-Unmodified-Since CANNOT
+DISTINGUISH between them, and a CONFLICTING update might be INCORRECTLY accepted as "unmodified"
+
+ETag-based (If-Match): the ETag CHANGES with EVERY SINGLE update, REGARDLESS of HOW CLOSE
+TOGETHER in TIME two updates happen -- NO precision LIMITATION, since it's NOT based on a
+TIMESTAMP at all -- it's an OPAQUE, GUARANTEED-unique-per-VERSION identifier instead
+```
+
+Because a timestamp's precision is fundamentally limited by whatever granularity the server tracks (rarely finer than a second, sometimes coarser), `If-Unmodified-Since` can fail to detect two genuinely conflicting updates that happen to occur within the same timestamp granularity window — an ETag, generated fresh with every actual change (a hash of the content, or an incrementing version number), has no such precision ceiling, making it the more robust choice for concurrency control even though a timestamp-based check is often simpler to implement with data a system already tracks.
+
+**Common Pitfall:** relying on `If-Unmodified-Since` for concurrency control specifically because `Last-Modified` timestamps are already tracked and readily available, without considering the precision ceiling that a busy resource updated multiple times per second genuinely runs into — for anything with meaningful concurrent-update risk, an ETag's version-per-change guarantee avoids this specific class of missed-conflict bug that a timestamp-based check remains vulnerable to.
+
+---

@@ -1502,4 +1502,88 @@ Because `.RequireAuthorization()` chains onto `IEndpointConventionBuilder` (whic
 
 ---
 
+## Beginner — Question 17
+
+**Q17: What is the `[controller]` token substitution in a controller-level `[Route]` attribute, and how does it avoid hardcoding the controller's own name into every route template?**
+
+`[controller]` is a placeholder MVC/Web API replaces with the controller class's name (minus the conventional "Controller" suffix) at routing time — writing `[Route("api/[controller]")]` on `ProductsController` produces the route `api/Products` automatically, without the literal string "Products" appearing anywhere in the attribute itself.
+
+```csharp
+[ApiController]
+[Route("api/[controller]")] // [controller] -- SUBSTITUTED with "Products" (from "ProductsController")
+public class ProductsController : ControllerBase
+{
+    [HttpGet]
+    public IActionResult GetAll() => Ok(); // reachable at: GET api/Products
+}
+```
+
+```text
+ProductsController -- [controller] token BECOMES "Products" -- final route: api/Products
+OrdersController    -- [controller] token BECOMES "Orders"   -- final route: api/Orders
+-- BOTH controllers use the IDENTICAL "[Route("api/[controller]")]" attribute text --
+   the ACTUAL route differs AUTOMATICALLY, based purely on EACH controller's OWN class NAME
+```
+
+Because the token is resolved from the controller's class name rather than a hardcoded string, renaming a controller class (`ProductsController` → `ItemsController`) automatically updates its route too, without needing to separately edit the route attribute — keeping the route and the class name from silently drifting out of sync with each other over time.
+
+**Common Pitfall:** hardcoding a literal route string (`[Route("api/Products")]`) instead of using `[controller]`, then later renaming the controller class without remembering to also update the now-stale, hardcoded route string — the class name and its route can drift apart, creating a confusing mismatch between what the controller is called and what URL path actually reaches it.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is `ActionResult<T>`'s implicit conversion from `T`, and how does it let an action return either a raw value or an explicit `IActionResult` (like `NotFound()`) from the same method without a compile error?**
+
+Before `ActionResult<T>`, an action returning a specific type `T` couldn't also easily return `NotFound()`/`BadRequest()` from the same method, since those are `IActionResult`, not `T` — `ActionResult<T>` defines implicit conversions from both `T` and `ActionResult` (the non-generic base), letting a single action method return either kind of value interchangeably, with the compiler accepting both without complaint.
+
+```csharp
+[HttpGet("{id}")]
+public ActionResult<Product> GetProduct(int id)
+{
+    var product = _repository.Find(id);
+    if (product is null) return NotFound();    // implicitly converts FROM ActionResult (NotFoundResult)
+    return product;                             // implicitly converts FROM Product (the raw T) directly
+}
+```
+
+```text
+WITHOUT ActionResult<T> -- returning IActionResult -- WORKS, but LOSES the STRONG "this returns
+  a Product" TYPE information that Swagger/OpenAPI generation (covered elsewhere) relies on
+
+WITH ActionResult<T> -- BOTH "return product;" (T) AND "return NotFound();" (IActionResult)
+  compile SUCCESSFULLY, from the SAME method -- AND Swagger STILL correctly infers "this
+  RETURNS a Product" from the GENERIC type argument
+```
+
+Because `ActionResult<T>` preserves the specific return type `T` in its generic argument even while also allowing non-`T` result types like `NotFound()`, tooling that inspects an action's declared return type (Swagger/OpenAPI generation, covered elsewhere) can still correctly infer the actual success-case response shape — something plain `IActionResult` as a return type can't express nearly as precisely.
+
+**Common Pitfall:** declaring an action's return type as plain `IActionResult` purely out of habit, even when the action always conceptually returns one specific type on success — this loses the stronger type information `ActionResult<T>` would have preserved, degrading the accuracy of auto-generated OpenAPI documentation for that endpoint's actual success response shape.
+
+---
+
+## Advanced — Question 17
+
+**Q17: What is a custom `IAsyncActionFilter` (as distinct from the synchronous `IActionFilter` covered under MVC), and when does implementing the async variant actually matter over the synchronous one?**
+
+`IAsyncActionFilter` provides a single `OnActionExecutionAsync` method wrapping the *entire* action execution (both before and after) as one continuous `async` delegate — as opposed to `IActionFilter`'s two separate, synchronous `OnActionExecuting`/`OnActionExecuted` methods; the async variant matters specifically when the filter itself needs to `await` genuine asynchronous work (an async database call, an async external API call) as part of its own cross-cutting logic.
+
+```csharp
+public class AsyncAuditFilter : IAsyncActionFilter
+{
+    public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
+    {
+        await _auditService.LogRequestStartAsync(context.HttpContext); // GENUINE async work BEFORE the action
+        var resultContext = await next(); // invokes the ACTION (and any LATER filters) -- awaits its COMPLETION
+        await _auditService.LogRequestEndAsync(context.HttpContext, resultContext.Result); // AFTER the action
+    }
+}
+```
+
+Because `IActionFilter`'s synchronous methods have no way to `await` anything at all (calling `.Result`/`.Wait()` on an async operation from within them risks the exact synchronous-over-asynchronous deadlock pattern covered under EF Core/.NET), any filter logic that genuinely needs asynchronous work (rather than purely synchronous, in-memory logic) must implement `IAsyncActionFilter` instead — the framework itself internally treats a registered `IActionFilter` as a synchronous special case, wrapping it, but a filter author writing genuinely async logic should implement the async interface directly rather than forcing async work through the sync one.
+
+**Common Pitfall:** implementing `IActionFilter`'s synchronous methods but internally calling `.Result`/`.GetAwaiter().GetResult()` on an async operation to "make it fit" the synchronous interface — this reintroduces the sync-over-async deadlock/thread-pool-starvation risk covered elsewhere; any filter needing genuine async work should implement `IAsyncActionFilter` directly instead of forcing asynchronous work through a synchronous interface shape.
+
+---
+
 ---
