@@ -1331,6 +1331,73 @@ Because `ref readonly` still avoids copying the potentially-large `double` value
 
 ---
 
+## Beginner — Question 16
+
+**Q16: What is C#'s target-typed `new()` expression, and how does it let the compiler infer the type being constructed from context, avoiding a redundant, repeated type name?**
+
+Ordinarily, `new SomeType(...)` names the type explicitly on the right-hand side — target-typed `new()` lets you omit that type name entirely when the compiler can already infer it unambiguously from the surrounding context (a variable's declared type, a method's parameter type), avoiding writing the same type name twice.
+
+```csharp
+// WITHOUT target-typed new -- the TYPE NAME is REPEATED, on BOTH sides
+Dictionary<string, List<int>> cache = new Dictionary<string, List<int>>();
+
+// WITH target-typed new -- the TYPE is INFERRED from the LEFT-hand side's DECLARED type
+Dictionary<string, List<int>> cache = new(); // the COMPILER already KNOWS the target TYPE
+
+// ALSO works for METHOD ARGUMENTS, where the PARAMETER's type is ALREADY known
+void Configure(ConnectionOptions options) { /* ... */ }
+Configure(new()); // the PARAMETER's type (ConnectionOptions) is what's INFERRED
+```
+Because the compiler already knows the target type from the variable's declaration (or the parameter's declared type), repeating that same, often verbose, generic type name a second time on the right-hand side is purely redundant — `new()` lets the code state the type exactly once, reducing repetition especially valuable for lengthy generic type names like `Dictionary<string, List<int>>`.
+
+**Common Pitfall:** using target-typed `new()` in a context where the target type is genuinely ambiguous or not obvious to a reader at a glance (assigning to a `var`-declared variable, which has no explicit declared type for the compiler — or the reader — to infer from) — target-typed `new()` requires an explicitly-typed target to infer from; it cannot be used with `var`, and even where it technically could be used, keeping the type visible sometimes aids readability over saving a few characters.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is C#'s `checked`/`unchecked` context, and how does it control whether an integer arithmetic overflow throws an exception or silently wraps around?**
+
+By default, C# arithmetic operations silently wrap around on overflow (the value "wraps" past its type's maximum, becoming a small or negative number) rather than throwing — a `checked` context instead makes an overflowing operation throw an `OverflowException`, while `unchecked` explicitly preserves the default silent-wraparound behavior even in a project configured to check by default.
+
+```csharp
+int max = int.MaxValue; // 2,147,483,647
+
+int wrapped = max + 1; // DEFAULT (unchecked) behavior -- SILENTLY WRAPS to -2,147,483,648 -- NO exception AT ALL
+
+checked
+{
+    int overflow = max + 1; // THROWS System.OverflowException -- the SAME operation, but CHECKED THIS time
+}
+
+unchecked
+{
+    int stillWraps = max + 1; // EXPLICITLY silent-wraps, EVEN IF the PROJECT is configured to CHECK by DEFAULT
+}
+```
+Because silent overflow can produce a subtly wrong result that looks like a perfectly valid number (rather than an obvious crash), a bug caused by an unnoticed overflow can be extremely difficult to trace back to its actual root cause — wrapping genuinely overflow-sensitive arithmetic (a financial calculation, an array index computation) in a `checked` block converts a silent, wrong-answer bug into an immediate, loud exception at the exact point the overflow actually occurs.
+
+**Common Pitfall:** assuming arithmetic overflow always produces some kind of visible error or crash by default — C#'s default `unchecked` behavior means an overflowing calculation silently produces a plausible-looking but entirely wrong number, with no exception or warning at all; code performing arithmetic where overflow is a genuine, realistic possibility (not merely a theoretical edge case) should deliberately use `checked` (or the project-wide `<CheckForOverflowUnderflow>` MSBuild setting) to convert this silent failure mode into an immediate, diagnosable exception.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What are C# UTF-8 string literals (`"text"u8`), and how do they let code work directly with UTF-8-encoded bytes without an explicit runtime encoding call, avoiding an allocation each time?**
+
+Ordinarily, getting a UTF-8 byte representation of a string literal requires an explicit runtime call (`Encoding.UTF8.GetBytes("text")`), which allocates a new byte array every single time it executes — a `u8` suffix on a string literal instead has the *compiler* embed the UTF-8 bytes directly into the assembly at compile time, exposed as a `ReadOnlySpan<byte>`, with no runtime encoding call or allocation needed at all.
+
+```csharp
+// WITHOUT u8 -- an EXPLICIT runtime ENCODING call, ALLOCATING a NEW byte[] EVERY SINGLE time it EXECUTES
+byte[] bytes = Encoding.UTF8.GetBytes("Hello");
+
+// WITH a UTF-8 string literal -- the BYTES are EMBEDDED directly INTO the assembly AT COMPILE TIME
+ReadOnlySpan<byte> bytes = "Hello"u8; // NO runtime ENCODING call, NO per-call ALLOCATION AT ALL
+```
+Because the UTF-8 bytes are computed once, at compile time, and embedded directly as static data in the compiled assembly, using a `u8` literal in a hot code path (comparing an incoming byte sequence against a fixed, known string, like an HTTP header name) avoids both the CPU cost of re-encoding the string every time and the GC pressure of allocating a fresh byte array on every single call.
+
+**Common Pitfall:** continuing to call `Encoding.UTF8.GetBytes(someLiteralString)` repeatedly inside a hot, frequently-executed code path for a string that's always a fixed, compile-time-known literal — this re-encodes and re-allocates the exact same bytes on every single call, when a `u8` literal would compute those same bytes exactly once, at compile time, with zero runtime cost or allocation for a value that was always going to be identical anyway.
+
 ---
 
 ---

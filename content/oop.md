@@ -1477,4 +1477,98 @@ By default, `Point`'s inherited `Equals` (from `object`) compares references —
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is a C# Local Function (a function defined inside another method), and how does it differ from a private helper method or a lambda expression assigned to a variable?**
+
+A Local Function is defined entirely within the body of another method — visible and callable only from within that enclosing method, unlike a private helper method (callable from anywhere else in the class) — and unlike a lambda assigned to a variable, a Local Function is declared with ordinary method syntax and can be called before its own textual declaration within the same method.
+
+```csharp
+public int CalculateShippingCost(Order order)
+{
+    if (!IsEligibleForShipping(order)) return 0; // called BEFORE its OWN declaration, further DOWN
+
+    return ComputeBaseRate(order) + ComputeSurcharge(order);
+
+    // LOCAL FUNCTIONS -- visible/callable ONLY within CalculateShippingCost ITSELF
+    bool IsEligibleForShipping(Order o) => o.Items.Count > 0;
+    decimal ComputeBaseRate(Order o) => o.Weight * 2.5m;
+    decimal ComputeSurcharge(Order o) => o.IsExpress ? 10m : 0m;
+}
+```
+Because `IsEligibleForShipping` and the others are declared as local functions rather than private methods on the class, no other method anywhere else in the class can accidentally call them — communicating clearly that this logic exists *purely* to support `CalculateShippingCost` and has no broader relevance elsewhere in the type, a level of encapsulation a private method (technically callable from any other method in the same class) doesn't provide.
+
+**Why this differs from a lambda assigned to a local variable, despite superficial similarity:** a local function can be called *before* its own textual declaration within the method (as shown above), and doesn't incur the small overhead of capturing variables into a delegate instance the way a lambda assigned to a `Func<>`/`Action<>` variable typically does — local functions are generally the more efficient, more natural choice specifically for private, method-scoped helper logic, while lambdas remain the right tool when a function value genuinely needs to be passed around, stored, or invoked as a first-class delegate.
+
+**Common Pitfall:** promoting method-scoped helper logic to a full private method on the class by default, even when that logic is genuinely only ever relevant to one single, specific method — this makes the helper needlessly visible and callable from other methods in the class that have no legitimate reason to use it; a local function communicates the tighter, single-method scope explicitly, both to the compiler (which enforces it) and to a future reader.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is the distinction between Aggregation and Composition, the two sub-flavors of a "has-a" relationship (covered earlier), and how does each differ in terms of lifetime ownership of the contained object?**
+
+Both Aggregation and Composition describe one object holding a reference to another (the general "has-a" relationship, covered earlier) — the distinction is *lifetime ownership*: in Composition, the contained object's lifetime is entirely owned by and tied to its container (it cannot meaningfully exist without it); in Aggregation, the contained object has an independent lifetime and could exist (or be shared) separately from its container.
+
+```csharp
+// COMPOSITION -- the "Engine" is CREATED and DESTROYED ALONGSIDE its OWNING "Car" -- CANNOT exist INDEPENDENTLY
+public class Car
+{
+    private readonly Engine _engine = new Engine(); // OWNED entirely -- CREATED here, DIES with the CAR
+}
+
+// AGGREGATION -- the "Employee" objects EXIST INDEPENDENTLY of the "Department" -- COULD be shared,
+// or REASSIGNED to a DIFFERENT department, or OUTLIVE this specific Department object ENTIRELY
+public class Department
+{
+    private readonly List<Employee> _employees; // REFERENCES employees -- does NOT OWN their LIFETIME
+    public Department(List<Employee> employees) => _employees = employees; // INJECTED from OUTSIDE
+}
+```
+An `Engine` genuinely has no meaningful existence separate from the specific `Car` that constructed it (Composition) — an `Employee`, by contrast, exists independently of any one `Department` (they could be transferred to a different department, or the `Employee` object could be referenced by multiple parts of the system simultaneously), making this an Aggregation relationship instead.
+
+**Why this distinction matters beyond pure terminology, connecting directly to object lifetime management:** Composition implies the container is responsible for the contained object's entire lifecycle (creating it, and — for a `Disposable` resource, covered elsewhere — disposing of it when the container itself is destroyed) — Aggregation implies no such lifecycle responsibility, since the contained object is owned and managed by something else entirely; getting this distinction wrong (treating an aggregated, externally-owned object as if the current class owned its lifetime) can lead to disposing of or otherwise destroying an object that other parts of the system still legitimately depend on.
+
+**Common Pitfall:** disposing of or otherwise destroying an object a class only *aggregates* (rather than genuinely owns via composition), based on the mistaken assumption that holding a reference to something implies owning its lifetime — this can break other parts of the system still legitimately using that same, shared object, precisely the kind of bug that correctly distinguishing Aggregation from Composition at design time is meant to prevent.
+
+---
+
+## Advanced — Question 15
+
+**Q15: How does a subclass override throwing a new exception type its base class method never declared or documented violate the Liskov Substitution Principle, even when the method's return type and parameters remain unchanged?**
+
+LSP (covered extensively) requires a subtype to be substitutable for its base type without surprising callers — this applies not just to return values and parameter types, but to a method's *exception contract* too: a caller written against the base class's documented behavior (catching only the exceptions the base method is known to throw) can be broken by a subclass override that introduces an entirely new, undocumented exception type the caller never anticipated and has no `catch` clause for.
+
+```csharp
+public class FileRepository
+{
+    // DOCUMENTED contract: throws ONLY FileNotFoundException, if the file doesn't exist
+    public virtual string ReadContent(string path) { /* ... */ }
+}
+
+public class NetworkFileRepository : FileRepository
+{
+    // OVERRIDE introduces an ENTIRELY NEW exception type the BASE method's CONTRACT never mentioned
+    public override string ReadContent(string path)
+    {
+        // ... throws NetworkTimeoutException on a SLOW connection -- NEVER part of the BASE contract
+    }
+}
+```
+```csharp
+// CALLER code, written AGAINST the BASE class's DOCUMENTED contract
+try
+{
+    var content = repository.ReadContent(path); // 'repository' could be EITHER concrete type
+}
+catch (FileNotFoundException) { /* handles the ONE exception the BASE contract DOCUMENTED */ }
+// -- if 'repository' is ACTUALLY a NetworkFileRepository, a NetworkTimeoutException PROPAGATES
+//    UNCAUGHT, CRASHING code that was PERFECTLY CORRECT against the BASE class's OWN documented contract --
+```
+Code written correctly against `FileRepository`'s documented contract (catch `FileNotFoundException`, nothing else expected) breaks the instant it's handed a `NetworkFileRepository` instead — exactly the substitutability violation LSP describes, just manifesting through an exception type rather than a return value or parameter type, which is precisely why LSP's "behavioral contract" framing (covered earlier) explicitly includes exception behavior as part of what a subtype must honor, not merely a method's normal-path return value.
+
+**Why this specific violation is easy to overlook compared to a wrong return value:** a subclass returning an unexpected *value* is often caught quickly (an assertion fails, a test breaks) — a subclass throwing an unexpected *exception type* frequently only surfaces once that specific code path is actually exercised in production (a network hiccup that never happened to occur during testing), making this a particularly sneaky, delayed-discovery form of LSP violation compared to a more immediately-visible wrong-return-value violation.
+
+**Common Pitfall:** overriding a base class method and introducing a new, broader category of exception (a checked-exception-equivalent the base method's own documented contract never mentioned) without updating that documented contract, or without the new exception type actually deriving from something the base contract already covers — callers relying on the base class's original, narrower documented exception contract have no reason to expect (or catch) the new exception type, precisely the substitutability break LSP is meant to prevent.
+
 ---

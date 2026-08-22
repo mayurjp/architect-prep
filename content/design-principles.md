@@ -1409,4 +1409,88 @@ Because a cycle means each package's build genuinely requires the other to alrea
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What are the classic types of Cohesion (functional, sequential, communicational, temporal, logical, coincidental), and how does this spectrum give a more precise vocabulary than simply saying "high" or "low" cohesion?**
+
+Cohesion (covered earlier alongside Coupling) isn't just a single yes/no property — classic software engineering theory identifies several distinct *kinds* of cohesion, ranked roughly from strongest/best to weakest/worst, giving a more precise way to describe *why* a class or module's responsibilities do or don't genuinely belong together.
+
+```text
+FUNCTIONAL (strongest, BEST) -- EVERY piece contributes to ONE single, WELL-DEFINED task:
+  a "CalculateTax" class -- EVERYTHING in it EXISTS to compute tax, and NOTHING else
+
+SEQUENTIAL -- output of ONE piece FEEDS DIRECTLY as input to the NEXT, forming a PIPELINE:
+  a class whose methods MUST run in ORDER, EACH consuming the PREVIOUS one's OUTPUT
+
+COMMUNICATIONAL -- pieces operate on the SAME DATA, but DON'T NECESSARILY need a SPECIFIC ORDER:
+  a class with SEVERAL methods, ALL operating on the SAME "Order" object, but INDEPENDENTLY of EACH OTHER
+
+TEMPORAL -- pieces are grouped PURELY because they HAPPEN at the SAME TIME (e.g., "Startup" tasks):
+  an "ApplicationStartup" class BUNDLING unrelated INITIALIZATION steps, TOGETHER ONLY because they
+  ALL happen to run AT STARTUP, NOT because they're CONCEPTUALLY related to EACH OTHER AT ALL
+
+LOGICAL -- pieces are grouped by SUPERFICIAL CATEGORY, but do GENUINELY DIFFERENT things:
+  an "InputHandlers" class LUMPING TOGETHER keyboard, mouse, AND network input handling, JUST
+  because they're ALL "input," DESPITE being COMPLETELY UNRELATED in ACTUAL behavior
+
+COINCIDENTAL (weakest, WORST) -- pieces are grouped with NO MEANINGFUL RELATIONSHIP AT ALL:
+  a "Utils" class containing RANDOM, UNRELATED helper methods, GROUPED purely by HAPPENING to
+  BOTH be "some kind of utility," with NO OTHER connection WHATSOEVER
+```
+Rather than vaguely saying a class has "low cohesion," this spectrum lets a reviewer be precise: "this class exhibits Temporal cohesion — its methods are only grouped because they all run at startup, not because they're conceptually related" is a far more actionable, specific critique than a generic "this class feels unfocused," directly pointing at exactly *why* the grouping is weak and what a better grouping would actually look like.
+
+**Common Pitfall:** treating any class that "does more than one thing" as automatically low-cohesion, without recognizing that Sequential and Communicational cohesion (genuinely grouping related steps of one pipeline, or several operations on the same core data) are both still considered reasonably strong, legitimate groupings — the spectrum's real value is distinguishing these still-reasonable groupings from the genuinely weak ones (Temporal, Logical, Coincidental), rather than treating "more than one method" as an automatic cohesion red flag regardless of *why* those methods are actually grouped together.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What is GRASP's "Information Expert" pattern, and how does assigning a responsibility to the class that already holds the information needed to fulfill it differ from an arbitrary or convenience-driven assignment?**
+
+GRASP (General Responsibility Assignment Software Patterns) is a lesser-known-by-name but widely-applied set of principles for deciding *which class* should be responsible for *what* — Information Expert specifically says: assign a responsibility to whichever class already has the data needed to fulfill it, rather than pulling that data into some other, unrelated class just because it seems like a convenient place to put the logic.
+
+```csharp
+// VIOLATES Information Expert -- an UNRELATED class REACHES INTO Order's data to COMPUTE something
+public class OrderPrinter
+{
+    public decimal CalculateTotal(Order order) => order.Lines.Sum(l => l.Price * l.Quantity);
+    // -- OrderPrinter had to REACH INTO Order's internal LINES data to do THIS calculation --
+    // -- WHY does a "PRINTER" class own TAX/PRICING logic AT ALL? --
+}
+
+// FOLLOWS Information Expert -- Order ITSELF already HAS the data (Lines) -- IT should OWN the calculation
+public class Order
+{
+    public List<OrderLine> Lines { get; set; }
+    public decimal CalculateTotal() => Lines.Sum(l => l.Price * l.Quantity); // the DATA and the LOGIC live TOGETHER
+}
+```
+Because `Order` already holds the `Lines` collection the total calculation needs, Information Expert says `Order` itself — not some unrelated `OrderPrinter` or `OrderService` — should own the `CalculateTotal` responsibility; this keeps data and the logic that operates on it together in one place, rather than scattering pricing logic into whichever class happened to need a total at some point, directly connecting to the earlier discussion of Encapsulation and avoiding an Anemic Domain Model (covered under Clean Architecture).
+
+**Why this specifically provides a concrete, checkable heuristic for a question that otherwise feels subjective ("which class should own this logic?"):** "assign the responsibility to whoever already has the data" is a specific, actionable test — rather than debating abstractly about where logic "feels like it belongs," Information Expert gives a concrete starting question: which class's own data does this responsibility actually operate on? That's usually a strong, objective signal for where the responsibility genuinely belongs.
+
+**Common Pitfall:** placing business logic in a service/manager class purely out of habit (a "TaxCalculatorService" that reaches into an `Order`'s internal data from the outside), rather than asking whether the entity that already owns the relevant data should own the logic instead — this is precisely the pattern underlying the Anemic Domain Model anti-pattern (covered under Clean Architecture), where entities become simple data bags and all actual logic lives in external services that must constantly reach into them.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is GRASP's "Protected Variations" pattern, and how does it relate to (but differ in emphasis from) the "Encapsulate What Varies" principle covered earlier?**
+
+Protected Variations says: identify points in a design where variation is *predicted* to occur, and wrap a stable, well-defined interface around them, so that the variation is isolated behind that interface and doesn't ripple outward into the rest of the system — conceptually the same underlying idea as "Encapsulate What Varies" (covered earlier), but GRASP's framing places specific emphasis on *predicting* variation points during design, as a distinct, deliberate design activity.
+
+```csharp
+// a design DELIBERATELY anticipating that "HOW we persist data" is a LIKELY future variation point
+public interface IOrderRepository { Task SaveAsync(Order order); Task<Order> GetByIdAsync(int id); }
+// -- the REST of the system depends ONLY on this STABLE interface -- WHETHER it's backed by SQL
+//    Server TODAY, or SOME OTHER store LATER, is PROTECTED behind this ONE interface BOUNDARY --
+```
+The interface itself doesn't change regardless of which specific persistence technology sits behind it — new variations (a new database, a new storage technology) are absorbed entirely behind the existing, stable interface, without rippling out to touch every piece of code that depends on it, exactly the protective boundary "Protected Variations" names directly.
+
+**Why this is essentially the same underlying idea as "Encapsulate What Varies," approached from a slightly different angle:** "Encapsulate What Varies" (covered earlier) emphasizes the *outcome* — draw an abstraction boundary around whatever varies — Protected Variations, as a GRASP pattern, emphasizes the *process*: deliberately identifying and predicting future variation points as part of the design activity itself, then protecting the rest of the system from them; the two principles converge on the same practical technique, just named and emphasized slightly differently within two different, overlapping bodies of design-pattern literature (GoF-adjacent principles versus GRASP specifically).
+
+**Common Pitfall:** treating GRASP and the GoF-derived design principles (Encapsulate What Varies, Open/Closed) as entirely separate, unrelated bodies of knowledge requiring independent study — many GRASP patterns (Protected Variations, Information Expert) are effectively the same underlying ideas covered elsewhere in this topic, articulated through a different naming convention and slightly different emphasis; recognizing the overlap deepens understanding of both, rather than treating them as disconnected, competing frameworks to separately memorize.
+
+---
+
 ---

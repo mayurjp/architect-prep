@@ -1325,4 +1325,88 @@ Because `Avx.Add` issues a single CPU instruction that processes 8 floating-poin
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is `System.Diagnostics.Activity`, and how is it the concrete .NET primitive underlying distributed tracing (covered under System Design) and OpenTelemetry instrumentation?**
+
+`Activity` is .NET's built-in representation of one unit of traced work (a single span, in distributed-tracing terminology) — creating one automatically captures a start time, and (when stopped) a duration, plus lets you attach tags/attributes describing what happened; it's the actual, concrete .NET type that OpenTelemetry and Application Insights (covered under Azure) both build directly on top of.
+
+```csharp
+private static readonly ActivitySource MyActivitySource = new("MyApp.OrderProcessing");
+
+public async Task ProcessOrder(Order order)
+{
+    using var activity = MyActivitySource.StartActivity("ProcessOrder"); // STARTS a SPAN, records the START time
+    activity?.SetTag("order.id", order.Id);
+    activity?.SetTag("order.total", order.Total);
+
+    await _paymentService.ChargeAsync(order); // ANY Activity STARTED here becomes a CHILD of THIS one
+
+} // 'using' STOPS the activity HERE -- records the DURATION AUTOMATICALLY
+```
+Because `Activity` already carries the parent/child relationship, timing, and tag/attribute data a tracing system needs, an OpenTelemetry exporter (or Application Insights' SDK) simply *listens* for `Activity` start/stop events and forwards that already-captured data to whatever tracing backend is configured — application code instruments itself once, against this one built-in .NET primitive, and can then be observed by any tracing backend that knows how to consume `Activity` data, without the application needing to know which specific backend is actually in use.
+
+**Common Pitfall:** manually implementing custom timing/correlation-ID logic (a hand-rolled `Stopwatch` plus a manually-passed correlation string, covered under Microservices) instead of using `Activity`, unaware that .NET already provides a standardized, tracing-ecosystem-compatible primitive for exactly this purpose — hand-rolled timing/correlation logic works, but doesn't automatically integrate with OpenTelemetry or any standard tracing backend the way instrumenting with `Activity` does from the start.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is `ThreadPool.SetMinThreads`, and how does raising the thread pool's minimum thread count affect how quickly it ramps up to handle a sudden burst of concurrent work?**
+
+By default, the .NET thread pool starts with a relatively small number of threads and only creates new ones gradually, throttled to roughly one new thread every so often, when existing threads are all busy — `SetMinThreads` raises the *minimum* thread count the pool keeps ready immediately, letting it absorb a sudden burst of concurrent work without needing to slowly ramp up new threads one at a time.
+
+```csharp
+ThreadPool.SetMinThreads(workerThreads: 200, completionPortThreads: 200);
+// tells the THREAD POOL: "keep AT LEAST 200 threads READY immediately -- don't THROTTLE new
+// thread CREATION below THIS floor, the way you NORMALLY would starting from a SMALLER default"
+```
+```text
+WITHOUT raising the minimum -- a SUDDEN burst of 200 concurrent, BLOCKING-style operations
+  hitting an APPLICATION that's been IDLE (few threads CURRENTLY warmed up) can experience a
+  NOTICEABLE RAMP-UP DELAY, as the POOL gradually creates NEW threads, ONE AT A TIME, on ITS
+  OWN throttled SCHEDULE, rather than IMMEDIATELY having ENOUGH threads AVAILABLE
+
+WITH SetMinThreads(200, 200) -- the POOL ALREADY maintains AT LEAST 200 threads, READY
+  IMMEDIATELY -- a SUDDEN burst of concurrent work can be ABSORBED WITHOUT waiting on the
+  POOL's NORMAL, GRADUAL thread-creation RAMP-UP behavior AT ALL
+```
+This specifically matters for a workload experiencing sudden, spiky bursts of concurrent, synchronous or blocking work (a burst of legacy synchronous I/O calls, or many simultaneous CPU-bound tasks) after a period of relative idleness — without a raised minimum, the pool's default, gradual thread-creation throttling can itself become a bottleneck exactly during the burst, adding latency precisely when the application needs to scale up quickly.
+
+**Common Pitfall:** raising the thread pool's minimum thread count as a blanket "just in case" performance tweak, without actually diagnosing (via profiling or `ThreadPool.GetAvailableThreads`) that thread-pool starvation/ramp-up delay is a genuine, measured bottleneck — an unnecessarily high minimum thread count wastes memory (each thread reserves a stack) and doesn't help at all for workloads that are already predominantly `async`/non-blocking, where thread-pool starvation was never actually the limiting factor to begin with.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is .NET's ReadyToRun (R2R) compilation, and how does it provide a middle ground between ordinary JIT compilation and full Native AOT (covered earlier)?**
+
+Ordinary JIT compilation compiles IL to native code at runtime, on first use — Native AOT (covered earlier) compiles everything to native code entirely ahead of time, with no JIT involved at all — ReadyToRun sits between the two: it pre-compiles methods to native code ahead of time (like Native AOT), but the resulting binary *still runs on the normal .NET runtime* and can still fall back to JIT-compiling anything R2R didn't pre-compile, rather than eliminating the JIT/runtime entirely.
+
+```xml
+<PropertyGroup>
+  <PublishReadyToRun>true</PublishReadyToRun> <!-- pre-compiles METHODS to NATIVE code AHEAD OF TIME -->
+</PropertyGroup>
+```
+```text
+ORDINARY JIT: EVERY method is compiled to NATIVE code the FIRST time it's ACTUALLY called, AT RUNTIME
+  -- SLOWEST cold-start (EVERY method PAYS its OWN first-call JIT cost)
+
+ReadyToRun (R2R): MOST methods are ALREADY pre-compiled to NATIVE code, EMBEDDED directly in the
+  assembly -- FASTER cold-start (SKIPS most JIT compilation on FIRST call) -- but STILL runs on
+  the ORDINARY .NET runtime, STILL has the JIT AVAILABLE as a FALLBACK, and STILL benefits from
+  Tiered Compilation/Dynamic PGO (covered earlier) RE-optimizing HOT methods LATER, AT RUNTIME
+
+Native AOT: EVERYTHING is compiled AHEAD OF TIME -- NO JIT AT ALL, EVER -- FASTEST cold-start,
+  but LOSES the ability to RE-optimize based on RUNTIME-OBSERVED behavior (Dynamic PGO, covered
+  earlier) SINCE there's NO JIT PRESENT to DO that re-optimization AT ALL
+```
+Because R2R-compiled methods still run on the ordinary .NET runtime (rather than a completely separate, JIT-less execution model), an R2R application retains full compatibility with everything Native AOT gives up — full reflection support, dynamic loading, and the ability for hot methods to still be re-JIT'd and further optimized at runtime via Tiered Compilation/Dynamic PGO — while still getting a meaningfully faster cold start than pure JIT-from-scratch would provide, at the cost of a larger binary (embedding both the pre-compiled native code and the original IL, needed as a fallback/for re-JITting).
+
+**Why R2R is often the pragmatic middle-ground choice for applications that need faster startup but can't tolerate Native AOT's compatibility restrictions:** an application relying on unrestricted reflection, dynamic assembly loading, or other capabilities Native AOT structurally can't support (covered earlier) simply cannot use Native AOT at all — R2R provides a genuine, meaningful cold-start improvement over plain JIT without requiring the application to give up any of that runtime flexibility, making it the practical choice specifically for applications facing this exact compatibility constraint.
+
+**Common Pitfall:** assuming ReadyToRun and Native AOT are simply "two settings for the same thing, pick whichever is more convenient" — they represent a genuinely different point on the same startup-speed-versus-runtime-flexibility spectrum; R2R preserves full runtime/JIT flexibility (including Dynamic PGO's ongoing re-optimization) at a smaller startup-time benefit, while Native AOT sacrifices that flexibility entirely for the largest possible startup-time win — the right choice depends on whether the application can actually tolerate Native AOT's specific compatibility restrictions.
+
+---
+
 ---

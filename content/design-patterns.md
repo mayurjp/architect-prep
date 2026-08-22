@@ -1675,4 +1675,100 @@ Adding `Triangle` to the hierarchy breaks compilation for every existing `IShape
 
 ---
 
+## Beginner — Question 15
+
+**Q15: What is the Multiton pattern, and how does it generalize Singleton to allow a fixed, known set of named instances — one per enum value or key — rather than exactly one instance globally?**
+
+Singleton (covered earlier) guarantees exactly *one* instance of a class exists — Multiton generalizes this to guarantee exactly *one* instance *per key*, from a fixed or bounded set of possible keys — genuinely different callers requesting the same key always get back the identical, shared instance, while different keys get their own separate, independent instances.
+
+```csharp
+public class Multiton
+{
+    private static readonly ConcurrentDictionary<LogLevel, Multiton> _instances = new();
+    private Multiton(LogLevel level) { Level = level; }
+    public LogLevel Level { get; }
+
+    public static Multiton GetInstance(LogLevel level) =>
+        _instances.GetOrAdd(level, l => new Multiton(l)); // ONE instance PER distinct LogLevel key
+}
+
+var infoLogger1 = Multiton.GetInstance(LogLevel.Info);
+var infoLogger2 = Multiton.GetInstance(LogLevel.Info);
+Console.WriteLine(ReferenceEquals(infoLogger1, infoLogger2)); // True -- the SAME shared instance, for THIS key
+
+var errorLogger = Multiton.GetInstance(LogLevel.Error);
+Console.WriteLine(ReferenceEquals(infoLogger1, errorLogger)); // False -- a DIFFERENT key, a DIFFERENT instance
+```
+Any two calls to `GetInstance(LogLevel.Info)` return the exact same shared instance (mirroring Singleton's guarantee, but scoped to that one specific key) — while `GetInstance(LogLevel.Error)` returns a genuinely different, independently-shared instance, giving each distinct key its own single, shared instance rather than either a single global instance (Singleton) or an unlimited number of fresh instances (ordinary object creation).
+
+**Common Pitfall:** confusing Multiton with simply "a Dictionary of objects," missing the specific guarantee it provides (exactly one instance per key, created lazily and shared across every caller requesting that same key) — an ordinary dictionary populated ad-hoc by different callers doesn't inherently guarantee this same-instance-per-key property unless it's specifically implemented with Multiton's controlled, centralized creation logic (as `GetOrAdd` provides above), rather than callers being free to construct and insert their own separate instances under the same key.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: How can the Decorator pattern be approximated using C# extension methods as a lightweight, static alternative to a full class-based Decorator, and what capability does this simpler technique give up?**
+
+A full, class-based Decorator (covered earlier) wraps an object behind the *same interface*, letting decorators be composed and swapped polymorphically at runtime — an extension method achieves a superficially similar "add behavior without modifying the original type" effect, but as a static, compile-time-bound method call, not a genuine runtime object wrapping another object behind a shared interface.
+
+```csharp
+// EXTENSION METHOD -- "adds" behavior to IEnumerable<T>, WITHOUT modifying its DEFINITION AT ALL
+public static class EnumerableExtensions
+{
+    public static IEnumerable<T> LoggedEach<T>(this IEnumerable<T> source, ILogger logger)
+    {
+        foreach (var item in source) { logger.LogInformation("Processing {Item}", item); yield return item; }
+    }
+}
+
+var items = data.LoggedEach(logger).Where(x => x.IsValid); // READS almost like STACKING decorators
+
+// TRUE Decorator (covered earlier) -- a REAL OBJECT, WRAPPING another object behind the SAME interface,
+// SWAPPABLE and COMPOSABLE at RUNTIME, POLYMORPHICALLY
+IDataSource wrapped = new LoggingDataSourceDecorator(new RealDataSource(), logger);
+```
+The extension method *reads* similarly to decorator-style chaining, and does genuinely add behavior without modifying the original type's own source — but it's resolved entirely at compile time as a static method call, with no actual object wrapping another object behind a shared interface at runtime; you cannot, for instance, decide *at runtime* which decorators to apply based on dynamic configuration the way a true class-based Decorator's runtime object composition allows.
+
+**Why this specific capability gap matters for choosing between the two techniques:** a genuine Decorator's power comes specifically from runtime polymorphism — deciding, based on configuration or user input at runtime, which specific decorators to wrap around a base object, and in what order — an extension-method-based approach is fixed at compile time (the exact chain of extension method calls is baked directly into the calling code), making it a lighter-weight, simpler technique appropriate when the "decoration" is always the same, known, fixed sequence, but not a substitute for genuine Decorator when runtime-configurable composition is actually needed.
+
+**Common Pitfall:** reaching for extension-method-based "decoration" for a scenario that genuinely needs runtime-configurable behavior composition (which specific cross-cutting behaviors apply depends on a runtime setting, not something fixed at compile time) — extension methods can't provide this, since the exact chain of calls is fixed in the compiled code itself; a true class-based Decorator (or a DI-container-based decoration approach) is the correct tool whenever the actual set of applied decorations needs to vary based on runtime configuration rather than being fixed once, at compile time.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is a "non-terminating" variant of the Chain of Responsibility pattern, where multiple handlers in the chain can all process the same request, as distinct from the terminating style covered earlier (where one handler consumes the request and stops the chain)?**
+
+The Chain of Responsibility pattern (covered earlier, connected to ASP.NET Core middleware) is often implemented so that the *first* handler able to process a request does so and stops the chain there — a non-terminating variant instead lets *every* handler in the chain inspect (and potentially act on) the same request, continuing through the entire chain regardless of whether an earlier handler already did something, rather than any single handler "consuming" it and ending the chain.
+
+```csharp
+public abstract class NotificationHandler
+{
+    protected NotificationHandler _next;
+    public void SetNext(NotificationHandler next) => _next = next;
+    public void Handle(Notification notification)
+    {
+        Process(notification);       // THIS handler ALWAYS gets a CHANCE to act, REGARDLESS of EARLIER handlers
+        _next?.Handle(notification); // ALWAYS continues to the NEXT handler too -- NEVER "consumes" and STOPS
+    }
+    protected abstract void Process(Notification notification);
+}
+
+public class EmailNotificationHandler : NotificationHandler
+{
+    protected override void Process(Notification n) { if (n.WantsEmail) SendEmail(n); }
+}
+public class SmsNotificationHandler : NotificationHandler
+{
+    protected override void Process(Notification n) { if (n.WantsSms) SendSms(n); } // ALSO runs, REGARDLESS
+}
+```
+Every handler in this chain runs unconditionally for every notification — `EmailNotificationHandler` might send an email *and* the chain still continues to `SmsNotificationHandler`, which might *also* send an SMS for the exact same notification, a fundamentally different intent than the terminating style (covered earlier, and mirrored by ASP.NET Core middleware, which is itself a variant that CAN short-circuit, covered under that topic) where typically only the first matching handler actually processes the request and the chain stops there.
+
+**Why recognizing this variant matters for correctly applying the pattern to notification/broadcast-style scenarios:** a scenario genuinely requiring "every interested handler gets a chance to act, not just the first one" (broadcasting a notification across multiple channels, as shown above) needs the non-terminating variant specifically — applying the terminating style (stopping at the first handler that "can" handle the notification) to this scenario would incorrectly suppress every handler after the first one, when the actual requirement was for all of them to run.
+
+**Common Pitfall:** defaulting to the terminating Chain of Responsibility style (as commonly seen in ASP.NET Core middleware, covered elsewhere) for a scenario that actually needs every handler to run, rather than just the first matching one — recognizing which variant a given scenario actually calls for (terminate at the first match, versus let every handler act) is a deliberate design decision, not something that should default to whichever style happens to be most familiar from a specific framework's own implementation.
+
+---
+
 ---
