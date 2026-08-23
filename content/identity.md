@@ -1795,4 +1795,91 @@ Because a compromised credential's actual damage potential is bounded by exactly
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is the `nonce` parameter in an OpenID Connect request, and how does it protect against a replay attack using a previously-issued ID Token?**
+
+A client generates a random `nonce` value and includes it in the initial authentication request — the Identity Provider embeds that exact same value inside the returned ID Token's own claims. The client then checks that the `nonce` in the received ID Token matches the one it originally generated, confirming this specific token was issued in direct response to *this* specific request, rather than being an old, previously-issued token replayed by an attacker.
+
+```text
+1. Client generates a random nonce: "a1b2c3", sends it in the AUTH request
+2. Identity Provider issues an ID Token EMBEDDING that same nonce: { ..., "nonce": "a1b2c3" }
+3. Client receives the ID Token and CHECKS: does its "nonce" claim match
+   the ONE I originally generated for THIS specific request?
+4. If an ATTACKER tries to REPLAY an old, previously-captured ID Token from
+   a DIFFERENT session, its embedded nonce won't match the CURRENT request's
+   own freshly-generated nonce -- the replay is DETECTED and REJECTED
+```
+
+Because the nonce is generated fresh for every individual authentication request and directly bound into that specific request's resulting token, comparing it against the token actually received closes a specific replay-attack vector — an old, previously-valid ID Token can't be reused to impersonate a fresh login, since its embedded nonce would immediately reveal it as belonging to a different, earlier request.
+
+**Common Pitfall:** generating the `nonce` but then never actually validating it against the value returned in the ID Token — simply sending a nonce without checking it on the way back provides zero actual protection; the security benefit comes specifically from the client's own verification step, not merely from the parameter's presence in the protocol flow.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is the OAuth 2.0 `resource` parameter (RFC 8707, Resource Indicators), and how does it let a client explicitly specify which API a requested access token is intended for, alongside `scope`?**
+
+`scope` describes *what* permissions a token should carry (`read:orders`, `write:profile`) but doesn't necessarily identify *which* specific API/resource server that token is meant to be used against — the `resource` parameter lets a client explicitly declare the target API's identifier as part of the token request, letting the Authorization Server mint a token whose `aud` (audience) claim is deliberately scoped to exactly that one resource server, rather than a token broadly usable across multiple APIs sharing overlapping scope names.
+
+```http
+POST /token
+grant_type=authorization_code
+&code=abc123
+&resource=https://api.example.com/orders
+&scope=read write
+```
+
+```text
+WITHOUT resource: a token requesting "read write" scope COULD potentially be
+  usable against ANY API that happens to recognize those SAME scope names --
+  ambiguous WHICH specific API it was actually MEANT for
+
+WITH resource: the client EXPLICITLY states which API this token is FOR --
+  the issued token's audience claim is scoped SPECIFICALLY to that ONE
+  resource server, closing the ambiguity
+```
+
+Because a large system with many APIs might reuse similar scope names across different services, the `resource` parameter provides an explicit, unambiguous way to bind a token to one specific target API at request time — directly complementing the audience (`aud`) claim validation (covered earlier) a Resource Server performs when it actually receives the token.
+
+**Common Pitfall:** relying on `scope` alone to implicitly convey which API a token is meant for, in a system with multiple APIs sharing similarly-named scopes — without an explicit `resource` parameter (or equivalent mechanism), a token could end up usable against an API it was never actually intended for, since scope names alone don't inherently identify a specific target resource server.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is SAML (Security Assertion Markup Language), and how does its XML-based Assertion compare structurally to an OIDC ID Token, given that enterprises still widely use SAML despite OIDC being the more modern protocol?**
+
+SAML is an older (early-2000s), XML-based federated identity protocol — its core artifact, the SAML Assertion, is an XML document (typically digitally signed, sometimes encrypted) asserting facts about an authenticated subject, conceptually playing the same role as an OIDC ID Token (a signed JSON document making similar claims), but built on an entirely different technology stack (XML/SOAP-era conventions versus OIDC's JSON/REST-era conventions).
+
+```xml
+<!-- SAML Assertion (simplified) -->
+<saml:Assertion>
+  <saml:Subject><saml:NameID>alice@example.com</saml:NameID></saml:Subject>
+  <saml:AuthnStatement AuthnInstant="2026-08-23T10:00:00Z"/>
+  <saml:AttributeStatement>
+    <saml:Attribute Name="department"><saml:AttributeValue>Engineering</saml:AttributeValue></saml:Attribute>
+  </saml:AttributeStatement>
+</saml:Assertion>
+```
+```json
+// OIDC ID Token (JWT) -- conceptually the SAME role, different TECHNOLOGY
+{ "sub": "alice@example.com", "auth_time": 1755939600, "department": "Engineering" }
+```
+
+```text
+SAML: XML-based, predates modern mobile/SPA-friendly design -- HEAVILY
+  entrenched in ENTERPRISE Single Sign-On (many large enterprise identity
+  providers and legacy enterprise applications were BUILT around it)
+
+OIDC: JSON/REST-based, designed with MOBILE apps and SPAs specifically in
+  mind -- generally SIMPLER to implement and INTEGRATE with modern web/mobile
+  tooling
+```
+
+Because a large number of enterprise identity providers and long-lived internal enterprise applications were built around SAML long before OIDC existed, and migrating an entrenched SSO integration carries real organizational cost and risk, SAML remains genuinely common in enterprise contexts even though a greenfield application today would almost always choose OIDC for its simpler, more modern, JSON-based tooling.
+
+**Common Pitfall:** assuming a modern application never needs to support SAML at all "because OIDC is newer" — many enterprise customers' own identity providers only support SAML for SSO integration, and a B2B SaaS product targeting enterprise customers often needs to support both protocols to accommodate whichever one a given customer's existing identity infrastructure actually uses.
+
 ---

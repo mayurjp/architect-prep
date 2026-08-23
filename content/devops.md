@@ -1812,4 +1812,94 @@ Because the steady state is defined precisely and measurably *before* the fault 
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is the difference between a CI pipeline's "Stage" and a "Job" within it, and how does this two-level structure let a pipeline organize both sequential phases and parallel work within each phase?**
+
+A Stage represents a broad, sequential phase of the pipeline (Build, Test, Deploy) — stages run one after another, in order. Within a single Stage, one or more Jobs can run — and Jobs within the same Stage commonly run in parallel with each other, since they typically represent independent work that doesn't depend on one another's completion.
+
+```yaml
+stages:
+  - build      # Stage 1
+  - test       # Stage 2 -- runs only AFTER build finishes
+  - deploy     # Stage 3 -- runs only AFTER test finishes
+
+test:               # this Stage contains MULTIPLE Jobs
+  unit-tests:        # Job 1 -- can run in PARALLEL with...
+    stage: test
+  integration-tests:  # Job 2 -- ...this one, since neither depends on the other
+    stage: test
+```
+
+```text
+Stages: SEQUENTIAL phases -- Stage 2 doesn't START until Stage 1 fully COMPLETES
+
+Jobs within ONE Stage: typically run in PARALLEL -- independent WORK units
+  that don't need to wait on EACH OTHER, just on the PREVIOUS Stage finishing
+```
+
+Because organizing a pipeline into Stages (sequential) containing Jobs (parallel within a stage) lets independent work happen simultaneously wherever genuinely possible, while still enforcing a meaningful overall order (never testing before building, never deploying before testing passes), this two-level structure is the standard way most CI/CD systems (GitLab CI, Azure Pipelines, GitHub Actions) balance pipeline speed against correct ordering.
+
+**Common Pitfall:** placing genuinely independent work into the same sequential Stage chain rather than as parallel Jobs within one Stage — needlessly serializing work that could have run concurrently extends the pipeline's total wall-clock time without providing any actual correctness benefit.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is a deployment manifest templating tool like Helm, and how does parameterizing Kubernetes YAML manifests avoid duplicating nearly-identical files per environment?**
+
+Raw Kubernetes YAML has no built-in templating — deploying the same application to dev, staging, and production with slightly different values (replica count, image tag, resource limits) traditionally means maintaining several nearly-identical copies of the same manifest files, one per environment, that must all be kept manually in sync. Helm (and similar tools) instead defines one parameterized "Chart" template plus a small, distinct `values.yaml` file per environment, generating the final manifest by substituting each environment's specific values into the shared template.
+
+```yaml
+# templates/deployment.yaml (ONE shared template)
+spec:
+  replicas: {{ .Values.replicaCount }}
+  containers:
+  - image: "myapp:{{ .Values.imageTag }}"
+    resources:
+      limits:
+        memory: {{ .Values.memoryLimit }}
+```
+```yaml
+# values-prod.yaml                 # values-dev.yaml
+replicaCount: 10                    replicaCount: 1
+imageTag: "v2.3.1"                  imageTag: "latest"
+memoryLimit: "2Gi"                  memoryLimit: "512Mi"
+```
+
+```text
+WITHOUT templating: THREE nearly-identical, hand-maintained deployment.yaml
+  files (dev/staging/prod) -- a STRUCTURAL change (adding a new env var) must
+  be MANUALLY, carefully repeated across ALL THREE, risking DRIFT between them
+
+WITH Helm: ONE template + a SMALL values file PER environment -- a structural
+  change is made ONCE, in the shared template, and AUTOMATICALLY applies to
+  every environment the NEXT time it's deployed
+```
+
+Because a structural change to the deployment shape (a new sidecar container, an added environment variable) only needs to be made in one shared template rather than replicated by hand across every environment's own copy, templating directly eliminates the specific configuration-drift risk that maintaining several near-duplicate YAML files invites over time.
+
+**Common Pitfall:** treating a Helm Chart's `values.yaml` as a place to duplicate an entire manifest's structure per environment (effectively reintroducing near-duplicate files, just with `.yaml` extensions inside a Chart) rather than genuinely parameterizing only the values that actually differ between environments — the benefit of templating comes specifically from keeping the shared structure in one place, not from moving the same duplication problem into a different file format.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What are the "Four Golden Signals" from Google's Site Reliability Engineering practice, and how do they provide a minimal, sufficient set of metrics for monitoring nearly any user-facing service?**
+
+Rather than attempting to monitor every conceivable metric a service could expose, the Four Golden Signals — Latency (how long requests take), Traffic (how much demand the service is receiving), Errors (the rate of failing requests), and Saturation (how "full" the service's most constrained resource is) — are proposed as the smallest set of signals that, together, reveal nearly every meaningful category of problem a service can experience.
+
+```text
+Latency:    are REQUESTS taking longer than expected? (distinguish successful
+              vs FAILED request latency separately -- a fast error is NOT good news)
+Traffic:    how much DEMAND is the service currently receiving?
+Errors:     what FRACTION of requests are failing?
+Saturation: how CLOSE is the service's most CONSTRAINED resource (CPU,
+              memory, connection pool) to its LIMIT?
+```
+
+Because these four signals together cover both the *symptom* a user directly experiences (Latency, Errors) and the *underlying resource pressure* driving toward future symptoms (Traffic, Saturation), they give an on-call engineer a compact, comprehensive starting dashboard for nearly any service — deliberately avoiding the trap of instrumenting dozens of narrow, service-specific metrics before first ensuring these four foundational ones are actually being tracked.
+
+**Common Pitfall:** monitoring only the "happy path" average latency without separately tracking error-path latency and the error rate itself — a service returning errors quickly can show a deceptively good average latency number while actually failing a significant fraction of its traffic; the Golden Signals framework specifically calls out tracking Errors as its own distinct signal precisely to avoid this blind spot.
+
 ---

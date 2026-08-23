@@ -1734,4 +1734,77 @@ Because workloads with genuinely variable, unpredictable traffic patterns (a ret
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is Azure Static Web Apps, and how does its integrated hosting model combine a static frontend (React, Angular) with a serverless Azure Functions API in a single, simplified deployment?**
+
+Rather than provisioning and wiring together a separate static-hosting service and a separate Azure Functions app yourself, Azure Static Web Apps bundles both concerns into one resource: it builds and deploys a static frontend directly from a connected GitHub/Azure DevOps repository, and automatically provisions a managed Azure Functions API alongside it (under a conventional `/api` route) without requiring separate infrastructure setup.
+
+```yaml
+# GitHub Actions workflow, auto-generated when linking a repo to Static Web Apps
+app_location: "/src"       # the static frontend
+api_location: "/api"       # an Azure Functions project, deployed automatically alongside it
+output_location: "/dist"
+```
+
+```text
+WITHOUT Static Web Apps: PROVISION a storage account/CDN for the FRONTEND,
+  SEPARATELY provision an Azure Functions app for the API, WIRE the two
+  together yourself (CORS, routing, deployment coordination)
+
+WITH Static Web Apps: ONE resource, ONE deployment workflow -- the FRONTEND
+  and its companion API are BUILT and DEPLOYED together automatically on
+  every push, with routing between them handled TRANSPARENTLY
+```
+
+Because many modern frontend applications need only a thin serverless API alongside their static assets (form submission, a proxy to a third-party service), Static Web Apps' integrated model removes the setup overhead of coordinating two separate Azure resources for what is conceptually one deployable unit — free-tier support and built-in staging environments per pull request make it a common choice for smaller, frontend-heavy projects.
+
+**Common Pitfall:** reaching for Static Web Apps for an application whose "API" needs are actually substantial (many endpoints, complex business logic, its own scaling/hosting requirements) — its integrated Functions API is well-suited for lightweight backend needs tightly coupled to the frontend, not as a full substitute for a dedicated, independently-scaled backend service.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is the difference between Azure Logic Apps and Azure Functions, given that both are commonly described as "serverless"?**
+
+Azure Functions is code-first — you write actual C#/JavaScript/Python code that runs in response to a trigger. Azure Logic Apps is design-first — you compose a workflow visually (or via its underlying JSON definition) from a large catalog of pre-built connectors (Office 365, Salesforce, SQL, hundreds of others), with minimal or no custom code, oriented specifically toward integrating and orchestrating existing systems rather than implementing custom business logic.
+
+```text
+Azure Functions: WRITE code -- full control over LOGIC, but you IMPLEMENT
+  every integration yourself (an HTTP call, a SQL query) IN that code
+
+Azure Logic Apps: COMPOSE a workflow from PRE-BUILT connectors -- "when a
+  new email arrives in Outlook, add a row to a SQL table, then post a
+  Teams message" -- LITTLE to NO custom code, but LESS flexibility for
+  genuinely complex, code-level business logic
+```
+
+Because Logic Apps' value comes specifically from its enormous connector ecosystem and low-code composition model, it excels at integration-heavy workflows stitching together existing SaaS/enterprise systems with minimal development effort — while Azure Functions remains the better fit whenever the actual logic needed is complex enough that writing real code is more maintainable than composing it visually through a workflow designer.
+
+**Common Pitfall:** choosing Logic Apps for a workflow with genuinely complex, branching business logic purely because "no-code" sounds simpler — a sufficiently complex Logic App's JSON definition can become considerably harder to read, test, and version-control than the equivalent logic expressed as ordinary, unit-testable C# code in an Azure Function.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is Azure Synapse Link for Cosmos DB, and how does it enable near-real-time analytical queries directly against operational data, without a separate ETL pipeline copying that data elsewhere first?**
+
+Ordinarily, running analytical queries against operational (transactional) data requires an ETL process to extract, transform, and load that data into a separate analytical store — Synapse Link instead maintains a fully-managed, automatically-synced column-oriented replica of a Cosmos DB container's data, queryable directly from Azure Synapse Analytics, without impacting the transactional workload's own performance or requiring any custom pipeline to be built and maintained.
+
+```text
+WITHOUT Synapse Link (traditional ETL): OPERATIONAL data changes in Cosmos DB
+  -> a SEPARATE, custom pipeline PERIODICALLY extracts/transforms/loads it
+  INTO an analytical store -- introduces LATENCY (data is stale until the
+  next ETL run) and ONGOING pipeline maintenance burden
+
+WITH Synapse Link: Cosmos DB AUTOMATICALLY maintains a COLUMNAR analytical
+  store, KEPT in near-real-time sync -- Synapse queries run DIRECTLY against
+  it, with ZERO impact on the OPERATIONAL container's own request-unit budget,
+  and NO custom ETL pipeline to build or maintain at all
+```
+
+Because this pattern — running analytics directly against fresh operational data without a separate extraction pipeline — is often called Hybrid Transactional/Analytical Processing (HTAP), Synapse Link's specific value is eliminating both the ETL latency (data staleness) and the ETL engineering burden that a traditional analytics pipeline would otherwise require, letting analytical queries reflect data that's minutes (not hours) old.
+
+**Common Pitfall:** assuming Synapse Link's analytical store queries consume the same Request Unit budget as the operational container — they're deliberately isolated, specifically so that even a heavy, complex analytical query running through Synapse cannot degrade the operational container's transactional throughput; conflating the two budgets leads to an inaccurate capacity-planning estimate for the operational workload.
+
 ---

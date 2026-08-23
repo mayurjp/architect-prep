@@ -1961,4 +1961,96 @@ Because triggering catastrophic backtracking requires nothing beyond ordinary, u
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is Cross-Origin Resource Sharing (CORS), and how does a browser's preflight request combined with the `Access-Control-Allow-Origin` response header let a server explicitly opt in to being called from a different origin?**
+
+By default, a browser's Same-Origin Policy blocks a page loaded from one origin (`https://app.example.com`) from making a request to a different origin (`https://api.example.com`) via JavaScript — CORS is the mechanism that lets a server explicitly relax this restriction for specific, trusted origins by returning headers telling the browser "requests from this origin are allowed."
+
+```http
+OPTIONS /api/orders HTTP/1.1
+Origin: https://app.example.com
+Access-Control-Request-Method: POST
+```
+```http
+HTTP/1.1 204 No Content
+Access-Control-Allow-Origin: https://app.example.com
+Access-Control-Allow-Methods: GET, POST
+```
+
+```text
+1. Browser sends a "preflight" OPTIONS request FIRST (for non-simple requests) --
+   asking the SERVER "would you ALLOW an actual request from THIS origin?"
+2. Server RESPONDS with Access-Control-Allow-Origin naming the SPECIFIC
+   origin(s) it trusts
+3. ONLY if the browser sees its OWN origin explicitly allowed does it PROCEED
+   to send the ACTUAL request -- otherwise, the browser BLOCKS it CLIENT-side,
+   before it ever reaches application code
+```
+
+Because CORS enforcement happens entirely in the *browser*, not the server — a server without any CORS headers configured is still perfectly reachable via non-browser clients (curl, a mobile app, server-to-server calls) — CORS specifically protects against a malicious *webpage* trying to make unauthorized cross-origin requests using a victim's browser and its ambient credentials (cookies), not against direct API abuse from non-browser contexts.
+
+**Common Pitfall:** believing that a correctly-configured CORS policy is itself an authentication or authorization mechanism — CORS only controls whether a *browser* permits a cross-origin JavaScript request to proceed; it provides no protection at all against a request made directly (bypassing a browser entirely), which is why genuine authorization checks must always happen server-side, regardless of what CORS policy is configured.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is a Content Security Policy (CSP) nonce, and how does it let specific inline `<script>` tags execute while still blocking an attacker's injected inline script — something a blanket `'unsafe-inline'` directive cannot do?**
+
+A CSP header listing `'unsafe-inline'` permits *any* inline script to execute, including one an attacker successfully injects via an XSS vulnerability — defeating much of CSP's own purpose. A nonce-based CSP instead generates a fresh, random, unpredictable value on every page load, includes it in the CSP header, and requires each legitimate inline `<script>` tag to carry that exact same nonce as an attribute — a script an attacker injects has no way of knowing that request's freshly-generated nonce value, so it fails the CSP check and never executes.
+
+```http
+Content-Security-Policy: script-src 'nonce-r4nd0mA1b2C3'
+```
+```html
+<!-- Legitimate script -- carries the CORRECT nonce, EXECUTES normally -->
+<script nonce="r4nd0mA1b2C3">console.log("I'm allowed to run");</script>
+
+<!-- Attacker-injected script via an XSS flaw -- has NO WAY of knowing this
+     request's freshly-generated nonce, so the browser REFUSES to execute it -->
+<script>alert(document.cookie)</script>
+```
+
+```text
+'unsafe-inline': ANY inline script runs -- INCLUDING one an attacker injects
+
+nonce-based CSP: ONLY a script carrying the CORRECT, freshly-generated nonce
+  for THIS specific page load executes -- an attacker's injected script,
+  lacking that unpredictable value, is BLOCKED by the browser itself
+```
+
+Because the nonce changes on every single page load and an attacker has no way to predict or discover it in advance (it must never be reused or guessable), even a successful HTML/script injection through some other application flaw still fails to execute, since the injected script simply cannot carry the correct, freshly-generated nonce value — providing meaningful defense-in-depth even when an injection vulnerability exists elsewhere.
+
+**Common Pitfall:** generating the nonce once and reusing the same static value across many requests (or hardcoding it) rather than generating a genuinely fresh, unpredictable one per page load — a reused or guessable nonce value defeats the entire mechanism, since an attacker could simply include that same known nonce in their own injected script.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is HTTP Request Smuggling, and how does a discrepancy between a front-end proxy's and a back-end server's interpretation of the `Content-Length` and `Transfer-Encoding` headers let an attacker smuggle a hidden, second request?**
+
+When a request includes both a `Content-Length` header and a `Transfer-Encoding: chunked` header, the HTTP specification says `Transfer-Encoding` should take priority — but not every server implementation actually enforces this consistently. If a front-end proxy and the back-end server it forwards requests to disagree about where one request ends and the next begins (one honoring `Content-Length`, the other honoring `Transfer-Encoding`), an attacker can craft a single request that the proxy interprets as one request, but the back-end interprets as *two* — with the smuggled second request then processed in a context the attacker controls, often getting inserted ahead of an unsuspecting, subsequent legitimate user's own request on that same reused backend connection.
+
+```text
+Attacker sends ONE HTTP request containing BOTH a Content-Length header
+  AND a Transfer-Encoding: chunked header, deliberately CRAFTED so the two
+  headers DISAGREE about where the request body actually ENDS
+
+Front-end proxy: honors Content-Length -- believes the request ENDS at
+  a certain byte offset, forwards EVERYTHING up to there as "one request"
+
+Back-end server: honors Transfer-Encoding instead -- interprets the SAME
+  bytes differently, believing a SECOND, hidden request begins PARTWAY
+  through what the proxy thought was still the FIRST request's body
+
+Result: the "smuggled" second request gets PROCESSED by the backend in a
+  context the ATTACKER controls -- potentially PREPENDED onto the NEXT
+  legitimate user's request on a REUSED, persistent backend connection
+```
+
+Because this vulnerability arises specifically from an *inconsistency between two different systems'* HTTP parsing behavior rather than a flaw in either system alone, it's notoriously difficult to detect through testing either system in isolation — mitigations include normalizing/rejecting ambiguous requests at the front-end proxy (rejecting any request carrying both headers), and ensuring front-end and back-end components use HTTP libraries that parse headers identically or communicate over HTTP/2 (whose framing is less ambiguous by design).
+
+**Common Pitfall:** assuming HTTPS/TLS termination at the proxy prevents this attack — Request Smuggling is a parsing-ambiguity problem entirely independent of transport encryption; a request smuggled successfully over a TLS-terminated connection is just as effective as one sent over plain HTTP, since the vulnerability lies in how the proxy and backend each interpret the (now-decrypted) request's headers, not in whether the transport itself was encrypted.
+
 ---

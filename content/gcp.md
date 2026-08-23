@@ -1691,4 +1691,83 @@ Because this efficiency comes directly from the same physical co-location that m
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is the difference between GCP Cloud Functions and Cloud Run, given that both let you deploy code without managing servers?**
+
+Cloud Functions is scoped to a single function — you deploy one piece of code (a function signature the platform invokes directly) responding to an event or HTTP request. Cloud Run deploys an entire *container* — any application packaged as a Docker image, running any language, any framework, any web server, listening on a port of your choosing, giving it far more flexibility than a single-function model.
+
+```text
+Cloud Functions: deploy ONE function's code -- the PLATFORM handles the
+  HTTP server/event-trigger plumbing FOR you; SIMPLE, but LIMITED to what
+  the function-based programming model SUPPORTS
+
+Cloud Run: deploy an ENTIRE container -- ANY language, ANY framework, ANY
+  existing web application already packaged as a Docker image -- MORE
+  flexible, at the cost of needing to OWN the container's own HTTP handling
+```
+
+Because Cloud Run accepts any container listening on the expected port, it can run an existing application with zero code changes (an ASP.NET Core app, a full Node.js Express server) — whereas Cloud Functions requires code specifically written against its function-signature programming model, making it a better fit for small, purpose-built, event-driven snippets rather than an entire pre-existing application.
+
+**Common Pitfall:** choosing Cloud Functions for an application that's substantial enough to already exist as a full, containerizable web application — forcing that application's logic into Cloud Functions' single-function model often means an awkward rewrite, when Cloud Run could have run the exact same containerized application with no code changes at all.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is Google Cloud Build, and how does it provide a fully-managed CI/CD pipeline that builds container images directly within GCP, without needing to run and maintain your own build server?**
+
+Cloud Build executes a sequence of build steps — defined declaratively in a `cloudbuild.yaml` — each running inside its own container, commonly used to build a Docker image from source, run tests, and push the resulting image directly to Artifact Registry (covered earlier), all triggered automatically by a source repository push, without provisioning or managing any build infrastructure yourself.
+
+```yaml
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'us-central1-docker.pkg.dev/my-project/repo/app:$COMMIT_SHA', '.']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'us-central1-docker.pkg.dev/my-project/repo/app:$COMMIT_SHA']
+```
+
+```text
+WITHOUT Cloud Build: PROVISION and MAINTAIN your own build server/agent
+  (a Jenkins instance, a self-hosted GitHub Actions runner) -- YOU own its
+  scaling, patching, and AVAILABILITY
+
+WITH Cloud Build: EACH build step runs in an EPHEMERAL, MANAGED container --
+  GCP provisions the compute FOR the duration of the build ONLY, scaling
+  automatically with build VOLUME, with NO persistent infrastructure to maintain
+```
+
+Because Cloud Build's ephemeral, managed execution model removes the operational burden of running your own build infrastructure entirely, it's a natural fit for teams already committed to GCP wanting their CI/CD pipeline (build, test, push, and often deploy) to live within the same platform as the rest of their infrastructure, rather than maintaining a separate CI system.
+
+**Common Pitfall:** assuming Cloud Build handles deployment automatically just by building and pushing an image — Cloud Build's core responsibility is the build/test/push pipeline; actually deploying the resulting image to Cloud Run/GKE typically requires an explicit additional build step (or a separate tool like Cloud Deploy, covered earlier) invoking the deployment itself.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What are Cloud Spanner's `exact_staleness` and `max_staleness` read options, and how do they let a read-only query trade a small amount of consistency for lower latency and higher throughput?**
+
+A default Spanner read is strongly consistent, requiring coordination that adds latency — for workloads that can tolerate reading slightly stale data (a dashboard, an analytics query), Spanner lets a client explicitly request a **stale read**: `exact_staleness` reads data as of a specific duration in the past, and `max_staleness` reads the most recent data available that's at least as old as the specified bound, both avoiding the coordination overhead a fully up-to-date strong read requires.
+
+```csharp
+// Read data as it existed at LEAST 15 seconds ago -- trades freshness for lower latency
+var staleRead = connection.CreateSelectCommand("SELECT * FROM Orders")
+    .WithTimestampBound(TimestampBound.OfExactStaleness(TimeSpan.FromSeconds(15)));
+```
+
+```text
+Strong read (default): requires COORDINATION to guarantee the ABSOLUTE latest
+  committed data -- HIGHER latency, but ZERO staleness
+
+Stale read (exact_staleness/max_staleness): reads data as of a SPECIFIC
+  point (or "at least this OLD") in the PAST -- can be served from a NEARBY
+  replica WITHOUT the coordination overhead a strong read requires --
+  LOWER latency and HIGHER read throughput, at the cost of a BOUNDED amount
+  of staleness
+```
+
+Because many read-heavy workloads (reporting, dashboards, cached-for-display data) don't actually need up-to-the-millisecond freshness, deliberately requesting a bounded-staleness read lets an application meaningfully reduce read latency and increase achievable throughput for exactly those workloads — while still using Spanner's default strong consistency for reads (like an account balance check before a withdrawal) that genuinely require it.
+
+**Common Pitfall:** applying `max_staleness`/`exact_staleness` reads uniformly across an entire application without distinguishing which specific reads can actually tolerate staleness — a read feeding into a decision requiring absolute correctness (checking current inventory before confirming a sale) needs Spanner's default strong consistency; stale reads are an opt-in optimization for specific, tolerant read paths, not a blanket setting.
+
 ---
