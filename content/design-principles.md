@@ -1732,4 +1732,90 @@ Because a caller of the *base* method's contract expects to be able to pass *any
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is the "Big Ball of Mud" anti-pattern, and how does a system that grew organically without any deliberate architectural principles being applied eventually exhibit it, regardless of the individual developers' own skill?**
+
+A "Big Ball of Mud" describes a system with no discernible architecture at all — code haphazardly connected, responsibilities scattered arbitrarily, dependencies pointing every direction — that emerges not from any single bad decision, but from the *accumulation* of many individually-reasonable-seeming shortcuts over time, each one locally sensible but collectively producing a system nobody can safely reason about anymore.
+
+```text
+EACH individual change, VIEWED IN ISOLATION, might have seemed REASONABLE: "just ADD this
+  ONE quick check HERE," "just CALL this OTHER module DIRECTLY, it's FASTER than going
+  through the PROPER layer" -- REPEATED across HUNDREDS of such INDIVIDUALLY-small decisions,
+  by MANY different (even SKILLED) developers, over YEARS, WITHOUT any DELIBERATE, ENFORCED
+  architectural principle GUIDING the SYSTEM's overall SHAPE
+
+RESULT: a system where NOTHING is CLEANLY separated, EVERYTHING depends on EVERYTHING else,
+  and EVEN a SIMPLE-seeming change requires TRACING through a TANGLED, UNPREDICTABLE web
+  of INTERCONNECTIONS to be CONFIDENT it won't BREAK something ENTIRELY UNRELATED
+```
+
+Because no individual developer necessarily made an obviously "bad" decision at any single point, a Big Ball of Mud is fundamentally a *systemic* failure — the absence of deliberately-applied, consistently-enforced architectural principles (layering, SRP, dependency direction rules) over time, rather than any one identifiable mistake — which is precisely why architectural principles need active, ongoing enforcement (code review, architectural tests, covered elsewhere) rather than simply trusting that individually-reasonable decisions will naturally add up to a coherent whole.
+
+**Common Pitfall:** assuming a codebase degrading into a Big Ball of Mud must be the result of specifically unskilled developers making obviously bad decisions — in practice, it's usually the cumulative result of many individually-reasonable, locally-optimal shortcuts taken without any actively-enforced architectural principle constraining the system's overall shape over a long period of organic, unguided growth.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is Cyclomatic Complexity as a concrete, measurable metric, and how does counting a method's independent execution paths give an objective signal for when it has grown too complex to reason about safely?**
+
+Cyclomatic Complexity counts the number of linearly-independent paths through a method's control flow — calculated roughly as one plus the number of decision points (`if`, `while`, `case`, `&&`/`||`) — giving an objective, tool-measurable number rather than a subjective "this feels complicated" judgment call.
+
+```csharp
+public string ClassifyOrder(Order order) // Cyclomatic Complexity CALCULATION:
+{
+    if (order.Total > 1000) // +1
+    {
+        if (order.IsInternational) return "HighValueInternational"; // +1
+        return "HighValueDomestic";
+    }
+    else if (order.IsRush && order.CustomerTier == "Gold") return "PriorityRush"; // +1 (if) +1 (&&)
+    return "Standard";
+} // Cyclomatic Complexity = 1 (base) + 4 (decision points) = 5
+```
+
+```text
+A METHOD with Cyclomatic Complexity of 5: has 5 DISTINCT possible PATHS through it -- a
+  DEVELOPER needs to consider ALL 5 to be CONFIDENT a change doesn't BREAK some SPECIFIC path
+
+A METHOD with Cyclomatic Complexity of 30+: has 30+ DISTINCT paths -- REALISTICALLY, NO
+  developer can HOLD all of them in MIND simultaneously -- this is an OBJECTIVE, MEASURABLE
+  signal (NOT just a "feeling") that the METHOD has grown genuinely TOO complex to SAFELY modify
+```
+
+Because this metric is directly computable by static analysis tools (rather than relying purely on subjective code-review judgment), teams can set concrete, enforceable thresholds (a linter rule flagging any method above a chosen complexity score) — giving an objective trigger for "this method needs to be refactored/broken apart" rather than relying purely on individual reviewers' subjective sense of "this seems complicated."
+
+**Common Pitfall:** relying purely on subjective impressions ("this method feels hard to follow") to decide when refactoring is warranted, without any objective, tool-enforced threshold — Cyclomatic Complexity (and similar static-analysis metrics) provide a concrete, consistently-applied signal that doesn't depend on any one reviewer's particular tolerance for complexity, making it a more reliable trigger for enforcing a "this needs to be simplified" standard across an entire team.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is the Dependency Inversion Principle's distinction between "high-level" (policy) and "low-level" (mechanism) modules, and how does this distinction — not merely "depend on interfaces" — capture the principle's actual intent?**
+
+A high-level module encodes *policy* — the actual business rules and decisions that give an application its meaning (how an order gets processed, what makes a discount valid) — a low-level module provides *mechanism* — the concrete, interchangeable technical means of carrying out some operation (which specific database driver, which specific email-sending library) that could, in principle, be swapped without changing the business meaning at all. DIP's actual point isn't merely "use interfaces everywhere" — it's that the *high-level policy* should never depend on the specific *low-level mechanism's* concrete details, only on an abstraction the high-level module itself defines.
+
+```csharp
+// HIGH-LEVEL (POLICY) -- the actual BUSINESS RULE: "an order over $1000 requires MANAGER approval"
+public class OrderApprovalPolicy
+{
+    private readonly INotifier _notifier; // depends on an ABSTRACTION, defined by the HIGH-LEVEL module itself
+    public void Evaluate(Order order)
+    {
+        if (order.Total > 1000) _notifier.NotifyManager(order); // the POLICY -- the BUSINESS MEANING
+    }
+}
+
+// LOW-LEVEL (MECHANISM) -- HOW notification actually HAPPENS -- SWAPPABLE, without changing the POLICY at ALL
+public class EmailNotifier : INotifier { public void NotifyManager(Order order) { /* SMTP details */ } }
+public class SlackNotifier : INotifier { public void NotifyManager(Order order) { /* Slack API details */ } }
+```
+
+Because the *interface* (`INotifier`) is conceptually owned by the high-level policy module (it defines what "notify" means *for its own purposes*, covered under the earlier "client-owned interface" discussion), swapping the low-level mechanism (Email for Slack) never requires touching the actual business policy at all — this is the deeper point DIP is making: not merely "depend on abstractions" as a syntactic rule, but that *policy* (the reason the software exists) should never be entangled with, or dependent upon, the specific, swappable *mechanisms* carrying it out.
+
+**Common Pitfall:** treating DIP as satisfied merely because an interface exists somewhere in the dependency chain, without checking whether the actual *business policy* is genuinely insulated from *mechanism*-level details — an interface defined and owned by the low-level, mechanism-providing module (rather than by the high-level, policy-defining one) can still leave the high-level module's design shaped around that mechanism's own concerns, missing DIP's actual intent even while technically "depending on an abstraction."
+
+---
+
 ---

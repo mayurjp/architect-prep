@@ -1819,3 +1819,92 @@ C# 11's static abstract interface members (covered under C#, the mechanism under
 **Common Pitfall:** assuming C#'s Generic Math feature (static abstract interface members) means C# now supports genuine structural/duck typing — it doesn't; every type using this feature still must explicitly declare which interfaces it implements, exactly as nominal typing always required — the feature only expands *what an interface can describe* (now including static members), not *how a type opts into satisfying one*.
 
 ---
+
+## Beginner — Question 19
+
+**Q19: What is the difference between a class method being `static` versus an instance method, and how does the choice reflect whether an operation conceptually belongs to the type itself or to a specific object?**
+
+An instance method operates on a *specific object's* own state — calling it requires an actual instance to call it on, and its behavior can depend on that instance's particular data. A `static` method belongs to the *class itself*, with no associated instance at all — it can't access any instance's own fields/properties directly, since there's no specific object it's "attached to."
+
+```csharp
+public class Calculator
+{
+    public int Total { get; set; } // INSTANCE state
+
+    public void Add(int x) { Total += x; } // INSTANCE method -- operates on THIS SPECIFIC instance's Total
+
+    public static int Add(int a, int b) => a + b; // STATIC method -- belongs to the CLASS itself,
+                                                     // has NO instance state to operate ON at all
+}
+
+var calc = new Calculator();
+calc.Add(5);                    // calls the INSTANCE method -- mutates 'calc's OWN Total
+int sum = Calculator.Add(2, 3); // calls the STATIC method -- NO instance involved AT ALL
+```
+
+Because a static method has no notion of "which instance" it's operating on, it's the right choice specifically when an operation is genuinely independent of any particular object's state (a pure calculation, a factory method creating a *new* instance) — an instance method is the right choice whenever the operation genuinely needs to read or mutate a *specific* object's own data.
+
+**Common Pitfall:** making a method `static` purely for convenience (to avoid needing an instance to call it) even when it conceptually operates on, or should operate on, a specific object's state — this often signals the method actually belongs as an instance method instead, and forcing it to be static can push callers toward passing an object's state around as method parameters unnecessarily, rather than the method naturally operating on `this`.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is "Feature Envy" as a code smell, and how does a method accessing another class's data/methods far more than its own class's suggest that logic actually belongs on the other class instead?**
+
+Feature Envy describes a method that spends most of its logic reaching into a *different* object's data (via getters, or several chained calls) rather than working with its own class's own state — a strong signal that the method's logic is more naturally a responsibility of that *other* class, and moving it there would reduce the coupling this envy creates.
+
+```csharp
+// FEATURE ENVY -- this method is MOSTLY interested in "customer"'s data, BARELY uses "this" at all
+public class InvoicePrinter
+{
+    public string FormatCustomerLine(Customer customer)
+    {
+        return $"{customer.FirstName} {customer.LastName}, {customer.Address.Street}, " +
+               $"{customer.Address.City} {customer.Address.PostalCode}"; // ALL reaching INTO 'customer'
+    }
+}
+
+// FIXED -- the LOGIC moves TO the class it's actually MOST interested in
+public class Customer
+{
+    public string FormatForInvoice() => $"{FirstName} {LastName}, {Address.Street}, {Address.City} {Address.PostalCode}";
+}
+```
+
+Because the original method's logic depends almost entirely on `Customer`'s own data (and barely touches anything belonging to `InvoicePrinter` itself), moving it directly onto `Customer` follows the "Information Expert" principle (covered under Design Principles) — placing behavior where the data it needs already lives, reducing the awkward, envious reaching-across-object-boundaries the original placement required.
+
+**Common Pitfall:** leaving a method with obvious Feature Envy in its original class simply because "that's where it was originally written," even after noticing it barely touches its own class's state — recognizing this smell and relocating the logic to the class it's actually most interested in typically produces a cleaner, more cohesive design with reduced coupling between the two classes.
+
+---
+
+## Advanced — Question 19
+
+**Q19: How does the Open/Closed Principle's interaction with `sealed` classes (covered under C#) work — sealing a class simultaneously closes it for inheritance-based extension while still allowing composition-based extension — and why is this often a better default than leaving every class open to inheritance?**
+
+Sealing a class prevents anyone from subclassing it, closing off inheritance-based extension entirely — but it doesn't prevent composition (a different class holding a reference to, and delegating to, the sealed class), meaning "extension" is still fully possible, just through composition rather than inheritance — a deliberate constraint many style guides now recommend as the safer default, given inheritance's tendency to create tight, fragile coupling (the Fragile Base Class Problem, covered earlier) when a class wasn't specifically designed to support being subclassed.
+
+```csharp
+public sealed class EmailValidator // SEALED -- CANNOT be subclassed by ANYONE
+{
+    public bool IsValid(string email) { /* validation logic */ return true; }
+}
+
+// EXTENSION via COMPOSITION is STILL entirely possible, even though inheritance is BLOCKED:
+public class LoggingEmailValidator
+{
+    private readonly EmailValidator _inner = new();
+    public bool IsValid(string email)
+    {
+        var result = _inner.IsValid(email); // DELEGATES to the sealed class -- COMPOSITION, not inheritance
+        Console.WriteLine($"Validated {email}: {result}");
+        return result;
+    }
+}
+```
+
+Because a class not specifically *designed* to be safely subclassed (with carefully chosen `virtual` extension points, covered under the Template Method pattern) risks the Fragile Base Class Problem if it's left open to inheritance by default, deliberately sealing it and relying on composition for any needed extension avoids exposing an extension mechanism the class's author never actually validated as safe — "favor composition over inheritance" (covered under Design Principles) and "seal by default" are two closely related, mutually-reinforcing recommendations.
+
+**Common Pitfall:** leaving every class unsealed "just in case someone needs to extend it later" without deliberately designing safe, well-considered extension points — an unsealed class that was never actually designed with subclassing in mind can be silently broken by a subclass relying on implementation details the base class's author never intended to expose or guarantee stable, exactly the Fragile Base Class Problem sealing (with composition as the alternative extension mechanism) is meant to avoid.
+
+---

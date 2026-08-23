@@ -2055,4 +2055,91 @@ Because Event Sourcing retains the *complete history* of every individual change
 
 ---
 
+## Beginner — Question 19
+
+**Q19: How does the Decorator pattern's requirement that a Decorator implement the same interface as what it wraps let Decorators be stacked in any combination, transparently to client code?**
+
+Because every Decorator implements the exact same interface as the object it wraps (and as every other Decorator in the chain), client code calling a method on the outermost Decorator has no way to tell — and no need to care — how many layers of wrapping actually exist underneath, or in what order they were applied; each layer simply delegates to the next, all indistinguishable from the client's point of view.
+
+```csharp
+public interface ICoffee { decimal Cost(); }
+public class SimpleCoffee : ICoffee { public decimal Cost() => 2.00m; }
+
+public class MilkDecorator : ICoffee // implements the SAME interface as what it WRAPS
+{
+    private readonly ICoffee _inner;
+    public MilkDecorator(ICoffee inner) { _inner = inner; }
+    public decimal Cost() => _inner.Cost() + 0.50m;
+}
+public class SugarDecorator : ICoffee // ALSO implements the SAME interface
+{
+    private readonly ICoffee _inner;
+    public SugarDecorator(ICoffee inner) { _inner = inner; }
+    public decimal Cost() => _inner.Cost() + 0.25m;
+}
+
+ICoffee order = new SugarDecorator(new MilkDecorator(new SimpleCoffee())); // STACKED, in ANY order
+Console.WriteLine(order.Cost()); // client code calls Cost() -- has NO IDEA (and doesn't NEED to know)
+                                   // how MANY layers exist, or in WHAT order they were APPLIED
+```
+
+Because every layer in the stack presents the identical `ICoffee` interface, client code holding a reference to the outermost wrapper can call `Cost()` exactly as if it held a plain `SimpleCoffee` directly — this uniform interface requirement is precisely what makes arbitrary stacking (in any combination, in any order) transparently possible, without the client needing any special-case logic per layer.
+
+**Common Pitfall:** implementing a "Decorator" that exposes additional methods beyond the interface it's wrapping, breaking the uniform-interface guarantee — this means client code can no longer treat every layer interchangeably, since some layers now expose capabilities others don't, undermining the transparent-stacking property that makes the Decorator pattern useful in the first place.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: Why does implementing the Null Object pattern's "null" instance as a Singleton (since all null objects of a given type are interchangeable and stateless) make particular sense for this specific pattern pairing?**
+
+A Null Object (covered earlier) representing "nothing/absence" has no meaningful state to distinguish one instance from another — every "do-nothing" `NullLogger`, for instance, behaves identically regardless of which specific instance a caller happens to hold — making it a natural, low-risk fit for the Singleton pattern (covered earlier), since there's no reason to ever create more than one, and no state that could make separate instances meaningfully different.
+
+```csharp
+public class NullLogger : ILogger
+{
+    public static readonly NullLogger Instance = new(); // SINGLETON -- ONE shared instance, reused EVERYWHERE
+    private NullLogger() { } // private constructor -- prevents CREATING additional, REDUNDANT instances
+
+    public void Log(string message) { /* does NOTHING, intentionally */ }
+}
+
+// EVERYWHERE in the codebase needing a "no-op" logger, THE SAME shared instance is reused:
+var service = new OrderService(logger: NullLogger.Instance);
+```
+
+Because every consumer of `NullLogger.Instance` gets the exact same behavior (doing nothing) regardless of which reference they hold, there's no downside to sharing a single instance across the entire application — unlike a typical Singleton (covered earlier, often criticized for introducing hidden global state), a Null Object Singleton carries no actual state at all, sidestepping the usual concerns about Singleton-induced coupling or hidden shared mutable state.
+
+**Common Pitfall:** unnecessarily constructing a fresh `new NullLogger()` (or equivalent) every time one is needed, rather than reusing one shared, static instance — since every Null Object instance of a given type is functionally identical (no state to differentiate them), this wastes a trivial allocation for no benefit; a single, shared static instance is both simpler and marginally more efficient, with none of the usual risks a stateful Singleton might carry.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is the Servant pattern, and how does it let a shared behavior be applied to multiple, unrelated classes' objects without adding that behavior to each class itself or requiring a common base class/interface at all?**
+
+A Servant is a standalone class providing a service/operation that acts *on* objects of other classes, passed in as parameters — rather than each of those classes implementing the behavior itself (or being forced to share a common interface just to support it), the Servant externally provides the shared operation, working through whatever public members those otherwise-unrelated classes already expose.
+
+```csharp
+// UNRELATED classes -- NO common base class or interface between them AT ALL
+public class Circle { public double Radius; }
+public class Square { public double Side; }
+
+// A SERVANT -- provides a SHARED operation, WITHOUT either class needing to implement it ITSELF,
+// and WITHOUT requiring them to SHARE any common interface
+public class AreaCalculatorServant
+{
+    public double CalculateArea(Circle c) => Math.PI * c.Radius * c.Radius;
+    public double CalculateArea(Square s) => s.Side * s.Side;
+}
+
+var servant = new AreaCalculatorServant();
+double circleArea = servant.CalculateArea(new Circle { Radius = 5 });
+double squareArea = servant.CalculateArea(new Square { Side = 4 });
+```
+
+Because the Servant class itself carries the shared behavior externally (via method overloads for each unrelated type it supports), neither `Circle` nor `Square` needs to be modified, share a base class, or implement a common interface purely to support this one operation — useful specifically when a shared behavior would otherwise force an artificial, unwanted relationship between classes that are conceptually unrelated apart from this one incidental need.
+
+**Common Pitfall:** forcing several unrelated classes to implement a shared interface purely so a single operation can be applied polymorphically across them, when a Servant class could provide that same operation externally without requiring any relationship between the classes at all — the Servant pattern is specifically useful for avoiding this kind of artificial coupling introduced purely to support one incidental, shared behavior.
+
 ---

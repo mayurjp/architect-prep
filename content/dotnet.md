@@ -1650,4 +1650,103 @@ Because `AsyncLocal<T>` is specifically designed to survive the thread-hopping n
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is `Environment.ProcessorCount`, and how does an application avoid hardcoding a thread-pool/parallelism size by instead scaling it to the actual machine it happens to run on?**
+
+`Environment.ProcessorCount` reports the number of logical processors available to the current process at runtime — code that sizes a level of parallelism (a custom worker-thread count, a `Parallel.ForEach`'s `MaxDegreeOfParallelism`) based on this value automatically scales appropriately whether it's running on a small 2-core container or a large 64-core server, without a hardcoded constant that would be wrong on most machines.
+
+```csharp
+var options = new ParallelOptions
+{
+    MaxDegreeOfParallelism = Environment.ProcessorCount // SCALES automatically to WHATEVER machine this runs on
+};
+Parallel.ForEach(items, options, ProcessItem);
+
+// vs. a HARDCODED constant:
+var badOptions = new ParallelOptions { MaxDegreeOfParallelism = 8 }; // WRONG on a 2-core container,
+                                                                        // WASTEFUL on a 64-core server
+```
+
+```text
+A HARDCODED "8" is simply WRONG on MOST machines: on a 2-core CONTAINER, it OVER-SUBSCRIBES
+  the AVAILABLE cores (causing CONTEXT-SWITCHING overhead); on a 64-CORE server, it LEAVES
+  56 cores COMPLETELY UNUSED for THIS specific workload
+
+Environment.ProcessorCount ADAPTS automatically -- the SAME code correctly UTILIZES whatever
+  ACTUAL capacity the machine it's DEPLOYED to happens to PROVIDE
+```
+
+Because container orchestration platforms (Kubernetes, covered elsewhere) frequently run the exact same container image across nodes with wildly different core counts, code that hardcodes a parallelism level makes an assumption that's almost certainly wrong somewhere in a real deployment — `Environment.ProcessorCount` (and the .NET thread pool's own default sizing, which already uses it internally) is the portable, correctly-scaling alternative.
+
+**Common Pitfall:** hardcoding a specific thread/parallelism count based on the developer's own local machine's core count during development — this value is essentially guaranteed to be wrong once the application is actually deployed to a container or server with a different core count, either wasting available capacity or oversubscribing scarce cores; `Environment.ProcessorCount` correctly adapts to wherever the code actually runs.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is `IAsyncEnumerable<T>`'s `WithCancellation()` extension, and how does it let an `await foreach` loop respect a `CancellationToken` passed in, stopping iteration early rather than running to completion regardless?**
+
+An `await foreach` loop over an `IAsyncEnumerable<T>` (covered earlier) doesn't automatically know about any `CancellationToken` unless one is explicitly threaded through — `WithCancellation()` attaches a token to the enumeration itself, and the underlying async iterator (if it correctly checks the token, typically via `[EnumeratorCancellation]` on its own parameter) stops producing further elements and throws `OperationCanceledException` once that token is signaled.
+
+```csharp
+async IAsyncEnumerable<int> GenerateNumbersAsync([EnumeratorCancellation] CancellationToken ct = default)
+{
+    for (int i = 0; ; i++)
+    {
+        ct.ThrowIfCancellationRequested(); // CHECKS the token -- STOPS iterating once CANCELLED
+        await Task.Delay(100, ct);
+        yield return i;
+    }
+}
+
+await foreach (var number in GenerateNumbersAsync().WithCancellation(cts.Token))
+{
+    // STOPS iterating (throws OperationCanceledException) the MOMENT cts.Token is CANCELLED --
+    // rather than CONTINUING to iterate the ENTIRE (potentially INFINITE) sequence REGARDLESS
+    Console.WriteLine(number);
+}
+```
+
+Because `WithCancellation()` explicitly wires the token into the enumeration (and `[EnumeratorCancellation]` tells the compiler-generated iterator state machine which parameter should actually receive it), an otherwise-unbounded or long-running async sequence can be stopped cleanly and promptly from outside — without this explicit plumbing, a `CancellationToken` passed as an ordinary method parameter to the *async iterator method itself* wouldn't automatically propagate correctly through the compiler's generated enumerator state machine.
+
+**Common Pitfall:** passing a `CancellationToken` as an ordinary parameter to an async iterator method without marking it `[EnumeratorCancellation]`, then calling `WithCancellation()` on the resulting sequence expecting it to work — without the attribute, the compiler doesn't correctly wire the token from `WithCancellation()` into the iterator's own internal checks, and the loop may not actually respect cancellation as expected.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is `RuntimeFeature.IsDynamicCodeSupported`, and how does checking it let a library provide a different, AOT-compatible code path when running under Native AOT (covered earlier), where JIT-based dynamic code generation isn't available at all?**
+
+Some library code relies on runtime code generation (`System.Reflection.Emit`, dynamically compiling an `Expression<T>`) that simply isn't possible under Native AOT (covered earlier), since there's no JIT compiler present at runtime to generate new code on the fly — `RuntimeFeature.IsDynamicCodeSupported` lets a library check, at runtime, whether this capability is actually available, and branch to a different, reflection-free (or source-generator-based) implementation when it isn't.
+
+```csharp
+public object CreateInstance(Type type)
+{
+    if (RuntimeFeature.IsDynamicCodeSupported)
+    {
+        return _cachedEmittedFactory(type); // uses Reflection.Emit-generated code -- FAST, but NOT AOT-compatible
+    }
+    else
+    {
+        return Activator.CreateInstance(type)!; // a SLOWER, but AOT-COMPATIBLE fallback path
+    }
+}
+```
+
+```text
+Running under the ORDINARY JIT: IsDynamicCodeSupported == true -- the LIBRARY can SAFELY use
+  Reflection.Emit / dynamically-compiled expressions for MAXIMUM performance
+
+Running under Native AOT: IsDynamicCodeSupported == false -- ATTEMPTING to use Reflection.Emit
+  here would THROW or simply NOT WORK -- the LIBRARY must fall back to a DIFFERENT, AOT-SAFE
+  code path INSTEAD, EVEN IF it's SOMEWHAT slower
+```
+
+Because a library author often wants to support both environments (ordinary JIT-based execution for maximum flexibility, and Native AOT for minimal startup/footprint) from the *same* codebase, checking this flag at runtime lets the library dynamically choose the appropriate strategy for whichever environment it actually finds itself running in, rather than requiring two entirely separate library builds or forcing every consumer into one environment's constraints.
+
+**Common Pitfall:** publishing a library that unconditionally relies on `Reflection.Emit` or runtime expression compilation, without providing any AOT-compatible fallback — this makes the library entirely incompatible with Native AOT-published applications, a real and growing limitation as more teams adopt AOT specifically for its startup-time and container-size benefits; checking `IsDynamicCodeSupported` and providing an alternative path is what lets a library support both execution models gracefully.
+
+---
+
 ---
