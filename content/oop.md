@@ -1999,3 +1999,90 @@ Because the History Constraint concerns the *evolution of an object's state over
 **Common Pitfall:** verifying LSP compliance purely by checking that every *overridden* method's signature follows the contravariant-parameter/covariant-return rules (covered earlier), while overlooking that a subtype's genuinely *new* methods/fields can independently violate the base type's invariants — the History Constraint specifically catches this broader, state-evolution-focused violation that signature-level checks alone don't cover.
 
 ---
+
+## Beginner — Question 21
+
+**Q21: Why can an abstract class still define and run constructor logic — invoked via a derived class's `base()` call — even though the abstract class itself can never be instantiated directly?**
+
+An abstract class's constructor never runs "on its own" (since you can never write `new AbstractClass()` directly) — but it *does* run as part of constructing any concrete derived class, since every derived class's constructor implicitly (or explicitly, via `base(...)`) calls its base class's constructor first, letting the abstract class establish shared initialization logic every concrete subclass automatically inherits.
+
+```csharp
+public abstract class Shape
+{
+    public string Color { get; }
+    protected Shape(string color) // an ABSTRACT class's OWN constructor -- NEVER called
+    {                              // DIRECTLY, but STILL RUNS as part of BUILDING a subclass
+        Color = color;
+        Console.WriteLine("Shape constructor: initializing shared state");
+    }
+}
+
+public class Circle : Shape
+{
+    public Circle(string color) : base(color) { } // EXPLICITLY calls the BASE constructor
+}
+
+var circle = new Circle("red"); // RUNS Shape's constructor FIRST, THEN Circle's OWN body --
+                                   // "new Shape(...)" ITSELF would be a COMPILE ERROR
+```
+
+Because every concrete subclass's construction *necessarily* runs through its entire base-class chain's constructors first (even for an abstract base that can never be directly instantiated), the abstract class's constructor remains the correct, natural place to put initialization logic every derived class should share — it's simply never reachable as a *standalone*, directly-instantiated call.
+
+**Common Pitfall:** assuming an abstract class having a constructor is somehow contradictory or pointless, since the class itself "can't be instantiated" — the constructor still plays a genuine, necessary role as part of constructing any concrete subclass, and is the correct place for shared initialization logic every derived class should inherit automatically.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: How does Temporal Coupling (covered under Design Principles) apply specifically to object construction — a multi-step "Initialize() must be called after the constructor" pattern — and how does requiring all necessary parameters upfront in the constructor eliminate this ordering dependency entirely?**
+
+A class requiring a separate `Initialize()` call *after* construction (rather than passing everything needed directly into the constructor) creates Temporal Coupling: calling code must remember the correct order (`new MyClass(); myClass.Initialize();`), and nothing in the type system enforces this — forgetting the second call, or calling methods before it, produces a subtly broken object with no compile-time signal anything is wrong.
+
+```csharp
+// TEMPORAL COUPLING -- caller MUST remember the CORRECT order
+public class ReportGenerator
+{
+    public ReportGenerator() { } // does NOTHING useful ALONE
+    public void Initialize(IDataSource source) { _source = source; } // MUST be called SEPARATELY, AFTERWARD
+    public Report Generate() { /* USES _source -- BREAKS if Initialize() was NEVER called */ }
+}
+
+// NO temporal coupling -- the CONSTRUCTOR REQUIRES everything UPFRONT
+public class ReportGenerator
+{
+    private readonly IDataSource _source;
+    public ReportGenerator(IDataSource source) { _source = source; } // GUARANTEED, by the TYPE
+                                                                        // SYSTEM ITSELF, to be SET
+    public Report Generate() { /* _source is ALWAYS set -- NO ordering DEPENDENCY EXISTS at ALL */ }
+}
+```
+
+Because a constructor requiring all necessary parameters makes it *impossible* to construct an object in an incomplete, half-initialized state (covered earlier under the Constructor's role in guaranteeing invariants), it eliminates Temporal Coupling structurally, at the type-system level — rather than merely documenting "remember to call `Initialize()` first" and hoping every caller reads and follows that convention correctly.
+
+**Common Pitfall:** splitting object construction into a constructor plus a separate, required `Initialize()`/`Configure()` method purely out of habit — this reintroduces exactly the ordering-dependency risk a single, complete constructor would have eliminated entirely, relying on documentation and caller discipline rather than the type system itself to guarantee correct usage order.
+
+---
+
+## Advanced — Question 21
+
+**Q21: Why doesn't C# unify a zero-argument method call and a property read syntactically, the way some other languages embracing the Uniform Access Principle (covered under Design Principles) do — and what convention guides choosing one over the other?**
+
+Some languages (Scala, for instance) let a parameterless method be called with or without parentheses, making it syntactically indistinguishable from a property read — C# deliberately keeps them distinct (`obj.Property` versus `obj.Method()`), with convention guiding the choice: a property should be a cheap, side-effect-free, idempotent read of conceptual state, while a method call signals "this does actual work," potentially with side effects or non-trivial cost, that a reader should be aware is happening.
+
+```csharp
+public class Order
+{
+    public decimal Total { get; }              // PROPERTY -- implies a CHEAP, SIDE-EFFECT-FREE read
+    public Invoice GenerateInvoice() { ... }    // METHOD -- implies REAL WORK, POSSIBLY a SIDE EFFECT
+}
+
+var total = order.Total;              // reads as: "just GETTING a VALUE" -- CHEAP, EXPECTED
+var invoice = order.GenerateInvoice(); // reads as: "DOING something" -- the PARENTHESES SIGNAL
+                                         // to the READER that REAL WORK/COST is INVOLVED HERE
+```
+
+Because C#'s syntactic distinction between properties and methods carries this convention-based signal (cheap/pure versus potentially-expensive/effectful), a developer reading `order.Total` versus `order.GenerateInvoice()` gets an immediate, syntax-level hint about what kind of operation they're actually invoking — a genuinely useful piece of information the Uniform Access Principle's full syntactic unification would deliberately obscure.
+
+**Common Pitfall:** implementing a property getter that actually performs expensive computation, a database call, or a meaningful side effect — this violates the conventional expectation a property's syntax carries (cheap, pure, side-effect-free), misleading a reader who reasonably assumes `obj.SomeProperty` is a trivial read; genuinely expensive or effectful operations should be expressed as methods, preserving the convention's informative value.
+
+---

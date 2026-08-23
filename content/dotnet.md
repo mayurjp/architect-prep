@@ -1827,4 +1827,97 @@ Because the GC and JIT can be more aggressive than intuition might suggest about
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is `TimeProvider` (.NET 8+), and how does injecting it — rather than calling `DateTime.Now` directly — let code dealing with the current time be unit-tested with a fake, controllable clock?**
+
+Code calling `DateTime.Now`/`DateTime.UtcNow` directly is tightly coupled to the actual system clock, making it essentially untestable for time-dependent logic (a discount expiring at a specific time, a "how many days since signup" calculation) without manipulating the test machine's real clock — `TimeProvider` is an injectable abstraction over "what time is it right now," letting production code use the real system clock while tests substitute a `FakeTimeProvider` that can be set to any arbitrary, controllable value.
+
+```csharp
+public class DiscountService(TimeProvider timeProvider) // INJECTED, not called DIRECTLY
+{
+    public bool IsDiscountActive(Discount discount) =>
+        timeProvider.GetUtcNow() < discount.ExpiresAt; // uses the INJECTED abstraction
+
+}
+
+// PRODUCTION: registered as the REAL system clock
+builder.Services.AddSingleton(TimeProvider.System);
+
+// TEST: a FAKE, fully CONTROLLABLE clock
+var fakeTime = new FakeTimeProvider(startDateTime: DateTimeOffset.Parse("2026-01-01"));
+var service = new DiscountService(fakeTime);
+fakeTime.SetUtcNow(DateTimeOffset.Parse("2026-01-02")); // ADVANCES the fake clock EXACTLY
+    // as MUCH as the TEST needs, WITHOUT touching the REAL system clock AT ALL
+```
+
+Because the test controls exactly what "now" means for the code under test, time-dependent logic (discount expiration, scheduled task timing) becomes deterministically, reliably testable — directly closing the flaky-test gap covered earlier (a test calling `DateTime.Now` directly occasionally failing near midnight/month boundaries) by removing the dependency on the actual wall clock entirely.
+
+**Common Pitfall:** calling `DateTime.Now`/`DateTime.UtcNow` directly inside business logic rather than injecting `TimeProvider` — this makes the logic's dependency on "the current time" invisible and untestable without manipulating the real system clock, reproducing exactly the flaky, time-dependent test problem covered earlier under Testing.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is `System.Diagnostics.Metrics`' `Meter`/`Counter`/`Histogram` API, and how does it provide a vendor-neutral way to emit application metrics, consumable by any OpenTelemetry-compatible backend, without coupling application code to a specific monitoring vendor's own SDK?**
+
+Rather than calling a specific monitoring vendor's own proprietary metrics API directly (coupling application code to that one vendor), `System.Diagnostics.Metrics` provides a vendor-neutral, BCL-native API for emitting counters, histograms, and gauges — any OpenTelemetry-compatible exporter can then pick up these metrics and forward them to whichever specific backend (Prometheus, Azure Monitor, Datadog) a deployment actually uses, without the application code itself ever referencing that backend directly.
+
+```csharp
+private static readonly Meter _meter = new("MyApp.Orders");
+private static readonly Counter<int> _ordersPlaced = _meter.CreateCounter<int>("orders.placed");
+private static readonly Histogram<double> _orderProcessingTime = _meter.CreateHistogram<double>("orders.processing_time_ms");
+
+public void PlaceOrder(Order order)
+{
+    _ordersPlaced.Add(1); // VENDOR-NEUTRAL -- works REGARDLESS of WHICH backend is ACTUALLY listening
+    // ... process the order, timing it ...
+    _orderProcessingTime.Record(elapsedMs);
+}
+```
+
+```text
+Application code emits metrics via the STANDARD, BCL-native API -- COMPLETELY UNAWARE of
+  WHICH specific MONITORING backend is ACTUALLY configured
+
+An OpenTelemetry EXPORTER (configured SEPARATELY, OUTSIDE the application's OWN business
+  logic) FORWARDS these SAME metrics to PROMETHEUS, Azure MONITOR, Datadog, or ANY other
+  OpenTelemetry-COMPATIBLE backend -- SWITCHING backends REQUIRES ZERO changes to the
+  APPLICATION's OWN metric-EMITTING code AT ALL
+```
+
+Because the application never directly references a specific vendor's SDK, switching monitoring backends (or supporting multiple simultaneously) becomes purely a matter of exporter configuration, entirely decoupled from the application's own business logic — directly embodying the Dependency Inversion Principle (covered under Design Principles) applied specifically to observability/monitoring infrastructure.
+
+**Common Pitfall:** calling a specific monitoring vendor's own proprietary metrics SDK directly throughout application code — this tightly couples business logic to one specific vendor, making a future switch to a different monitoring backend require touching every single metric-emitting call site, exactly the coupling `System.Diagnostics.Metrics`' vendor-neutral abstraction is designed to avoid.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is C# 12's experimental Interceptors feature (`[InterceptsLocation]`), and how does it let a source generator literally replace a specific method call at a specific source location with a different implementation, without the original calling code changing at all?**
+
+Interceptors let a source generator declare that calls to a specific method, at *specific, precisely-identified source code locations*, should actually be redirected to a different, generated method instead — the original call site's source code is never modified, but the compiler silently substitutes the generated implementation at compile time, entirely transparent to whoever wrote the original call.
+
+```csharp
+// Original, HAND-WRITTEN call site -- NEVER modified
+var result = SomeMethod("input"); // this EXACT call, at THIS EXACT location, gets INTERCEPTED
+
+// SOURCE-GENERATOR-produced interceptor -- REDIRECTS the ABOVE call to A DIFFERENT implementation
+[InterceptsLocation(version: 1, data: "...")] // encodes the EXACT source LOCATION being intercepted
+public static string InterceptedSomeMethod(string input) => "optimized, GENERATED implementation";
+```
+
+```text
+The DEVELOPER's original source CODE is NEVER touched OR modified AT ALL -- the COMPILER
+  ITSELF silently REDIRECTS that SPECIFIC call, at that SPECIFIC location, to the
+  GENERATOR-produced implementation INSTEAD -- ENTIRELY transparent to ANYONE reading
+  the ORIGINAL, UNCHANGED source file
+```
+
+Because this mechanism lets a source generator optimize or entirely replace specific, individual method calls without any visible change to the developer's own code, it's a powerful (and, as an experimental feature, still evolving) building block for advanced compile-time code generation scenarios — such as a library detecting and specializing a specific LINQ call pattern into a hand-tuned, generated equivalent purely for performance, all invisibly, without the calling code needing to opt into anything beyond using the library normally.
+
+**Common Pitfall:** treating Interceptors as a general-purpose, everyday application-development feature — as an experimental, source-generator-focused mechanism primarily intended for library/tooling authors doing advanced compile-time optimization, using it in ordinary application code (rather than relying on well-established alternatives like ordinary method overriding or dependency injection) introduces a genuinely unusual, hard-to-discover indirection that most application code has no real need for.
+
+---
+
 ---

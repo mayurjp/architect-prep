@@ -1835,4 +1835,94 @@ Because `scoped` narrows what the compiler needs to conservatively guard against
 
 ---
 
+## Beginner — Question 22
+
+**Q22: What is `ArgumentNullException.ThrowIfNull` (.NET 6+), and how does this one-line guard replace the traditional `if (x == null) throw new ArgumentNullException(nameof(x));` boilerplate?**
+
+`ArgumentNullException.ThrowIfNull(x)` performs the exact same null-check-and-throw as the traditional pattern, but as a single, static helper method call — internally using a special compiler-supported attribute (`CallerArgumentExpression`) to automatically capture the *name* of whatever expression was actually passed in, without you needing to write `nameof(x)` yourself.
+
+```csharp
+public void ProcessOrder(Order order)
+{
+    ArgumentNullException.ThrowIfNull(order); // ONE line -- automatically THROWS
+        // "ArgumentNullException: Value cannot be null. (Parameter 'order')" if NULL
+
+    // equivalent, the TRADITIONAL, more VERBOSE way:
+    if (order is null) throw new ArgumentNullException(nameof(order));
+}
+```
+
+```text
+ThrowIfNull(order) -- the COMPILER automatically captures "order" (the LITERAL expression
+  text PASSED in) via CallerArgumentExpression -- the RESULTING exception message CORRECTLY
+  names "order" as the OFFENDING parameter, WITHOUT the DEVELOPER manually TYPING "nameof(order)"
+```
+
+Because this helper eliminates several lines of repetitive, easy-to-get-slightly-wrong boilerplate (forgetting `nameof`, or typo-ing the parameter name as a raw string) across every method needing a null guard, it's become the standard, idiomatic way to write this extremely common validation check in modern C# — a small but genuinely widespread quality-of-life improvement.
+
+**Common Pitfall:** continuing to write the verbose, manual `if (x == null) throw new ArgumentNullException(nameof(x));` pattern out of habit in a modern .NET 6+ codebase — while functionally equivalent, `ArgumentNullException.ThrowIfNull` is shorter, less error-prone (no risk of a stale/incorrect `nameof` after a parameter rename, since the compiler derives it automatically), and now the more idiomatic choice.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is a C# 13 `partial` property, and how does it extend the `partial` member concept (covered earlier for classes/methods) to let a source generator provide a property's actual implementation while a hand-written file declares only its signature?**
+
+Just as a `partial` method (covered earlier) lets one file declare a method's signature while another (often source-generator-produced) file supplies its body, a `partial` property does the same for properties — a hand-written file declares the property's *signature* (its type, whether it has a getter/setter), and a source generator supplies the actual backing implementation in a separate, generated file.
+
+```csharp
+// Hand-written file -- declares ONLY the SIGNATURE
+public partial class Person
+{
+    public partial string FullName { get; set; } // NO body HERE -- just the SIGNATURE
+}
+
+// Source-generator-produced file (NOT hand-written) -- supplies the ACTUAL implementation
+public partial class Person
+{
+    private string _fullName = "";
+    public partial string FullName
+    {
+        get => _fullName;
+        set => _fullName = value; // could include VALIDATION, CHANGE notification, etc.
+    }
+}
+```
+
+Because the hand-written declaration and the generator-produced implementation are two separate files contributing to the same `partial` type, a source generator can inject sophisticated property logic (validation, `INotifyPropertyChanged` support, covered elsewhere) while the developer's own hand-written code stays clean, containing only the property's declared signature — directly extending the same generator-friendly pattern already established for `partial` methods to properties specifically.
+
+**Common Pitfall:** assuming `partial` properties work identically to auto-implemented properties, forgetting that a `partial` property declaration with no corresponding implementing declaration elsewhere is a compile error — unlike an ordinary auto-property, a `partial` property signature is a genuine promise that *some* other partial declaration (typically source-generator-produced) will supply the actual implementation.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is `[UnsafeAccessor]` (.NET 8+), and how does it let code call a private member of another type without reflection's runtime cost, by generating a direct, JIT-compiled accessor at compile time instead?**
+
+Ordinary reflection (`GetField`/`Invoke`) accesses a private member through a runtime lookup-and-invoke mechanism carrying real, measurable per-call overhead — `[UnsafeAccessor]` instead lets you declare a special `extern` method stub that the runtime resolves, at JIT time, into a *direct* call to the target private member, with essentially the same performance characteristics as if the member had been public all along.
+
+```csharp
+[UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_privateCounter")]
+static extern ref int GetPrivateCounter(SomeClass instance); // NO reflection AT RUNTIME --
+    // the JIT resolves this DIRECTLY to the PRIVATE field, AT COMPILE/JIT time
+
+ref int counter = ref GetPrivateCounter(instance);
+counter = 42; // DIRECTLY mutates the PRIVATE field -- NO Reflection API call INVOLVED at ALL
+```
+
+```text
+Ordinary Reflection: FieldInfo.GetValue()/SetValue() -- a RUNTIME lookup-and-INVOKE
+  mechanism -- REAL, MEASURABLE per-call OVERHEAD, EVERY single TIME it's USED
+
+[UnsafeAccessor]: the RUNTIME resolves the ACCESS at JIT time -- SUBSEQUENT calls are
+  ESSENTIALLY as FAST as a DIRECT, ORDINARY method/field ACCESS would HAVE BEEN, HAD the
+  MEMBER been PUBLIC in the FIRST place
+```
+
+Because this feature avoids reflection's inherent per-call overhead while still accessing a genuinely private member, it's specifically useful for high-performance interop/serialization libraries that need to touch private state without paying reflection's cost — but it deliberately bypasses the encapsulation a private member was meant to enforce, so it's a narrow, advanced tool rather than a general-purpose replacement for ordinary access modifiers.
+
+**Common Pitfall:** reaching for `[UnsafeAccessor]` broadly to bypass encapsulation for ordinary application code convenience, rather than reserving it for genuinely performance-critical library code (serializers, ORMs) that specifically needs to avoid reflection's overhead — routinely bypassing another type's intended encapsulation boundary undermines the very invariants that type's private members were designed to protect.
+
+---
+
 ---

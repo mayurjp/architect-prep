@@ -1901,4 +1901,75 @@ Because accepting the broadest reasonable parameter type minimizes what a caller
 
 ---
 
+## Beginner — Question 21
+
+**Q21: How does a method's default parameter value silently changing behavior for existing callers — without them ever updating their own call site — violate both the Principle of Least Astonishment and backward compatibility simultaneously?**
+
+Changing a method's default parameter value affects every existing call site that relied on that default *without recompiling or reviewing anything* — a caller who wrote `SendEmail(message)` expecting the *old* default behavior (say, `retries: 3`) is silently affected the moment the library author changes the default to `retries: 0`, with no compile error, no warning, and no visible signal that anything changed at all.
+
+```csharp
+// VERSION 1 of a shared library
+public void SendEmail(string message, int retries = 3) { ... }
+
+// Caller code, WRITTEN once, NEVER touched again:
+SendEmail("Hello"); // relies IMPLICITLY on the DEFAULT of 3 retries
+
+// VERSION 2 -- the LIBRARY author changes the DEFAULT
+public void SendEmail(string message, int retries = 0) { ... } // a SILENT behavior CHANGE
+
+// The CALLER's CODE above is COMPLETELY UNCHANGED, yet its ACTUAL BEHAVIOR (retries)
+// has SILENTLY changed -- WITHOUT the caller EVER reviewing OR approving THIS change
+```
+
+Because the caller's source code never changes at all, this kind of default-value change is one of the most surprising, hardest-to-detect breaking changes a library can introduce — violating Least Astonishment (the caller had no reason to expect their unchanged code's behavior would shift) while also technically being a breaking change masquerading as a harmless internal default tweak.
+
+**Common Pitfall:** treating a default parameter value as a purely internal implementation detail safe to change freely between versions, without recognizing that every existing caller relying on the old default is silently, invisibly affected — a genuine behavioral change to a public API's default value deserves the same careful consideration (and, ideally, a major version bump per Semantic Versioning, covered under DevOps) as any other breaking change.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: Why must the Composition Root, as a direct consequence of the Dependency Inversion Principle, live in the outermost, most volatile layer of an application — the entry point — rather than in a reusable library?**
+
+The Composition Root (covered under OOP) is where every concrete dependency actually gets wired up — but if it lived inside a reusable library rather than the application's own entry point, that library would need to know about and reference *every* concrete implementation any consumer might ever want to use, reintroducing exactly the concrete-dependency coupling DIP is meant to eliminate; only the outermost application entry point (which already, necessarily, knows about and depends on every concrete piece being assembled) is the appropriate place for this wiring to actually happen.
+
+```csharp
+// A REUSABLE LIBRARY -- depends ONLY on ABSTRACTIONS -- NEVER references ANY concrete
+// implementation, and CERTAINLY never contains a Composition Root ITSELF
+public class OrderProcessor(IPaymentGateway gateway) { ... }
+
+// The APPLICATION's OWN entry point (Program.cs) -- the ONLY appropriate PLACE for the
+// COMPOSITION ROOT -- it's ALREADY the ONE place that KNOWS about EVERY concrete piece
+services.AddScoped<IPaymentGateway, StripePaymentGateway>(); // a CONCRETE choice, made HERE,
+                                                                // ONLY at the OUTERMOST layer
+```
+
+Because a reusable library is meant to be usable by many different applications, each potentially choosing entirely different concrete implementations for the same abstractions, baking a specific concrete wiring decision into the library itself would defeat its entire reusability — the Composition Root's job (deciding "use *this* concrete implementation *here*") is inherently an application-specific decision, correctly belonging only to the outermost, most volatile layer that's uniquely positioned to make it.
+
+**Common Pitfall:** embedding concrete service registrations or dependency wiring inside a shared, reusable library rather than the consuming application's own entry point — this forces every consumer of that library to accept whatever concrete choices the library author baked in, defeating the library's own reusability and violating DIP's actual intent (letting the application, not the library, decide which concrete mechanism serves a given abstraction).
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is the Stable Abstractions Principle (from Robert Martin's package-design principles, complementing the Stable Dependencies Principle covered earlier), and how does it specifically require a package other packages stably depend on to also be sufficiently abstract, rather than concrete?**
+
+The Stable Dependencies Principle (covered earlier) says dependencies should point toward more stable packages — but a package that's *stable* (hard to change, because many others depend on it) and simultaneously *concrete* (containing lots of specific implementation detail) becomes genuinely difficult to evolve at all, since any change risks breaking every dependent; the Stable Abstractions Principle adds the complementary requirement: a package that's stable should *also* be correspondingly abstract, so it can still be extended (via new implementations of its abstractions) without needing to modify its own already-stable, hard-to-change code.
+
+```text
+A package that's BOTH stable (MANY packages depend ON it) AND CONCRETE (full of
+  SPECIFIC implementation DETAIL): GENUINELY difficult to EVOLVE -- ANY change RISKS
+  breaking EVERY dependent, yet the CONCRETE nature means CHANGE is OFTEN still NEEDED
+
+A package that's STABLE AND ABSTRACT (mostly INTERFACES/abstract CLASSES): NEW
+  functionality can be added via NEW implementations of ITS abstractions, WITHOUT
+  ever needing to MODIFY the STABLE package's OWN, ALREADY-depended-upon CODE at ALL
+```
+
+Because an abstract package can be *extended* (new implementations added) without being *modified* (its own existing code changed), pairing stability with abstraction gives a package the best of both properties — safe to depend on heavily (stability) while still remaining genuinely extensible (via abstraction) — directly connecting to the Open/Closed Principle's own "open for extension, closed for modification" framing, applied here specifically at the package/module level rather than a single class.
+
+**Common Pitfall:** allowing a heavily-depended-upon, "stable" package to accumulate significant concrete implementation detail over time — this creates a package that's both hard to change (many dependents) and frequently *needing* to change (concrete logic evolving), a genuinely painful combination the Stable Abstractions Principle specifically warns against by requiring stability and abstraction to travel together.
+
+---
+
 ---

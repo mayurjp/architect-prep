@@ -2245,3 +2245,75 @@ Because each grammar rule corresponds to exactly one Expression class, and a rec
 **Common Pitfall:** treating the Interpreter pattern as a purely academic, rarely-applicable GoF pattern (as the earlier coverage noted regarding how rarely it's hand-implemented in typical application code) without recognizing that its underlying structure is exactly what's already happening, likely without anyone calling it "the Interpreter pattern" explicitly, inside any regex engine, expression evaluator, or hand-written recursive-descent parser a codebase might already contain.
 
 ---
+
+## Beginner — Question 21
+
+**Q21: How does a unit testing framework's own test lifecycle (Setup/Test/Teardown, covered broadly under Testing) embody the Template Method pattern directly?**
+
+A test framework's base class (or attribute-driven lifecycle) defines the *overall sequence* — run setup, run the test method, run teardown — while leaving the *specific content* of each step to whatever the individual test class actually implements, exactly mirroring the Template Method pattern's structure of a fixed algorithm skeleton with pluggable, subclass-provided steps.
+
+```csharp
+public abstract class TestBase // the FRAMEWORK's own base class -- defines the FIXED SEQUENCE
+{
+    [SetUp] public virtual void Setup() { }      // a HOOK (covered earlier) -- OPTIONAL to override
+    public abstract void Test();                  // MUST be implemented -- the ACTUAL test logic
+    [TearDown] public virtual void Teardown() { } // ALSO a hook -- OPTIONAL
+
+    // the FRAMEWORK itself calls THESE in a FIXED order: Setup() -> Test() -> Teardown() --
+    // EXACTLY the Template Method pattern's "algorithm SKELETON is FIXED, STEPS are PLUGGABLE" structure
+}
+```
+
+Because the framework's own execution engine calls `Setup()`, the actual test method, and `Teardown()` in a guaranteed, fixed order — regardless of which specific test class is running — every test author is, whether they realize it or not, writing pluggable steps into a Template Method the testing framework itself defines and controls the overall sequence of.
+
+**Common Pitfall:** viewing "Template Method" as an obscure, rarely-used GoF pattern with no everyday relevance, without recognizing that virtually every developer who has ever written a unit test has already used it extensively — every testing framework's Setup/Test/Teardown lifecycle is a direct, concrete application of exactly this pattern's structure.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: How does a logging framework's own log-level filtering/appender chain mirror the Chain of Responsibility pattern's general structure, with each appender deciding whether to handle a log entry or pass it along?**
+
+A logging framework often chains multiple appenders/handlers together — a console appender, a file appender, a remote-logging-service appender — each configured with its own minimum severity threshold, deciding independently whether a given log entry meets its own criteria (write it) or should simply be passed along to the next appender in the chain, directly mirroring Chain of Responsibility's core structure (covered earlier).
+
+```csharp
+// A LOGGING framework's INTERNAL chain -- EACH appender DECIDES independently whether
+// to HANDLE (write) a GIVEN log entry, or PASS it ALONG to the NEXT appender in the CHAIN
+ConsoleAppender (threshold: Info)   -> writes INFO+ entries, then PASSES the entry ALONG
+FileAppender (threshold: Warning)   -> writes ONLY Warning+ entries, PASSES everything ALONG
+AlertingAppender (threshold: Error) -> writes ONLY Error+ entries (e.g., PAGES an on-call engineer)
+
+// a LOG entry at "Warning" level: SKIPPED by ConsoleAppender's OWN threshold logic? NO --
+// actually WRITTEN by BOTH Console AND File appenders (BOTH thresholds SATISFIED), but
+// SKIPPED by AlertingAppender (its THRESHOLD is HIGHER, at Error)
+```
+
+Because each appender in the chain independently evaluates the log entry against its own criteria and decides its own action, without any single, centralized piece of code needing to know about every possible appender and its specific threshold, this structure lets new appenders be added to (or removed from) the chain without touching any existing appender's own logic — precisely the decoupling benefit Chain of Responsibility (covered earlier) provides in its more general form.
+
+**Common Pitfall:** implementing a logging system's routing logic as one large, centralized `if`/`switch` statement checking every possible appender and severity combination directly, rather than letting each appender independently decide for itself — this reintroduces the exact tight coupling the Chain of Responsibility pattern (and the appender-chain design most real logging frameworks already use) is specifically meant to avoid.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does a Dependency Injection container's own "resolve this interface to that concrete type" configuration largely supersede hand-written Abstract Factory classes for most modern applications?**
+
+The Abstract Factory pattern (covered earlier) exists to let client code create a family of related objects without knowing their concrete types — a DI container achieves largely the same goal through its own registration/resolution mechanism: registering which concrete type satisfies a given interface, and letting the container itself construct and hand back the correct concrete instance whenever that interface is requested, without the requesting code ever needing a hand-written Factory class at all.
+
+```csharp
+// Hand-written ABSTRACT FACTORY -- the CLASSIC GoF approach
+public interface IUIFactory { IButton CreateButton(); ICheckbox CreateCheckbox(); }
+public class DarkThemeFactory : IUIFactory { /* creates DARK-themed CONCRETE controls */ }
+
+// DI CONTAINER registration -- achieves a SIMILAR goal, WITHOUT a HAND-WRITTEN Factory CLASS
+services.AddTransient<IButton, DarkThemeButton>();
+services.AddTransient<ICheckbox, DarkThemeCheckbox>();
+// requesting code simply INJECTS "IButton"/"ICheckbox" -- the CONTAINER itself handles
+// CONSTRUCTING the CORRECT concrete type, WITHOUT a HAND-WRITTEN Factory class INVOLVED at ALL
+```
+
+Because a DI container already provides a general-purpose, configuration-driven mechanism for "resolve this abstraction to that concrete implementation," most applications no longer need to hand-write dedicated Abstract Factory classes for the common case the container already handles natively — Abstract Factory remains genuinely useful specifically when creating a *family* of related objects that must be *mutually consistent* (all Dark-theme, or all Light-theme, together), a nuance a container's simple one-interface-to-one-implementation registration doesn't automatically enforce on its own.
+
+**Common Pitfall:** hand-writing a full Abstract Factory class hierarchy for a scenario a DI container's ordinary registration/resolution already handles perfectly well — for the common case of "give me an implementation of this interface," a DI container's built-in mechanism is simpler and requires less custom code; Abstract Factory earns its complexity specifically for the family-of-mutually-consistent-objects scenario a simple container registration doesn't directly express.
+
+---
