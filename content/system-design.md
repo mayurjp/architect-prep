@@ -2144,4 +2144,74 @@ Because Vector Clocks capture genuine causal relationships (has this node "seen"
 
 ---
 
+## Beginner — Question 20
+
+**Q20: How does allowing a small number of test requests through during a Circuit Breaker's Half-Open state — rather than just one — give a more reliable signal about whether the downstream service has actually recovered?**
+
+A single test request during Half-Open (covered earlier at a basic level) risks a false signal in either direction — one lucky success doesn't prove the downstream service is genuinely, reliably healthy again (it might fail the very next real request), and one unlucky failure doesn't necessarily mean it's still fully down (a single transient blip could cause it). Allowing a small *batch* of test requests through and requiring a reasonable success rate among them provides a statistically more reliable signal than any single request could.
+
+```text
+Half-Open, SINGLE test request: SUCCEEDS -- Circuit CLOSES fully, resuming FULL traffic --
+  but WHAT IF that ONE success was JUST LUCK, and the SERVICE immediately FAILS again
+  on the VERY NEXT real request? A SINGLE data POINT provides WEAK confidence EITHER way
+
+Half-Open, a SMALL BATCH (say, 5) of test requests: REQUIRES a REASONABLE SUCCESS rate
+  (e.g., 4 OUT of 5) before FULLY closing the circuit -- a SINGLE, ISOLATED failure/success
+  doesn't SWING the DECISION alone -- a MORE STATISTICALLY reliable signal of ACTUAL, GENUINE recovery
+```
+
+Because a downstream service's recovery is rarely perfectly binary (fully down one moment, fully healthy the next), sampling a small batch of requests during Half-Open smooths out the noise a single test request would be vulnerable to — providing a more robust basis for the "should I fully reopen traffic, or go back to Open" decision than any single data point could support.
+
+**Common Pitfall:** implementing a Circuit Breaker's Half-Open state with only a single test request, then being surprised when the circuit flaps rapidly between Open and Closed due to noisy, inconsistent individual test results — a small batch of test requests with a reasonable success-rate threshold provides meaningfully more stable, reliable recovery detection than relying on any single request's outcome.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: How does using a Read Replica specifically for offloading analytical/reporting queries away from the primary database protect the primary's performance for transactional (OLTP) workloads from a heavy, long-running analytical query?**
+
+A heavy analytical query (aggregating millions of rows for a report) can consume significant CPU/IO/lock resources for an extended period — running it directly against the primary database risks degrading the primary's ability to quickly serve the frequent, small, latency-sensitive transactional queries (OLTP workloads, covered elsewhere) that the actual application depends on; directing analytical queries to a Read Replica instead isolates that heavy resource consumption entirely away from the primary.
+
+```text
+WITHOUT a read replica: a HEAVY monthly SALES report query RUNS directly against the
+  PRIMARY database, CONSUMING significant CPU/IO for SEVERAL minutes -- ORDINARY,
+  TRANSACTIONAL queries (a CUSTOMER placing an ORDER) COMPETE for the SAME resources,
+  potentially experiencing NOTICEABLE SLOWDOWNS DURING the report's EXECUTION
+
+WITH a read replica: the HEAVY report query RUNS against the REPLICA instead -- the
+  PRIMARY's OWN resources remain ENTIRELY DEDICATED to ORDINARY, TRANSACTIONAL workloads --
+  the REPORT's resource CONSUMPTION has ZERO impact on the PRIMARY's OWN OLTP performance
+```
+
+Because a Read Replica's data can tolerate some replication lag (covered elsewhere) without meaningfully affecting a monthly report's own usefulness, this trade-off (accepting slightly stale replica data for analytical purposes) is usually well worth the isolation benefit — protecting the primary's genuinely latency-sensitive transactional workload from being degraded by a fundamentally different, heavier query pattern that doesn't actually need up-to-the-millisecond freshness anyway.
+
+**Common Pitfall:** running heavy, long-running analytical/reporting queries directly against the primary database "since it's the same data anyway," without considering the resource contention this creates for the primary's actual, latency-sensitive transactional workload — a Read Replica specifically dedicated to analytical queries isolates this contention entirely, at the cost of the replica's data being slightly less fresh than the primary's own.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is a Fencing Token — a monotonically increasing number issued with each leadership grant — and how does a downstream resource rejecting a request carrying an older fencing token than one it's already seen protect against a stale, deposed leader still attempting to act?**
+
+A distributed lock/leader-election system can experience a scenario where a leader believes it still holds leadership (perhaps due to a long garbage-collection pause or network delay) even after the system has already elected a *new* leader — a Fencing Token closes this gap: every time leadership changes, a new, strictly higher token number is issued, and any downstream resource receiving a request includes that token, rejecting any request whose token is *lower* than the highest one it's already seen, structurally preventing a stale, deposed leader from successfully acting even if it doesn't yet realize it's been deposed.
+
+```text
+Leader A is granted leadership WITH fencing token 5 -- experiences a LONG GC pause,
+  during WHICH the system TIMES OUT waiting for it and ELECTS Leader B, granted TOKEN 6
+
+Leader A's GC pause ENDS -- it (INCORRECTLY) still BELIEVES it's the LEADER, and attempts
+  to WRITE to a shared RESOURCE, INCLUDING its OWN token (5)
+
+The SHARED RESOURCE has ALREADY seen token 6 (from Leader B's OWN, MORE RECENT writes) --
+  it REJECTS Leader A's write OUTRIGHT, since TOKEN 5 is LOWER than the HIGHEST token
+  (6) it has ALREADY observed -- Leader A's STALE write NEVER actually SUCCEEDS, EVEN
+  though LEADER A itself doesn't YET REALIZE it's been DEPOSED
+```
+
+Because the downstream resource enforces this token-ordering check independently, it structurally prevents a "split-brain"-style scenario where a deposed but still-active leader could otherwise corrupt shared state — the fencing mechanism doesn't require the stale leader to *know* it's been deposed; it simply guarantees its actions can never successfully take effect once a newer leader's higher token has already been observed.
+
+**Common Pitfall:** implementing distributed leader election without a corresponding fencing-token check on the downstream resources a leader actually writes to — even a technically-correct leader election algorithm can't prevent a genuinely deposed-but-still-active leader (due to a GC pause, a network partition healing late) from attempting writes; the fencing token check at the resource level is what actually prevents those stale writes from succeeding, closing a gap leader election alone doesn't address.
+
+---
+
 ---

@@ -1636,4 +1636,92 @@ Because this flag structurally forecloses an entire privilege-escalation techniq
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What is a Docker `LABEL` instruction, and how does attaching arbitrary metadata — a version, a maintainer, a git commit SHA — directly to an image let tooling later query/filter images by that metadata?**
+
+`LABEL` attaches arbitrary key-value metadata directly to an image at build time — this metadata travels with the image wherever it's pushed/pulled, and can later be queried via `docker inspect` or `docker images --filter`, letting tooling (or a human) identify exactly which commit, build, or version a specific image corresponds to without needing a separate, external tracking system.
+
+```dockerfile
+LABEL org.opencontainers.image.version="2.3.1" \
+      org.opencontainers.image.revision="a1b2c3d4" \
+      maintainer="platform-team@example.com"
+```
+
+```bash
+docker inspect myapp:latest --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+# retrieves the EXACT git commit SHA this SPECIFIC image was BUILT from -- DIRECTLY from
+# the IMAGE itself, WITHOUT needing a SEPARATE, EXTERNAL build-metadata TRACKING system
+```
+
+Because this metadata is embedded directly into the image and travels with it through the entire registry/deployment pipeline, it provides a self-contained, always-available way to answer "exactly what is this image, and where did it come from" — directly connecting to the earlier-covered practice of embedding build metadata (a commit SHA) into deployed artifacts, applied specifically at the Docker image level via the standardized `LABEL` mechanism.
+
+**Common Pitfall:** tracking image provenance (which commit/build produced a specific image) purely through external systems (a CI pipeline's own logs, a separate spreadsheet) rather than embedding it directly into the image via `LABEL` — this makes the information harder to retrieve later, especially for an image that's already been deployed and separated from its original CI pipeline run's context; `LABEL` keeps this information self-contained and always retrievable directly from the image itself.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: How does Docker Compose's `depends_on` with `condition: service_completed_successfully` (as distinct from `service_healthy`, covered earlier) let a one-shot init/migration container run to completion before a dependent, long-running service even starts?**
+
+`service_healthy` (covered earlier) waits for a *long-running* service to report itself healthy — `service_completed_successfully` instead is for a genuinely one-shot container (a database migration runner, a data-seeding script) that's expected to *finish and exit* with a success status, and only once it has actually completed successfully does Compose start whatever depends on it.
+
+```yaml
+services:
+  migrator:
+    image: myapp-migrator
+    command: ["dotnet", "ef", "database", "update"] # runs ONCE, then EXITS
+
+  api:
+    image: myapp-api
+    depends_on:
+      migrator:
+        condition: service_completed_successfully # WAITS for "migrator" to EXIT SUCCESSFULLY
+                                                      # BEFORE "api" is EVEN STARTED
+```
+
+```text
+WITHOUT this condition: "api" might START BEFORE "migrator" has FINISHED applying database
+  MIGRATIONS -- "api" could ATTEMPT to query TABLES that DON'T yet EXIST, or that are STILL
+  mid-MIGRATION -- a GENUINE startup-ordering RACE condition
+
+WITH service_completed_successfully: "api" is GUARANTEED to start ONLY AFTER "migrator"
+  has ALREADY finished, SUCCESSFULLY, EXITING with a ZERO status CODE
+```
+
+Because this condition specifically waits for a *completion* signal (a one-shot process exiting successfully) rather than an *ongoing health* signal (a long-running service reporting itself ready), it correctly models the genuinely different dependency relationship a migration/init task has with the services depending on its output — distinct from the ongoing-health dependency `service_healthy` models for long-running services.
+
+**Common Pitfall:** using `service_healthy` (or plain `depends_on` with no condition at all) for a dependency on a one-shot migration/init container — a health check doesn't make sense for a process that's meant to run once and exit; `service_completed_successfully` is the correct condition specifically for this "must finish successfully before I start" dependency shape.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is a Docker image's Manifest List — the underlying mechanism behind multi-platform images, covered earlier — and how does one single image tag actually point at multiple, architecture-specific manifests, with the client choosing the correct one automatically?**
+
+A Manifest List (also called an "image index") is itself a small, structured document listing several architecture-specific image manifests (one for `linux/amd64`, one for `linux/arm64`) under one shared tag — when a client pulls that tag, the registry serves the Manifest List first, and the client automatically selects and downloads only the manifest matching its own actual platform, entirely transparently.
+
+```json
+{
+  "manifests": [
+    { "platform": { "architecture": "amd64", "os": "linux" }, "digest": "sha256:aaa..." },
+    { "platform": { "architecture": "arm64", "os": "linux" }, "digest": "sha256:bbb..." }
+  ]
+}
+```
+
+```text
+"myapp:latest" is ACTUALLY a MANIFEST LIST, POINTING at TWO separate, ARCHITECTURE-specific
+  image MANIFESTS -- an amd64 SERVER pulling "myapp:latest" AUTOMATICALLY receives the
+  amd64-specific MANIFEST/image (digest AAA) -- an ARM64 Raspberry Pi pulling the EXACT
+  SAME TAG AUTOMATICALLY receives the arm64-specific ONE (digest BBB) INSTEAD -- BOTH
+  clients use the IDENTICAL tag, but GET GENUINELY DIFFERENT, PLATFORM-appropriate images
+```
+
+Because the Manifest List's platform-selection logic happens entirely client-side, transparently, a single published tag can correctly serve every supported architecture without requiring users to know or specify which architecture-specific variant they need — this is the concrete mechanism underlying `docker buildx build --platform` (covered earlier), which actually constructs and pushes this Manifest List alongside each architecture-specific image it builds.
+
+**Common Pitfall:** assuming a single Docker image tag always refers to exactly one, single image — for any multi-platform-published tag, it actually refers to a Manifest List pointing at several distinct, architecture-specific images, with the *specific* image your machine actually receives depending entirely on your own platform, resolved transparently and automatically at pull time.
+
+---
+
 ---

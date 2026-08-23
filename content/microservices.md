@@ -2344,4 +2344,79 @@ Because every phase of this migration is independently reversible (falling back 
 
 ---
 
+## Beginner — Question 21
+
+**Q21: How does a consumer subscribing to multiple versions of the same event type simultaneously, during a migration window, let a producer upgrade its event schema without requiring every consumer to upgrade at the same time?**
+
+Rather than forcing a hard, coordinated cutover where every consumer must upgrade to understand a new event schema at the exact same moment a producer starts publishing it, the producer can publish *both* the old and new event versions side-by-side for a transition period — consumers still on the old schema keep working against the version they already understand, while consumers that have already upgraded consume the new version, letting each team migrate on their own independent schedule.
+
+```text
+Producer PUBLISHES BOTH: "OrderPlacedV1" (the OLD schema, for consumers NOT yet upgraded)
+  AND "OrderPlacedV2" (the NEW schema, with an ADDITIONAL field) -- SIMULTANEOUSLY, for
+  the ENTIRE transition WINDOW
+
+Consumer A (NOT yet upgraded): keeps SUBSCRIBING to "OrderPlacedV1" -- CONTINUES working
+  EXACTLY as before, COMPLETELY UNAWARE anything CHANGED
+
+Consumer B (ALREADY upgraded): SUBSCRIBES to "OrderPlacedV2" INSTEAD -- gets the NEW field
+  it ACTUALLY needs
+
+ONCE every CONSUMER has EVENTUALLY migrated to V2, the PRODUCER can FINALLY stop
+  publishing V1 ENTIRELY -- WITHOUT ANY consumer EVER being FORCED into an ABRUPT,
+  COORDINATED, all-at-ONCE cutover
+```
+
+Because each consuming team can migrate independently, at their own pace, without the producer team needing to coordinate a simultaneous cutover across every consumer, this dual-publishing approach directly mirrors the same incremental-migration philosophy as Branch by Abstraction (covered elsewhere) — trading some temporary publishing overhead (maintaining two event versions simultaneously) for eliminating the risk and coordination burden of a hard, all-at-once schema cutover.
+
+**Common Pitfall:** publishing a breaking event schema change and expecting every subscribing consumer to upgrade simultaneously, in perfect coordination — in a genuinely decoupled microservices architecture, different consumer teams operate on independent release schedules, making a hard, simultaneous cutover impractical; publishing both versions during a transition window respects each consumer's own independent migration timeline.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: How does a Saga's choice between Orchestration and Choreography (covered earlier) often depend specifically on the number of steps/services involved — a two-service Saga favoring Choreography's simplicity, versus a five-plus-service Saga favoring Orchestration's centralized visibility?**
+
+For a Saga spanning just two services, Choreography's simplicity (each service reacting to the other's events, with no central coordinator needed at all) genuinely is simpler — there's no meaningful "flow" complex enough to warrant a dedicated Orchestrator. As the number of participating services grows, Choreography's event-chain becomes progressively harder to trace and reason about (covered earlier as the "Saga Choreography Event Chain Depth" problem) — at that point, an Orchestrator's single, centralized definition of the entire flow becomes genuinely valuable for maintainability and debuggability, outweighing the added architectural complexity of introducing a coordinator.
+
+```text
+2-service Saga (Order -> Inventory): Choreography is GENUINELY simpler -- OrderService
+  publishes "OrderPlaced," InventoryService REACTS -- NO orchestrator NEEDED for SUCH a
+  SHORT, SIMPLE flow
+
+5+ service Saga (Order -> Inventory -> Payment -> Shipping -> Notification, EACH with
+  its OWN compensating LOGIC): Choreography's EVENT chain becomes GENUINELY hard to
+  TRACE -- "WHO reacts to WHAT, in WHAT order, and WHAT happens if step 3 FAILS" requires
+  MENTALLY reconstructing the ENTIRE chain from FIVE separate services' INDEPENDENT event
+  handlers -- an ORCHESTRATOR's SINGLE, EXPLICIT flow definition becomes GENUINELY valuable HERE
+```
+
+Because the complexity of reasoning about a choreographed flow grows non-linearly with the number of participating services (each new service adds potential event-chain paths, not just one more linear step), the crossover point where Orchestration's centralized-coordinator overhead becomes worth it typically arrives somewhere around three-to-five participating services — though this is a practical heuristic, not a hard rule, and team familiarity/tooling maturity also genuinely factor into the actual decision.
+
+**Common Pitfall:** defaulting to Choreography for every Saga regardless of its actual complexity, purely because it avoids introducing a centralized coordinator — for a genuinely complex, many-service flow, this can produce exactly the hard-to-trace, hard-to-debug event chain covered earlier, where an Orchestrator's centralized visibility would have been the more maintainable choice despite its added architectural component.
+
+---
+
+## Advanced — Question 21
+
+**Q21: How does applying Interface Segregation (covered under Design Principles) to a microservice's own public API — exposing separate, narrowly-scoped endpoints per consumer need, rather than one broad, general-purpose endpoint — reduce coupling between a service and its various consumers?**
+
+A single, broad endpoint trying to serve every possible consumer's needs (returning every field any consumer might ever want) forces every consumer to depend on the entire, ever-growing response shape, even the parts they never actually use — directly mirroring ISP's core insight (covered under Design Principles) applied at the microservice API level: a consumer depending on fields it never uses is still coupled to changes in those fields, exactly the unnecessary coupling ISP warns against.
+
+```text
+ONE broad, "SERVE EVERYONE" endpoint: "GET /orders/5" returns EVERY possible field ANY
+  consumer MIGHT ever want -- the SHIPPING service, ONLY caring about the SHIPPING address,
+  is STILL COUPLED to the ENTIRE response shape -- a CHANGE to a COMPLETELY unrelated field
+  (a PRICING field the shipping SERVICE never even TOUCHES) can STILL break ITS deserialization
+
+SEPARATE, narrowly-scoped endpoints: "GET /orders/5/shipping-info" returns ONLY what the
+  SHIPPING service actually NEEDS -- "GET /orders/5/pricing-info" returns ONLY pricing DATA,
+  for a DIFFERENT consumer -- EACH consumer depends ONLY on the SPECIFIC slice it ACTUALLY uses
+```
+
+Because each narrowly-scoped endpoint's contract only needs to remain stable for the specific consumer(s) actually depending on it, a change to one endpoint's shape has a much smaller, more precisely-understood blast radius than a change to one giant, everyone-depends-on-it endpoint — directly reducing the coupling surface between a service and its various, differently-needing consumers, the same underlying benefit ISP provides at the interface/class level.
+
+**Common Pitfall:** designing one broad, "kitchen sink" endpoint intended to serve every possible consumer's needs at once, reasoning that it's simpler to maintain "just one endpoint" — this actually increases coupling, since every consumer becomes indirectly dependent on the entire response shape, including fields it never uses, making the endpoint harder to safely evolve without risking every consumer, not just the ones that would have genuinely been affected by a more narrowly-scoped change.
+
+---
+
 ---

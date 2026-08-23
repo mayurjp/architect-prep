@@ -1855,4 +1855,91 @@ Because Topology Spread Constraints directly express the actual distribution goa
 
 ---
 
+## Beginner — Question 20
+
+**Q20: How does `kubectl logs -f --previous` retrieving logs from a crashed container's previous instance, rather than its current, restarted one, help diagnose why it crashed in the first place?**
+
+When a container crashes and Kubernetes restarts it (per its restart policy), `kubectl logs` by default shows the *current*, freshly-restarted instance's logs — which are of no help at all in understanding why the *previous* instance actually crashed, since that instance's own logs were specific to whatever led up to its failure; `--previous` retrieves exactly that prior instance's logs instead, which usually contain the actual error/stack trace explaining the crash.
+
+```bash
+kubectl logs my-pod --previous # retrieves logs from the CRASHED, PREVIOUS container
+                                  # instance -- NOT the FRESHLY-restarted CURRENT one
+```
+
+```text
+WITHOUT --previous: "kubectl logs my-pod" shows the CURRENT, JUST-restarted instance's
+  logs -- which might show NOTHING useful at ALL, since it's ONLY just STARTED and hasn't
+  YET encountered WHATEVER caused the PREVIOUS crash
+
+WITH --previous: retrieves the ACTUAL logs from the crashed INSTANCE -- typically
+  containing the REAL error message/stack TRACE explaining EXACTLY why it CRASHED
+```
+
+Because a container's logs are tied to that *specific* container instance's own lifetime (not the Pod's overall, ongoing identity across restarts), diagnosing a `CrashLoopBackOff` (covered elsewhere) genuinely requires retrieving the *previous* instance's logs — the current, restarted instance simply hasn't been running long enough to have logged anything relevant to the actual crash cause yet.
+
+**Common Pitfall:** running `kubectl logs` without `--previous` on a Pod stuck in `CrashLoopBackOff`, then being confused by minimal or unhelpful log output — the current instance's logs only cover its own brief runtime since the last restart; `--previous` is essential for actually seeing what caused the crash that triggered the restart in the first place.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is a Kubernetes `PriorityClass`'s `globalDefault: true` setting, and how does it let a cluster assign a default priority to every Pod that doesn't explicitly specify one, rather than leaving them at an undefined, lowest priority?**
+
+By default, a Pod without an explicit `priorityClassName` receives priority `0` — `globalDefault: true` on a specific `PriorityClass` lets a cluster administrator designate a *different* class as the default applied automatically to any Pod that doesn't explicitly specify one, ensuring ordinary, unspecified Pods get a sensible baseline priority rather than always defaulting to the absolute lowest.
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: standard-priority
+value: 1000
+globalDefault: true # applies AUTOMATICALLY to ANY Pod that DOESN'T explicitly specify a priorityClassName
+description: "Default priority for ordinary application workloads"
+```
+
+```text
+WITHOUT a globalDefault PriorityClass: a Pod with NO explicit priorityClassName gets
+  priority 0 -- the ABSOLUTE LOWEST -- meaning it's the FIRST candidate for PREEMPTION
+  (covered earlier) whenever CLUSTER capacity gets TIGHT, EVEN IF it's an ORDINARY,
+  IMPORTANT application workload that was SIMPLY never explicitly GIVEN a priority CLASS
+
+WITH a globalDefault PriorityClass set to a SENSIBLE, NON-ZERO value: ORDINARY Pods
+  AUTOMATICALLY receive a REASONABLE baseline PRIORITY, WITHOUT every SINGLE Pod SPEC
+  needing to EXPLICITLY declare "priorityClassName: standard-priority" ITSELF
+```
+
+Because leaving every unspecified Pod at priority `0` by default can unintentionally make ordinary, important workloads the *first* candidates for preemption during genuine capacity contention, setting a sensible `globalDefault` ensures the common case (a Pod spec that simply never mentioned priority at all) gets treated as a reasonable, "normal" priority rather than the absolute bottom of the priority scale.
+
+**Common Pitfall:** leaving every Pod at the implicit priority-0 default, without setting a `globalDefault` `PriorityClass`, then being surprised that ordinary, important workloads get preempted first during a capacity crunch — explicitly designating a sensible default priority class ensures Pods that simply never specified a priority aren't automatically treated as the least important workloads in the entire cluster.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does the guaranteed ordering between Mutating and Validating Admission Webhooks — mutating webhooks always run first — let a mutating webhook inject a default value that a validating webhook then checks?**
+
+Kubernetes guarantees Mutating Admission Webhooks (covered earlier) run *before* Validating Admission Webhooks for the same request — this ordering is deliberate: a mutating webhook can inject a missing default value (a resource limit, a required label) into a resource *before* a validating webhook subsequently checks that the resource now satisfies whatever policy it enforces, letting the two work together as a coordinated pipeline rather than independently.
+
+```text
+STEP 1 (Mutating Webhook runs FIRST): a Pod SPEC arrives MISSING a "team" LABEL -- the
+  mutating WEBHOOK automatically INJECTS a DEFAULT "team: unassigned" LABEL, if NONE was PROVIDED
+
+STEP 2 (Validating Webhook runs SECOND): CHECKS that EVERY Pod has a "team" LABEL PRESENT --
+  THANKS to Step 1's MUTATION, this CHECK now ALWAYS PASSES for the "team" label SPECIFICALLY,
+  since ANY Pod MISSING it was ALREADY given the DEFAULT VALUE before VALIDATION even RAN
+```
+
+```text
+IF the ORDER were REVERSED (validation BEFORE mutation): a Pod MISSING the "team" label
+  would FAIL validation IMMEDIATELY, BEFORE the MUTATING webhook ever GOT a CHANCE to
+  INJECT the DEFAULT value that WOULD have made it VALID -- the GUARANTEED "mutate FIRST"
+  ordering is SPECIFICALLY what makes THIS "inject a DEFAULT, then VALIDATE" pattern WORK
+```
+
+Because Kubernetes' admission control pipeline runs all mutating webhooks to completion before any validating webhook begins, this ordering is exactly what enables a common, deliberate design pattern: use mutation to fill in sensible, automatic defaults, and validation to enforce that the *final*, post-mutation resource genuinely satisfies required policy — a coordinated two-stage pipeline rather than two independent, order-agnostic checks.
+
+**Common Pitfall:** implementing a validation rule assuming a required field will already be present, without realizing a separate mutating webhook is what's actually responsible for ensuring that field gets populated in the first place — understanding the guaranteed mutating-then-validating ordering clarifies how these two webhook types are meant to work together as a coordinated pipeline, not independently.
+
+---
+
 ---
