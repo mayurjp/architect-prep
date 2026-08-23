@@ -1921,4 +1921,97 @@ Because `Properties` is a general, untyped dictionary rather than a specific, co
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is a Razor view's `@inject` directive, and how does it let a view directly resolve a service from DI, without the controller needing to explicitly pass it in via the model?**
+
+`@inject` declares a dependency directly inside a Razor view, letting the view resolve any service registered in DI directly, without the controller acting as an intermediary passing it through the model — genuinely useful for view-only concerns (a feature-flag service checked purely to conditionally render a section of markup) that don't belong in the controller's own business logic at all.
+
+```html
+@inject IFeatureFlagService FeatureFlags
+
+@if (FeatureFlags.IsEnabled("NewCheckoutFlow"))
+{
+    <partial name="_NewCheckoutFlow" />
+}
+else
+{
+    <partial name="_LegacyCheckoutFlow" />
+}
+```
+
+```text
+WITHOUT @inject: the CONTROLLER would need to CHECK the FEATURE flag ITSELF, and PASS
+  a BOOLEAN (or a SEPARATE VIEW model PROPERTY) into the VIEW's model, PURELY so the
+  VIEW can DECIDE which PARTIAL to RENDER -- ADDING view-specific CONCERNS into the
+  CONTROLLER's OWN responsibility
+
+WITH @inject: the VIEW resolves the SERVICE DIRECTLY, ITSELF -- the CONTROLLER's OWN
+  code remains COMPLETELY UNAWARE of this PURELY presentation-layer DECISION
+```
+
+Because `@inject` lets a view resolve genuinely view-specific concerns directly (rather than requiring the controller to funnel every possible piece of information through its model), it keeps the controller focused on actual business orchestration while letting presentation-layer decisions (which partial to render, based on a feature flag) live entirely within the view itself.
+
+**Common Pitfall:** having a controller resolve and pass through every possible service a view might conceivably need via the model, even for purely presentation-layer decisions that have nothing to do with the controller's actual business logic — `@inject` lets a view resolve genuinely view-specific dependencies directly, keeping the controller's model focused on the data it actually needs to orchestrate business logic, not incidental view-rendering decisions.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is a custom `TagHelperComponent`, as distinct from an ordinary Tag Helper (covered extensively earlier), and how does it let you inject markup into every `<head>`/`<body>` tag across an entire application, without modifying each individual view/layout file?**
+
+An ordinary Tag Helper (covered earlier) is applied explicitly, wherever a developer chooses to write its corresponding HTML tag/attribute in a specific view — a `TagHelperComponent` instead is registered globally and automatically processes *every* occurrence of a specific tag (`<head>`, `<body>`) across the entire application, letting you inject markup application-wide without touching any individual view or layout file at all.
+
+```csharp
+public class GoogleAnalyticsHeadComponent : TagHelperComponent
+{
+    public override void Process(TagHelperContext context, TagHelperOutput output)
+    {
+        if (context.TagName == "head") // AUTOMATICALLY applies to EVERY <head> tag,
+        {                                // ACROSS every VIEW/layout, APPLICATION-wide
+            output.PostContent.AppendHtml("<script src=\"https://analytics.example.com/ga.js\"></script>");
+        }
+    }
+}
+
+builder.Services.AddSingleton<ITagHelperComponent, GoogleAnalyticsHeadComponent>();
+```
+
+Because this component is registered once, globally, and automatically processes every matching tag wherever it appears — without any individual view needing to explicitly reference it — it's the correct mechanism for genuinely application-wide markup injection (analytics scripts, a global CSP nonce, a shared meta tag) that would otherwise require manually editing every single layout file across the application.
+
+**Common Pitfall:** manually adding the same script tag/markup fragment to every individual layout file across an application (a main layout, an admin-area layout, an error-page layout) rather than registering one global `TagHelperComponent` — this duplicates the same markup across multiple files that must all be kept in sync manually, exactly the repeated maintenance burden a globally-registered component eliminates.
+
+---
+
+## Advanced — Question 22
+
+**Q22: How does a model implementing both Data Annotations and `IValidatableObject` (covered earlier) have both sets of validation errors merged into one, single `ModelState` dictionary?**
+
+MVC's default validation pipeline runs Data Annotations validation (covered earlier) first, then — if the model also implements `IValidatableObject` — invokes its `Validate()` method, adding *any additional* errors it produces into the *same* `ModelState` dictionary already containing the Data Annotations results, rather than treating the two validation mechanisms as separate, independent outcomes the developer would need to manually reconcile.
+
+```csharp
+public class OrderViewModel : IValidatableObject
+{
+    [Required] public string CustomerName { get; set; } = ""; // Data ANNOTATIONS validation
+    public DateTime DeliveryDate { get; set; }
+    public DateTime OrderDate { get; set; }
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext context) // IValidatableObject --
+    {                                                                          // CROSS-property RULES
+        if (DeliveryDate < OrderDate)
+            yield return new ValidationResult("Delivery date cannot be before order date.", new[] { nameof(DeliveryDate) });
+    }
+}
+// IF "CustomerName" is EMPTY *AND* "DeliveryDate" is BEFORE "OrderDate": ModelState
+// contains BOTH errors TOGETHER, from BOTH validation MECHANISMS, MERGED into ONE
+// single, UNIFIED ModelState.IsValid CHECK -- the CONTROLLER doesn't need to CHECK
+// EACH mechanism's RESULTS SEPARATELY AT ALL
+```
+
+Because both validation sources ultimately populate the exact same `ModelState` dictionary, a controller checking `ModelState.IsValid` correctly reflects the *combined* outcome of both Data Annotations and any additional `IValidatableObject` cross-property rules — the two mechanisms compose naturally rather than requiring separate, independently-managed validation results the developer would need to reconcile manually.
+
+**Common Pitfall:** assuming `IValidatableObject`'s `Validate()` method only runs if Data Annotations validation *passes* first, or that the two produce separate, independent results requiring manual merging — in practice, MVC runs both and merges their results into the same unified `ModelState`, letting a single `ModelState.IsValid` check correctly reflect both validation sources together.
+
+---
+
 ---

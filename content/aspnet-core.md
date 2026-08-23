@@ -2015,4 +2015,100 @@ Because most MVC-aware code already runs *within* the MVC pipeline where `Action
 
 ---
 
+## Beginner — Question 21
+
+**Q21: How does `app.UseExceptionHandler("/Error")` differ from the Developer Exception Page (covered earlier) in what it shows to the user in production?**
+
+The Developer Exception Page (covered earlier) shows a detailed stack trace and exception information — appropriate only during local development, never in production, since it can leak sensitive implementation details to end users. `app.UseExceptionHandler("/Error")` instead redirects any unhandled exception to a specified, ordinary application path (a simple, generic error page/action), letting production show a clean, user-appropriate error message without exposing any internal exception details at all.
+
+```csharp
+if (app.Environment.IsDevelopment())
+{
+    app.UseDeveloperExceptionPage(); // DETAILED stack traces -- development ONLY
+}
+else
+{
+    app.UseExceptionHandler("/Error"); // PRODUCTION -- redirects to a GENERIC, SAFE error page --
+                                          // NO internal exception DETAILS ever EXPOSED to the USER
+}
+```
+
+```text
+Developer Exception Page: shows the FULL stack trace, EXCEPTION type, and message
+  DIRECTLY in the browser -- INVALUABLE for LOCAL debugging, but a SERIOUS information-
+  disclosure RISK if EVER shown to a REAL, PRODUCTION user
+
+UseExceptionHandler("/Error"): SILENTLY catches the EXCEPTION, and INSTEAD renders
+  WHATEVER simple, GENERIC error CONTENT the "/Error" endpoint ITSELF produces --
+  the ACTUAL exception details NEVER reach the USER's browser AT ALL
+```
+
+Because this environment-conditional pattern (Developer Exception Page for development, `UseExceptionHandler` for everything else) is the standard ASP.NET Core convention, virtually every production application follows this exact split — ensuring detailed diagnostic information stays available for developers locally while production users only ever see a safe, generic error experience.
+
+**Common Pitfall:** accidentally leaving `UseDeveloperExceptionPage()` active in a production deployment (a misconfigured environment check, or simply forgetting the conditional branch) — this exposes detailed exception information, including potentially sensitive internal details (connection strings in a stack trace, internal file paths), directly to any user who happens to trigger an unhandled exception.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is a custom `IProblemDetailsWriter` (.NET 8+), and how does it let you customize the shape of the standardized ProblemDetails (covered under Web API) error response for every unhandled exception, application-wide?**
+
+`IProblemDetailsWriter` is the extension point controlling exactly how a `ProblemDetails` response (covered earlier) gets serialized and written to the response — implementing a custom one lets you add application-specific fields (a correlation ID, a support-ticket link) to *every* ProblemDetails response generated application-wide, without needing to modify every individual place an error might originate.
+
+```csharp
+public class CustomProblemDetailsWriter : IProblemDetailsWriter
+{
+    public bool CanWrite(ProblemDetailsContext context) => true; // handles EVERY ProblemDetails response
+    public ValueTask WriteAsync(ProblemDetailsContext context)
+    {
+        context.ProblemDetails.Extensions["correlationId"] = context.HttpContext.TraceIdentifier;
+        // EVERY error response, APPLICATION-wide, NOW includes a CORRELATION id, WITHOUT
+        // any INDIVIDUAL controller/action needing to ADD it ITSELF
+        return context.HttpContext.Response.WriteAsJsonAsync(context.ProblemDetails);
+    }
+}
+
+builder.Services.AddSingleton<IProblemDetailsWriter, CustomProblemDetailsWriter>();
+```
+
+Because this writer intercepts every single ProblemDetails response the framework generates, application-wide (from `[ApiController]`'s automatic validation errors, covered earlier, to explicitly thrown, unhandled exceptions), it's a genuinely central place to enrich the error response format consistently — much cleaner than manually adding the same extra fields to every individual error-handling code path scattered across the application.
+
+**Common Pitfall:** manually adding the same custom error-response fields (a correlation ID, a support link) inside every individual exception handler/controller action, rather than centralizing this enrichment in a single, application-wide `IProblemDetailsWriter` — this duplicates the same enrichment logic repeatedly, risking inconsistency if some error paths remember to add it and others don't.
+
+---
+
+## Advanced — Question 21
+
+**Q21: How does declaring a Minimal API endpoint's exact set of possible return types via `Results<Ok<Product>, NotFound>` let the compiler and OpenAPI generation know precisely what an endpoint can return, without runtime reflection?**
+
+Rather than a Minimal API endpoint returning the loosely-typed `IResult` (which reveals nothing about what specific result types might actually be produced), the `Results<T1, T2, ...>` union type explicitly declares the *exact*, closed set of possible result types a given endpoint can return — letting both the compiler enforce that only these declared types are ever actually returned, and OpenAPI generation (covered earlier) derive the endpoint's documented response types directly from this declaration, with zero runtime reflection needed.
+
+```csharp
+app.MapGet("/products/{id}", Results<Ok<Product>, NotFound> (int id) =>
+{
+    var product = repository.Find(id);
+    return product is not null ? TypedResults.Ok(product) : TypedResults.NotFound();
+    // the RETURN type ITSELF explicitly DECLARES: "this endpoint EITHER returns
+    // Ok<Product> OR NotFound -- NOTHING else" -- the COMPILER enforces THIS,
+    // and OpenAPI generation READS it DIRECTLY, with NO runtime REFLECTION needed
+});
+```
+
+```text
+Plain "IResult" return type: reveals NOTHING about WHAT SPECIFIC result types the
+  endpoint might ACTUALLY produce -- OpenAPI generation would need to RELY on
+  REFLECTION/attributes (like [ProducesResponseType], covered earlier) SEPARATELY
+
+"Results<Ok<Product>, NotFound>": the RETURN TYPE ITSELF is the DOCUMENTATION --
+  EXPLICITLY, STATICALLY declares the COMPLETE, CLOSED set of POSSIBLE outcomes --
+  BOTH the compiler AND OpenAPI tooling can READ this DIRECTLY, WITHOUT any SEPARATE
+  reflection-based INFERENCE step
+```
+
+Because the union type is checked at compile time (attempting to return a result type not included in the union produces a genuine compile error) and is directly, statically inspectable by OpenAPI generation tooling, this pattern provides stronger, more accurate guarantees than relying purely on `[ProducesResponseType]` attributes (covered earlier) layered on top of a loosely-typed `IResult` return — the return type itself becomes the single, authoritative source of truth for what an endpoint can produce.
+
+**Common Pitfall:** returning a loosely-typed `IResult` from a Minimal API endpoint and relying solely on `[ProducesResponseType]` attributes to document its possible outcomes — this creates two separate, independently-maintained sources of truth (the actual code, and the attribute-based documentation) that can drift out of sync; `Results<T1, T2, ...>` unifies them into one, compiler-checked declaration.
+
+---
+
 ---

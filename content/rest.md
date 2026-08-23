@@ -2710,3 +2710,90 @@ Because an API ultimately exists to serve its actual consumers rather than to sa
 **Common Pitfall:** rigidly adhering to strict, textbook REST resource modeling even when it's well-known that the actual consuming clients need data shaped differently — this forces clients into unnecessary extra round-trips or client-side data assembly purely to satisfy an architectural ideal, when a deliberate, consumer-informed deviation would genuinely serve the API's actual purpose better.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is the REST convention behind the `HEAD` method, and how does a client use it to check a resource's metadata — its size, its ETag — without downloading the full response body?**
+
+`HEAD` is defined to return exactly the same headers a `GET` request would, but with no response body at all — a client wanting to check whether a large resource has changed (via its `ETag`/`Last-Modified`, covered earlier), or simply learn its size (`Content-Length`) before deciding whether to actually download it, can issue a `HEAD` request instead, getting all the metadata a `GET` would provide, at a fraction of the bandwidth cost.
+
+```http
+HEAD /api/reports/annual-summary.pdf HTTP/1.1
+```
+```http
+HTTP/1.1 200 OK
+Content-Length: 52428800
+ETag: "abc123"
+Last-Modified: Wed, 20 Aug 2026 10:00:00 GMT
+```
+
+```text
+A CLIENT wanting to know "IS this 50MB report DIFFERENT from the ONE I already
+  DOWNLOADED yesterday" can issue a HEAD request, CHECK the returned ETag AGAINST its
+  OWN cached VALUE, and ONLY issue the FULL, EXPENSIVE GET request IF the ETag ACTUALLY
+  DIFFERS -- AVOIDING a WASTED 50MB download WHEN nothing has ACTUALLY changed
+```
+
+Because `HEAD`'s response is guaranteed to mirror `GET`'s headers exactly (just without the body), it's a lightweight, bandwidth-efficient way to check a resource's current metadata before committing to the potentially expensive cost of actually downloading its full content — directly complementing conditional request patterns (`If-None-Match`, covered earlier) that rely on comparing ETags.
+
+**Common Pitfall:** always issuing a full `GET` request purely to check a resource's size or freshness before deciding whether to actually process its content — for a large resource checked frequently, this wastes significant bandwidth downloading a body that's immediately discarded if the check reveals nothing changed; `HEAD` provides the same metadata at a fraction of the cost.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: How should an API Gateway's own response handle a partially-successful aggregation — if one of several aggregated backend calls fails — returning partial data with an error indicator, or failing the entire request?**
+
+An API Gateway Aggregation pattern (covered earlier) combining calls to several backend services faces a genuine design decision when *one* of those calls fails while the others succeed: failing the *entire* aggregated request discards perfectly good data the client could have used, while returning partial data risks the client not realizing part of the response is actually missing/incomplete unless the response explicitly signals which parts succeeded and which didn't.
+
+```json
+// a DELIBERATE, EXPLICIT partial-success response SHAPE -- the CLIENT can SEE exactly
+// WHAT succeeded and WHAT didn't, rather than EITHER a SILENT gap or a TOTAL FAILURE
+{
+  "order": { "id": 5, "total": 129.99 },
+  "customer": { "name": "Alice" },
+  "recommendations": null,
+  "_errors": [{ "field": "recommendations", "reason": "Recommendation service timed out" }]
+}
+```
+
+```text
+FAIL the ENTIRE request: the CLIENT gets NOTHING, EVEN though "order" AND "customer"
+  data was PERFECTLY AVAILABLE -- WASTES genuinely GOOD, ALREADY-fetched data
+
+Return PARTIAL data, EXPLICITLY flagged: the CLIENT gets the ORDER and CUSTOMER data
+  it NEEDS immediately, PLUS an EXPLICIT signal that "recommendations" specifically
+  FAILED -- the CLIENT can DECIDE how to HANDLE the missing PIECE (SHOW a "recommendations
+  UNAVAILABLE" message, RETRY just THAT piece LATER) RATHER than losing EVERYTHING
+```
+
+Because silently omitting a failed piece (returning `null` with no explanation) leaves the client unable to distinguish "this data genuinely doesn't exist" from "this data failed to load," an explicit error-indicator field alongside partial data gives the client the information needed to handle the failure gracefully — a design choice directly analogous to GraphQL's own partial-failure response shape (covered elsewhere), just applied at a REST Gateway's own aggregation layer.
+
+**Common Pitfall:** silently returning `null`/an empty value for a failed backend call within an aggregated response, without any explicit indication that a failure (rather than a genuine absence of data) actually occurred — this leaves the client unable to distinguish a real failure from legitimately empty data, undermining its ability to handle the partial failure appropriately (retry, show an error, degrade gracefully).
+
+---
+
+## Advanced — Question 23
+
+**Q23: Why do most real-world "RESTful" APIs stop at Richardson Maturity Level 2 (resources plus HTTP verbs) rather than reaching Level 3's full hypermedia controls (covered earlier), and what practical trade-off explains this widespread stopping point?**
+
+Level 3's hypermedia controls (covered earlier as HATEOAS) require every response to include the full set of contextually-valid links/actions a client can take next — genuinely powerful in theory (a client discovers valid actions dynamically, rather than hardcoding URL patterns), but in practice it demands considerably more upfront design and implementation effort, and most client applications are written by the *same* team (or a closely-coordinated one) that builds the API, making hardcoded URL knowledge in the client a perfectly acceptable, much simpler trade-off than building genuine hypermedia discovery.
+
+```text
+Level 2 (resources + HTTP verbs, WITHOUT hypermedia): the CLIENT's OWN code KNOWS,
+  HARDCODED, that CANCELLING an order means "POST /orders/{id}/cancel" -- SIMPLE,
+  DIRECT, and PERFECTLY ADEQUATE when the SAME team (or a CLOSELY coordinated ONE)
+  controls BOTH the API and its CONSUMING client CODE
+
+Level 3 (full hypermedia): the CLIENT discovers VALID actions DYNAMICALLY, from
+  LINKS embedded IN each response (covered EARLIER) -- GENUINELY more DECOUPLED and
+  FLEXIBLE, but requires SIGNIFICANTLY more DESIGN and IMPLEMENTATION effort on
+  BOTH the SERVER (generating CORRECT, CONTEXTUAL links) and CLIENT (GENERICALLY
+  following THEM, rather than HARDCODING known URL PATTERNS) sides
+```
+
+Because Level 3's genuine benefit (a client that adapts automatically to server-side URL/workflow changes without needing a corresponding client update) matters most specifically when the API and its clients are developed and deployed independently, by genuinely separate, uncoordinated teams — a scenario less common than it might seem, since most APIs are consumed by clients whose release cycle the API team has at least some visibility into — many teams reasonably conclude the added complexity of full hypermedia isn't worth its cost for their specific situation, settling for Level 2's simpler, more direct approach instead.
+
+**Common Pitfall:** treating Level 3 hypermedia as an unconditionally "more correct" or "more mature" goal every API should aspire to, without weighing whether the specific benefit (client-side adaptability to server-side changes without a corresponding client update) genuinely matters for a particular API's actual consumer relationship — for many APIs, the added implementation cost of full HATEOAS doesn't pay for itself relative to a simpler Level 2 design.
+
+---

@@ -1939,4 +1939,98 @@ Because the endpoint delegate's parameters are populated directly from this same
 
 ---
 
+## Beginner — Question 22
+
+**Q22: How does applying `[Range]` directly to an action parameter — rather than a model property — let `[ApiController]`'s automatic model-state validation (covered earlier) reject an out-of-range query/route parameter without the action's own code needing an explicit check?**
+
+Data Annotations attributes (covered earlier) aren't limited to model properties — they can be applied directly to an individual action parameter too, and `[ApiController]`'s automatic model-binding validation (covered earlier) checks these exactly the same way it checks a bound model's own properties, automatically returning a `400 Bad Request` for an out-of-range value before the action method's body ever executes.
+
+```csharp
+[HttpGet]
+public IActionResult GetProducts([Range(1, 100)] int pageSize = 10)
+{
+    // [ApiController] AUTOMATICALLY validates "pageSize" is BETWEEN 1 and 100 --
+    // a REQUEST with "?pageSize=9999" is REJECTED with a 400, BEFORE this METHOD BODY
+    // ever EXECUTES -- NO explicit "if (pageSize > 100) return BadRequest();" CODE needed HERE
+}
+```
+
+```text
+WITHOUT [Range] on the PARAMETER: the ACTION's OWN code would need an EXPLICIT,
+  MANUAL check ("if (pageSize < 1 || pageSize > 100) return BadRequest();") for
+  EVERY parameter needing THIS kind of VALIDATION
+
+WITH [Range] DIRECTLY on the parameter: [ApiController]'s AUTOMATIC validation PIPELINE
+  (covered earlier) HANDLES it, EXACTLY the SAME way it handles a BOUND model's OWN
+  [Range]-annotated PROPERTIES -- ZERO manual validation CODE needed in the ACTION itself
+```
+
+Because Data Annotations validation applies uniformly to both model properties and individual action parameters, this lets simple, per-parameter validation rules (a range, a required string length) be expressed declaratively at the parameter level, without needing a dedicated wrapper model class purely to attach a validation attribute to one single, simple value.
+
+**Common Pitfall:** writing a manual, explicit range/bounds check inside an action method's own body for a simple query/route parameter, when applying `[Range]` (or another appropriate Data Annotations attribute) directly to that parameter would let `[ApiController]`'s existing automatic validation pipeline handle it declaratively, with zero manual validation code needed.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: How does `ActionResult<T>`'s implicit conversion (covered earlier) work seamlessly through an async method returning `Task<ActionResult<T>>`, without needing an explicit `Task.FromResult()` call?**
+
+The C# compiler's `async`/`await` machinery already handles wrapping a plain return value into the enclosing `Task<T>` automatically — combined with `ActionResult<T>`'s own implicit conversions (covered earlier), this means an `async Task<ActionResult<T>>` method can simply `return product;` or `return NotFound();` directly, with both the `ActionResult<T>` conversion *and* the `Task<T>` wrapping happening automatically, requiring no manual `Task.FromResult(...)` wrapping at all.
+
+```csharp
+[HttpGet("{id}")]
+public async Task<ActionResult<Product>> GetProduct(int id)
+{
+    var product = await _repository.FindAsync(id);
+    if (product is null) return NotFound(); // implicitly converts to ActionResult<Product>,
+                                               // THEN automatically WRAPPED in a Task BY the
+                                               // COMPILER's own async MACHINERY -- NO
+                                               // Task.FromResult() call NEEDED, ANYWHERE
+    return product; // SAME -- BOTH conversions happen TRANSPARENTLY, TOGETHER
+}
+```
+
+```text
+"return NotFound();" INSIDE an async METHOD returning Task<ActionResult<Product>>:
+  STEP 1 -- NotFoundResult IMPLICITLY converts to ActionResult<Product> (COVERED earlier)
+  STEP 2 -- the COMPILER's OWN async/await MACHINERY AUTOMATICALLY wraps THAT in a
+            Task<ActionResult<Product>> -- BOTH steps happen TRANSPARENTLY, with NO
+            EXPLICIT "Task.FromResult(...)" call WRITTEN anywhere in the METHOD'S body
+```
+
+Because these two conversions (the `ActionResult<T>` implicit conversion, and the compiler's own async-method return-value wrapping) compose transparently without any conflict, writing an async action method feels exactly as natural as writing a synchronous one — the developer never needs to think about explicitly wrapping a return value in a `Task`, since the `async` keyword's own compiler-generated machinery already handles that automatically.
+
+**Common Pitfall:** manually wrapping a return value in `Task.FromResult(...)` inside an `async` method, out of an old habit from working with non-async `Task`-returning methods — inside a genuinely `async`-marked method, this is entirely unnecessary; the compiler's own async machinery already wraps the return value automatically, and manually wrapping it again is redundant, unneeded code.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is a custom `IApiDescriptionProvider`, and how does it let you intervene in how Swagger/OpenAPI generation discovers an action's metadata, for a genuinely unusual routing/action-discovery scenario the default provider doesn't handle correctly?**
+
+`IApiDescriptionProvider` (covered earlier at a conceptual level, feeding Swagger/OpenAPI generation) is itself an extensible pipeline — a custom implementation can add, modify, or filter the `ApiDescription` objects the default provider produces, appropriate for genuinely unusual scenarios where an application's routing is dynamic or non-standard enough that the framework's default action-discovery logic doesn't correctly infer accurate documentation on its own.
+
+```csharp
+public class DynamicRouteApiDescriptionProvider : IApiDescriptionProvider
+{
+    public int Order => 100; // runs AFTER the DEFAULT provider (Order 0) -- can ADJUST its RESULTS
+    public void OnProvidersExecuting(ApiDescriptionProviderContext context)
+    {
+        // for a DYNAMICALLY-registered set of routes the DEFAULT provider can't
+        // CORRECTLY introspect (a PLUGIN system REGISTERING endpoints at RUNTIME,
+        // for instance), MANUALLY construct and ADD the CORRECT ApiDescription entries HERE
+        context.Results.Add(BuildCustomDescription());
+    }
+    public void OnProvidersExecuted(ApiDescriptionProviderContext context) { }
+}
+
+builder.Services.AddSingleton<IApiDescriptionProvider, DynamicRouteApiDescriptionProvider>();
+```
+
+Because this is the same underlying pipeline API Explorer itself is built from (covered earlier), a custom provider operates at the most foundational level available for controlling generated API documentation — appropriate specifically for scenarios genuinely beyond what customizing Swashbuckle's own operation/schema filters (covered earlier) can address, such as dynamically-registered routes the framework's default reflection-based discovery simply can't see or correctly describe on its own.
+
+**Common Pitfall:** reaching for a custom `IApiDescriptionProvider` to solve a documentation customization need that Swashbuckle's own `IOperationFilter`/`ISchemaFilter` (covered earlier) would have handled more simply — providers operate at a lower, more foundational level with genuinely more complexity; they're appropriate specifically for scenarios involving actions the framework's default discovery mechanism can't correctly see at all, not routine documentation customization needs.
+
+---
+
 ---

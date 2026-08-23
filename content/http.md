@@ -1754,3 +1754,93 @@ Because trailers let genuinely body-dependent metadata be communicated without s
 **Common Pitfall:** assuming HTTP Trailers are a gRPC-specific mechanism with no relevance to ordinary REST/HTTP APIs — trailers are a general HTTP/2 (and chunked HTTP/1.1) capability, usable by any application needing to communicate body-dependent metadata after a streamed response completes, not something exclusive to gRPC's particular use of them.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What does the `Content-Language` response header communicate, and how does it differ from the `Accept-Language` request header a client sends?**
+
+`Accept-Language` (covered earlier) is the client telling the server which language(s) it *prefers* for the response; `Content-Language` is the server's own header on the returned response, stating which language the actual content *is written in* — the two are logically paired (a server honoring content negotiation typically sets `Content-Language` to match whichever preference from `Accept-Language` it was actually able to satisfy) but are not the same header used in two directions.
+
+```http
+GET /api/articles/42 HTTP/1.1
+Accept-Language: fr-FR, en;q=0.5
+```
+```http
+HTTP/1.1 200 OK
+Content-Language: fr-FR
+Content-Type: application/json
+```
+
+```text
+Accept-Language: the CLIENT's REQUEST, stating WHAT it WOULD prefer
+Content-Language: the SERVER's RESPONSE, stating WHAT it ACTUALLY delivered
+
+A CLIENT can COMPARE the TWO to DETECT whether its PREFERRED language was
+  ACTUALLY honored, OR whether the SERVER fell BACK to a DEFAULT language
+  because NO translation WAS available IN the REQUESTED one
+```
+
+Because `Content-Language` gives the client (and intermediate caches, and accessibility tools) an explicit, machine-readable statement of the response body's actual language rather than requiring it to be inferred or assumed, it closes the loop on content negotiation — confirming what was actually delivered, not just what was requested.
+
+**Common Pitfall:** omitting `Content-Language` entirely and assuming clients will simply trust that `Accept-Language` was honored — if a server falls back to a default language when the requested one isn't available, an explicit `Content-Language` on the response is the only reliable way for the client to detect that fallback occurred, rather than silently displaying content in the wrong language under a false assumption.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What does the `Cache-Control: immutable` directive tell a browser, and why does it matter specifically for revalidation behavior during a page reload?**
+
+Ordinarily, even a resource cached with a long `max-age` gets revalidated (a conditional `If-None-Match`/`If-Modified-Since` request) when a user does a manual, forced reload of the page — `immutable` tells the browser that the resource will *never* change for as long as its current URL is valid, so this revalidation step can be skipped even on a forced reload, since the browser can trust the cached copy is still correct without asking the server.
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: public, max-age=31536000, immutable
+ETag: "v2-bundle-a1b2c3"
+```
+
+```text
+WITHOUT immutable: a FORCED reload (Ctrl+Shift+R OR the REFRESH button) STILL sends
+  a CONDITIONAL "If-None-Match" REQUEST to REVALIDATE, EVEN though max-age HASN'T
+  expired -- WASTING a ROUND-TRIP for a RESOURCE that will NEVER actually CHANGE
+
+WITH immutable: the BROWSER skips REVALIDATION entirely, EVEN on a FORCED reload,
+  TRUSTING that the RESOURCE at THIS exact URL is GENUINELY permanent -- ONLY safe
+  when the BUILD pipeline GUARANTEES a NEW, content-hashed URL FOR any ACTUAL change
+```
+
+Because `immutable` is only safe to apply to resources whose URL itself changes whenever the content changes (content-hashed filenames from a bundler, for instance — covered elsewhere), it lets a build pipeline eliminate an entirely unnecessary revalidation round-trip on every forced reload for assets that are, by construction, permanently unchanging at their current URL.
+
+**Common Pitfall:** adding `immutable` to a resource whose URL does *not* change when its content is updated (a plain `/app.js` rather than a content-hashed `/app.a1b2c3.js`) — a subsequent deployment's change would then be invisible to any browser that already cached the old version, since `immutable` explicitly tells it to skip checking for updates even on a forced reload.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is HTTP/2 Connection Coalescing, and what specific conditions allow a browser to reuse one already-open connection for requests to a different subdomain?**
+
+Connection Coalescing lets a browser reuse an existing HTTP/2 connection for requests to a *different* hostname than the one the connection was originally opened for, provided two conditions both hold: the new hostname resolves to the same IP address the existing connection is already using, and the TLS certificate presented by that connection is valid for the new hostname too (typically via a wildcard or multi-domain SAN certificate) — satisfying both lets the browser skip an entirely new TCP+TLS handshake for the second subdomain.
+
+```text
+Connection ALREADY open TO "www.example.com" (resolves TO 203.0.113.10, CERTIFICATE
+  covers *.example.com VIA a WILDCARD SAN)
+
+A REQUEST is THEN needed for "static.example.com" -- IF "static.example.com" ALSO
+  resolves TO 203.0.113.10, AND the EXISTING certificate's WILDCARD SAN COVERS it too,
+  the BROWSER can COALESCE: reuse the SAME already-open CONNECTION, SKIPPING an
+  entirely NEW TCP handshake + TLS NEGOTIATION for the SECOND subdomain
+```
+
+```text
+WITHOUT coalescing: EACH distinct SUBDOMAIN pays ITS own FULL connection-setup COST,
+  even WHEN they're SERVED from the SAME physical INFRASTRUCTURE
+
+WITH coalescing: SUBDOMAINS sharing BOTH IP and CERTIFICATE coverage SHARE a SINGLE
+  connection's ALREADY-paid setup COST, and its EXISTING HTTP/2 MULTIPLEXING (covered
+  earlier) simply CARRIES the ADDITIONAL subdomain's REQUESTS alongside the FIRST's
+```
+
+Because avoiding a redundant TCP+TLS handshake for a subdomain that's genuinely served by the same infrastructure directly reduces page-load latency, deliberately architecting static assets and APIs behind subdomains that share both DNS resolution and certificate coverage (a wildcard certificate across `*.example.com`) is a real, practical technique for maximizing HTTP/2 connection reuse across a site's own subdomains.
+
+**Common Pitfall:** assuming HTTP/2's connection reuse is limited strictly to requests on the exact same hostname the connection was opened for — coalescing genuinely extends reuse across *different* hostnames when the IP-and-certificate conditions are met, meaning a site deliberately serving multiple subdomains from shared infrastructure with a wildcard certificate can benefit from connection reuse it might not realize is available.
+
+---
