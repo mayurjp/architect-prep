@@ -2186,3 +2186,98 @@ Because this specific covariance was baked into the language before generics (an
 **Common Pitfall:** assuming array covariance in C# is fully type-safe simply because it compiles without error — array covariance is a well-known, deliberate unsoundness in the language's type system, and any code writing into a covariant array reference should be aware that a runtime `ArrayTypeMismatchException` is a genuine possibility the compiler cannot rule out, unlike the sound, compiler-verified variance generics provide via `out`/`in` (covered earlier).
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is the difference between a C# Instance Constructor and a Static Constructor, and when does each actually run?**
+
+An Instance Constructor runs each time `new` creates a new object instance, initializing that specific instance's own state — a Static Constructor runs at most once *per type* (not per instance), automatically triggered by the runtime the first time the type is used (either an instance is created, or a static member is accessed), initializing shared, type-level state.
+
+```csharp
+public class Logger
+{
+    private static readonly string _logPath;
+
+    static Logger()   // Static Constructor -- runs ONCE, automatically, before first use of the TYPE
+    {
+        _logPath = Environment.GetEnvironmentVariable("LOG_PATH") ?? "default.log";
+    }
+
+    public Logger()   // Instance Constructor -- runs EVERY time `new Logger()` is called
+    {
+        Console.WriteLine("A new Logger instance was created");
+    }
+}
+```
+
+```text
+Instance Constructor: runs EVERY time `new Logger()` executes -- once PER
+  OBJECT created
+
+Static Constructor: runs AT MOST once, EVER, for the ENTIRE type -- triggered
+  AUTOMATICALLY by the runtime the FIRST time the type is touched, NEVER
+  called explicitly by application code
+```
+
+Because a static constructor is guaranteed by the runtime to run exactly once, before any other access to the type, it's the natural place to initialize `static readonly` fields that require actual computation (rather than a simple inline value) — guaranteeing that shared, type-level state is fully initialized before any code can possibly observe it in an incomplete state.
+
+**Common Pitfall:** writing a static constructor that throws an exception — a failed static constructor permanently marks the type as unusable for the remainder of the application's lifetime (a `TypeInitializationException` wraps the original exception on every subsequent attempt to use the type), unlike a failed instance constructor, which only affects that one specific construction attempt.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is the "Refused Bequest" code smell, and how does a subclass inheriting members it doesn't actually want or use signal a poor inheritance hierarchy design?**
+
+"Refused Bequest" names the situation where a subclass inherits from a base class but only genuinely uses a fraction of what it inherited — leaving unused, unwanted, or explicitly overridden-to-throw members (directly echoing the "Contractor doesn't get a bonus" LSP violation covered earlier) as visible evidence that the subclass doesn't actually fit the "is-a" relationship the inheritance implies.
+
+```csharp
+public class Bird
+{
+    public virtual void Fly() { /* ... */ }
+}
+
+public class Penguin : Bird
+{
+    public override void Fly() => throw new NotSupportedException(); // REFUSED the inherited "Fly" behavior
+}
+```
+
+```text
+A subclass GENUINELY using every inherited member: the "IS-A" relationship
+  holds cleanly -- inheritance was the RIGHT modeling choice
+
+A subclass REFUSING part of what it inherited (throwing, leaving unused,
+  overriding to do NOTHING): a visible SIGNAL that the class hierarchy
+  doesn't actually MODEL a clean "IS-A" relationship -- the inheritance was
+  probably the WRONG tool for this specific relationship
+```
+
+Because Refused Bequest is a *symptom* rather than the root problem itself, the fix usually isn't to patch the specific unwanted member — it's to reconsider the hierarchy: extracting a narrower base class/interface that only the members every subclass genuinely needs belong to (a "FlyingBird" interface separate from a general "Bird" base), directly connecting to the Interface Segregation Principle's advice (covered under Design Principles) against forcing implementers to support behavior they don't actually need.
+
+**Common Pitfall:** noticing a Refused Bequest smell and "fixing" it by simply suppressing the symptom (returning a default value instead of throwing, silently doing nothing) rather than addressing the underlying hierarchy design — this hides the modeling problem without actually resolving it, and can introduce a worse, silent bug where calling code reasonably expects the inherited behavior to have actually happened.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is the "Yo-Yo Problem" in a deep inheritance hierarchy, and how does needing to jump up and down many levels of the hierarchy to understand a single method's actual runtime behavior hurt readability?**
+
+Understanding what a specific method call actually does in a deeply-layered inheritance hierarchy can require repeatedly jumping from a subclass's method up to its base class to check if it calls `base.Method()` or is itself overridden further down — then jumping back down again to check whether a further-derived subclass overrides that same method differently, back and forth ("like a yo-yo") across many levels before the actual, complete runtime behavior becomes clear.
+
+```text
+Class A (base)
+  Class B : A (overrides Method(), calls base.Method() partway through)
+    Class C : B (overrides Method() again, calls base.Method())
+      Class D : C (overrides Method() ONE more time)
+
+Understanding what D's inherited Method() ACTUALLY does at runtime requires
+  reading D -> jumping UP to C -> jumping UP to B -> jumping UP to A --
+  then mentally REASSEMBLING the combined behavior from ALL FOUR levels
+```
+
+Because each additional layer of inheritance multiplies how many separate class definitions a reader must mentally combine to understand one method's complete, actual behavior, deep inheritance hierarchies (beyond roughly two or three levels) become progressively harder to reason about — a concrete, practical reason favoring the Composite Reuse Principle's (covered earlier) preference for composition over deep inheritance chains, since composed behavior tends to be traceable through a single, flatter delegation rather than a multi-level override chain.
+
+**Common Pitfall:** treating "the Yo-Yo Problem only matters for extremely deep, unusual hierarchies" as a reason to dismiss it — even a moderate hierarchy of three or four levels, each with a partial override calling `base`, can already produce genuinely confusing, hard-to-trace behavior; the problem's severity scales with hierarchy depth, but it begins mattering well before a hierarchy becomes unusually deep.
+
+---

@@ -2014,4 +2014,112 @@ Because this method exposes what would ordinarily be a deliberately-hidden imple
 
 ---
 
+## Beginner — Question 23
+
+**Q23: What are `Lazy<T>`'s thread-safety modes (`LazyThreadSafetyMode`), and how do they let you trade synchronization overhead for a specific concurrency guarantee when initializing a value on first access?**
+
+`Lazy<T>` (covered elsewhere for its basic deferred-initialization role) defaults to full thread safety — multiple threads racing to access `.Value` for the first time are automatically synchronized so the factory function runs exactly once. `LazyThreadSafetyMode` lets you explicitly choose a cheaper mode when that full guarantee isn't actually needed for your specific usage.
+
+```csharp
+// Default: ExecutionAndPublication -- fully thread-safe, factory runs EXACTLY once, EVER
+var safe = new Lazy<ExpensiveObject>(() => new ExpensiveObject());
+
+// PublicationOnly -- factory may run MULTIPLE times concurrently, but every thread
+// ends up seeing the SAME published result (whichever one "won" first)
+var relaxed = new Lazy<ExpensiveObject>(() => new ExpensiveObject(), LazyThreadSafetyMode.PublicationOnly);
+
+// None -- NO synchronization at all -- only safe if you GUARANTEE single-threaded access
+var unsafe_ = new Lazy<ExpensiveObject>(() => new ExpensiveObject(), LazyThreadSafetyMode.None);
+```
+
+```text
+ExecutionAndPublication (default): a LOCK ensures the factory runs EXACTLY
+  once -- SAFEST, but pays LOCKING overhead on every access CHECK
+
+PublicationOnly: NO lock around the factory itself -- MULTIPLE threads might
+  EACH run it concurrently, but they all AGREE on the SAME final published
+  value -- avoids LOCKING at the cost of possible REDUNDANT factory calls
+
+None: ZERO synchronization -- fastest, but ONLY correct if the caller
+  GUARANTEES single-threaded access
+```
+
+Because the default mode's locking overhead is usually negligible for a value initialized only once per application lifetime, most code never needs to touch this setting at all — it becomes relevant specifically for a `Lazy<T>` accessed extremely frequently from multiple threads where even the default's small locking cost is measurable, or where the factory function is cheap enough that occasional redundant execution (`PublicationOnly`) is a perfectly acceptable trade for avoiding a lock.
+
+**Common Pitfall:** choosing `LazyThreadSafetyMode.None` for a `Lazy<T>` instance that's actually accessed from multiple threads, based on an incorrect assumption about the application's own threading model — without any synchronization, concurrent first-access calls can corrupt the lazy initialization state entirely, producing genuinely undefined behavior rather than merely running the factory redundantly.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is the difference between `object.GetHashCode()` (which a type can override) and `System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode()`, which always returns an identity-based hash regardless of any override?**
+
+A type overriding `GetHashCode()` (commonly alongside `Equals`, for value-based equality — covered under OOP) changes what `obj.GetHashCode()` returns for that type. `RuntimeHelpers.GetHashCode(obj)` instead always returns the hash code the *default*, identity-based implementation would have produced — completely bypassing any override — giving code a way to obtain an object's reference-identity hash even when its own `GetHashCode()` has been overridden to mean something else entirely.
+
+```csharp
+public class Point
+{
+    public int X, Y;
+    public override int GetHashCode() => HashCode.Combine(X, Y); // value-based override
+}
+
+var p = new Point { X = 1, Y = 2 };
+
+int valueBasedHash = p.GetHashCode();                            // uses the OVERRIDE -- based on X, Y
+int identityBasedHash = RuntimeHelpers.GetHashCode(p);           // IGNORES the override -- based on OBJECT IDENTITY
+```
+
+```text
+p.GetHashCode(): calls WHATEVER GetHashCode() the type's OWN override defines
+  -- for Point, that's a VALUE-based hash derived from X and Y
+
+RuntimeHelpers.GetHashCode(p): ALWAYS returns an IDENTITY-based hash, exactly
+  as if NO override existed -- USEFUL when code specifically needs to
+  distinguish "is this the SAME OBJECT REFERENCE" regardless of how the
+  type's own GetHashCode() has been customized
+```
+
+Because certain low-level scenarios (implementing a reference-identity-based cache, debugging object lifetime, certain interop scenarios) genuinely need an object's identity hash specifically, independent of whatever value-based equality semantics its type may define, `RuntimeHelpers.GetHashCode()` provides that guaranteed, override-proof identity hash as an explicit escape hatch.
+
+**Common Pitfall:** assuming `RuntimeHelpers.GetHashCode()` is simply "a faster version of `GetHashCode()`" rather than understanding its specific, different semantic meaning — using it as a general-purpose hash for a `Dictionary<TKey, TValue>` keyed on value-equality would silently break lookups for any type overriding `Equals`/`GetHashCode()`, since the dictionary would then be hashing by identity while comparing by value (or vice versa), violating the fundamental contract that equal objects must produce equal hash codes.
+
+---
+
+## Advanced — Question 26
+
+**Q26: What is a `GCHandle`, and how does explicitly pinning a managed object's memory prevent the Garbage Collector from relocating it during a compacting collection — a requirement for certain interop scenarios?**
+
+The .NET GC is a compacting collector — it can move objects in memory during a collection to reduce fragmentation, which is invisible and harmless to ordinary managed code, since references are transparently updated. But native/unmanaged code holding a raw pointer to a managed object's memory has no way to know if that address changes — `GCHandle.Alloc(obj, GCHandleType.Pinned)` tells the GC to never move that specific object for as long as the handle is held, guaranteeing its address stays stable for the duration of a native interop call.
+
+```csharp
+byte[] buffer = new byte[1024];
+GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+try
+{
+    IntPtr address = handle.AddrOfPinnedObject(); // safe to pass to native code -- GUARANTEED stable
+    NativeMethod(address, buffer.Length);
+}
+finally
+{
+    handle.Free(); // MUST explicitly release the pin -- it does NOT happen automatically
+}
+```
+
+```text
+WITHOUT pinning: the GC could MOVE the buffer's memory during a COLLECTION
+  that happens to run WHILE native code still holds a pointer to its OLD
+  address -- native code would then be READING/WRITING memory that NO
+  LONGER belongs to that object, genuine MEMORY CORRUPTION
+
+WITH GCHandle pinning: the GC SKIPS relocating this SPECIFIC object for as
+  long as the handle is HELD -- the address obtained via
+  AddrOfPinnedObject() remains VALID and STABLE for native code to use
+```
+
+Because a pinned object cannot be moved (and, depending on GC generation, can complicate compaction of the surrounding heap region), pinning should be held for the shortest possible duration — pin immediately before the native call, and free the handle immediately afterward — rather than pinning an object for an extended period, which can measurably degrade GC efficiency for the rest of the heap around it.
+
+**Common Pitfall:** forgetting to call `handle.Free()` (or not wrapping the pinned handle's lifetime in a `try`/`finally`) — an un-freed `GCHandle` keeps its target object pinned indefinitely, which both prevents that object from ever being collected (a memory leak) and permanently degrades the GC's ability to compact the heap region around it, for as long as the process runs.
+
+---
+
 ---

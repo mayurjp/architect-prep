@@ -2413,3 +2413,114 @@ Because each chained call configures one additional piece of the eventual, compl
 **Common Pitfall:** viewing fluent, chainable APIs (validation libraries, LINQ's own query syntax, HTTP client builders) as an unrelated, purely stylistic convention distinct from "the Builder pattern," rather than recognizing them as concrete, everyday applications of the exact same underlying structural idea — accumulating configuration step-by-step before a final, complete result is actually used or produced.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is the difference between "Push" and "Pull" notification models in the Observer pattern, and how does each affect what data the Subject actually sends to its Observers?**
+
+In a Push model, the Subject sends the full, relevant data directly as part of the notification itself — Observers receive everything they need without any further action. In a Pull model, the Subject sends only a minimal notification ("something changed"), and each Observer is responsible for calling back into the Subject afterward to fetch whatever specific data it actually needs.
+
+```csharp
+// Push model -- the notification ITSELF carries the actual data
+public interface IOrderObserver { void OnOrderPlaced(Order order); }
+subject.OrderPlaced += order => observer.OnOrderPlaced(order); // order data pushed DIRECTLY
+
+// Pull model -- the notification is just a signal; observer PULLS data afterward
+public interface IOrderObserver { void OnOrderChanged(); }
+subject.OrderChanged += () => {
+    var order = subject.GetCurrentOrder(); // Observer calls BACK into the Subject to fetch data
+};
+```
+
+```text
+Push: the SUBJECT decides WHAT data every OBSERVER receives -- SIMPLE for
+  observers, but the Subject's notification SIGNATURE is COUPLED to
+  whatever data happens to be RELEVANT right now
+
+Pull: the SUBJECT sends only a MINIMAL signal -- EACH Observer decides FOR
+  ITSELF exactly what data it actually NEEDS, calling back to fetch it --
+  more FLEXIBLE, at the cost of an EXTRA round trip back to the Subject
+```
+
+Because Push couples the notification's shape to exactly what data happens to be relevant at the time it was designed, while Pull keeps the notification minimal and lets each Observer decide independently what it actually needs, the choice depends on how uniform Observers' data needs are: a small, stable set of Observers with identical data needs favors Push's simplicity, while a more varied or evolving set of Observers favors Pull's flexibility.
+
+**Common Pitfall:** choosing a Push model for a Subject with many different kinds of Observers whose data needs vary significantly — this forces the notification payload to either bloat with every possible piece of data any Observer might need, or forces frequent changes to the notification's shape as new Observer types with different needs are added; a Pull model avoids coupling the notification's shape to any specific Observer's requirements.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: How does registering multiple `IStrategy` implementations with a Dependency Injection container and resolving the correct one by a runtime key differ from — and improve on — hardcoded factory branching for selecting a Strategy pattern implementation?**
+
+Rather than a factory method containing an explicit `switch`/`if-else` chain mapping a key to a `new SpecificStrategy()` call (requiring the factory itself to be modified every time a new strategy is added — an Open/Closed Principle violation, covered under Design Principles), registering every strategy implementation with the DI container and resolving the correct one via a keyed lookup lets new strategies be added simply by registering them, with zero changes to any existing selection logic.
+
+```csharp
+// Hardcoded factory branching -- must be MODIFIED every time a new strategy is added
+public IShippingStrategy GetStrategy(string country) => country switch
+{
+    "US" => new FedExStrategy(),
+    "UK" => new RoyalMailStrategy(),
+    _ => new FlatRateStrategy(),
+};
+
+// DI-based keyed resolution -- adding a NEW strategy means just REGISTERING it,
+// with ZERO changes to any existing selection code
+services.AddKeyedTransient<IShippingStrategy, FedExStrategy>("US");
+services.AddKeyedTransient<IShippingStrategy, RoyalMailStrategy>("UK");
+services.AddKeyedTransient<IShippingStrategy, FlatRateStrategy>("default");
+
+var strategy = serviceProvider.GetKeyedService<IShippingStrategy>(country) 
+               ?? serviceProvider.GetKeyedService<IShippingStrategy>("default");
+```
+
+```text
+Hardcoded factory branching: adding a NEW country's strategy means EDITING
+  the EXISTING switch statement -- the FACTORY method itself is NEVER
+  "closed" against modification, directly VIOLATING the Open/Closed Principle
+
+DI-based keyed resolution: adding a NEW country's strategy means REGISTERING
+  a new implementation with its OWN key -- the RESOLUTION/lookup mechanism
+  itself NEVER needs to change
+```
+
+Because each new strategy is added purely through registration rather than by modifying existing selection logic, this approach directly satisfies the Open/Closed Principle for strategy selection itself — genuinely extending the system's behavior (supporting a new country) without touching any already-tested, already-working code path.
+
+**Common Pitfall:** using keyed DI resolution for a small, genuinely fixed, rarely-changing set of strategies where the added indirection (registration, keyed lookup, a fallback-key convention) provides little practical benefit over a simple switch expression — the pattern earns its complexity specifically for strategy sets that grow or change with meaningful frequency, not as a default, one-size-fits-all replacement for every conditional branch.
+
+---
+
+## Advanced — Question 22
+
+**Q22: How does a Dependency Injection container's built-in decoration support (such as Scrutor's `Decorate<T>()` extension for Microsoft.Extensions.DependencyInjection) apply the Decorator pattern automatically, as opposed to manually wrapping instances by hand?**
+
+Manually applying the Decorator pattern (covered extensively earlier) means explicitly constructing the wrapped chain yourself — `new LoggingDecorator(new CachingDecorator(new RealService()))` — at every place the decorated service is needed. A DI container's decoration support instead lets you register the base implementation, then separately declare that a decorator type should wrap it, with the container automatically constructing the correctly-nested chain anywhere the interface is subsequently injected.
+
+```csharp
+// Manual Decorator wiring -- must be repeated everywhere RealService is constructed
+IOrderService service = new LoggingDecorator(new CachingDecorator(new RealOrderService()));
+
+// DI container decoration (Scrutor) -- registered ONCE, the container builds the chain automatically
+services.AddScoped<IOrderService, RealOrderService>();
+services.Decorate<IOrderService, CachingDecorator>();
+services.Decorate<IOrderService, LoggingDecorator>();
+
+// Anywhere IOrderService is injected, the container automatically provides the FULLY-wrapped chain
+public class OrderController(IOrderService orderService) { /* ... */ }
+```
+
+```text
+Manual wrapping: EVERY place constructing the decorated service must KNOW
+  and REPEAT the exact wrapping ORDER -- error-prone, and a NEW decorator
+  means updating EVERY construction site
+
+Container-based decoration: the WRAPPING order is declared ONCE, centrally,
+  at REGISTRATION time -- every INJECTION site automatically receives the
+  FULLY-decorated chain, with NO knowledge of the decoration happening at
+  all
+```
+
+Because the decoration chain's construction logic lives in exactly one place (the DI registration) rather than being repeated at every manual construction site, adding, removing, or reordering decorators becomes a small, localized registration change rather than a change that must be hunted down and applied consistently everywhere the service is manually constructed — letting the Decorator pattern's benefits (composable, stackable cross-cutting behavior) scale cleanly to a large application without the wiring itself becoming a maintenance burden.
+
+**Common Pitfall:** assuming a DI container's decoration feature is a built-in part of the base framework — `Microsoft.Extensions.DependencyInjection` itself doesn't include automatic decoration support out of the box; it requires an additional library (like Scrutor) or a hand-rolled factory registration achieving the same effect, a detail easy to overlook when following an example that assumes the extension method is simply always available.
+
+---

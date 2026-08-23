@@ -2054,4 +2054,80 @@ Because raw magic values carry no self-describing information about what they ac
 
 ---
 
+## Beginner — Question 23
+
+**Q23: What is "Big Design Up Front" (BDUF), and how does it contrast with the iterative, emergent design favored by principles like YAGNI (covered earlier)?**
+
+Big Design Up Front describes attempting to fully specify a system's architecture and design in exhaustive detail before writing any code — the theory being that thorough upfront planning prevents costly rework later. In practice, BDUF struggles specifically because requirements are rarely fully known or stable at a project's outset, meaning a large fraction of that upfront design effort ends up describing a system that never actually gets built exactly as planned, once real requirements and constraints emerge during implementation.
+
+```text
+BDUF: SPEND weeks/months designing EVERY component, interface, and DATA flow
+  before writing ANY code -- assumes REQUIREMENTS are fully KNOWN and STABLE
+  upfront
+
+Iterative/emergent design (YAGNI-aligned): build the SIMPLEST thing that
+  satisfies CURRENT, actually-known requirements -- let the DESIGN evolve
+  and ADAPT as genuine new requirements EMERGE through actual USE and FEEDBACK
+```
+
+Because software requirements are rarely fully understood before a system starts being built and used, BDUF's core assumption — that spending significant upfront effort designing for requirements not yet validated pays off — frequently fails to hold, and much of that early design work turns out to describe a system shape that changes substantially once real usage and feedback arrive; this is a foundational part of the reasoning behind agile methodologies' preference for iterative, incremental design over a single large upfront design phase.
+
+**Common Pitfall:** treating "avoid BDUF" as license to skip *any* upfront design thinking at all — there's a meaningful difference between exhaustively specifying every detail before writing code (BDUF's actual failure mode) and doing enough deliberate upfront thinking to avoid an obviously poor initial direction; the criticism targets the former, not the latter.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is Referential Transparency, and how does a function's output depending only on its inputs — with no hidden side effects — make it trivially composable and testable?**
+
+A referentially transparent function can always be replaced by its return value without changing the program's behavior — calling it twice with the same inputs always produces the same output, and it neither reads from nor mutates any external, hidden state. This property, borrowed from functional programming, makes such a function easy to test (no setup/teardown of external state needed) and easy to compose (its behavior is fully predictable from its signature alone, with no hidden dependencies to account for).
+
+```csharp
+// Referentially transparent -- output depends ONLY on inputs, no hidden state touched
+public decimal CalculateTax(decimal amount, decimal rate) => amount * rate;
+
+// NOT referentially transparent -- depends on hidden, external, mutable state
+public decimal CalculateTax(decimal amount) => amount * _currentTaxRateFromSomewhereElse;
+```
+
+```text
+Referentially transparent function: CalculateTax(100, 0.2) ALWAYS returns
+  20 -- test it by CALLING it with inputs and CHECKING the output, no
+  SETUP of external state required at ALL
+
+NOT referentially transparent: CalculateTax(100)'s RESULT depends on WHATEVER
+  _currentTaxRateFromSomewhereElse happens to BE at call time -- testing it
+  requires CAREFULLY arranging that hidden STATE first, and its BEHAVIOR
+  isn't fully PREDICTABLE from its signature alone
+```
+
+Because a referentially transparent function's entire behavior is captured by its signature (given these inputs, this output, always), it can be reasoned about, tested, and safely reused in a completely different context without worrying about hidden dependencies or side effects — the underlying reason "pure functions" are considered easier to work with than functions relying on ambient, mutable state, even in an otherwise object-oriented, non-functional codebase.
+
+**Common Pitfall:** assuming referential transparency only matters in genuinely functional programming languages — deliberately writing individual methods (even within an object-oriented C# codebase) to be as close to referentially transparent as practical is a widely applicable technique for making specific pieces of business logic easier to test and reason about, entirely independent of the overall paradigm the rest of the codebase follows.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is "Shotgun Surgery" as a code smell, and how does needing to make many small changes across many different, scattered classes for a single logical change often signal a DRY or SRP violation distributed across a codebase rather than concentrated in one place?**
+
+Shotgun Surgery describes the situation where a single conceptual change (updating a business rule, adding a new field to a concept used throughout the system) requires touching many different classes scattered across the codebase, each needing a small, related edit — the opposite problem from a God Object (covered under OOP), but arising from a related root cause: the same piece of knowledge or responsibility has been duplicated (violating DRY) or scattered (violating SRP's "one reason to change") across many places instead of being consolidated in one.
+
+```text
+A SINGLE conceptual change ("orders can now have a 'gift-wrapped' status")
+  requires editing: OrderEntity, OrderDto, OrderValidator, OrderRepository,
+  OrderMapper, OrderReportGenerator, OrderEmailTemplate -- SEVEN separate
+  files, EACH needing a small, RELATED edit for ONE logical change
+
+This SIGNALS that "how an Order's status is represented and validated" is
+  actually DUPLICATED/SCATTERED knowledge across all SEVEN places, rather
+  than CONSOLIDATED in one location a SINGLE change could target
+```
+
+Because Shotgun Surgery's symptom (touching many files for one change) is the *effect* of duplicated or scattered knowledge, the fix is usually consolidating that scattered responsibility into fewer, more cohesive places — directly the outcome DRY and SRP are meant to produce when properly applied; recognizing Shotgun Surgery as a named smell gives a concrete, recognizable signal for when a codebase's actual structure has drifted away from those principles' intent, even if no single class looks obviously wrong in isolation.
+
+**Common Pitfall:** responding to Shotgun Surgery by consolidating everything into one large, all-encompassing class purely to reduce the number of files touched — this risks trading Shotgun Surgery for a God Object (covered under OOP), the opposite extreme; the actual fix is finding the *right* level of consolidation, grouping genuinely related knowledge together without over-consolidating unrelated concerns into a single bloated class.
+
+---
+
 ---
