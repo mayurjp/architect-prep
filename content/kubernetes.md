@@ -2038,3 +2038,102 @@ Because a Pod can still receive new traffic for a brief window even after Kubern
 **Common Pitfall:** setting `terminationGracePeriodSeconds` generously long without verifying the application's own shutdown logic actually uses that time productively — if the application doesn't handle `SIGTERM` at all (exiting immediately, or not exiting until forcibly killed), a longer grace period only delays how quickly a Pod actually terminates during a rollout or scale-down, without providing any real graceful-shutdown benefit.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What do `kubectl top pod` and `kubectl top node` show, and how does the current CPU/memory usage they report differ from the resource requests/limits declared in a Pod's own spec?**
+
+A Pod's `resources.requests`/`resources.limits` (covered elsewhere) are *declared, static* values used by the scheduler and for enforcing ceilings — `kubectl top` instead reports *actual, real-time, currently-observed* CPU and memory usage, sourced from the cluster's Metrics Server, giving a live snapshot of what a Pod or node is genuinely consuming right now, as opposed to what it was configured to request or allowed to use.
+
+```bash
+kubectl top pod
+# NAME              CPU(cores)   MEMORY(bytes)
+# api-7d9f8c-x2n4p   250m         180Mi
+
+kubectl top node
+# NAME       CPU(cores)   CPU%   MEMORY(bytes)   MEMORY%
+# node-1     1800m        45%    6000Mi          60%
+```
+
+```text
+Pod spec's requests/limits: STATIC, DECLARED values -- "this Pod is ALLOWED
+  up to 500m CPU / 512Mi memory" -- doesn't change UNLESS the spec ITSELF
+  is edited
+
+kubectl top: LIVE, OBSERVED usage RIGHT NOW -- "this Pod is CURRENTLY
+  actually using 250m CPU / 180Mi memory" -- changes CONTINUOUSLY as the
+  Pod's REAL workload fluctuates
+```
+
+Because comparing a Pod's actual observed usage (via `kubectl top`) against its declared requests/limits reveals whether those declared values are realistically sized — a Pod consistently using far less than its request wastes reserved cluster capacity, while one frequently approaching its limit risks throttling or OOMKill — this comparison is a standard first step when tuning resource requests/limits for a workload whose real-world usage pattern wasn't precisely known upfront.
+
+**Common Pitfall:** assuming `kubectl top`'s absence of output (or a "metrics not available" error) means something is wrong with the Pod itself — this command depends entirely on the Metrics Server being installed and running in the cluster; a cluster without it configured simply cannot report this live usage data at all, regardless of the Pod's own actual health.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is a Kubernetes `Lease` object, and how does it provide a lightweight, general-purpose mechanism for leader election among multiple replicas of a controller, without each one needing its own external coordination service?**
+
+A `Lease` is a small Kubernetes API object representing a time-bounded claim of exclusive ownership — multiple replicas of a controller can all attempt to acquire (or renew) the same named Lease, with the Kubernetes API server's own optimistic-concurrency guarantees ensuring only one replica succeeds at a time, giving those replicas a leader-election mechanism built entirely on infrastructure the cluster already provides, with no separate coordination service (like etcd accessed directly, or Zookeeper) needed.
+
+```csharp
+// Conceptual: multiple replicas of the same controller all periodically try to
+// acquire/renew a shared Lease named "my-controller-leader"
+// Only the replica currently holding a valid, unexpired Lease acts as the leader;
+// the others watch and stand by, ready to acquire it if the leader stops renewing
+```
+
+```text
+WITHOUT a Lease-based mechanism: implementing leader election requires
+  standing up (or directly accessing) a SEPARATE coordination service --
+  extra INFRASTRUCTURE, extra operational burden
+
+WITH a Kubernetes Lease: LEADER election is implemented using an object
+  TYPE the cluster's own API server ALREADY provides -- no ADDITIONAL
+  coordination infrastructure needed, just a small amount of CLIENT-side
+  logic (acquire, renew, release) using the EXISTING Kubernetes API
+```
+
+Because Kubernetes itself internally uses Leases for its own core controller-manager and scheduler leader election (ensuring only one active instance among several standby replicas), the same mechanism is available to any application controller needing similar semantics — a genuinely reusable, low-friction building block for "exactly one active instance among several replicas" scenarios running inside a Kubernetes cluster.
+
+**Common Pitfall:** implementing custom leader-election logic using a `ConfigMap` or another general-purpose object type as an improvised lock, rather than using the purpose-built `Lease` object — `Lease` specifically models time-bounded ownership with a defined renewal/expiration semantic, providing safer, more correct behavior out of the box than a hand-rolled approach layered awkwardly onto a general-purpose object type never designed for this purpose.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is Kubernetes' `PodOverhead` field, and how does it let the scheduler account for the additional resource cost a specific container runtime imposes beyond a container's own declared resource requests?**
+
+A container running under a lightweight runtime (standard `runc`) has negligible overhead beyond its own declared resource requests — but a Pod running under a heavier, VM-based sandboxing runtime (like Kata Containers, which runs each Pod inside its own lightweight virtual machine for stronger isolation) incurs genuine additional resource cost (the VM's own hypervisor overhead) that isn't captured anywhere in the container's own requests. `PodOverhead`, associated with a specific `RuntimeClass`, tells the scheduler to add that runtime's known overhead on top of a Pod's declared requests when making scheduling decisions.
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-containers
+handler: kata
+overhead:
+  podFixed:
+    cpu: "250m"      # this runtime's VM sandbox itself costs 250m CPU, beyond the Pod's own requests
+    memory: "160Mi"
+```
+
+```text
+WITHOUT PodOverhead: the scheduler accounts ONLY for a Pod's OWN declared
+  requests (say, 500m CPU) -- but the ACTUAL resource consumption on the
+  node also includes the RUNTIME's OWN sandbox overhead (250m CPU for the
+  VM itself) -- the scheduler UNDERESTIMATES true resource consumption,
+  risking OVER-PACKING a node beyond its genuine capacity
+
+WITH PodOverhead configured on the RuntimeClass: the scheduler ACCOUNTS
+  for BOTH the Pod's own 500m request AND the runtime's 250m overhead --
+  a TRUE total of 750m is considered when deciding whether this Pod FITS
+  on a given node
+```
+
+Because a VM-based sandboxing runtime's overhead is a genuine, fixed resource cost that exists regardless of what the containerized application itself actually requests, `PodOverhead` closes a real accuracy gap for clusters using such runtimes — without it, the scheduler would systematically underestimate true per-Pod resource consumption for every Pod using that runtime, eventually leading to node-level resource exhaustion despite the scheduler believing there was still available capacity.
+
+**Common Pitfall:** configuring `PodOverhead` values that don't accurately reflect a specific runtime's actual measured overhead — an underestimated `PodOverhead` reproduces exactly the scheduling-inaccuracy problem this feature exists to solve, while an overestimated one wastes genuinely available cluster capacity by making the scheduler believe less room exists on a node than the runtime's overhead actually costs.
+
+---

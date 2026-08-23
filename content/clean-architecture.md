@@ -2204,3 +2204,121 @@ Because an Aggregate's replay cost would otherwise grow linearly, unboundedly, w
 **Common Pitfall:** treating a Snapshot as the Aggregate's actual source of truth, rather than a pure performance optimization derived from it — the full event stream must always remain the authoritative record; a corrupted or lost snapshot should be safely reconstructable by simply replaying the complete event history from the beginning, exactly as if the snapshot had never existed at all.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is the convention of a per-layer "Startup Extension Method" (`AddApplicationServices()`, `AddInfrastructureServices()`), and how does it keep `Program.cs` thin and free of layer-specific dependency-registration details?**
+
+Rather than `Program.cs` directly listing every single service registration for every layer, each layer (Application, Infrastructure, and so on) exposes its own extension method encapsulating exactly what that layer needs registered — `Program.cs` then simply calls each layer's own method, staying a short, high-level summary of "which layers are being wired up" rather than an ever-growing list of individual `services.AddScoped<...>()` calls.
+
+```csharp
+// Infrastructure/DependencyInjection.cs
+public static class InfrastructureServiceCollectionExtensions
+{
+    public static IServiceCollection AddInfrastructureServices(this IServiceCollection services, IConfiguration config)
+    {
+        services.AddDbContext<AppDbContext>(options => options.UseSqlServer(config.GetConnectionString("Default")));
+        services.AddScoped<IOrderRepository, OrderRepository>();
+        return services;
+    }
+}
+
+// Program.cs -- stays SHORT and HIGH-LEVEL
+builder.Services.AddApplicationServices();
+builder.Services.AddInfrastructureServices(builder.Configuration);
+```
+
+```text
+WITHOUT per-layer extension methods: Program.cs ACCUMULATES dozens of
+  INDIVIDUAL service registrations directly, MIXING concerns from every
+  layer together in ONE increasingly unwieldy FILE
+
+WITH per-layer extension methods: EACH layer owns and MAINTAINS its OWN
+  registration logic, in its OWN project -- Program.cs simply CALLS each
+  layer's method, remaining a SHORT, readable SUMMARY of the application's
+  overall composition
+```
+
+Because each layer's own registration logic lives inside that same layer's project (an Infrastructure-specific `AddInfrastructureServices()` living inside the Infrastructure project itself), adding a new service to a specific layer only requires touching that layer's own extension method — `Program.cs` itself rarely needs to change as a project grows, staying a stable, high-level composition summary rather than a constantly-churning file every new registration touches.
+
+**Common Pitfall:** placing a layer's extension method in the wrong project (an `AddInfrastructureServices()` method defined inside the Application project, for instance) — this subtly violates the Dependency Rule the extension-method convention is meant to support, since the method's own implementation would need to reference Infrastructure-specific types from a project that should never depend on Infrastructure at all.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is a Domain Model Purity architecture test (via a library like NetArchTest), and how does it enforce the Dependency Rule (covered extensively earlier) as a genuine, automated build-time check rather than relying on code review discipline alone?**
+
+Rather than trusting every code reviewer to always notice an accidental `using EFCore` statement creeping into the Domain project, an architecture test uses a library like NetArchTest to programmatically assert, as part of the normal test suite, that the Domain assembly has *zero* dependencies on Infrastructure/EF Core/any specific framework — turning what would otherwise be a code-review judgment call into an automated, CI-enforced, unambiguous pass/fail check.
+
+```csharp
+[Fact]
+public void Domain_Should_Not_Depend_On_Infrastructure()
+{
+    var result = Types.InAssembly(typeof(Order).Assembly)
+        .ShouldNot()
+        .HaveDependencyOn("MyApp.Infrastructure")
+        .GetResult();
+
+    Assert.True(result.IsSuccessful, string.Join(", ", result.FailingTypeNames ?? Array.Empty<string>()));
+}
+```
+
+```text
+WITHOUT an architecture test: enforcing the Dependency Rule relies ENTIRELY
+  on every CODE REVIEWER catching a violation manually -- an accidental
+  reference SNEAKS through review, and the Domain layer is now QUIETLY
+  coupled to Infrastructure, discovered LATE (if ever)
+
+WITH a Domain Model Purity test: ANY violation FAILS the build IMMEDIATELY,
+  the MOMENT it's introduced -- the Dependency Rule becomes a GENUINE,
+  ENFORCED constraint, not merely a CONVENTION everyone is TRUSTED to
+  remember and CATCH during review
+```
+
+Because this test runs as part of the ordinary CI test suite, a Dependency Rule violation is caught at the exact commit that introduces it — immediately, automatically, and consistently — rather than depending on a human reviewer's attention on that specific pull request, making architecture tests a genuinely stronger enforcement mechanism than code review discipline alone for a rule this foundational to the entire Clean Architecture approach.
+
+**Common Pitfall:** writing an architecture test once and never revisiting it as the codebase evolves — a genuinely useful architecture test suite needs to grow alongside new layers, new projects, or new architectural rules the team adopts over time; a stale, unmaintained architecture test can create false confidence if it no longer reflects the project's actual current structure.
+
+---
+
+## Advanced — Question 22
+
+**Q22: Why does DDD guidance generally discourage giving an Entity/Aggregate a direct constructor-level dependency on an external service, favoring instead a Domain Service passed as a method parameter at the moment it's actually needed?**
+
+Injecting a service dependency (a password hasher, a currency-conversion service) directly into an Entity's own constructor ties that Entity's construction to the availability of that service everywhere the Entity is created — including in unit tests, in-memory reconstruction from an event stream, or simple object initialization scenarios that have no natural way to supply that dependency. Passing the needed Domain Service as a parameter to the *specific method* that actually requires it keeps the Entity's own construction dependency-free, while still making the needed capability available exactly where and when it's genuinely used.
+
+```csharp
+// Avoided: a constructor-injected dependency couples EVERY construction of User
+// to having an IPasswordHasher available -- even in scenarios that don't need it
+public class User
+{
+    private readonly IPasswordHasher _hasher; // now required for EVERY User construction
+    public User(IPasswordHasher hasher) { _hasher = hasher; }
+    public void UpdatePassword(string newPassword) => PasswordHash = _hasher.Hash(newPassword);
+}
+
+// Preferred: the dependency is passed only to the SPECIFIC method that needs it
+public class User
+{
+    public void UpdatePassword(string newPassword, IPasswordHasher hasher) =>
+        PasswordHash = hasher.Hash(newPassword); // dependency scoped to EXACTLY where it's used
+}
+```
+
+```text
+Constructor injection: EVERY place constructing a User (a unit test, EF
+  Core materializing it from the DATABASE, an event-sourced replay) must
+  now SUPPLY an IPasswordHasher, even though MOST of those construction
+  paths have NOTHING to do with password hashing at all
+
+Method-parameter injection: ONLY the ONE method that GENUINELY needs
+  password hashing (UpdatePassword) requires it -- EVERY other way of
+  constructing/reconstructing a User remains COMPLETELY dependency-free
+```
+
+Because an Entity is fundamentally a data-and-behavior object that gets constructed/reconstructed in many different contexts (a fresh creation, an ORM materializing it from a database row, an Event Sourcing replay reconstructing it from historical events), tying its constructor to an external service dependency needlessly complicates every one of those contexts — scoping the dependency to the specific method that actually needs it (the approach directly referenced in an earlier scenario covering `UpdatePassword()`) keeps construction simple everywhere while still making the needed capability available exactly where it's genuinely required.
+
+**Common Pitfall:** reflexively applying constructor injection to a Domain Entity the same way it's applied to an Application-layer or Infrastructure-layer class — Entities have a fundamentally different construction lifecycle (frequently reconstructed by an ORM or event replay, not just freshly created via DI) that makes constructor-level service dependencies a much worse fit than the method-parameter alternative.
+
+---

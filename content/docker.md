@@ -1818,3 +1818,95 @@ Because CI build agents are frequently ephemeral (a fresh container/VM per build
 **Common Pitfall:** pushing the remote cache without also using BuildKit's `mode=max` cache export option — the default `mode=min` only exports cache for the image's *final* layers, missing the intermediate build-stage layers (in a multi-stage build) that often benefit the most from caching; `mode=max` exports cache for every layer of every stage, at the cost of a larger cache image being pushed.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is a Docker Bind Mount, as distinct from a Named Volume (covered earlier), and how does mapping a host directory directly into a container let local file changes appear instantly, without rebuilding the image?**
+
+A Named Volume's storage location is managed by Docker itself, opaque to the host filesystem — a Bind Mount instead maps a *specific, known host directory* directly into the container, so any file the host modifies is immediately visible inside the container (and vice versa), no image rebuild required — commonly used during local development to let source-code edits take effect immediately inside a running container.
+
+```bash
+docker run -v $(pwd)/src:/app/src myapp:dev
+# host's ./src directory is mapped DIRECTLY into the container's /app/src --
+# editing a file on the HOST is immediately visible INSIDE the container
+```
+
+```text
+Named Volume: Docker manages the STORAGE location itself -- opaque to the
+  host filesystem, PORTABLE across different host environments, appropriate
+  for DATA a container OWNS (a database's files)
+
+Bind Mount: maps a SPECIFIC, host-chosen directory directly INTO the
+  container -- changes on EITHER side are IMMEDIATELY visible on the OTHER
+  -- appropriate for LIVE-EDITING source code during local DEVELOPMENT
+```
+
+Because a Bind Mount reflects host-side file changes into a running container instantly, it's the standard technique for a local development workflow where a container runs the application while the actual source files are edited on the host — combined with a file-watching dev server inside the container, this enables live-reload without any rebuild-and-restart cycle.
+
+**Common Pitfall:** using a Bind Mount in a production deployment the same way it's used locally — Bind Mounts tie a container to a *specific host path*, which breaks the portability a containerized deployment is meant to provide (that exact host path may not exist, or may hold different content, on a different production host); production deployments should rely on Named Volumes or genuinely externalized storage instead.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is Docker Compose's `watch` mode (`docker compose watch`), and how does it automatically sync file changes or trigger a rebuild for a service during local development, without a manual restart?**
+
+Rather than manually stopping, rebuilding, and restarting a Compose service every time source code changes, `docker compose watch` monitors specified paths and automatically takes a configured action — syncing changed files directly into the running container (for interpreted languages/hot-reload setups) or triggering a full rebuild-and-restart (for compiled languages) — the moment a relevant file changes on the host.
+
+```yaml
+services:
+  api:
+    build: .
+    develop:
+      watch:
+        - action: sync         # copy changed files DIRECTLY into the running container
+          path: ./src
+          target: /app/src
+        - action: rebuild       # trigger a FULL rebuild if a dependency file changes
+          path: ./package.json
+```
+
+```text
+WITHOUT watch mode: EVERY code change requires a MANUAL "docker compose up
+  --build" cycle -- SLOW, repetitive, EASY to forget the --build flag and
+  test against a STALE image
+
+WITH watch mode: the DEVELOPER simply saves a FILE -- Compose AUTOMATICALLY
+  syncs it into the RUNNING container (or rebuilds, per the CONFIGURED
+  action) -- the inner development LOOP tightens considerably
+```
+
+Because `watch` mode automates exactly the manual rebuild-and-restart cycle a developer would otherwise perform by hand after every code change, it meaningfully shortens the local development feedback loop for a multi-service Compose-based application — complementing (rather than replacing) a Bind Mount's (covered earlier) live-visibility benefit, since `watch`'s `sync` action can push changes into a container even when a Bind Mount alone wouldn't be sufficient (a container built from a different base needing files placed in a specific location).
+
+**Common Pitfall:** configuring `watch` with the `sync` action for files that actually require a full rebuild to take effect (a compiled language's source files, a changed dependency manifest) — syncing raw source files into a container without triggering the corresponding build step leaves the running application using stale, already-compiled code despite the file technically having been updated inside the container.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is Docker's user namespace remapping (`--userns-remap`), and how does mapping a container's root user to an unprivileged user ID on the host provide defense-in-depth against a container-escape vulnerability?**
+
+Even with a container's own internal process running as root (UID 0) inside its namespace, `--userns-remap` reconfigures the Docker daemon to map that container-internal root UID to a genuinely *unprivileged* user ID on the host — so a process that somehow escapes the container's isolation boundary finds itself running as an unprivileged host user, not as actual host root, regardless of whether it believed itself to be "root" from inside the container.
+
+```bash
+# Docker daemon configuration (/etc/docker/daemon.json)
+{ "userns-remap": "default" }
+```
+
+```text
+WITHOUT userns-remap: a CONTAINER-ESCAPE vulnerability exploited by a
+  process running as ROOT (UID 0) INSIDE the container grants the ATTACKER
+  genuine ROOT privileges on the HOST itself, since UID 0 maps DIRECTLY
+  to host UID 0
+
+WITH userns-remap: the SAME container-internal UID 0 is REMAPPED to an
+  UNPRIVILEGED UID on the HOST -- even a SUCCESSFUL container escape lands
+  the attacker with only UNPRIVILEGED host permissions, dramatically
+  LIMITING the actual damage possible
+```
+
+Because this remapping happens transparently at the kernel's user-namespace level — the containerized application still believes it's running as root, with no code changes required — it provides a genuine defense-in-depth layer against the specific, high-severity risk of a container-escape vulnerability translating directly into host-level root compromise, independent of whether the containerized application itself was deliberately designed to avoid running as root (covered under earlier rootless-mode and non-root-user discussions).
+
+**Common Pitfall:** assuming user namespace remapping alone makes running containers as root inside the container fully safe, removing any need to also follow the earlier-covered best practice of running as a non-root user *inside* the container — remapping limits the blast radius of a successful *escape*, but a compromised process still has full root privileges *within* the container's own namespace, able to do damage to anything reachable from inside that boundary; the two mitigations address different layers and are complementary, not substitutes for each other.
+
+---

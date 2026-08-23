@@ -2281,3 +2281,76 @@ Because achieving this majority-consensus guarantee requires every lock operatio
 **Common Pitfall:** defaulting to a consensus-based lock service for every locking need regardless of the actual correctness stakes — for many use cases (a best-effort deduplication lock, a low-stakes coordination hint) a single-Redis-instance lock's simplicity and lower latency is a perfectly reasonable trade-off, and reaching for etcd/Chubby-level guarantees everywhere adds real operational and latency cost without a correspondingly real correctness need.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is a "Reconnection Storm," and how does adding random jitter to client reconnection logic prevent many clients from simultaneously overwhelming a server that just restarted?**
+
+When a server restarts (a deployment, a crash-and-recover), every client that was connected to it typically detects the disconnection and attempts to reconnect at roughly the same moment — without any randomization, thousands of clients reconnecting in the exact same instant can overwhelm the freshly-restarted server with a sudden connection spike, potentially causing it to fail again immediately after recovering.
+
+```text
+WITHOUT jitter: server RESTARTS -> ALL 10,000 previously-connected clients
+  detect the disconnect at ROUGHLY the same moment -> ALL attempt to
+  reconnect SIMULTANEOUSLY -> the FRESHLY-restarted server is HIT with a
+  massive connection SPIKE, potentially crashing it AGAIN immediately
+
+WITH jitter: each client waits a RANDOM, small delay (say, 0-5 seconds)
+  before attempting to reconnect -- the SAME 10,000 clients' reconnection
+  attempts SPREAD OUT smoothly over that window, rather than arriving all
+  AT ONCE
+```
+
+Because a server just recovering from a restart is often at its most fragile moment (cold caches, warming-up connection pools), a coordinated reconnection spike arriving at exactly that moment is a genuinely dangerous failure amplifier — deliberately randomizing each client's reconnection delay is a simple, low-cost technique that smooths out this spike into a gentler, more manageable ramp, directly analogous to the jitter used in exponential backoff retry logic (covered under gRPC/resilience patterns) for the same underlying reason.
+
+**Common Pitfall:** implementing a fixed, identical reconnection delay across every client (e.g., "always retry after exactly 3 seconds") rather than a randomized one — a fixed delay merely shifts the reconnection storm's timing by a constant amount without actually spreading it out, since every client still reconnects in near-perfect unison, just 3 seconds later than they would have otherwise.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: How does applying the Bulkhead pattern (covered under Microservices) at the thread-pool level — a separate, dedicated thread pool per downstream dependency — differ from a simple connection-count limit in isolating resource exhaustion?**
+
+A plain connection-count limit caps how many *connections* to a dependency can be open simultaneously, but the *threads* handling those calls may still be drawn from one shared thread pool serving the entire application — if calls to a slow dependency occupy enough of that shared pool's threads (even while respecting the connection limit), unrelated work needing the same shared pool can still be starved. A genuine thread-pool-level Bulkhead instead dedicates an entirely separate, fixed-size thread pool to each downstream dependency, so a slow dependency exhausting *its own* dedicated pool has zero effect on threads reserved for calls to any other dependency.
+
+```text
+Connection-count limit only: calls to a SLOW dependency are capped at, say,
+  20 concurrent connections -- but the THREADS handling those 20 slow calls
+  are drawn from the SAME shared thread pool serving EVERY OTHER piece of
+  work in the application -- if those 20 threads are all BLOCKED waiting on
+  the slow dependency, UNRELATED work sharing that SAME pool can still be
+  STARVED
+
+Thread-pool-level Bulkhead: the SLOW dependency's calls run on their OWN,
+  DEDICATED, separate thread pool -- even if EVERY thread in that dedicated
+  pool is BLOCKED waiting on the slow dependency, threads in EVERY OTHER
+  dependency's OWN separate pool remain completely UNAFFECTED
+```
+
+Because true resource isolation requires isolating the actual constrained resource (threads) rather than just a proxy metric for it (open connections), a thread-pool-level Bulkhead provides a stronger isolation guarantee than a connection-count limit alone — the specific mechanism Netflix's Hystrix library popularized (via configurable per-dependency thread pools) before many ecosystems shifted toward reactive, non-thread-per-call models that sidestep this specific concern differently.
+
+**Common Pitfall:** implementing only a connection-count limit and assuming it provides the same isolation guarantee as a full thread-pool Bulkhead — a connection limit alone still permits shared-thread-pool starvation from a slow dependency's blocked calls, an entirely different (and often more damaging) failure mode than merely having too many open connections.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is a system's "Degraded Mode," and how does deliberately designing an explicit, reduced-but-functional fallback behavior for each critical dependency differ from a binary all-or-nothing availability model?**
+
+A binary availability model treats a system as either fully "up" (every feature working) or fully "down" (nothing working) — Degraded Mode instead deliberately designs, in advance, a reduced but still genuinely useful fallback behavior for when a specific dependency becomes unavailable (showing cached, slightly-stale recommendations rather than none at all when a recommendation service is down; disabling a non-essential feature while keeping checkout fully functional), so a partial outage produces a partial, tolerable degradation in user experience rather than a complete, all-or-nothing failure.
+
+```text
+Binary model: RECOMMENDATION service goes DOWN -> the ENTIRE page (which
+  ALSO shows the checkout button, unrelated to recommendations) FAILS to
+  load AT ALL, because ONE dependency in the request chain FAILED
+
+Degraded Mode: RECOMMENDATION service goes DOWN -> the page LOADS normally,
+  simply OMITTING the recommendations section (or showing a CACHED,
+  slightly stale version) -- the CORE, CRITICAL functionality (browsing,
+  checkout) remains COMPLETELY unaffected by this ONE dependency's outage
+```
+
+Because designing Degraded Mode behavior requires explicitly identifying, for every dependency, what a reasonable fallback actually looks like (a cached value, an omitted section, a simplified alternative) — decided deliberately in advance, not improvised during an actual incident — it represents genuine upfront engineering investment, but pays off directly during a partial outage by keeping a system's *critical* functionality available even while a *non-critical* dependency is failing, precisely the difference between "resilient" and merely "either fully working or fully broken."
+
+**Common Pitfall:** treating every dependency as equally critical, with no distinction between "must work for the core experience to function at all" and "nice to have, but the system remains genuinely useful without it" — without this classification made explicit upfront, a team has no principled basis for deciding where Degraded Mode fallback behavior is actually worth the engineering investment to build, versus where a dependency failing legitimately should bring down the whole request.
+
+---

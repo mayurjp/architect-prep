@@ -2485,3 +2485,86 @@ Because the Chassis pattern deliberately draws its reuse boundary at "infrastruc
 **Common Pitfall:** letting a Chassis template gradually accumulate genuine domain logic over time (a well-intentioned developer adding a "helper" that happens to encode a business rule) — without deliberate discipline keeping the Chassis strictly infrastructure-only, it can slowly drift into exactly the shared-library-trap coupling it was originally designed to avoid, simply under a different name.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is "Smart Endpoints, Dumb Pipes," one of the original tenets from Fowler and Lewis's foundational microservices article, and how does it contrast microservices' philosophy against a heavyweight Enterprise Service Bus (ESB) putting orchestration logic into the messaging layer itself?**
+
+Older, ESB-centric integration architectures often placed significant business logic — routing rules, message transformation, orchestration — *inside* the messaging middleware itself, making the "pipe" connecting services genuinely smart and business-aware. Microservices' "Smart Endpoints, Dumb Pipes" principle inverts this: the messaging infrastructure (the "pipe") should remain simple, general-purpose, and business-agnostic, while all actual business logic lives inside the services (the "endpoints") themselves.
+
+```text
+ESB-centric architecture: the MESSAGE BUS itself contains ROUTING rules,
+  TRANSFORMATION logic, and ORCHESTRATION business rules -- the "pipe"
+  is SMART, and services connected to it can stay relatively SIMPLE
+
+Microservices' "Smart Endpoints, Dumb Pipes": the MESSAGE BROKER (Kafka,
+  RabbitMQ) is a SIMPLE, general-purpose transport with NO business logic
+  of its OWN -- ALL business logic (routing decisions, transformations,
+  orchestration) lives INSIDE the individual SERVICES that produce/consume
+  messages
+```
+
+Because business logic embedded inside a shared, centralized messaging middleware becomes a bottleneck for both understanding (logic scattered across configuration rather than code) and independent deployability (every team depends on the same central bus's own release cycle for logic changes), keeping the transport layer deliberately simple and pushing all business logic into the services themselves preserves the independent deployability and clear ownership boundaries microservices are meant to provide.
+
+**Common Pitfall:** gradually reintroducing ESB-style complexity into a message broker's own configuration (complex routing rules, message transformation logic configured centrally in the broker) under the belief that centralizing this logic is more efficient — this recreates the exact coupling and bottleneck "Smart Endpoints, Dumb Pipes" was specifically formulated to avoid, shifting business logic back into shared infrastructure that every team then depends on.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is a "Canary Consumer" for a message-driven microservice, and how does it apply the Canary Deployment concept (covered under DevOps) specifically to a consumer processing messages from a shared topic or queue?**
+
+An ordinary Canary Deployment (covered under DevOps) routes a small percentage of *HTTP request traffic* to a new version before a full rollout — a Canary Consumer applies the same incremental-validation philosophy to a message-driven consumer: running a small number of instances on the new version, consuming from the same shared topic alongside the existing, stable-version instances, letting the new version prove itself against genuine production message traffic before scaling it up to replace the old version entirely.
+
+```text
+Consumer group "OrderProcessors" processing the "OrderPlaced" topic:
+  - 9 instances running the STABLE, current version
+  - 1 instance running the NEW, candidate version (the "canary")
+
+Both versions CONSUME from the SAME shared topic, via the SAME consumer
+  group's PARTITION assignment (covered under Messaging) -- the CANARY
+  instance processes a NATURAL, small SLICE of real production messages,
+  without any DELIBERATE traffic-splitting logic needed
+```
+
+Because a consumer group's own partition-assignment mechanism (covered under Messaging) already naturally distributes messages across whichever instances are currently members of the group, running one canary instance alongside several stable ones achieves incremental validation without needing an explicit traffic-splitting mechanism the way an HTTP-based canary requires — the canary simply receives its proportional share of whatever partitions get assigned to it.
+
+**Common Pitfall:** deploying a Canary Consumer without first confirming the new version's message-processing logic is safely idempotent and side-effect-compatible with the stable version — since both versions may process interleaved messages from the same topic during the canary period, any incompatibility (a schema the new version can't parse, a side effect the old version doesn't expect) surfaces immediately against real production data, unlike an HTTP canary where a bad response is simply returned to one unlucky request.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is the "Parallel Run" migration technique, and how does running both an old and a new implementation of a piece of logic side by side against the same input — without the new implementation's result actually being used yet — provide a safe variant of the Strangler Fig migration strategy (covered earlier)?**
+
+Rather than cutting over to a new implementation and hoping it behaves correctly, Parallel Run executes *both* the old (currently trusted, in-production) implementation and the new (candidate) implementation against the exact same real input, discards the new implementation's result without acting on it, and instead logs/compares the two outputs — building confidence that the new implementation genuinely matches the old one's behavior across real production data, before ever actually switching production traffic to rely on it.
+
+```csharp
+public decimal CalculateShipping(Order order)
+{
+    var oldResult = _legacyShippingCalculator.Calculate(order); // TRUSTED, currently used
+    var newResult = _newShippingCalculator.Calculate(order);    // CANDIDATE, not yet trusted
+
+    if (oldResult != newResult)
+        _logger.LogWarning("Shipping calc mismatch: old={Old}, new={New}, order={OrderId}", oldResult, newResult, order.Id);
+
+    return oldResult; // the OLD result is still what's ACTUALLY used/returned
+}
+```
+
+```text
+Strangler Fig's typical cutover: route a GROWING percentage of REAL traffic
+  DIRECTLY to the new implementation -- a BUG in the new implementation
+  directly AFFECTS real users/data for whatever SLICE of traffic it handles
+
+Parallel Run: BOTH implementations run on EVERY request -- the OLD result
+  is what's actually USED/returned; the NEW result is only COMPARED and
+  LOGGED -- a bug in the NEW implementation has ZERO user-facing impact,
+  since its output is never actually ACTED upon during this phase
+```
+
+Because the new implementation's output never actually drives real behavior during the Parallel Run phase, this technique provides a genuinely risk-free way to validate a new implementation's correctness against real, messy production data (including edge cases a test suite might never think to cover) before the far riskier step of actually switching production to depend on it — directly analogous to Shadow/Mirrored Traffic Testing (covered under DevOps), but applied at the level of a specific piece of business logic rather than an entire service.
+
+**Common Pitfall:** running a Parallel Run comparison that includes any side-effecting behavior in the new implementation (a database write, an external API call) rather than a genuinely pure computation — Parallel Run's safety guarantee depends entirely on the new implementation's execution having zero observable side effects; a new implementation that writes data or calls external systems during the comparison phase can cause real, unintended consequences despite its *return value* being correctly discarded.
+
+---
