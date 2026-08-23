@@ -1982,4 +1982,86 @@ Because the sidecar proxy operates at the network level, entirely transparent to
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What does `MapGrpcService<T>()` do in ASP.NET Core's startup configuration, and how does registering a gRPC service this way differ from registering an ordinary MVC controller?**
+
+`MapGrpcService<T>()` wires a generated gRPC service base class implementation into ASP.NET Core's routing, specifically configured to handle gRPC's own protocol requirements (HTTP/2, Protobuf binary request/response bodies, gRPC status trailers) — a fundamentally different request pipeline than `MapControllers()`, which handles ordinary HTTP/JSON MVC routing.
+
+```csharp
+var app = builder.Build();
+
+app.MapGrpcService<GreeterService>();  // gRPC service, generated from a .proto file
+app.MapControllers();                   // ordinary MVC/Web API controllers, side by side
+```
+
+```text
+MapControllers(): routes ORDINARY HTTP requests to CONTROLLER actions based
+  on ROUTE attributes/conventions -- expects/returns JSON over HTTP/1.1 or HTTP/2
+
+MapGrpcService<T>(): routes gRPC calls (ALWAYS over HTTP/2) to the SPECIFIC
+  service implementation's METHODS, matching the RPC names DEFINED in the
+  original .proto file -- expects/returns Protobuf BINARY, not JSON
+```
+
+Because both registration calls can coexist in the same ASP.NET Core application, a single web application can expose both a traditional REST/JSON API and a gRPC API side by side, sharing the same underlying Kestrel server and dependency injection container, while each request is routed to the appropriate pipeline based on its actual protocol.
+
+**Common Pitfall:** forgetting that gRPC requires HTTP/2 specifically — attempting to call a `MapGrpcService`-registered endpoint over plain HTTP/1.1 (as an ordinary browser fetch or an HTTP/1.1-only client might attempt) fails, since gRPC's framing and multiplexing depend on HTTP/2 features that HTTP/1.1 simply doesn't provide.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is gRPC JSON Transcoding, and how does it let a single gRPC service definition also be exposed automatically as a RESTful JSON API, without hand-writing a separate REST controller?**
+
+Rather than manually building and maintaining a separate REST API layer that duplicates a gRPC service's own logic (the general gateway-based approach covered in an earlier scenario), gRPC JSON Transcoding annotates a `.proto` file's RPC methods with HTTP routing information, and ASP.NET Core's gRPC JSON Transcoding middleware automatically generates a REST/JSON endpoint that internally translates incoming JSON requests into the equivalent gRPC call, and translates the gRPC response back into JSON.
+
+```protobuf
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply) {
+    option (google.api.http) = {
+      get: "/v1/greet/{name}"   // annotates the RPC with a REST-style route
+    };
+  }
+}
+```
+
+```text
+WITHOUT JSON Transcoding: MAINTAIN a SEPARATE REST controller MANUALLY,
+  duplicating the SAME business logic already implemented in the gRPC service
+
+WITH JSON Transcoding: the SAME .proto-defined RPC method is AUTOMATICALLY
+  reachable via BOTH a native gRPC call AND a plain HTTP GET/POST JSON
+  request to the ANNOTATED route -- ONE implementation, TWO protocols
+```
+
+Because the underlying service implementation is written exactly once and the transcoding middleware handles translating between JSON-over-HTTP and native gRPC automatically, this removes the maintenance burden of hand-writing and keeping in sync a separate REST facade — directly addressing the "maintain two API surfaces for the same logic" problem in a more automated, declarative way than a general-purpose gateway proxy.
+
+**Common Pitfall:** assuming JSON Transcoding produces an idiomatic, fully-featured REST API purely by adding the HTTP annotation — the generated REST surface still fundamentally mirrors gRPC's own request/response shapes and semantics; it's a convenient compatibility layer for simpler cases, not necessarily a substitute for a REST API deliberately designed around REST's own idioms (HATEOAS, resource-oriented URLs) from scratch.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is HTTP/2 stream-level flow control in gRPC, and how does a slow consumer of a server-streaming RPC cause the server to pause sending further messages until window credit is replenished?**
+
+HTTP/2 flow control operates independently of `MaxConcurrentStreams` (covered earlier, which limits how many streams can be open at once) — each individual stream has its own flow-control *window*, a budget of bytes the sender is allowed to transmit before the receiver acknowledges it's processed some of what it already received. If a server-streaming RPC's consumer processes messages slower than the server produces them, the consumer's flow-control window fills up, and the server is protocol-level *forced* to pause sending further data until the consumer's processing catches up and replenishes the window.
+
+```text
+Server-streaming RPC: server PRODUCES messages rapidly, but the CLIENT's
+  own processing loop is SLOW (a heavy per-message computation)
+
+1. Client's flow-control WINDOW starts at its INITIAL size (e.g., 64KB)
+2. Server SENDS messages, consuming WINDOW capacity as bytes are TRANSMITTED
+3. Client is SLOW to consume/acknowledge -- the WINDOW isn't REPLENISHED
+   fast enough
+4. Once the WINDOW is exhausted, the SERVER'S underlying HTTP/2 layer is
+   FORCED to PAUSE sending further data on THAT stream, protocol-level,
+   until the CLIENT catches up and sends a WINDOW_UPDATE frame
+```
+
+Because this flow-control mechanism operates entirely at the HTTP/2 transport layer, beneath gRPC's own application-level API, it provides automatic backpressure for streaming RPCs without either side needing to implement custom throttling logic — a slow consumer naturally, transparently slows down a fast producer, rather than the producer overwhelming the consumer with an unbounded backlog of unprocessed messages.
+
+**Common Pitfall:** assuming a server-streaming RPC will always produce messages at whatever rate the server's own logic can generate them, regardless of the consumer's processing speed — HTTP/2 flow control means a genuinely slow consumer will measurably throttle the server's actual send rate, which is a feature (automatic backpressure) but can surprise a developer expecting the server-side production rate alone to determine overall throughput.
+
 ---

@@ -2086,4 +2086,90 @@ Because a Value Type has no identity for the Gateway to resolve across subgraphs
 
 ---
 
+## Beginner — Question 21
+
+**Q21: Why do GraphQL Mutations conventionally wrap their arguments in a single `input` Input Object type, rather than accepting several loose scalar arguments directly?**
+
+A Mutation accepting several separate scalar arguments (`createProduct(name: String, price: Float, categoryId: ID)`) works initially, but adding a new required argument later is a breaking change for every existing client call — wrapping the same arguments in a single Input Object (`createProduct(input: CreateProductInput!)`) lets a new *optional* field be added to that input type later without breaking any existing call, since clients simply omit fields they don't yet know about.
+
+```graphql
+# Loose scalar arguments -- adding a new one changes the FIELD'S OWN signature
+type Mutation {
+  createProduct(name: String!, price: Float!, categoryId: ID!): Product
+}
+
+# Wrapped in an Input Object -- adding a field to CreateProductInput later is
+# NON-BREAKING, since existing clients simply don't include the new field
+type Mutation {
+  createProduct(input: CreateProductInput!): Product
+}
+input CreateProductInput {
+  name: String!
+  price: Float!
+  categoryId: ID!
+}
+```
+
+Because a schema's forward compatibility depends heavily on being able to add new capability without breaking existing clients, wrapping Mutation arguments in a single Input Object gives the schema a natural place to grow (adding new optional input fields over time) without ever needing to change the Mutation field's own signature — a small, deliberate convention that pays off specifically as a schema evolves over its lifetime.
+
+**Common Pitfall:** accepting several loose scalar arguments on a Mutation "because there are currently only two or three," reasoning that Input Object wrapping is unnecessary overhead for a simple case — a Mutation's argument list tends to grow over a schema's lifetime, and retrofitting the Input Object convention onto an already-published Mutation is itself a breaking change, unlike adopting the convention from the very first version.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: How do GraphQL Subscription arguments let a client subscribe only to events matching specific criteria, rather than receiving every event of a given Subscription type?**
+
+A Subscription field can accept arguments exactly like a Query field can — the server's subscription resolver uses those arguments to filter which underlying events actually get pushed to a specific client's subscription, rather than pushing every event of that type to every subscriber regardless of relevance.
+
+```graphql
+type Subscription {
+  orderStatusChanged(orderId: ID!): Order
+}
+```
+```csharp
+// Server-side: only publish TO subscribers whose orderId argument MATCHES
+// the event being published, rather than broadcasting to EVERY subscriber
+public IObservable<Order> Subscribe(string orderId) =>
+    _orderEvents.Where(order => order.Id == orderId);
+```
+
+```text
+WITHOUT argument-based filtering: EVERY client subscribed to
+  "orderStatusChanged" receives EVERY order's status change, forcing
+  CLIENT-side filtering of irrelevant events
+
+WITH argument-based filtering (orderId: ID!): a CLIENT subscribing with a
+  SPECIFIC orderId receives ONLY events for THAT order -- the SERVER does
+  the filtering, reducing UNNECESSARY network traffic to every subscriber
+```
+
+Because pushing every event to every subscriber regardless of relevance wastes bandwidth and forces redundant client-side filtering logic, argument-based Subscription filtering lets the server do that filtering once, centrally, sending each client only the specific subset of events it actually asked for — directly analogous to how a Query's arguments narrow down which data a specific request actually needs.
+
+**Common Pitfall:** implementing Subscription filtering entirely client-side (subscribing to the unfiltered stream and discarding irrelevant events in JavaScript) rather than passing a filtering argument the server-side resolver can act on — this wastes network bandwidth pushing every event to every client regardless of whether that specific client actually needs it, when server-side filtering could have avoided sending irrelevant events in the first place.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is GraphQL Federation's Query Plan Cache, and how does caching a computed execution plan for a given operation's shape avoid recomputing the same plan on every identical incoming request?**
+
+Computing a Query Plan (covered earlier — decomposing one client query across multiple subgraphs into an execution plan of sub-queries) is real, non-trivial work for the Gateway to perform on every single request — but for a given GraphQL *operation* (the same query document, structurally), the resulting execution plan is always identical, since the plan depends only on the query's shape, not on the specific variable values passed at runtime. A Query Plan Cache stores the computed plan keyed by the operation's own identity, so subsequent requests using the same operation skip planning entirely and reuse the cached plan.
+
+```text
+WITHOUT a plan cache: EVERY incoming request, even ones repeating the EXACT
+  SAME query shape (just different variable VALUES), triggers the Gateway to
+  RECOMPUTE the entire query-decomposition and execution-plan logic from scratch
+
+WITH a plan cache: the FIRST time a given operation is seen, its PLAN is
+  computed ONCE and CACHED, keyed by the operation's own identity (often
+  paired with Persisted Queries' hash, covered earlier) -- EVERY subsequent
+  request using the SAME operation skips planning entirely, reusing the
+  cached plan and substituting only the NEW variable values
+```
+
+Because query planning is genuinely CPU-intensive work that scales with a query's structural complexity (how many subgraphs it touches, how deeply nested it is), and because the vast majority of a production API's traffic consists of a relatively small, stable set of known operations repeated with different variables, caching computed plans keyed by operation identity turns an expensive per-request cost into a one-time cost per distinct operation shape — a natural, high-value pairing with the Persisted Queries pattern covered earlier, which already gives each distinct operation a stable, cacheable identity (its hash).
+
+**Common Pitfall:** keying the plan cache by the full query *text* rather than a normalized operation identity — two functionally identical queries differing only in insignificant whitespace or field ordering would then be treated as entirely different cache entries, needlessly recomputing (and separately caching) what is actually the same execution plan.
+
 ---

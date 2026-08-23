@@ -1819,4 +1819,91 @@ Because ordinary compaction alone has no mechanism to represent "this key should
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is a RabbitMQ Direct Exchange, completing the routing-type trio alongside Fanout and Topic (both covered earlier), and how does it route a message to a queue based on an exact routing key match?**
+
+A Direct Exchange routes a published message to exactly the queue(s) bound with a routing key that *exactly* matches the message's own routing key — no wildcard pattern-matching (as Topic exchanges support) and no broadcasting to every bound queue regardless of key (as Fanout exchanges do); just a precise, literal match.
+
+```text
+Exchange type: Direct
+Queue "PaymentsQueue" bound with routing key "payment"
+Queue "ShippingQueue" bound with routing key "shipping"
+
+Message published with routing key "payment" -> routed ONLY to PaymentsQueue
+Message published with routing key "shipping" -> routed ONLY to ShippingQueue
+```
+
+```text
+Fanout: broadcasts to EVERY bound queue, IGNORING routing key entirely
+
+Direct: routes to queue(s) whose BINDING KEY exactly MATCHES the message's
+  routing key -- no PATTERN matching, just an EXACT string comparison
+
+Topic: routes using WILDCARD pattern matching (`orders.*`) against the
+  routing key -- the most FLEXIBLE of the three
+```
+
+Because a Direct Exchange's routing logic is the simplest of the three (exact match, no wildcards, no unconditional broadcast), it's the natural choice when a message needs to reach one specific, precisely-identified queue based on a simple category label, without the added flexibility (and complexity) Topic exchanges' wildcard patterns provide.
+
+**Common Pitfall:** reaching for a Topic exchange's wildcard routing-key patterns when a Direct exchange's simpler, exact-match routing would suffice — Topic patterns add real complexity (understanding wildcard semantics, debugging why a message did or didn't match a given binding) that's simply unnecessary overhead when every actual routing need is really just an exact, one-to-one category match.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is Batch Consuming (pulling multiple messages per poll, like Kafka's `max.poll.records`), and how does processing several messages together amortize per-message overhead compared to handling one message at a time?**
+
+Rather than fetching and processing exactly one message per network round trip to the broker, Batch Consuming configures a consumer to pull up to N messages in a single poll — application code then processes that entire batch together (a single database bulk-insert instead of N individual inserts, for instance), spreading the fixed cost of each network round trip and each downstream operation's own overhead across many messages at once.
+
+```csharp
+var consumerConfig = new ConsumerConfig
+{
+    // conceptually: fetch UP TO 500 messages per poll, rather than one at a time
+};
+
+var batch = consumer.ConsumeBatch(maxMessages: 500, timeout: TimeSpan.FromSeconds(1));
+await database.BulkInsertAsync(batch.Select(m => m.Value)); // ONE bulk operation for the WHOLE batch
+consumer.CommitOffsets(batch); // commit ONCE for the entire batch
+```
+
+```text
+One-at-a-time: 500 messages = 500 SEPARATE database round trips, 500 SEPARATE
+  offset commits -- EACH one paying its OWN fixed per-operation overhead
+
+Batched (500 per poll): 500 messages = ONE bulk database operation, ONE
+  offset commit -- the FIXED per-operation overhead is paid ONCE, AMORTIZED
+  across all 500 messages, dramatically increasing overall THROUGHPUT
+```
+
+Because many downstream operations (a database write, an HTTP call to another service) carry a meaningful fixed cost independent of how much data they carry, batching a consumer's message processing directly reduces the number of times that fixed cost is paid — a standard, high-impact throughput optimization for any consumer whose downstream operation supports processing multiple items together.
+
+**Common Pitfall:** committing offsets individually within a batch-processing loop rather than once per entire batch — this defeats much of batching's own throughput benefit, since the offset-commit overhead (itself a network round trip to the broker) is still being paid once per message rather than once per batch.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What are Kafka's In-Sync Replicas (ISR), and how does an "Unclean Leader Election" trade consistency for availability when every ISR for a partition is lost simultaneously?**
+
+Each Kafka partition has a leader broker plus follower replicas — the ISR is the subset of replicas that are genuinely caught up with the leader at any given moment (not lagging behind). If the leader fails, Kafka normally elects a new leader from the remaining ISR members, guaranteeing no committed data is lost. But if *every* ISR member is also lost (a broader outage), Kafka can optionally perform an "Unclean Leader Election," electing a leader from an out-of-sync replica instead — keeping the partition available, at the cost of silently losing whatever messages that out-of-sync replica hadn't yet caught up on.
+
+```text
+Normal leader failure: leader FAILS -> a NEW leader is elected FROM the ISR
+  (replicas KNOWN to be fully caught up) -- ZERO committed data LOST
+
+Every ISR member ALSO lost (broader outage): with `unclean.leader.election.enable=true`,
+  Kafka elects a leader from an OUT-OF-SYNC replica -- the PARTITION stays
+  AVAILABLE, but ANY messages that replica HADN'T yet caught up on are
+  SILENTLY, PERMANENTLY lost
+
+With `unclean.leader.election.enable=false` (the safer default in modern
+  Kafka): the PARTITION simply becomes UNAVAILABLE until an ISR member
+  recovers -- NO data loss, but a genuine AVAILABILITY gap during the outage
+```
+
+Because this setting directly embodies a CAP-theorem-style trade-off (covered under system design) between availability and consistency during a severe, multi-replica failure, the choice depends entirely on which cost a specific workload can tolerate less — a financial ledger topic would almost always disable unclean leader election (preferring unavailability over silent data loss), while a less critical, high-volume metrics topic might reasonably accept the risk in exchange for staying available.
+
+**Common Pitfall:** enabling `unclean.leader.election.enable=true` broadly across a cluster without considering that different topics may have genuinely different tolerance for silent data loss versus temporary unavailability — this setting's correct value is a deliberate, workload-specific trade-off decision, not a one-size-fits-all cluster default.
+
 ---
