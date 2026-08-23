@@ -2173,3 +2173,120 @@ Because query planning is genuinely CPU-intensive work that scales with a query'
 **Common Pitfall:** keying the plan cache by the full query *text* rather than a normalized operation identity — two functionally identical queries differing only in insignificant whitespace or field ordering would then be treated as entirely different cache entries, needlessly recomputing (and separately caching) what is actually the same execution plan.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: How does declaring a default value directly on a GraphQL field argument (`sortOrder: SortOrder = ASC`) reduce boilerplate for clients that don't need non-default behavior?**
+
+A schema can declare a default value for any argument directly in its definition — a client that doesn't explicitly supply that argument automatically gets the declared default, without needing to pass it on every single call, while a client that genuinely needs different behavior can still override it explicitly.
+
+```graphql
+enum SortOrder { ASC, DESC }
+
+type Query {
+  products(sortOrder: SortOrder = ASC): [Product!]!
+}
+```
+```graphql
+# a client NOT specifying sortOrder gets ASC automatically:
+query { products { id name } }
+
+# a client explicitly WANTING descending order overrides the default:
+query { products(sortOrder: DESC) { id name } }
+```
+
+```text
+WITHOUT a default value: EVERY client query must EXPLICITLY pass
+  sortOrder: ASC just to get the COMMON, expected behavior — repetitive
+  boilerplate repeated across EVERY query that doesn't need anything
+  DIFFERENT
+
+WITH a default value declared IN the schema: the COMMON case requires
+  NO argument at all — only a client wanting the LESS common DESC
+  ordering needs to explicitly SPECIFY it
+```
+
+Because most calls to a given field typically want the same, common behavior, declaring that behavior as the argument's default directly in the schema removes the need for every client to repeat it explicitly — while still preserving full flexibility for the less common cases that genuinely need to override it, exactly the same trade-off a method's default parameter value provides in ordinary programming language design.
+
+**Common Pitfall:** changing an existing argument's default value after clients are already relying on the old default's implicit behavior — even though this isn't a *breaking* change in the strict schema-compatibility sense (covered under REST for an analogous case), it silently changes behavior for every client that never explicitly specified the argument, which can be just as disruptive as an actual breaking change in practice.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is GraphQL's `extend type` syntax, and how does it let a schema be composed from multiple separate files or modules, each contributing additional fields to the same root type, without one single monolithic type definition?**
+
+Rather than defining every field of `Query`/`Mutation` in one single, ever-growing type declaration, `extend type` lets a separate schema file or module add its own fields to an *already-declared* type — letting a large schema be organized into smaller, feature-oriented files (an `orders.graphql` file extending `Query` with order-related fields, a `products.graphql` file extending it with product-related fields) that get merged together into one complete schema at build time.
+
+```graphql
+# base-schema.graphql
+type Query {
+  _empty: String # a placeholder, since a type can't be declared with zero fields
+}
+
+# orders.graphql
+extend type Query {
+  orders(customerId: ID!): [Order!]!
+}
+
+# products.graphql
+extend type Query {
+  products: [Product!]!
+}
+```
+
+```text
+WITHOUT extend type: EVERY field belonging to Query must be declared
+  TOGETHER, in ONE single type definition — a LARGE schema's Query type
+  becomes an ever-growing, UNWIELDY single file merging EVERY feature's
+  fields together
+
+WITH extend type: EACH feature/module contributes its OWN fields, in its
+  OWN separate file — the SCHEMA build process MERGES all the extensions
+  together into ONE complete Query type, while the SOURCE remains
+  organized by FEATURE
+```
+
+Because a large, real-world schema often naturally organizes around feature areas maintained by different teams, `extend type` lets each team own and evolve their own schema file independently, without every team needing to coordinate edits to one single, shared, monolithic type definition — directly analogous to how a large application's C# codebase is split across many files rather than one enormous class.
+
+**Common Pitfall:** attempting to declare a genuinely new field directly on `type Query { ... }` in a secondary schema file that's meant to only *extend* an already-established base schema — depending on the specific schema-building tool, this can produce a duplicate-type-definition error rather than the intended merge; the correct syntax for adding to an already-declared type from a different file is `extend type`, not a second `type` declaration.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is Apollo Federation's `@shareable` directive, and how does it let multiple subgraphs independently resolve the same field on a shared type without Federation treating that overlap as a conflict requiring `@override` (covered earlier)?**
+
+By default, Federation expects exactly one subgraph to be the sole resolver of a given field on a shared type — `@override` (covered earlier) supports *moving* that sole ownership between subgraphs during a migration, but sometimes multiple subgraphs genuinely, deliberately need to resolve the *same* field independently (each computing it the same simple way from data they each already have) rather than one exclusively owning it. `@shareable` explicitly marks a field as intentionally resolvable by more than one subgraph, telling Federation's composition step this overlap is deliberate rather than an accidental conflict to flag.
+
+```graphql
+# Subgraph A
+type Product @key(fields: "id") {
+  id: ID!
+  name: String! @shareable  # deliberately resolvable by MULTIPLE subgraphs
+}
+
+# Subgraph B — ALSO resolves "name" independently, without this being an ERROR
+type Product @key(fields: "id") {
+  id: ID!
+  name: String! @shareable
+}
+```
+
+```text
+WITHOUT @shareable: Federation's composition step DETECTS two subgraphs
+  BOTH resolving "name" and treats this as an AMBIGUOUS conflict — schema
+  composition FAILS, since Federation doesn't know which subgraph's
+  resolver should be AUTHORITATIVE
+
+WITH @shareable on BOTH subgraphs' definitions: Federation UNDERSTANDS
+  this overlap is INTENTIONAL — either subgraph's resolver may be used
+  (the Gateway's query planner, covered earlier, picks whichever is
+  MOST efficient for a given query plan) — composition SUCCEEDS
+```
+
+Because `@shareable` explicitly documents an intentional, deliberate overlap in schema ownership — as opposed to `@override`'s single, exclusive-ownership-transfer semantics — it's the correct tool specifically for genuinely simple, duplicable field resolution logic that doesn't warrant the coordination overhead of designating one single authoritative subgraph, letting the query planner freely choose whichever subgraph is more convenient for a given overall query plan.
+
+**Common Pitfall:** marking a field `@shareable` when its resolution logic actually differs meaningfully between subgraphs (rather than being genuinely identical, simple, duplicated logic) — since the query planner may pick either subgraph's resolver for a given query, inconsistent resolution logic across "shareable" subgraphs can produce a response whose specific field value silently depends on which subgraph the planner happened to choose, a subtle correctness risk `@shareable` is only safe for when the resolvers are truly equivalent.
+
+---

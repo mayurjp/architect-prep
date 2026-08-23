@@ -1907,3 +1907,94 @@ Because this setting directly embodies a CAP-theorem-style trade-off (covered un
 **Common Pitfall:** enabling `unclean.leader.election.enable=true` broadly across a cluster without considering that different topics may have genuinely different tolerance for silent data loss versus temporary unavailability — this setting's correct value is a deliberate, workload-specific trade-off decision, not a one-size-fits-all cluster default.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is the difference between a RabbitMQ Topic Exchange's `*` wildcard (matching exactly one word) and its `#` wildcard (matching zero or more words), building on the basic `orders.*` binding covered earlier?**
+
+Within a Topic Exchange's dot-separated routing key pattern, `*` matches precisely *one* word in that position — no more, no fewer — while `#` matches *any number* of words (including zero), making it a much broader, more flexible wildcard for binding to an entire branch of related routing keys regardless of how many segments follow.
+
+```text
+Binding "orders.*.created"  matches: "orders.us.created", "orders.uk.created"
+                              does NOT match: "orders.us.west.created" (too many segments)
+
+Binding "orders.#"          matches: "orders.created", "orders.us.created",
+                              "orders.us.west.created" -- ANY number of segments
+                              (including ZERO extra ones) after "orders."
+```
+
+```text
+* (single-word wildcard): USE when a routing key's STRUCTURE is fixed and
+  KNOWN — exactly one variable SEGMENT in a specific POSITION
+
+# (multi-word wildcard): USE when you want to match an ENTIRE branch of
+  routing keys, REGARDLESS of how many additional segments they might
+  have — broader, more FORGIVING of routing-key structure changes
+```
+
+Because `#` matches a variable, unbounded number of segments while `*` matches exactly one, choosing between them depends on whether a binding needs to be sensitive to a routing key's exact segment count (`*`) or should remain valid even as new segments are added to a routing key convention over time (`#`) — a binding using `#` is generally more resilient to a routing-key naming convention evolving with additional segments later.
+
+**Common Pitfall:** using `*` when a routing key convention is expected to gain additional segments over time (e.g., `orders.*.created` breaking once a region-specific sub-segment like `orders.us.west.created` is introduced) — a `#`-based binding would have continued matching correctly, since it doesn't depend on an exact, fixed segment count.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is the trade-off in Kafka's `enable.auto.commit` setting, and how can its time-based commit interval risk marking a message's offset as processed before that message has actually finished being handled?**
+
+With `enable.auto.commit=true` (the default), the consumer client automatically commits the latest consumed offset on a fixed time interval (`auto.commit.interval.ms`) — entirely independent of whether the application has actually *finished processing* the most recently consumed message. If a message is still mid-processing when that timer fires, its offset can be committed prematurely, and a subsequent consumer crash before processing genuinely completes would then skip that message entirely on restart, since its offset was already marked as "done."
+
+```csharp
+// enable.auto.commit=true, auto.commit.interval.ms=5000
+var message = consumer.Consume(); // message received
+StartLongRunningProcessing(message); // takes 8 seconds -- LONGER than the commit interval
+
+// 5 seconds in: auto-commit FIRES, marking this message's offset as "processed" --
+// even though StartLongRunningProcessing() hasn't actually FINISHED yet
+
+// if the consumer CRASHES at the 6-second mark: on restart, this message's offset
+// is ALREADY committed -- the message is SKIPPED, even though it was NEVER
+// actually fully processed
+```
+
+```text
+Auto-commit (time-based): SIMPLE, no manual commit code needed -- but RISKS
+  committing an OFFSET for a message that hasn't ACTUALLY finished processing,
+  if processing takes LONGER than the commit interval
+
+Manual commit (after processing GENUINELY completes): the OFFSET is only
+  committed ONCE the application code has CONFIRMED the message was fully
+  handled -- eliminates this SPECIFIC premature-commit risk, at the cost of
+  needing to explicitly CALL the commit method in application code
+```
+
+Because auto-commit's timing is based purely on a fixed interval rather than genuine processing completion, any message whose processing time can occasionally exceed that interval carries a real risk of being silently skipped on a poorly-timed crash — manual, explicit offset commits performed only after processing genuinely finishes eliminate this specific risk, at the cost of slightly more application code.
+
+**Common Pitfall:** enabling auto-commit for a consumer handling messages with genuinely variable, sometimes-long processing times, based on the false assumption that "auto-commit just means I don't have to think about offsets" — auto-commit's convenience comes with a real, if usually infrequent, risk of silently skipped messages on crash, precisely the risk manual commit-after-processing eliminates.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is Kafka's Cooperative Sticky rebalancing strategy, and how does it reduce a rebalance's disruption (covered earlier) by only reassigning the specific partitions that actually need to move, rather than revoking every partition from every consumer?**
+
+The older "eager" rebalancing protocol works by revoking *every* partition from *every* consumer in the group the moment a rebalance starts, then reassigning all of them from scratch — even partitions that would have ended up right back with the same consumer anyway. Cooperative Sticky rebalancing instead computes the new assignment first, and only revokes/reassigns the specific partitions that genuinely need to move to a different consumer, leaving every other partition's existing assignment completely undisturbed throughout the rebalance.
+
+```text
+Eager rebalancing (older default): a rebalance TRIGGERS -- ALL partitions
+  are revoked from EVERY consumer, REGARDLESS of whether they'd end up
+  BACK with the same consumer -- EVERY consumer experiences a BRIEF pause
+  in processing ALL its partitions, even ones that DIDN'T actually need
+  to move at ALL
+
+Cooperative Sticky rebalancing: computes the NEW assignment FIRST -- ONLY
+  the specific PARTITIONS that genuinely need to CHANGE consumers are
+  revoked and REASSIGNED -- partitions that would have stayed with the
+  SAME consumer anyway are NEVER disrupted at all
+```
+
+Because most rebalances (a single consumer joining or leaving, out of many) only genuinely require moving a small fraction of the total partitions, Cooperative Sticky rebalancing dramatically reduces the overall processing disruption compared to the eager protocol's "revoke everything, then reassign everything" approach — directly building on (and going further than) the Sticky Partition Assignment strategy covered earlier, which minimizes movement within a single rebalance pass but still used the older eager revocation model underneath.
+
+**Common Pitfall:** assuming Sticky Partition Assignment (covered earlier) and Cooperative Sticky rebalancing are the same thing — Sticky Assignment minimizes *which* partitions move during a rebalance computation, while Cooperative Sticky additionally changes *how* the rebalance protocol itself revokes and reassigns partitions, avoiding the eager protocol's blanket revocation of every partition regardless of whether it actually needs to move; the two concepts are complementary but distinct.
+
+---

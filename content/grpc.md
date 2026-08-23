@@ -2065,3 +2065,94 @@ Because this flow-control mechanism operates entirely at the HTTP/2 transport la
 **Common Pitfall:** assuming a server-streaming RPC will always produce messages at whatever rate the server's own logic can generate them, regardless of the consumer's processing speed — HTTP/2 flow control means a genuinely slow consumer will measurably throttle the server's actual send rate, which is a feature (automatic backpressure) but can surprise a developer expecting the server-side production rate alone to determine overall throughput.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is `Grpc.Net.Client.Web`, and how does it let a browser-based client (like a Blazor WebAssembly application) call a gRPC service using the gRPC-Web protocol (covered earlier), directly from C# client code?**
+
+gRPC-Web (covered earlier) is the protocol variant letting a browser JavaScript client call a gRPC service despite browsers not supporting raw HTTP/2 trailers — `Grpc.Net.Client.Web` extends that same capability to a Blazor WebAssembly application, letting genuinely ordinary, generated gRPC client C# code work correctly from inside a browser-hosted WebAssembly runtime, using the gRPC-Web wire format under the hood instead of native HTTP/2 gRPC framing.
+
+```csharp
+// Blazor WebAssembly client setup
+var channel = GrpcChannel.ForAddress(navigationManager.BaseUri, new GrpcChannelOptions
+{
+    HttpHandler = new GrpcWebHandler(GrpcWebMode.GrpcWeb, new HttpClientHandler())
+});
+
+var client = new Greeter.GreeterClient(channel);
+var reply = await client.SayHelloAsync(new HelloRequest { Name = "Alice" }); // ORDINARY generated client code
+```
+
+```text
+WITHOUT Grpc.Net.Client.Web: a Blazor WASM app CANNOT use a NORMAL,
+  generated gRPC client directly — the BROWSER's own networking stack
+  doesn't support the raw HTTP/2 framing native gRPC requires
+
+WITH Grpc.Net.Client.Web: the SAME generated client code WORKS unchanged
+  — the HANDLER transparently translates calls into the gRPC-Web wire
+  format underneath, letting the BROWSER-hosted WebAssembly app communicate
+  with an ORDINARY gRPC service
+```
+
+Because the generated client API surface remains identical regardless of which handler is configured, a shared C# client library can be reused across a normal .NET server-side caller and a Blazor WebAssembly browser client with only the channel/handler configuration differing — the actual calling code (constructing requests, awaiting responses) needs no changes at all between the two environments.
+
+**Common Pitfall:** assuming a Blazor WebAssembly gRPC client can call a gRPC-Web endpoint directly without a corresponding server-side gRPC-Web proxy or `Grpc.AspNetCore.Web` middleware enabled on the server — the browser-side handler alone isn't sufficient; the server must also be configured to accept and translate gRPC-Web requests, not just native HTTP/2 gRPC.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What does `ServerCallContext.Peer` expose in a gRPC service method, and how does it let server-side code access the calling client's network address — useful for logging or IP-based access decisions at the RPC level?**
+
+`ServerCallContext.Peer` returns a string identifying the connecting client's network address (its IP and port, in a URI-scheme-prefixed format) directly from within a gRPC service method's own implementation — giving server-side code the same kind of caller-identifying information an ASP.NET Core MVC action might read from `HttpContext.Connection.RemoteIpAddress`, but through gRPC's own context object.
+
+```csharp
+public override Task<HelloReply> SayHello(HelloRequest request, ServerCallContext context)
+{
+    string peer = context.Peer; // e.g., "ipv4:203.0.113.10:54321"
+    _logger.LogInformation("Request from {Peer}", peer);
+    return Task.FromResult(new HelloReply { Message = $"Hello {request.Name}" });
+}
+```
+
+```text
+ServerCallContext.Peer: returns the CALLING client's network ADDRESS,
+  directly accessible from WITHIN the RPC method's own implementation —
+  useful for LOGGING, auditing, or IP-based ACCESS decisions, without
+  needing to reach into LOWER-level connection/transport APIs directly
+```
+
+Because this information is exposed through the same `ServerCallContext` object already used for deadlines, cancellation tokens, and metadata (covered elsewhere), it provides a consistent, gRPC-native way to access caller network information without needing to dig into ASP.NET Core's own underlying `HttpContext` — though for an application already using ASP.NET Core's hosting model, `HttpContext.Connection.RemoteIpAddress` remains accessible too, via `context.GetHttpContext()`.
+
+**Common Pitfall:** using `context.Peer`'s raw string value directly for IP-based access-control logic without properly parsing its scheme-prefixed format (`ipv4:`/`ipv6:` followed by the actual address) — treating the entire string as a bare IP address without stripping the prefix leads to comparisons that never actually match, silently breaking IP-based logic relying on this value.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What are a gRPC channel's Subchannel connectivity states (`CONNECTING`, `READY`, `TRANSIENT_FAILURE`, `IDLE`), and how does a channel's aggregate state, derived from its subchannels, determine whether `WaitForReady` (covered earlier) actually blocks a call or lets it proceed immediately?**
+
+A gRPC channel doesn't represent a single connection — it manages one or more Subchannels, each tracking its own connectivity state to a specific resolved backend address. The channel's own overall state is derived by aggregating its subchannels' individual states (if any subchannel is `READY`, the channel is generally considered `READY`), and this aggregate state is exactly what `WaitForReady` checks: if the channel's current aggregate state is `TRANSIENT_FAILURE` or `CONNECTING` rather than `READY`, `WaitForReady` causes the call to block and wait for the state to improve, rather than failing fast.
+
+```text
+Subchannel states:
+  IDLE:               no ACTIVE connection attempt yet
+  CONNECTING:          actively attempting to ESTABLISH a connection
+  READY:               connection is UP and able to carry RPCs
+  TRANSIENT_FAILURE:   the LAST connection attempt FAILED — will retry
+                        after a BACKOFF period
+
+Channel's AGGREGATE state: derived from ALL its subchannels — GENERALLY
+  READY if AT LEAST one subchannel is READY, TRANSIENT_FAILURE if ALL
+  subchannels are currently in that state
+
+WaitForReady=true behavior: if the CHANNEL's aggregate state is NOT
+  currently READY, the CALL blocks, waiting for a SUBCHANNEL to transition
+  into READY, rather than FAILING immediately with UNAVAILABLE
+```
+
+Because `WaitForReady`'s blocking behavior is a direct consequence of this underlying subchannel-state machinery rather than an independent mechanism of its own, understanding the connectivity-state model explains precisely *when* `WaitForReady` will actually cause a delay (whenever no subchannel is currently `READY`) versus proceeding immediately (as soon as any subchannel reaches `READY`) — a call issued while every subchannel happens to be in `TRANSIENT_FAILURE` following a backend restart will wait exactly as long as it takes for at least one subchannel's connection attempt to succeed.
+
+**Common Pitfall:** assuming a channel's `READY` aggregate state guarantees every individual backend behind a load-balanced channel is currently reachable — the aggregate state only requires *at least one* subchannel to be `READY`; other subchannels serving other resolved addresses could simultaneously be in `TRANSIENT_FAILURE`, meaning some backends are unreachable even while the channel as a whole reports as healthy.
+
+---
