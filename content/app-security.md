@@ -1713,4 +1713,91 @@ Because the vulnerability arises specifically from a mismatch between what the *
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is Defense in Depth as a foundational security principle, and how does layering multiple, independent security controls mean a single control's failure doesn't automatically result in a complete breach?**
+
+Defense in Depth means never relying on any *one* single security mechanism to be the sole thing standing between an attacker and a successful breach — instead, multiple independent layers (input validation, parameterized queries, least-privilege database accounts, network segmentation, monitoring/alerting) are stacked together, so that a failure or bypass of any one layer still leaves the others in place to limit or catch the damage.
+
+```text
+Layer 1: Input validation (rejects OBVIOUSLY malformed input)
+Layer 2: Parameterized queries (STRUCTURALLY prevents SQL injection, EVEN if Layer 1 misses something)
+Layer 3: A database ACCOUNT with ONLY the MINIMUM permissions the APPLICATION actually needs
+         (LIMITS the DAMAGE even IF an attacker somehow gets a QUERY through)
+Layer 4: Monitoring/alerting on UNUSUAL database ACTIVITY (CATCHES an attack IN PROGRESS,
+         even if EVERY earlier layer somehow FAILED)
+```
+
+```text
+IF an attacker BYPASSES Layer 1 (finds an INPUT VALIDATION gap): Layer 2 (parameterized
+  queries) STILL prevents the actual SQL injection from SUCCEEDING
+
+IF, HYPOTHETICALLY, Layer 2 were ALSO somehow bypassed: Layer 3 (LEAST-privilege DB
+  account) LIMITS what the ATTACKER could actually DO, even WITH a SUCCESSFUL injection
+
+NO SINGLE layer's failure, ALONE, results in a COMPLETE, UNMITIGATED breach
+```
+
+Because any single security control can theoretically fail, be misconfigured, or be bypassed by a novel attack technique nobody anticipated, Defense in Depth's core insight is that robust security comes from the *combination* of multiple, genuinely independent layers — not from perfecting any one layer to the point of assumed infallibility, which is an unrealistic standard for any single control to meet on its own.
+
+**Common Pitfall:** relying on a single, "strong enough" security control (a well-tested input validation layer, for instance) as the sole line of defense against a particular vulnerability class — even a well-implemented control can eventually be bypassed by an attack technique its designers didn't anticipate; Defense in Depth's layered approach ensures a single control's eventual failure doesn't translate directly into a complete, unmitigated breach.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is Credential Stuffing, and how does an attacker using username/password pairs leaked from a completely unrelated breach exploit users who reuse the same password across multiple sites?**
+
+Credential Stuffing takes a list of username/password pairs leaked from *one* breached service (say, an unrelated forum website) and automatically tries each pair against a *completely different* target service — since many users reuse the same password across multiple sites, a meaningful fraction of these attempts succeed, letting an attacker gain access to accounts on a service that was never itself breached at all.
+
+```text
+Breach at "RandomForum.com" leaks: { username: "alice@email.com", password: "Summer2023!" }
+
+ATTACKER takes THIS (and MILLIONS of OTHER) leaked pairs, and AUTOMATICALLY tries EACH one
+  against a COMPLETELY DIFFERENT service -- "YourBank.com" -- if ALICE happened to REUSE
+  the SAME password on BOTH sites, the ATTACKER now has VALID access to her BANK account,
+  EVEN THOUGH "YourBank.com" itself was NEVER breached AT ALL
+```
+
+```text
+The TARGET service's OWN security posture is ESSENTIALLY IRRELEVANT to THIS attack --
+  it succeeds PURELY based on PASSWORD REUSE across services the ATTACKER has NO
+  relationship to WHATSOEVER -- MFA (covered EARLIER) is one of the FEW defenses that
+  GENUINELY stops this attack, since KNOWING the correct PASSWORD alone is NO LONGER
+  sufficient to actually LOG IN
+```
+
+Because this attack doesn't exploit any vulnerability in the target service itself, but rather user behavior (password reuse) entirely outside the target's control, defenses focus on detecting and slowing automated login attempts (rate limiting by account/IP, covered elsewhere) and, most effectively, requiring a second factor (MFA, covered earlier) that a leaked password alone can't satisfy — rather than trying to prevent password reuse itself, which is largely outside any single service's ability to control.
+
+**Common Pitfall:** assuming a service's own strong security practices (proper password hashing, no SQL injection vulnerabilities) make it immune to Credential Stuffing — this attack succeeds regardless of how well the *target* service protects its own data, since it exploits password reuse across entirely unrelated services; MFA and login-attempt rate limiting are the defenses that actually matter here, not the target's own internal security hygiene.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is Second-Order SQL Injection, and how does malicious input safely stored via a parameterized query in one operation later become dangerous when it's read back and used unsafely — via string concatenation — to build a different, subsequent query?**
+
+A parameterized query (covered earlier) safely stores an attacker's malicious input as inert data, with no SQL injection occurring at that point — Second-Order SQL Injection happens when that *already-stored* data is later read back by a *different* piece of code and concatenated directly into a *new* SQL string, unsafely, at which point the originally-inert malicious content becomes an active injection — the vulnerability lies in the second, unsafe use, not the first, safe one.
+
+```csharp
+// STEP 1 -- SAFELY stores the malicious value, via a PARAMETERIZED query -- NO injection HERE
+var username = "admin'--"; // an ATTACKER-supplied username, containing SQL METACHARACTERS
+await connection.ExecuteAsync("INSERT INTO Users (Username) VALUES (@username)", new { username });
+// -- STORED SAFELY, as INERT DATA -- the STRING "admin'--" sits HARMLESSLY in the DATABASE
+
+// STEP 2 -- a COMPLETELY DIFFERENT piece of code, LATER, reads THAT SAME value BACK,
+// and UNSAFELY concatenates it DIRECTLY into a NEW query STRING
+var storedUsername = await connection.QuerySingleAsync<string>("SELECT Username FROM Users WHERE Id = @id", new { id });
+var query = $"SELECT * FROM Orders WHERE CreatedBy = '{storedUsername}'"; // <-- INJECTION happens
+    // HERE, NOW, when the PREVIOUSLY-SAFELY-STORED value is UNSAFELY concatenated -- the
+    // "admin'--" content, ENTIRELY HARMLESS while just SITTING in the database, BECOMES an
+    // ACTIVE SQL injection the MOMENT it's used THIS way
+```
+
+Because the actual point of injection is temporally and structurally *disconnected* from the point where the malicious data was originally introduced (it may have been stored safely, weeks earlier, by a completely different feature), Second-Order SQL Injection is notoriously harder to spot via code review than an ordinary, "obvious" first-order injection — every single place that reads and reuses previously-stored data (regardless of how safely it was originally stored) must independently apply the same parameterized-query discipline, since data being "already in the database" provides no inherent guarantee it's actually safe to concatenate elsewhere.
+
+**Common Pitfall:** assuming data already safely stored in a database (via a parameterized query) is therefore "trusted" and safe to concatenate directly into a *different*, later SQL query without re-parameterizing — data's safety depends entirely on how it's used at each specific point, not on how it was originally introduced; every query touching that data, no matter how many steps removed from its original insertion, needs its own, independent parameterization discipline.
+
+---
+
 ---

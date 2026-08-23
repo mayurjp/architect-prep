@@ -1463,4 +1463,107 @@ Because ZRS's synchronous, same-region replication avoids the latency penalty of
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is an Azure Subscription, and how does it serve as the fundamental boundary for billing and access management, analogous to a GCP Project (covered earlier)?**
+
+An Azure Subscription is the top-level container tying together billing (a subscription has one associated payment method/billing account) and access management (RBAC role assignments are commonly scoped at the subscription level) — every Resource Group and resource must belong to exactly one Subscription, making it the natural unit for separating environments, teams, or cost centers, directly paralleling how a GCP Project serves the same dual billing-plus-isolation role.
+
+```text
+Subscription ("Production")
+  └── Resource Group ("prod-rg")
+        ├── App Service
+        ├── SQL Database
+        └── Storage Account
+
+Subscription ("Development")   <-- a SEPARATE subscription -- SEPARATE billing, SEPARATE
+  └── Resource Group ("dev-rg")     access boundary -- resources HERE are COMPLETELY
+        └── ...                     ISOLATED from the "Production" subscription's OWN resources
+```
+
+Because every resource's billing is attributed to whichever Subscription it lives under, and RBAC permissions are commonly granted at the Subscription level, organizations typically create separate Subscriptions for genuinely distinct billing/access needs (production versus development, or one subscription per business unit) — directly mirroring the same organizational logic covered earlier for why GCP favors more, smaller, purpose-scoped Projects over one large, shared one.
+
+**Common Pitfall:** putting every environment (dev, staging, production) into a single, shared Subscription "to keep things simple" — this makes it much harder to cleanly separate billing attribution and access permissions between environments, since Subscription-level RBAC and cost reporting can't distinguish between resources that all happen to share the same Subscription boundary.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What are Azure Functions' Durable Entities, as distinct from Durable Functions' Orchestrator (covered earlier), and how does modeling a single, addressable stateful object let serverless code maintain per-entity state across multiple, separate invocations?**
+
+A Durable Orchestrator (covered earlier) coordinates a multi-step *workflow* — a Durable Entity instead models a single, individually-addressable stateful *object* (a specific shopping cart, a specific IoT device's current reading) that persists its own state between invocations, letting serverless functions maintain long-lived, per-entity state without needing an external database purely to track that state themselves.
+
+```csharp
+[Function(nameof(ShoppingCart))]
+public static void ShoppingCart([EntityTrigger] TaskEntityDispatcher dispatcher)
+{
+    dispatcher.Dispatch(operation =>
+    {
+        var cart = operation.GetState<List<string>>() ?? new List<string>();
+        switch (operation.Name)
+        {
+            case "AddItem": cart.Add(operation.GetInput<string>()); break;
+            case "GetItems": return cart;
+        }
+        operation.SetState(cart); // PERSISTS this ENTITY's state AUTOMATICALLY, BETWEEN invocations
+        return null;
+    });
+}
+
+// Calling code -- addresses a SPECIFIC cart instance, by ID
+await client.SignalEntityAsync(new EntityInstanceId("ShoppingCart", "cart-42"), "AddItem", "Widget");
+```
+
+```text
+An ORCHESTRATOR (covered earlier): coordinates a MULTI-STEP WORKFLOW's sequence of steps
+
+An ENTITY: represents ONE specific, ADDRESSABLE, STATEFUL OBJECT -- ITS OWN state PERSISTS
+  AUTOMATICALLY between SEPARATE invocations, WITHOUT the developer needing a SEPARATE
+  external DATABASE just to TRACK "what's currently IN cart-42" THEMSELVES
+```
+
+Because a Durable Entity's framework-managed state persistence removes the need to manually wire up an external store purely to track per-object state across otherwise-stateless serverless invocations, it's the right building block specifically for "model a single, addressable stateful object" scenarios — while a Durable Orchestrator remains the right tool for "coordinate a specific sequence of steps" scenarios, the two being complementary, not interchangeable, parts of the Durable Functions extension.
+
+**Common Pitfall:** using a Durable Orchestrator to model what's actually a single, long-lived stateful object (an individual shopping cart, a specific device's state) rather than a genuine multi-step workflow — Durable Entities are the purpose-built abstraction for per-object state, and forcing this use case into the Orchestrator model (or building a separate, hand-rolled external state store instead) adds unnecessary complexity Durable Entities already solve directly.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is Azure Chaos Studio, and how does injecting a controlled fault directly into a real Azure environment let a team validate resilience assumptions without hand-rolling their own fault-injection tooling?**
+
+Chaos Studio is Azure's native Chaos Engineering (covered under Testing) service — rather than a team building its own custom scripts to kill a VM, throttle network bandwidth, or inject latency into a specific dependency, Chaos Studio provides a managed, declarative way to define and run these exact fault-injection experiments directly against real Azure resources, with built-in safety controls (an automatic "stop and roll back" mechanism) to limit the blast radius of an experiment gone wrong.
+
+```json
+{
+  "steps": [{
+    "branches": [{
+      "actions": [{
+        "type": "continuous",
+        "name": "urn:csci:microsoft:virtualMachine:shutdown/1.0",
+        "duration": "PT10M",
+        "selectorId": "prod-vm-selector"
+      }]
+    }]
+  }]
+}
+```
+
+```text
+WITHOUT Chaos Studio: a TEAM wanting to VALIDATE "does our system SURVIVE a VM SUDDENLY
+  disappearing" would need to HAND-BUILD their OWN tooling to ACTUALLY shut down a REAL VM,
+  SAFELY, in a CONTROLLED way, with a RELIABLE mechanism to ABORT/ROLL BACK if things go WRONG
+
+WITH Chaos Studio: the SAME experiment is DEFINED declaratively, RUN against a REAL Azure
+  resource, with Azure's OWN built-in SAFETY controls (automatic experiment TERMINATION,
+  scoped BLAST radius) ALREADY provided, WITHOUT the team needing to BUILD any of THIS
+  fault-injection INFRASTRUCTURE THEMSELVES
+```
+
+Because building genuinely safe, reliable fault-injection tooling from scratch (with proper safeguards against an experiment causing unintended, lasting damage) is itself a non-trivial engineering effort, a managed service like Chaos Studio removes that upfront investment, letting a team focus directly on designing meaningful chaos experiments (informed by Game Days, covered under DevOps) rather than building the underlying fault-injection mechanism itself.
+
+**Common Pitfall:** avoiding Chaos Engineering entirely because building custom fault-injection tooling seems like too large an upfront investment — a managed service like Chaos Studio (or equivalent tooling on other clouds) removes much of that barrier, making it practical to start validating genuine resilience assumptions against real infrastructure without first needing to build a bespoke chaos-engineering platform in-house.
+
+---
+
 ---

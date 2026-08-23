@@ -1561,4 +1561,95 @@ Because most regressions serious enough to require a rollback tend to surface re
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is a Changelog file, and how does maintaining one let consumers of a released artifact understand what actually changed between versions, without digging through raw commit history?**
+
+A Changelog is a human-readable, version-organized summary of what changed in each release — either hand-written (a developer explicitly describing notable changes) or auto-generated from structured commit messages (covered elsewhere as Semantic Versioning/Conventional Commits) — giving anyone consuming a new version a quick, curated summary rather than needing to sift through potentially hundreds of raw, unfiltered git commits to figure out what actually changed.
+
+```markdown
+## [2.3.0] - 2026-08-15
+### Added
+- Support for bulk order export (CSV/Excel)
+### Fixed
+- Timezone bug in scheduled report generation
+### Changed
+- Upgraded EF Core from 8.0 to 9.0
+```
+
+```text
+RAW commit history: "fix typo", "wip", "address PR feedback", "merge branch 'feature/x'
+  into main" -- HUNDREDS of INDIVIDUALLY unhelpful, IMPLEMENTATION-detail-level messages,
+  with NO curated SUMMARY of what actually MATTERS to a CONSUMER of this RELEASE
+
+Changelog: a CURATED, HUMAN-readable SUMMARY specifically organized by VERSION and CATEGORY
+  (Added/Fixed/Changed) -- answers "WHAT do I actually NEED to know about THIS release"
+  DIRECTLY, without REQUIRING the reader to WADE through RAW commit NOISE
+```
+
+Because raw commit history is optimized for developers tracking granular implementation changes during development, not for someone deciding whether upgrading to a new version is safe or relevant to them, a curated Changelog serves a genuinely different audience and purpose — letting a downstream consumer (another team, an external user of a published package) quickly assess what changed without needing development-level familiarity with the codebase's commit history.
+
+**Common Pitfall:** relying on raw git commit history as the sole record of "what changed" in a release, expecting consumers to dig through it themselves — most commit messages are written for a developer's own in-progress tracking purposes, not as a curated summary for external consumption; a maintained Changelog serves a genuinely different, complementary purpose that raw commit history doesn't substitute for.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is Infrastructure Testing — validating a Terraform/Bicep template itself before ever applying it — and how does this extend the Shift Left principle (covered earlier) specifically to Infrastructure as Code?**
+
+Just as Shift Left (covered earlier) moves application-code quality checks earlier in the pipeline, Infrastructure Testing applies the same idea to infrastructure definitions themselves — running automated tests against a Terraform/Bicep template (using a tool like Terratest, or a cloud provider's own policy-validation tooling) *before* it's ever applied to a real environment, catching a misconfigured template (an overly permissive security group, a missing required tag) at the same early, cheap stage application unit tests would catch a code bug.
+
+```go
+// Terratest -- validates the ACTUAL infrastructure a Terraform template WOULD produce,
+// in an ISOLATED test environment, BEFORE it's ever applied to PRODUCTION
+func TestSecurityGroupNotOverlyPermissive(t *testing.T) {
+    terraformOptions := &terraform.Options{ TerraformDir: "../infra" }
+    defer terraform.Destroy(t, terraformOptions)
+    terraform.InitAndApply(t, terraformOptions)
+
+    sg := aws.GetSecurityGroupById(t, terraform.Output(t, terraformOptions, "sg_id"), "us-east-1")
+    assert.False(t, sg.AllowsIngressFromAnywhere(22)) // FAILS the TEST if SSH is OPEN to the WORLD
+}
+```
+
+```text
+WITHOUT infrastructure testing: a MISCONFIGURED template (an OVERLY permissive security
+  group, a MISSING required tag) is ONLY discovered AFTER it's ALREADY been APPLIED to a
+  REAL environment -- POTENTIALLY production -- EXPENSIVE and RISKY to discover THIS LATE
+
+WITH infrastructure testing: the SAME misconfiguration is CAUGHT by an AUTOMATED test,
+  RUNNING against an ISOLATED test environment, AS PART of the PIPELINE, BEFORE the
+  template is EVER applied to anything REAL at all
+```
+
+Because infrastructure misconfigurations (an accidentally-public storage bucket, an overly broad IAM role) can be just as consequential as application-code bugs — sometimes more so, given their direct security/cost implications — applying the same "catch it early, cheaply, before it reaches production" discipline to infrastructure templates extends Shift Left's core insight to a category of risk that's easy to overlook if testing efforts focus purely on application code.
+
+**Common Pitfall:** treating infrastructure-as-code templates as inherently lower-risk than application code, and skipping automated testing for them entirely — a misconfigured Terraform/Bicep template can introduce serious security or cost issues just as easily as a buggy application, and catching such misconfigurations only after they've already been applied to a real environment is considerably more expensive and risky than catching them via automated infrastructure tests beforehand.
+
+---
+
+## Advanced — Question 18
+
+**Q18: When a new feature (behind a Feature Flag Kill Switch, covered earlier) causes a regression during a Canary rollout with its own automated rollback, how do teams decide which mechanism should actually trigger first?**
+
+A Canary pipeline's automated rollback (covered earlier) reverts the *entire deployed version* — appropriate when the regression is caused by something in the deployment itself (a bug unrelated to any specific flag) — a Feature Flag Kill Switch (covered earlier) instead disables just *one specific feature* without touching the deployment at all, appropriate when the regression is isolated to that one feature's own logic; teams generally prefer trying the narrower, faster Kill Switch first when the regression is clearly tied to one specific, recently-flagged feature, reserving the broader Canary rollback for regressions that aren't cleanly attributable to a single flag.
+
+```text
+A regression appears DURING a canary rollout, and it's CLEARLY traced to ONE specific,
+  recently-added feature (BEHIND its OWN flag): flipping the KILL SWITCH is FASTER
+  (near-instant, NO deployment change needed) and NARROWER (doesn't affect ANYTHING else
+  the canary rollout also INTRODUCED) -- the PREFERRED first RESPONSE
+
+A regression appears that ISN'T cleanly attributable to ONE specific flagged feature
+  (a GENERAL performance regression, an INFRASTRUCTURE-level issue introduced by the
+  DEPLOYMENT itself): a KILL SWITCH can't HELP here AT ALL -- the CANARY pipeline's OWN
+  automated ROLLBACK (reverting the ENTIRE deployed version) is the APPROPRIATE response
+```
+
+Because these two mechanisms operate at genuinely different scopes (one specific feature versus the entire deployed version) and have different speeds (a Kill Switch flip is typically near-instant; a Canary rollback involves actually shifting traffic/infrastructure back), teams benefit from having runbooks (covered under DevOps) that guide on-call responders toward the narrower, faster fix when the regression is clearly attributable to one flagged feature, and the broader deployment rollback when it isn't.
+
+**Common Pitfall:** defaulting to a full Canary rollback for every regression during a progressive rollout, even when the actual cause is clearly isolated to one specific, recently-flagged feature — this is slower and broader than necessary, needlessly reverting the entire deployment (including unrelated, perfectly fine changes) when a targeted Kill Switch flip would have resolved the specific issue faster and with a narrower, more surgical impact.
+
+---
+
 ---

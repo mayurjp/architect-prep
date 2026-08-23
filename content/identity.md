@@ -1551,4 +1551,100 @@ Because this check happens invisibly, an SPA can periodically (or just before an
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is a Trust Boundary in identity/security architecture, and how does explicitly identifying where one exists — between a public internet-facing client and an internal API, for instance — clarify where authentication/authorization checks actually need to happen?**
+
+A Trust Boundary marks the line between two zones of differing trust — everything on one side is considered potentially hostile or unverified (the public internet, an end user's own browser), while everything on the other is presumed to already be validated — and it's precisely at each crossing of such a boundary that an authentication/authorization check genuinely needs to happen, since that's the one place trust actually needs to be established or re-verified.
+
+```text
+Public Internet  |  TRUST BOUNDARY  |  API Gateway  |  TRUST BOUNDARY  |  Internal Service
+  (UNTRUSTED)                          (validates a       (may APPLY
+                                        TOKEN HERE)         its OWN, ADDITIONAL
+                                                             checks HERE too)
+```
+
+```text
+EVERY crossing of a trust BOUNDARY is a place WHERE a check GENUINELY matters -- a request
+  ARRIVING from the PUBLIC internet MUST be authenticated/authorized AT the boundary it
+  FIRST crosses -- an INTERNAL service receiving an ALREADY-validated request from the
+  GATEWAY might STILL apply its OWN, additional authorization CHECK, depending on HOW MUCH
+  it trusts the GATEWAY's OWN validation ALONE
+```
+
+Because explicitly diagramming where trust boundaries actually exist in a system clarifies exactly which points genuinely need enforcement (rather than a vague, informal sense of "somewhere, something checks this"), this exercise directly informs decisions like "does authentication happen only at the API Gateway, or also at each individual microservice" (covered earlier) — a deliberate architectural choice best made by first identifying every actual trust boundary a request crosses.
+
+**Common Pitfall:** assuming a single authentication check at the system's outermost edge (an API Gateway) is automatically sufficient protection for everything behind it, without considering whether internal trust boundaries (between microservices, covered earlier) also warrant their own verification — a compromised or misconfigured internal service reachable without its own check can bypass the outer boundary's protection entirely, which is exactly why some architectures deliberately apply authentication at multiple internal boundaries, not just the outermost one.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is the OAuth 2.0 audience (`aud`) claim, and how does a Resource Server validating that a token's audience matches its own identifier prevent a token issued for one API from being misused against a completely different API?**
+
+The `aud` claim identifies which specific Resource Server (API) a token was actually issued to be used against — a properly-implemented Resource Server must check that an incoming token's `aud` claim matches its own identifier before accepting it, rejecting any token that, while validly signed by the correct Authorization Server, was actually intended for a *different* API entirely.
+
+```json
+{ "sub": "user123", "aud": "api://orders-service", "exp": 1755900000 }
+```
+```csharp
+// Resource Server validation -- MUST check the audience MATCHES its OWN identifier
+options.TokenValidationParameters.ValidAudience = "api://orders-service";
+// a TOKEN with "aud": "api://inventory-service" -- EVEN THOUGH validly SIGNED by the
+// SAME trusted Authorization Server -- is REJECTED HERE, since it was NEVER intended
+// to be USED against the "orders-service" API AT ALL
+```
+
+```text
+WITHOUT audience validation: a TOKEN legitimately issued FOR "inventory-service" (a
+  DIFFERENT API) could be REPLAYED against "orders-service" -- BOTH APIs trust the SAME
+  Authorization Server's SIGNATURE, so a NAIVE implementation checking ONLY "is this
+  SIGNATURE valid" would INCORRECTLY accept a TOKEN never meant for IT at all
+
+WITH audience validation: "orders-service" EXPLICITLY checks "aud" MATCHES its OWN
+  identifier -- a TOKEN issued FOR a DIFFERENT API is REJECTED, REGARDLESS of its
+  otherwise-VALID signature
+```
+
+Because a single Authorization Server commonly issues tokens for many different APIs it manages, signature validity alone doesn't guarantee a token was meant for the *specific* API receiving it — the `aud` claim (and each Resource Server's own explicit check against it) is precisely the mechanism preventing a token legitimately obtained for one API from being replayed against an entirely different one that happens to trust the same issuer.
+
+**Common Pitfall:** implementing token validation that checks signature validity and expiration but omits an explicit audience check — this leaves a Resource Server accepting any validly-signed token from the trusted issuer, regardless of which specific API it was actually intended for, opening the door to a token obtained for one API being misused against a completely different one sharing the same Authorization Server.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is Cross-Tenant Token Validation in a multi-tenant SaaS application, and how must the application explicitly verify a token's tenant claim matches the tenant a request is actually for, to prevent one tenant's token from accessing another tenant's data?**
+
+In a multi-tenant application, a token typically carries a tenant identifier claim alongside the user's own identity — beyond ordinary token validation (signature, expiry, audience, covered earlier), the application must explicitly check that this tenant claim matches the specific tenant the current request is actually targeting, since a validly-issued token for Tenant A says nothing on its own about whether the *request* it's attached to is genuinely meant to access Tenant A's data specifically.
+
+```csharp
+[HttpGet("/api/tenants/{tenantId}/orders")]
+public IActionResult GetOrders(string tenantId)
+{
+    var tokenTenantId = User.FindFirst("tenant_id")?.Value;
+    if (tokenTenantId != tenantId) return Forbid(); // EXPLICIT check -- the TOKEN's OWN tenant
+        // MUST match the tenant THIS SPECIFIC request is TARGETING -- a VALID token for
+        // Tenant A attempting to access Tenant B's data is REJECTED, REGARDLESS of the
+        // token's OTHERWISE valid signature/audience/expiry
+    return Ok(_orderService.GetOrdersForTenant(tenantId));
+}
+```
+
+```text
+WITHOUT this explicit check: a USER belonging to Tenant A, holding a VALID token FOR
+  Tenant A, could POTENTIALLY access "/api/tenants/tenant-B/orders" DIRECTLY -- since
+  ORDINARY token validation (signature, expiry) says NOTHING about WHICH tenant's DATA
+  a SPECIFIC request is actually ALLOWED to touch
+
+WITH the explicit check: the SAME request is REJECTED, since the TOKEN's OWN "tenant_id"
+  claim (Tenant A) does NOT match the REQUESTED "tenantId" ROUTE parameter (Tenant B)
+```
+
+Because ordinary authentication only confirms "this token is genuinely valid and belongs to this user," it says nothing by itself about tenant-level data isolation — this is precisely the same kind of per-object authorization gap BOLA/IDOR (covered under App Security) describes, just applied specifically at the tenant boundary rather than an individual resource, and it requires its own deliberate, explicit check on every tenant-scoped endpoint.
+
+**Common Pitfall:** relying purely on ordinary token validation (signature, audience, expiry) as sufficient protection in a multi-tenant application, without an explicit, per-request check that the token's own tenant claim matches the tenant the request is actually targeting — this is a genuine, high-severity data-isolation vulnerability specific to multi-tenant architectures, structurally identical to the general BOLA/IDOR pattern (covered under App Security) but scoped at the tenant level rather than an individual object.
+
+---
+
 ---
