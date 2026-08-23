@@ -1834,3 +1834,94 @@ Because multi-tenant or mixed-workload SQL Server instances (transactional OLTP 
 **Common Pitfall:** assuming Resource Governor isolates workloads at the level of separate databases or instances — it operates entirely within a single SQL Server instance, governing how that instance's own shared CPU/memory is divided among classified sessions; workloads that genuinely need full physical isolation (their own dedicated compute) still require separate instances, not just separate resource pools.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is a SQL Server Synonym, and how does it let a stable, alias name reference an underlying object — potentially living in a different database or even a different server — without callers needing to know that object's actual location?**
+
+A Synonym is a lightweight alias for another database object (a table, view, or stored procedure), letting code reference the synonym's name while SQL Server transparently redirects to whatever object it currently points at — including an object in an entirely different database or linked server — without every caller needing to know or update that actual, underlying location.
+
+```sql
+CREATE SYNONYM dbo.Products FOR ReportingDb.dbo.Products;
+
+SELECT * FROM dbo.Products; -- looks like a LOCAL table, but SQL Server
+                              -- transparently REDIRECTS to ReportingDb.dbo.Products
+```
+
+```text
+WITHOUT a Synonym: EVERY query referencing the remote table must SPELL OUT
+  its full THREE-PART name (ReportingDb.dbo.Products) -- if that TABLE ever
+  MOVES to a different database, EVERY query referencing it must be UPDATED
+
+WITH a Synonym: queries reference the SHORT, STABLE synonym NAME -- if the
+  underlying OBJECT's actual location changes, ONLY the synonym's OWN
+  definition needs updating, NOT every query that references it
+```
+
+Because a Synonym decouples a query's reference name from the referenced object's actual physical location, it's a useful tool during a database migration or consolidation effort — code can keep referencing the same stable synonym name throughout the migration, with only the synonym's own definition needing to be repointed once the underlying object actually moves.
+
+**Common Pitfall:** assuming a Synonym behaves like a View — it doesn't provide any column-level filtering, computed columns, or query logic of its own; it's purely a name alias for another object, forwarding requests transparently without any additional logic layered on top.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is `sys.dm_db_index_usage_stats`, and how does inspecting it let a DBA identify indexes that are never actually used by any query — safe candidates for removal to reduce write overhead?**
+
+Every index SQL Server maintains has a real cost on every `INSERT`/`UPDATE`/`DELETE` touching its table (the engine must keep the index's own data structure in sync) — `sys.dm_db_index_usage_stats` tracks how often each index is actually used for seeks, scans, and lookups (reads) versus how often it's updated (writes), letting a DBA identify an index that's paying its write-maintenance cost on every modification while providing essentially zero read benefit in return.
+
+```sql
+SELECT OBJECT_NAME(s.object_id) AS TableName, i.name AS IndexName,
+       s.user_seeks, s.user_scans, s.user_lookups, s.user_updates
+FROM sys.dm_db_index_usage_stats s
+JOIN sys.indexes i ON s.object_id = i.object_id AND s.index_id = i.index_id
+WHERE s.database_id = DB_ID()
+ORDER BY (s.user_seeks + s.user_scans + s.user_lookups) ASC; -- least-READ indexes first
+```
+
+```text
+An index with user_updates = 50,000 but user_seeks/scans/lookups = 0:
+  PAYING the full write-maintenance COST on every modification, while
+  providing ZERO read BENEFIT -- a strong CANDIDATE for removal
+
+An index with user_updates = 50,000 AND user_seeks = 40,000: genuinely
+  EARNING its write cost through FREQUENT, beneficial READ usage -- KEEP it
+```
+
+Because every unused index represents pure overhead — write cost paid on every modification with no offsetting read benefit — periodically reviewing `sys.dm_db_index_usage_stats` and removing indexes that show heavy write activity but negligible read usage is a standard, low-risk way to reduce a table's overall write overhead without impacting any query's actual performance.
+
+**Common Pitfall:** basing an index-removal decision on statistics collected since the last SQL Server service restart (this DMV's counters reset to zero on restart) without accounting for whether that specific window actually captured a representative sample of the application's real query patterns — a monthly reporting query's index might show as "unused" simply because the observation window didn't happen to include the one day per month it actually runs.
+
+---
+
+## Advanced — Question 22
+
+**Q22: How does Query Store's Wait Statistics capture differ from `sys.dm_os_wait_stats` (covered earlier) by persisting wait information per-query, per-time-window, letting a DBA correlate a specific wait-type spike historically to the exact query responsible?**
+
+`sys.dm_os_wait_stats` (covered earlier) provides server-wide, cumulative wait statistics that reset on every service restart — useful for understanding overall bottleneck categories, but unable to attribute a specific wait spike to any one particular query. Query Store's Wait Statistics feature instead persists wait information broken down *per query, per time interval*, letting a DBA look back at a specific historical time window and see exactly which query was responsible for a given wait-type spike (`CXPACKET`, `PAGEIOLATCH`, lock waits) at that moment.
+
+```sql
+SELECT qsq.query_id, qsqt.query_sql_text, qsrs.avg_query_wait_time_ms, qsws.wait_category_desc
+FROM sys.query_store_wait_stats qsws
+JOIN sys.query_store_runtime_stats qsrs ON qsws.plan_id = qsrs.plan_id
+JOIN sys.query_store_query qsq ON qsrs.plan_id = qsq.query_id
+JOIN sys.query_store_query_text qsqt ON qsq.query_text_id = qsqt.query_text_id
+WHERE qsws.wait_category_desc = 'Lock'
+ORDER BY qsws.total_query_wait_time_ms DESC;
+```
+
+```text
+sys.dm_os_wait_stats: "the SERVER, OVERALL, has spent a LOT of time on
+  LOCK waits since the LAST restart" -- tells you WHAT KIND of bottleneck
+  exists SERVER-wide, but NOT which specific QUERY caused it, or WHEN
+
+Query Store Wait Stats: "QUERY #4521 specifically accumulated SIGNIFICANT
+  Lock-category wait time DURING the 2-3pm interval YESTERDAY" -- attributes
+  the WAIT directly to a SPECIFIC query, at a SPECIFIC historical time
+```
+
+Because a production incident is often investigated well after it occurred (a DBA reviewing "why was the server slow yesterday afternoon"), having wait statistics persisted per-query, per-time-window — rather than only a live, cumulative, server-wide snapshot — lets that historical investigation actually identify the specific responsible query, closing a genuine gap `sys.dm_os_wait_stats` alone cannot address.
+
+**Common Pitfall:** relying exclusively on `sys.dm_os_wait_stats` for post-incident investigation, only to discover the server has been restarted (or the counters otherwise reset) since the incident occurred, losing all relevant historical wait data — Query Store's persisted, per-query wait statistics survive exactly this scenario, since they're stored in the database itself rather than in a volatile, restart-reset server-wide counter.
+
+---

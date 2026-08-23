@@ -2012,3 +2012,90 @@ Because this runs for *every* entity of every type materialized through the cont
 **Common Pitfall:** using `IMaterializationInterceptor` for logic that would be simpler and more idiomatic as a plain constructor or an `OnModelCreating`-configured value converter (covered earlier) — the interceptor is a powerful, low-level hook meant for genuinely cross-cutting concerns spanning many entity types, not a general-purpose substitute for straightforward, single-entity initialization logic that a constructor already handles perfectly well.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What does `DbContextOptionsBuilder.EnableDetailedErrors()` do, and how does it provide more informative exception messages specifically for data-reader and materialization errors?**
+
+By default, an exception thrown while EF Core is reading a database result set and materializing it into entity objects can produce a fairly generic error message — `EnableDetailedErrors()` tells EF Core to include additional diagnostic context (which specific property or column was being processed when the error occurred) in the exception, at a small performance cost, making an otherwise cryptic materialization failure meaningfully easier to diagnose.
+
+```csharp
+optionsBuilder.UseSqlServer(connectionString)
+              .EnableDetailedErrors(); // typically enabled only in Development
+```
+
+```text
+WITHOUT EnableDetailedErrors: a MATERIALIZATION failure (e.g., a database
+  NULL landing in a non-nullable C# property) produces a GENERIC exception
+  message, giving LITTLE indication of WHICH property/column was involved
+
+WITH EnableDetailedErrors: the SAME failure's exception message includes
+  the SPECIFIC property/column context, turning a confusing GENERIC error
+  into one that POINTS DIRECTLY at the likely root cause
+```
+
+Because this diagnostic detail comes with a measurable, if usually small, performance cost, `EnableDetailedErrors()` is conventionally enabled only in Development/Staging environments (often gated by the same `IsDevelopment()` check used for other diagnostic-only features) rather than left on in production, where the small extra overhead isn't worth paying for errors a team hopes rarely occur at all.
+
+**Common Pitfall:** leaving `EnableDetailedErrors()` enabled in a production environment purely out of habit, forgetting that it exists specifically as a development-time diagnostic aid — the performance cost is usually modest, but this setting's value is greatest during active development and debugging, not as a permanent production configuration.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What does an `IQueryable`'s `ToQueryString()` method do, and how does it let you inspect the exact SQL a LINQ query would generate without actually executing it against the database?**
+
+Rather than relying on logging output or a SQL Server Profiler trace to see what SQL a specific LINQ query translates to, `ToQueryString()` (available directly on any `IQueryable`) returns that generated SQL as a string immediately, without ever sending the query to the database — a fast, offline way to inspect exactly what will be executed.
+
+```csharp
+var query = context.Orders.Where(o => o.Status == "Pending").OrderBy(o => o.CreatedDate);
+
+string sql = query.ToQueryString();
+Console.WriteLine(sql);
+// SELECT [o].[Id], [o].[Status], [o].[CreatedDate] FROM [Orders] AS [o]
+// WHERE [o].[Status] = N'Pending' ORDER BY [o].[CreatedDate]
+```
+
+```text
+WITHOUT ToQueryString(): SEEING the generated SQL requires ENABLING logging,
+  ACTUALLY executing the query, and SEARCHING through log output for the
+  relevant statement
+
+WITH ToQueryString(): CALL one method on the QUERY itself -- get the EXACT
+  generated SQL back IMMEDIATELY, with NO database round trip and NO log
+  configuration needed at ALL
+```
+
+Because inspecting a query's generated SQL is a common step when diagnosing an unexpected performance issue or verifying a complex LINQ expression translates the way you expect, `ToQueryString()` provides a fast, frictionless way to do this directly from a debugger watch window or a quick console line, without needing to configure logging or actually run the query against real data.
+
+**Common Pitfall:** calling `ToQueryString()` on a query that includes client-evaluated portions (a method EF Core's SQL translator can't express) expecting it to somehow show the full end-to-end behavior — `ToQueryString()` shows only the SQL portion of a query's execution; any client-side evaluation happening after the database round trip isn't reflected in the returned SQL string at all.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What are `DbContext.SavingChanges`/`SavedChanges`/`SaveChangesFailed`, and how do these events provide a simpler, event-based hook for cross-cutting `SaveChanges` logic compared to implementing a full `ISaveChangesInterceptor` (covered earlier)?**
+
+For simpler cross-cutting needs (logging when a save starts, succeeds, or fails) that don't require the interceptor's full ability to inspect or modify individual tracked entities, `DbContext` exposes plain C# events — `SavingChanges` (before the save), `SavedChanges` (after a successful save), and `SaveChangesFailed` (after an exception) — that any code can subscribe to directly, without defining and registering a separate interceptor class.
+
+```csharp
+context.SavingChanges += (sender, args) => _logger.LogInformation("SaveChanges starting...");
+context.SavedChanges += (sender, args) => _logger.LogInformation("SaveChanges succeeded, {Count} entities affected", args.EntitiesSavedCount);
+context.SaveChangesFailed += (sender, args) => _logger.LogError(args.Exception, "SaveChanges failed");
+```
+
+```text
+ISaveChangesInterceptor (covered earlier): a SEPARATE class, registered via
+  AddInterceptors() -- can INSPECT and MODIFY the actual SaveChanges
+  operation (entities, the outcome) -- more POWERFUL, more ceremony
+
+SavingChanges/SavedChanges/SaveChangesFailed events: plain C# EVENTS on the
+  DbContext itself -- SUBSCRIBE directly, inline, for SIMPLE observational
+  logic (logging, metrics) -- LESS powerful, but MUCH less ceremony for a
+  need that's PURELY observational rather than requiring MODIFICATION
+```
+
+Because these events are plain, ordinary .NET events rather than a formal interceptor abstraction, they're the more lightweight, appropriate choice when the actual need is purely observational (logging, incrementing a metrics counter) — reserving the full `ISaveChangesInterceptor` mechanism for scenarios genuinely requiring the ability to inspect or modify the entities and outcome involved in the save operation itself.
+
+**Common Pitfall:** reaching for a full `ISaveChangesInterceptor` implementation for a need that's purely observational (simple logging around save operations) — the plain events provide the same visibility with far less boilerplate for cases that don't actually need to modify anything about the save operation itself.
+
+---

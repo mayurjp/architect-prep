@@ -2048,3 +2048,92 @@ Because the recorded fixture captures the *real* external service's actual respo
 **Common Pitfall:** never re-recording a fixture after the real external API's response shape genuinely changes — a stale recorded fixture can let tests pass indefinitely against a response shape the real service no longer actually returns, silently diverging from reality in exactly the way Record/Replay was meant to avoid; fixtures need a periodic re-recording process, not a one-time capture treated as permanently accurate.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: How does a mocking framework's `Verify()` call (Moq's `mock.Verify(...)`) differ from asserting on a returned value, by instead confirming a specific method was actually called, with specific arguments?**
+
+An ordinary assertion checks the *result* a piece of code produced — `Verify()` instead checks the *interaction* that occurred, confirming that a specific method on a mock was actually invoked, with matching arguments, a specific number of times (or never at all) — useful when the behavior worth testing is "did this call happen," not merely "what value came back."
+
+```csharp
+var emailServiceMock = new Mock<IEmailService>();
+var orderService = new OrderService(emailServiceMock.Object);
+
+orderService.PlaceOrder(order);
+
+emailServiceMock.Verify(
+    x => x.SendConfirmation(order.CustomerEmail, It.IsAny<string>()),
+    Times.Once); // asserts the CALL happened, exactly once, with THESE arguments
+```
+
+```text
+Assert.Equal(expected, result): checks WHAT VALUE a method RETURNED
+
+mock.Verify(x => x.SomeMethod(...), Times.Once): checks WHETHER (and HOW
+  MANY times, with WHAT arguments) an INTERACTION with a DEPENDENCY
+  actually OCCURRED -- appropriate when the method UNDER TEST doesn't
+  return a value directly reflecting the behavior you care about (a
+  void method whose ENTIRE observable effect is CALLING a dependency)
+```
+
+Because some methods' entire meaningful behavior is triggering a side effect on a collaborator (sending an email, publishing an event) rather than computing and returning a value, `Verify()` provides a way to test that specific interaction directly — the core mechanic behind interaction-based (Mockist) testing style, as distinct from state-based testing (both covered earlier).
+
+**Common Pitfall:** over-verifying every single interaction a piece of code has with its dependencies, rather than only the interactions that are genuinely meaningful to the test's actual intent — excessive `Verify()` calls make a test brittle, failing on innocuous internal refactors that don't change the code's actual observable behavior, exactly the fragility interaction-based testing's critics point to as its main downside.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is Test Order Independence, and how does a test suite that happens to pass only when run in a specific order — due to shared static state — represent a hidden flakiness risk distinct from the shared-database flakiness covered earlier?**
+
+A test suite should produce the same pass/fail outcome regardless of the order its individual tests happen to run in — a suite relying on shared, mutable static state (a static counter, a static cache, a static singleton left un-reset between tests) can accidentally pass when tests run in one particular order (test A happens to set up state test B silently depends on) while failing if that order changes, revealing a genuine, hidden coupling between tests that was masked purely by coincidental ordering.
+
+```csharp
+public class OrderIdGenerator { public static int NextId = 1; }
+
+[Fact]
+public void Test_A_CreatesOrder() { var id = OrderIdGenerator.NextId++; /* assumes NextId starts at 1 */ }
+
+[Fact]
+public void Test_B_CreatesAnotherOrder() { var id = OrderIdGenerator.NextId++; /* assumes NextId is now 2 -- ONLY true if Test_A ran FIRST */ }
+```
+
+```text
+Tests run in DECLARATION order (A then B): BOTH pass, since Test_B's
+  ASSUMPTION about NextId's current value happens to HOLD
+
+Tests run in a DIFFERENT order (a test RUNNER's default order isn't
+  GUARANTEED, or PARALLEL execution reorders them): Test_B's assumption
+  about NextId's STARTING value is now WRONG -- the test FAILS, despite
+  NO actual bug existing in the code being TESTED
+```
+
+Because this kind of failure depends entirely on execution order rather than any genuine defect, it's a particularly confusing category of flakiness — the fix is ensuring each test independently establishes its own required starting state rather than implicitly relying on whatever state a previously-run test happened to leave behind, exactly the discipline behind "Test Isolation via Fresh State Per Test" (covered earlier).
+
+**Common Pitfall:** "fixing" an order-dependent test failure by simply reordering test declarations to make the suite pass again, rather than addressing the underlying shared-state coupling — this only re-hides the same latent fragility, which will resurface the next time the test runner's execution order changes for any reason (a new test added, a parallelization setting changed).
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is Test Impact Analysis (TIA) in a CI pipeline, and how does selectively re-running only the tests affected by a specific code change — rather than the entire test suite — speed up CI feedback for a very large codebase?**
+
+For a codebase with tens of thousands of tests, running the *entire* suite on every single commit can take a genuinely long time — Test Impact Analysis instead analyzes which specific tests actually exercise the code paths touched by a given change (via static analysis of call graphs, or dynamically recorded code-coverage data from previous runs), and runs only that targeted, typically much smaller subset for fast feedback, while still running the full suite periodically (or before a release) as a safety net.
+
+```text
+A change touches ONLY the "OrderValidator" class
+
+Full suite run: EXECUTES all 40,000 tests in the CODEBASE, regardless of
+  whether they have ANY relationship to the changed CODE -- SLOW feedback
+
+Test Impact Analysis: identifies that ONLY 120 tests actually EXERCISE code
+  paths touching OrderValidator (via PREVIOUSLY recorded coverage data or
+  STATIC call-graph analysis) -- runs JUST those 120 tests for FAST feedback,
+  with the FULL suite still run periodically as a BROADER safety net
+```
+
+Because most individual code changes only affect a small fraction of a large codebase's overall behavior, running only the tests genuinely capable of catching a regression in that specific area provides dramatically faster CI feedback for the common case, while a periodic full-suite run (nightly, or gating an actual release) still catches anything TIA's narrower analysis might have missed or a stale coverage mapping failed to capture correctly.
+
+**Common Pitfall:** relying on Test Impact Analysis exclusively, with no periodic full-suite safety net at all — TIA's coverage mapping can become stale or miss subtle, indirect dependencies (reflection-based code paths, dynamic dispatch a static call-graph analysis can't fully capture), making an occasional full-suite run an important complement rather than something TIA can safely and entirely replace.
+
+---

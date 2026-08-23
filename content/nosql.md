@@ -1738,3 +1738,98 @@ Because DynamoDB has no native `JOIN` operation and charges per read/write capac
 **Common Pitfall:** applying Single Table Design reflexively to every DynamoDB use case, including ones with genuinely varied, unpredictable, ad-hoc query patterns — the pattern earns its complexity specifically when access patterns are well-known and stable upfront (a prerequisite for designing the overloaded key structure correctly); a workload with frequently-changing or exploratory query needs may be better served by a more conventional, if less DynamoDB-idiomatic, table-per-entity-type design.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is a NoSQL database's "Scatter-Gather" query pattern, and why is it considered an anti-pattern for a query run frequently against a partitioned table?**
+
+Querying by the partition key (covered extensively earlier) lets the database route a request directly to the one specific partition holding the relevant data — querying by a field that *isn't* the partition key instead forces the database's coordinator to send the query to *every* partition ("scatter"), wait for each one to respond, and merge all the results together ("gather"), a fundamentally more expensive operation that scales poorly as the number of partitions grows.
+
+```text
+Query BY partition key: coordinator routes DIRECTLY to the ONE partition
+  holding this data -- FAST, and the cost doesn't GROW as more partitions
+  are added to the cluster
+
+Query by a NON-partition-key field (Scatter-Gather): coordinator must send
+  the query to EVERY partition, wait for ALL of them to respond, then MERGE
+  the results -- cost GROWS directly with the number of partitions, and a
+  single SLOW partition delays the ENTIRE query (the "straggler problem,"
+  covered under System Design)
+```
+
+Because Scatter-Gather's cost scales with the total number of partitions rather than staying constant, a query pattern that relies on it will get progressively slower as a cluster grows to handle more data — exactly the opposite of the scaling behavior a horizontally-distributed database is supposed to provide, making it a strong signal that either a secondary index or a schema redesign (choosing a partition key that actually matches the query's filter) is needed for any query run with meaningful frequency.
+
+**Common Pitfall:** discovering a frequently-run query relies on Scatter-Gather only after a cluster has already grown large enough for the performance degradation to become noticeable — proactively identifying every genuinely important query pattern during initial schema design (and choosing partition keys or secondary indexes accordingly) avoids this class of problem emerging as a surprise well after the system is already in production.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is a Document Database's "Bucket Pattern," and how does grouping many small, related time-series readings into one larger document per time bucket reduce document-count overhead compared to one document per individual reading?**
+
+Storing one document per individual sensor reading (one document per second, for a high-frequency IoT sensor) creates an enormous number of tiny documents, each carrying its own per-document overhead (metadata, indexing cost) — the Bucket Pattern instead groups readings from a fixed time window (an hour, a day) into a single document containing an array of readings for that window, dramatically reducing the total document count while keeping related readings physically co-located.
+
+```json
+// WITHOUT bucketing: ONE document PER reading -- 3,600 documents PER HOUR, per sensor
+{ "sensorId": "temp-01", "timestamp": "2026-08-23T10:00:01Z", "value": 21.4 }
+{ "sensorId": "temp-01", "timestamp": "2026-08-23T10:00:02Z", "value": 21.5 }
+
+// WITH the Bucket Pattern: ONE document PER HOUR, containing an ARRAY of readings
+{
+  "sensorId": "temp-01",
+  "hourBucket": "2026-08-23T10:00:00Z",
+  "readings": [
+    { "timestamp": "2026-08-23T10:00:01Z", "value": 21.4 },
+    { "timestamp": "2026-08-23T10:00:02Z", "value": 21.5 }
+  ]
+}
+```
+
+```text
+WITHOUT bucketing: 3,600 SEPARATE documents per HOUR, per sensor -- each
+  paying its OWN per-document METADATA/indexing overhead, and a QUERY for
+  "this sensor's readings for the last HOUR" touches THOUSANDS of documents
+
+WITH bucketing: ONE document PER hour, per sensor -- the SAME hour's worth
+  of data is retrieved via a SINGLE document read, dramatically REDUCING
+  both document COUNT and the number of documents a typical QUERY must touch
+```
+
+Because per-document overhead (metadata, index entries) is paid once per document regardless of how much actual data that document contains, consolidating many small, related readings into fewer, larger documents directly reduces that overhead while also making a common query pattern ("all readings in this time window") a single-document read instead of a scan across many.
+
+**Common Pitfall:** choosing a bucket size (hourly, daily) without considering the document size limit most document databases enforce (MongoDB's 16MB document limit, for instance) — an extremely high-frequency sensor bucketed at too coarse a granularity (a full day per document) could accumulate enough readings to approach or exceed that limit, requiring a bucket size chosen with both query efficiency and document-size constraints in mind.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is a DynamoDB Sparse Index, and how does a Global Secondary Index that only includes items where the indexed attribute actually exists let it efficiently represent a filtered subset of a table?**
+
+DynamoDB only includes an item in a Global Secondary Index (covered earlier) if that item actually has a non-null value for the GSI's key attribute(s) — a Sparse Index deliberately exploits this behavior: by only setting a particular attribute on the subset of items that genuinely need to be queryable through that filtered view, the resulting GSI naturally contains only that relevant subset, without any explicit filtering logic needed at query time.
+
+```text
+Table "Orders": every item has a "status" attribute, but only items
+  CURRENTLY in "Pending" status ALSO have an "isPendingFlag" attribute SET
+
+GSI on "isPendingFlag": since MOST items never SET this attribute at all,
+  they are AUTOMATICALLY excluded from the index entirely -- the GSI
+  contains ONLY the (typically much SMALLER) subset of genuinely PENDING
+  orders, with NO explicit filter expression needed at QUERY time
+```
+
+```text
+WITHOUT a sparse index: a GSI on "status" itself would include EVERY order,
+  REGARDLESS of status -- querying for "Pending" orders specifically still
+  requires FILTERING within the (large) index results
+
+WITH a sparse index on a conditionally-set attribute: the INDEX itself
+  naturally contains ONLY the relevant subset -- a Query against it returns
+  EXACTLY the pending orders, with NO wasted read capacity spent on items
+  that were never GENUINELY part of the intended subset
+```
+
+Because DynamoDB's GSI membership is determined purely by whether the indexed attribute exists on a given item, this "existence equals membership" behavior can be used deliberately to model a filtered view (only orders needing follow-up, only users with a specific flag) as its own compact, efficient index — avoiding both a full-table scan with a filter expression and the read-capacity waste of indexing every item when only a small subset is actually relevant to that specific access pattern.
+
+**Common Pitfall:** setting an attribute on every item (even with a `false`/default value) intending to create a sparse index, without realizing that setting the attribute *at all* — even to a "falsy" value — still includes that item in the index; true sparseness requires the attribute to be entirely *absent* from items that shouldn't appear in the index, not merely set to a default or empty value.
+
+---

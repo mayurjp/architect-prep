@@ -1876,3 +1876,107 @@ Because `Vector<T>` automatically sizes itself to whatever SIMD width the curren
 **Common Pitfall:** applying SIMD vectorization to a hot path that's actually memory-bandwidth-bound rather than compute-bound — if the bottleneck is how fast data can be fetched from memory rather than how fast the CPU can compute on it, processing more elements per instruction doesn't help, since the CPU spends most of its time waiting on memory regardless of how many elements each instruction can crunch once the data actually arrives.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What does `Environment.Is64BitProcess` reveal, and how can running a 32-bit process on a 64-bit operating system impose an artificial memory ceiling regardless of how much physical RAM is actually available?**
+
+A 32-bit process is limited to addressing roughly 2-4GB of memory (bounded by a 32-bit pointer's own addressable range), no matter how much physical RAM the machine actually has installed — `Environment.Is64BitProcess` lets code check, at runtime, whether it's actually running as a 64-bit process (able to address vastly more memory) or a 32-bit one (subject to this much lower ceiling), which can matter for diagnosing an unexpected `OutOfMemoryException` on a machine that otherwise has plenty of free RAM.
+
+```csharp
+Console.WriteLine($"Is64BitProcess: {Environment.Is64BitProcess}");
+Console.WriteLine($"Is64BitOperatingSystem: {Environment.Is64BitOperatingSystem}");
+```
+
+```text
+64-bit OS, but a 32-bit PROCESS (perhaps due to an explicit "Prefer 32-bit"
+  build setting, or an x86-targeted publish): the PROCESS itself is STILL
+  limited to roughly 2-4GB of ADDRESSABLE memory, regardless of the MACHINE
+  having 64GB of physical RAM installed
+
+64-bit OS AND a 64-bit process: the PROCESS can address a VASTLY larger
+  memory space, LIMITED in practice by physical RAM/OS configuration
+  rather than the 32-bit pointer CEILING
+```
+
+Because a 32-bit process's memory ceiling is a hard architectural limit entirely independent of the host machine's actual physical RAM, an `OutOfMemoryException` occurring well before a machine's available memory is genuinely exhausted is a strong signal to check whether the process is unintentionally running as 32-bit — a legacy build configuration, an explicit "Prefer 32-bit" checkbox left checked, or a dependency forcing an x86-specific runtime.
+
+**Common Pitfall:** troubleshooting an `OutOfMemoryException` purely by looking at the machine's total physical RAM and free memory, without checking whether the process itself is actually running as 32-bit — a 32-bit process can hit its own architectural memory ceiling with gigabytes of physical RAM still sitting completely unused on the machine.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is `RecyclableMemoryStream` (from the `Microsoft.IO.RecyclableMemoryStream` library), and how does pooling `MemoryStream` buffers avoid the repeated Large Object Heap allocations a naive `new MemoryStream()` can cause?**
+
+A `MemoryStream` that grows past 85,000 bytes allocates its internal backing array on the Large Object Heap (covered elsewhere) — for code that frequently creates and discards `MemoryStream` instances of this size (serializing large JSON payloads, buffering file uploads), each one contributes to LOH fragmentation and GC pressure. `RecyclableMemoryStream` provides a drop-in-compatible `MemoryStream` subclass backed by pooled buffers, reusing previously-allocated memory rather than allocating and discarding fresh LOH segments on every use.
+
+```csharp
+private static readonly RecyclableMemoryStreamManager _manager = new();
+
+using (var stream = _manager.GetStream()) // returns a pooled, MemoryStream-compatible instance
+{
+    JsonSerializer.Serialize(stream, largeObject);
+    // ... use the stream
+} // Dispose() returns its buffers to the POOL, rather than abandoning them for GC to collect
+```
+
+```text
+Plain `new MemoryStream()`, used repeatedly for LARGE payloads: EACH one
+  allocates a FRESH backing array on the LARGE OBJECT HEAP -- repeated
+  allocation/discard CONTRIBUTES to LOH fragmentation and GC pressure
+
+RecyclableMemoryStream: backing buffers are POOLED and REUSED across
+  many stream instances -- AVOIDS the repeated fresh LOH allocation
+  entirely for the COMMON case of frequently creating/discarding
+  similarly-sized large streams
+```
+
+Because it implements the same `Stream`/`MemoryStream` interface application code already expects, `RecyclableMemoryStream` is typically a low-friction, drop-in replacement for hot paths specifically suffering from LOH pressure due to frequent large `MemoryStream` usage — a targeted fix for a diagnosed problem, not a blanket replacement for every `MemoryStream` usage throughout a codebase regardless of size or frequency.
+
+**Common Pitfall:** adopting `RecyclableMemoryStream` broadly across a codebase without first confirming (via profiling) that `MemoryStream`-related LOH pressure is actually a measurable problem — for small, infrequent, or short-lived streams well under the LOH threshold, the added pooling machinery provides no meaningful benefit over the simpler, ordinary `MemoryStream`.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is `GC.AddMemoryPressure`, and how does explicitly informing the GC about unmanaged memory associated with a managed object let it make more accurate collection-timing decisions it otherwise couldn't know about?**
+
+The .NET GC decides when to collect based on the *managed* memory it can see being allocated — a managed object wrapping a large chunk of *unmanaged* memory (via a native interop handle, for instance) looks small and cheap from the GC's own perspective, even though it's actually associated with a large, invisible unmanaged allocation. `GC.AddMemoryPressure(bytes)` explicitly tells the GC "treat this object as if it were this much larger," letting it factor that hidden unmanaged cost into its collection-timing decisions.
+
+```csharp
+public class NativeImageWrapper : IDisposable
+{
+    private IntPtr _nativeHandle;
+    private const long UnmanagedSizeBytes = 50_000_000; // a 50MB native image buffer
+
+    public NativeImageWrapper()
+    {
+        _nativeHandle = AllocateNativeImage();
+        GC.AddMemoryPressure(UnmanagedSizeBytes); // tell the GC about the HIDDEN cost
+    }
+
+    public void Dispose()
+    {
+        FreeNativeImage(_nativeHandle);
+        GC.RemoveMemoryPressure(UnmanagedSizeBytes); // MUST be paired with a matching removal
+    }
+}
+```
+
+```text
+WITHOUT AddMemoryPressure: the GC sees ONLY a small, MANAGED wrapper object
+  -- it has NO visibility into the 50MB of UNMANAGED memory that object is
+  ACTUALLY responsible for, and may DELAY collecting it far LONGER than
+  appropriate, letting UNMANAGED memory usage balloon UNNOTICED
+
+WITH AddMemoryPressure: the GC's collection-timing DECISIONS now ACCOUNT
+  for the HIDDEN unmanaged cost, potentially triggering a collection SOONER
+  than it otherwise would have, based purely on the SMALL managed object size
+```
+
+Because the GC fundamentally cannot see memory it doesn't itself manage, `GC.AddMemoryPressure`/`RemoveMemoryPressure` exist specifically to bridge that visibility gap for interop-heavy code wrapping genuinely large unmanaged allocations — without this explicit signal, a wrapper object's small managed footprint can mislead the GC into believing memory pressure is far lower than it actually is.
+
+**Common Pitfall:** calling `AddMemoryPressure` without a correspondingly reliable `RemoveMemoryPressure` call when the object is actually freed (a missed `Dispose()` call, an exception skipping cleanup) — an unmatched `AddMemoryPressure` permanently inflates the GC's perceived memory pressure for memory that's already been freed, potentially triggering unnecessarily aggressive collections for the remaining lifetime of the process.
+
+---
