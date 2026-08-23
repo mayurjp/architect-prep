@@ -1835,4 +1835,90 @@ Because `ExecuteUpdateAsync` bypasses the entire Change Tracking pipeline that n
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What is `DbSet<T>.Find()`'s overload accepting a composite key (multiple values), and how does it let you look up an entity by all of its key columns together for a table with a multi-column primary key?**
+
+For an entity with a composite primary key (multiple properties together forming the key, rather than one single `Id`), `Find()` accepts multiple values, in the same order the composite key was configured — EF Core checks the currently-tracked entities first (covered earlier), then queries the database if not already loaded, exactly like the single-key overload, just extended to match on every key column simultaneously.
+
+```csharp
+modelBuilder.Entity<OrderLine>().HasKey(ol => new { ol.OrderId, ol.ProductId }); // COMPOSITE key
+
+var line = await context.OrderLines.FindAsync(orderId: 5, productId: 42); // matches BOTH
+    // key COLUMNS together -- the SAME "check tracked entities FIRST" behavior (covered
+    // EARLIER) applies, just EXTENDED to a MULTI-column key
+```
+
+```text
+Single-key Find(): context.Products.FindAsync(5) -- MATCHES on ONE key COLUMN
+Composite-key Find(): context.OrderLines.FindAsync(5, 42) -- MATCHES on BOTH key
+  COLUMNS TOGETHER, in the SAME ORDER the composite key was CONFIGURED via HasKey()
+```
+
+Because `Find()`'s behavior (checking tracked entities before hitting the database) extends naturally to composite keys, it remains the most efficient lookup method even for multi-column-keyed entities, provided the values are supplied in the correct, configured order — getting the order wrong doesn't produce an error, but silently looks up the wrong (or no) entity.
+
+**Common Pitfall:** passing composite key values in the wrong order to `Find()` (swapping `productId` and `orderId` relative to how the composite key was actually configured) — this doesn't produce an explicit error, but silently searches for a combination that doesn't match any real row, or matches an unintended one, since `Find()` has no way to know which value corresponds to which key property beyond positional order.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is a `[DbFunction]` mapping, and how does it let EF Core translate a call to a user-defined SQL function directly into the generated query, rather than pulling data back and computing it in C#?**
+
+`[DbFunction]` maps a C# static method to an existing user-defined SQL function — calling that C# method inside a LINQ query doesn't actually execute C# code at all; EF Core recognizes the mapping and translates the call directly into a corresponding SQL function invocation within the generated query, letting database-side computation stay database-side rather than requiring data to be pulled into the application first.
+
+```csharp
+[DbFunction("CalculateDiscount", "dbo")] // maps to an EXISTING SQL Server FUNCTION
+public static decimal CalculateDiscount(decimal price, int customerTier) =>
+    throw new NotSupportedException(); // NEVER actually EXECUTES -- EF Core TRANSLATES the CALL, instead
+
+var discounted = await context.Products
+    .Select(p => new { p.Name, Discounted = MyDbContext.CalculateDiscount(p.Price, customer.Tier) })
+    .ToListAsync();
+// generates SQL calling "dbo.CalculateDiscount(Price, @tier)" DIRECTLY -- the COMPUTATION
+// happens ENTIRELY in the DATABASE, NEVER requiring the RAW price/tier data to be PULLED
+// into the APPLICATION just to COMPUTE the discount IN C# instead
+```
+
+Because the C# method body itself never actually runs (it exists purely as a typed, mappable placeholder EF Core recognizes and translates), this lets existing, already-tested SQL business logic (a function a DBA maintains directly in the database) be reused seamlessly from LINQ queries, without duplicating that logic in C# or paying the cost of pulling raw data out just to recompute something the database could have computed directly.
+
+**Common Pitfall:** reimplementing existing SQL Server function logic in C# and calling it after materializing raw data client-side, when a `[DbFunction]` mapping would let the exact same, already-existing SQL function be invoked directly as part of the generated query — this avoids both the logic duplication and the unnecessary data-transfer cost of pulling raw values out purely to recompute something the database already knows how to do.
+
+---
+
+## Advanced — Question 21
+
+**Q21: How does EF Core's runtime-generated Lazy Loading proxy actually intercept a navigation property's getter, and why must the entity's constructor be public or protected — never private — for this to work?**
+
+Lazy Loading proxies (covered earlier) work by generating, at runtime, a dynamic subclass of your entity that overrides each `virtual` navigation property's getter — creating this dynamic subclass requires the proxy generation library to actually construct an instance of it, which means it must be able to call *some* accessible constructor on your entity class; a `private` constructor would make this impossible, since the proxy-generation code (living outside your entity's own class) has no access to it at all.
+
+```csharp
+public class Author
+{
+    public Author() { }              // PUBLIC (or protected) -- the PROXY generator CAN call this
+    // private Author() { }          // PRIVATE would BREAK proxy generation ENTIRELY --
+                                       // the DYNAMIC subclass's OWN constructor NEEDS to call
+                                       // ITS base (YOUR entity's) constructor, which REQUIRES access to it
+
+    public virtual ICollection<Book> Books { get; set; } = new List<Book>(); // OVERRIDDEN by the PROXY
+}
+```
+
+```text
+Dynamically-generated PROXY subclass (INTERNAL to EF Core's proxy MACHINERY):
+  public class AuthorProxy : Author // MUST call Author's OWN constructor -- REQUIRES it be
+  {                                   // ACCESSIBLE (public/protected), NOT private
+      public override ICollection<Book> Books
+      {
+          get { /* TRIGGERS a database QUERY the FIRST time this is ACCESSED */ return base.Books; }
+      }
+  }
+```
+
+Because the proxy is a genuine C# subclass generated at runtime, it's bound by the exact same language rules any other subclass would be — needing access to a base class constructor to actually construct an instance, and needing the overridden member to be `virtual` (covered earlier) to actually intercept it — both requirements arise directly from proxies being ordinary, if dynamically-generated, C# inheritance under the hood, not some special, rule-exempt EF Core magic.
+
+**Common Pitfall:** marking an entity's constructor `private` (perhaps to force construction only through a static factory method, covered earlier under C#) on an entity that also needs Lazy Loading proxy support — these two goals directly conflict, since proxy generation requires an accessible constructor; an entity using Lazy Loading proxies needs at least a `protected` (or `public`) constructor, incompatible with the fully-private-constructor pattern.
+
+---
+
 ---

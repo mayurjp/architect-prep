@@ -1895,3 +1895,74 @@ Because the Pact Broker maintains a live record of exactly which contract verifi
 **Common Pitfall:** running contract verification tests as part of CI but never actually gating deployments on their results via a mechanism like `can-i-deploy` — this means a verification failure is *visible* somewhere in CI logs, but doesn't actually *prevent* an incompatible provider version from being deployed anyway; the real safety benefit of Consumer-Driven Contract Testing comes from actively gating deployments on verification results, not merely running the checks informationally.
 
 ---
+
+## Beginner — Question 20
+
+**Q20: What is the distinction between a Test Suite, a Test Case, and a Test Fixture, and how does understanding this precise terminology help when reading a testing framework's own documentation?**
+
+A Test Case is the smallest unit — one specific scenario being verified (`Withdraw_InsufficientBalance_ThrowsException`) — a Test Suite is a collection of related Test Cases grouped together (all tests for the `Account` class) — a Test Fixture (covered earlier for shared setup) refers specifically to the shared context/state a group of tests run against, sometimes used loosely to mean the test class itself.
+
+```text
+Test Case: ONE specific SCENARIO -- "Withdraw_InsufficientBalance_ThrowsException" --
+  the SMALLEST, MOST granular UNIT
+
+Test Suite: a COLLECTION of RELATED test CASES -- "AccountTests" (CONTAINING MANY
+  individual test CASES, ALL related to the "Account" class's BEHAVIOR)
+
+Test Fixture: the SHARED SETUP/context/state a GROUP of tests SHARE -- SOMETIMES used
+  to REFER to the TEST CLASS itself (WHICH provides THAT shared context)
+```
+
+Because different testing frameworks and their documentation sometimes use these terms slightly differently (or interchangeably, adding to the confusion), understanding the general, precise distinction helps when reading unfamiliar framework documentation or configuration options (a "fixture" setup hook, a command to "run this suite") — recognizing which specific concept a given term is actually referring to in that particular framework's own vocabulary.
+
+**Common Pitfall:** using "test suite," "test case," and "test fixture" interchangeably in team communication or documentation, assuming everyone shares the exact same mental model — this can create genuine confusion when discussing testing infrastructure or reading a specific framework's documentation, which often uses these terms with more precision than everyday conversation does.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: Why must a Snapshot Test explicitly "scrub" or normalize a non-deterministic output field — a timestamp, a GUID — before comparing against the approved snapshot, to avoid a false-positive failure on every single run?**
+
+If a captured snapshot includes a value that's genuinely different every time the code runs (a freshly-generated GUID, the current timestamp), comparing a fresh run's output against the previously-approved snapshot will *always* show a difference in that specific field — even when nothing about the actual, meaningful behavior changed at all — producing a false-positive failure on essentially every single test run unless that non-deterministic field is explicitly normalized (replaced with a fixed placeholder) before the comparison happens.
+
+```csharp
+// WITHOUT scrubbing -- the SNAPSHOT comparison FAILS on EVERY run, since "Id" and
+// "CreatedAt" are GENUINELY different EVERY time (a fresh GUID, the CURRENT timestamp)
+var result = GenerateReport();
+Approvals.Verify(result); // { "Id": "a1b2c3...", "CreatedAt": "2026-08-23T10:15:32Z", "Total": 129.99 }
+
+// WITH scrubbing -- NORMALIZES the non-deterministic fields to FIXED placeholders BEFORE comparing
+var scrubbed = Scrubbers.ScrubGuids(Scrubbers.ScrubDates(result));
+Approvals.Verify(scrubbed); // { "Id": "[GUID]", "CreatedAt": "[DATE]", "Total": 129.99 } --
+    // NOW STABLE across EVERY run -- ONLY genuine, MEANINGFUL differences (like "Total"
+    // actually CHANGING) cause the COMPARISON to FAIL
+```
+
+Because the whole point of Snapshot Testing is detecting *meaningful* regressions, not incidental, expected variation, failing to scrub non-deterministic fields produces constant, uninformative failures that train the team to ignore (or blindly re-approve) every failure — precisely the outcome that undermines the pattern's actual value, since a genuinely meaningful regression could then slip through unnoticed amid the noise.
+
+**Common Pitfall:** capturing a snapshot that includes genuinely non-deterministic values without any scrubbing/normalization step, then being surprised the snapshot test fails on every single run regardless of whether anything meaningful actually changed — this trains the team to treat snapshot failures as routine noise to dismiss, defeating the pattern's actual purpose of surfacing genuine, meaningful regressions.
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is a Soak Test — a long-duration, sustained-load variant distinct from a short spike Load Test — and how does it specifically reveal a slow memory leak or resource exhaustion that a short-duration test would never have time to surface?**
+
+An ordinary Load Test (covered earlier) runs at a target load level for a relatively short period, confirming the system meets its performance targets — a Soak Test instead sustains a realistic (often moderate, not peak) load for a much *longer* duration — hours, sometimes days — specifically to surface problems that only manifest gradually over sustained operation, like a slow memory leak, a gradually-growing connection pool, or a resource that's never quite fully released.
+
+```text
+SHORT Load Test (30 MINUTES, at target load): a SLOW memory LEAK (leaking, say, 1MB
+  PER HOUR) is COMPLETELY INVISIBLE -- 30 minutes SIMPLY ISN'T ENOUGH time for the LEAK
+  to ACCUMULATE into anything MEASURABLE or PROBLEMATIC AT ALL
+
+Soak Test (24+ HOURS, at SUSTAINED, realistic LOAD): that SAME 1MB/hour LEAK ACCUMULATES
+  into 24+ MB over the TEST's DURATION -- BECOMES CLEARLY VISIBLE and MEASURABLE (RISING
+  memory usage over TIME, EVENTUALLY leading to DEGRADED performance or an OUTRIGHT CRASH)
+  -- EXACTLY the KIND of problem ONLY a GENUINELY long-duration test can ACTUALLY reveal
+```
+
+Because a slow leak or gradual resource exhaustion is, by its very nature, undetectable within a short observation window (the accumulated effect simply hasn't had time to become measurable yet), a Soak Test's defining characteristic — sustained duration, not necessarily peak intensity — is precisely what's needed to surface this specific category of problem, one an intense-but-brief Load/Stress Test (covered earlier) structurally cannot catch regardless of how high its peak load actually is.
+
+**Common Pitfall:** relying exclusively on short-duration Load/Stress Tests (covered earlier) for performance validation, assuming they provide comprehensive coverage of "how the system behaves under load" — these tests are specifically blind to slow-accumulating problems (memory leaks, gradual resource exhaustion) that only manifest over sustained operation; a Soak Test is the specific tool needed to catch this genuinely different category of failure mode.
+
+---

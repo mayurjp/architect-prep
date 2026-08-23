@@ -1683,3 +1683,98 @@ Because an actual `StackOverflowException` cannot be caught at all under normal 
 **Common Pitfall:** processing deeply or unpredictably nested recursive data (a tree structure whose depth depends on untrusted, external input) without any stack-depth safeguard at all — a maliciously or accidentally deeply-nested input can trigger an actual `StackOverflowException`, immediately terminating the entire process with no opportunity for graceful error handling; `EnsureSufficientExecutionStack()` (or, more robustly, converting recursion to an explicit, heap-allocated stack/iterative approach) avoids this unrecoverable failure mode.
 
 ---
+
+## Beginner — Question 20
+
+**Q20: What is the difference between throughput measured in requests-per-second versus bytes-per-second, and why does optimizing for one sometimes actively trade away performance on the other?**
+
+Requests-per-second measures how many discrete operations a system completes in a given time — bytes-per-second measures raw data transfer volume — a system optimized purely for handling many small, frequent requests quickly (high requests/sec) may make different architectural trade-offs than one optimized for moving large volumes of data efficiently (high bytes/sec), and the two goals can genuinely conflict.
+
+```text
+OPTIMIZING for requests/sec: favors LOW per-request OVERHEAD, QUICK connection SETUP/reuse,
+  MINIMAL processing PER request -- appropriate for an API handling MANY SMALL, FREQUENT calls
+
+OPTIMIZING for bytes/sec: favors LARGE buffer SIZES, MAXIMIZING sustained TRANSFER rate PER
+  connection, POTENTIALLY accepting HIGHER per-connection SETUP cost in EXCHANGE for
+  BETTER sustained THROUGHPUT once a connection is ESTABLISHED -- appropriate for BULK file TRANSFER
+```
+
+```text
+A system TUNED for MAXIMUM requests/sec (small, LEAN buffers, AGGRESSIVE connection reuse)
+  might actually PERFORM WORSE at bytes/sec for a FEW, LARGE file transfers, SINCE its
+  SMALL buffer sizes ADD OVERHEAD relative to a SYSTEM specifically TUNED for LARGE,
+  SUSTAINED transfers INSTEAD -- the TWO metrics genuinely CAN pull in DIFFERENT directions
+```
+
+Because these two metrics capture genuinely different aspects of "how fast" a system is, understanding which one actually matters for a given workload (an API serving many small JSON responses cares about requests/sec; a file-transfer service cares about bytes/sec) is essential before choosing which specific tuning knobs to adjust — optimizing blindly for one without considering the other risks degrading the metric that actually matters for the real workload.
+
+**Common Pitfall:** benchmarking and tuning a system purely by requests-per-second when the actual production workload is dominated by a smaller number of large data transfers (where bytes/sec is the metric that actually matters), or vice versa — choosing the wrong throughput metric to optimize for can lead to tuning decisions that look good on paper but don't actually improve the performance characteristic the real workload cares about.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does wrapping each parallel task with a `SemaphoreSlim`'s `WaitAsync()`/`Release()` let you cap the maximum number of simultaneously-running operations, even when launching far more tasks than that cap via `Task.WhenAll`?**
+
+`Task.WhenAll` itself imposes no limit on how many tasks run concurrently — launching 10,000 tasks via `Task.WhenAll` attempts to run all 10,000 essentially at once, which can overwhelm a downstream resource (a rate-limited API, a database connection pool); wrapping each task's actual work with a `SemaphoreSlim` acquired before starting and released after finishing caps how many are ever *simultaneously* executing, regardless of how many total tasks were launched.
+
+```csharp
+var semaphore = new SemaphoreSlim(initialCount: 10); // AT MOST 10 CONCURRENT operations, EVER
+
+var tasks = urls.Select(async url =>
+{
+    await semaphore.WaitAsync(); // BLOCKS here if 10 are ALREADY running -- WAITS for a SLOT
+    try { return await httpClient.GetAsync(url); }
+    finally { semaphore.Release(); } // FREES a slot for the NEXT WAITING task to PROCEED
+});
+
+await Task.WhenAll(tasks); // 10,000 tasks LAUNCHED, but NEVER more than 10 ACTUALLY
+                             // executing SIMULTANEOUSLY, at ANY given MOMENT
+```
+
+```text
+WITHOUT the semaphore: Task.WhenAll ATTEMPTS to run ALL 10,000 tasks AT ONCE -- COULD
+  overwhelm a RATE-LIMITED downstream API, or EXHAUST a DATABASE connection pool
+
+WITH the semaphore: ONLY 10 tasks are EVER actively DOING their REAL work SIMULTANEOUSLY --
+  the REMAINING 9,990 simply WAIT at "await semaphore.WaitAsync()" until a SLOT FREES UP
+```
+
+Because the semaphore gates the actual concurrent execution regardless of how many tasks were initially launched, this pattern provides a simple, effective way to bound concurrency against a downstream resource with a known capacity limit — genuinely useful whenever `Task.WhenAll`'s natural "run everything at once" behavior would overwhelm something with finite capacity.
+
+**Common Pitfall:** launching a large number of concurrent tasks via `Task.WhenAll` against a downstream resource with a known, finite capacity (a rate-limited third-party API, a connection pool with a hard maximum) without any concurrency-limiting mechanism — this can overwhelm the downstream resource, triggering rate-limit rejections or connection-pool exhaustion; a `SemaphoreSlim`-based concurrency cap is a simple, standard fix for exactly this scenario.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How must code using `GC.TryStartNoGCRegion` (covered earlier) explicitly handle the failure mode where an exception is thrown mid-region if the region's own memory budget is exceeded?**
+
+`GC.TryStartNoGCRegion` accepts a memory budget upfront — if the application allocates *more* than that budget while inside the no-GC region, the runtime can't honor the "no garbage collection" promise any longer and throws an `InvalidOperationException`, meaning code inside a no-GC region must be prepared to handle this specific exception rather than assuming the region's protection is unconditionally guaranteed for its entire duration.
+
+```csharp
+try
+{
+    bool started = GC.TryStartNoGCRegion(100_000_000); // a 100MB BUDGET
+    if (!started) { /* the RUNTIME couldn't GUARANTEE this budget -- FALL BACK gracefully */ }
+
+    // latency-sensitive WORK here -- IF this ALLOCATES MORE than the 100MB BUDGET,
+    // an InvalidOperationException is THROWN AT THAT POINT, MID-region
+}
+catch (InvalidOperationException)
+{
+    // the NO-GC region's BUDGET was EXCEEDED -- the RUNTIME had to ABANDON the GUARANTEE --
+    // CODE must EXPLICITLY handle THIS possibility, RATHER than assuming the REGION's
+    // protection was UNCONDITIONALLY guaranteed for its ENTIRE, INTENDED duration
+}
+finally
+{
+    if (GCSettings.LatencyMode == GCLatencyMode.NoGCRegion) GC.EndNoGCRegion(); // ALWAYS clean UP
+}
+```
+
+Because the memory budget is a genuine, hard limit rather than a soft suggestion, code relying on this feature for a latency-critical section must account for the possibility that its actual allocation behavior exceeds the requested budget (perhaps due to an unexpectedly large input) — treating the no-GC guarantee as unconditional, without handling this specific exception, risks an unhandled crash during precisely the latency-sensitive operation the feature was meant to protect.
+
+**Common Pitfall:** requesting a `TryStartNoGCRegion` budget without actually measuring or bounding the code's real allocation behavior within that region, then failing to catch the `InvalidOperationException` that results if the budget turns out to be insufficient — this can produce an unhandled crash specifically during the latency-critical operation the feature was meant to protect, the opposite of the intended outcome.
+
+---

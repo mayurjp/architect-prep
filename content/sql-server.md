@@ -1657,4 +1657,86 @@ Because the total cost of a Nested Loop Join scales with the *outer* side's row 
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What is a SQL Server View's `WITH CHECK OPTION`, and how does it prevent an `INSERT`/`UPDATE` through the view from creating a row that wouldn't actually be visible through that same view's own filtering criteria?**
+
+A View defined with a `WHERE` clause (covered earlier) normally allows an `INSERT`/`UPDATE` performed *through* it to create or modify a row that violates that same filter — meaning the row would immediately "disappear" from the view's own results the moment you queried it again, since it no longer matches the filter. `WITH CHECK OPTION` explicitly disallows this: any `INSERT`/`UPDATE` through the view that would produce a row failing the view's own `WHERE` clause is rejected outright.
+
+```sql
+CREATE VIEW ActiveProducts AS
+SELECT Id, Name, IsActive FROM Products WHERE IsActive = 1
+WITH CHECK OPTION;
+
+UPDATE ActiveProducts SET IsActive = 0 WHERE Id = 5;
+-- FAILS -- setting IsActive = 0 would produce a row that NO LONGER matches the VIEW's
+-- OWN "WHERE IsActive = 1" filter -- WITH CHECK OPTION explicitly REJECTS this UPDATE
+```
+
+```text
+WITHOUT CHECK OPTION: the UPDATE would SUCCEED -- the ROW's IsActive becomes 0 -- QUERYING
+  "ActiveProducts" AGAIN afterward, the ROW has SIMPLY DISAPPEARED (no LONGER matches the
+  VIEW's filter) -- a CONFUSING, SILENT inconsistency
+
+WITH CHECK OPTION: the SAME update is REJECTED OUTRIGHT, with an EXPLICIT error -- the
+  VIEW's OWN filtering CRITERIA is TREATED as a GENUINE constraint on WHAT can be
+  WRITTEN through it, NOT just what's VISIBLE when READING through it
+```
+
+Because a view's filter is ordinarily enforced only for *reads* (what you see) but not writes (what you can create through it) unless explicitly told otherwise, `WITH CHECK OPTION` closes this gap — ensuring the view's own filtering logic genuinely constrains both directions consistently, rather than allowing a confusing "write succeeded, but the row immediately vanished from view" scenario.
+
+**Common Pitfall:** allowing writes through a filtered view without `WITH CHECK OPTION`, then being confused when a row modified through the view "disappears" from subsequent queries against that same view — this is the expected, if surprising, default behavior; `WITH CHECK OPTION` explicitly prevents it by rejecting any write that would produce a row failing the view's own filter.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is `sp_helptext`, and how does it let you retrieve the actual source code of an existing stored procedure, view, or function directly from the database, useful when the original source file has been lost?**
+
+`sp_helptext` returns the exact, original T-SQL definition of a stored procedure, view, function, or trigger as it's currently stored in the database — genuinely useful when a database object's source file was lost, never version-controlled in the first place, or has drifted from what's actually deployed, letting you retrieve the authoritative, currently-running definition directly from the database engine itself.
+
+```sql
+EXEC sp_helptext 'dbo.CalculateOrderTotal';
+-- returns the EXACT, CURRENTLY-DEPLOYED T-SQL source of the stored PROCEDURE/function/view --
+-- USEFUL when the ORIGINAL .sql SOURCE file was NEVER version-controlled, or has been LOST
+```
+
+```text
+A LEGACY database, MAINTAINED for YEARS, with SOME stored procedures NEVER properly
+  version-CONTROLLED (edited DIRECTLY via SQL Server Management Studio, over TIME) --
+  sp_helptext lets a DEVELOPER retrieve the EXACT, CURRENT definition DIRECTLY from the
+  DATABASE ITSELF, RECOVERING the "SOURCE OF TRUTH" that WOULD otherwise be MISSING
+  or OUT OF DATE in whatever (IF ANY) SEPARATE source-CONTROL repository EXISTS
+```
+
+Because the database engine always has the exact, currently-executing definition of every object stored internally, `sp_helptext` provides a reliable fallback for recovering source code that should ideally have been version-controlled all along — a useful diagnostic and recovery tool for legacy systems where that discipline wasn't always followed consistently.
+
+**Common Pitfall:** relying on a separately-maintained source-control repository as the assumed single source of truth for stored procedure definitions, without periodically verifying it actually matches what's deployed — `sp_helptext` reveals the actual, currently-running definition, which can drift from source control if someone modified a procedure directly in production without updating (or ever committing to) the corresponding source file.
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is SQL Server's Automatic Tuning (`AUTOMATIC_TUNING`) feature, and how does it let SQL Server itself automatically detect and revert a regressed execution plan, without a DBA manually intervening at all?**
+
+Building on Query Store's historical plan tracking (covered earlier), Automatic Tuning continuously monitors query performance and automatically detects when a query's performance has regressed due to a plan change — when it identifies this pattern with high confidence, it can automatically force the query back to its previous, better-performing plan, entirely without a human needing to notice the regression and manually intervene via `sp_query_store_force_plan`.
+
+```sql
+ALTER DATABASE MyApp SET AUTOMATIC_TUNING (FORCE_LAST_GOOD_PLAN = ON);
+```
+
+```text
+Query Store DETECTS: "Query X's average duration JUMPED from 10ms to 500ms, CORRELATING
+  EXACTLY with a NEW execution PLAN being ADOPTED at time T" -- SQL Server's AUTOMATIC
+  TUNING engine, with HIGH confidence this is a GENUINE regression (not just NORMAL data
+  growth), AUTOMATICALLY forces the QUERY back to its PREVIOUS, KNOWN-GOOD plan --
+  RESTORING performance WITHOUT a DBA ever needing to MANUALLY notice or INTERVENE
+```
+
+Because this feature builds directly on Query Store's already-covered historical tracking (recognizing a specific plan-change-correlated regression pattern with statistical confidence), it automates precisely the manual diagnostic-and-intervention workflow a DBA would otherwise need to perform by hand — SQL Server continuously self-monitors for this specific, well-understood failure pattern and can correct it proactively, often before a human would even notice the regression occurred.
+
+**Common Pitfall:** assuming Automatic Tuning eliminates the need for a DBA to ever review query performance manually — it specifically targets the well-defined "plan regression" pattern, not every possible performance problem (a genuinely new, more complex query with no prior good plan to revert to gets no benefit from this feature); it's a valuable safety net for one specific, common failure mode, not a comprehensive substitute for ongoing performance monitoring.
+
+---
+
 ---

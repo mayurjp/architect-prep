@@ -1593,4 +1593,82 @@ Because matching hashes at any level of the tree instantly confirm that entire s
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What are MongoDB's `$exists`/`$type` query operators, and how do they let you query based on whether a field is even present or what type it holds, given a schemaless collection (covered earlier) where different documents can have different shapes?**
+
+Because a schemaless collection (covered earlier) can hold documents with genuinely different sets of fields, ordinary equality queries aren't enough to handle the case where a field might simply be *absent* from some documents entirely — `$exists` lets you query specifically for documents that do (or don't) have a given field at all, and `$type` lets you query based on what data type a field currently holds, useful when a schema has evolved and different documents' same-named field might hold different types.
+
+```javascript
+db.products.find({ discountCode: { $exists: true } }); // ONLY documents that ACTUALLY
+    // HAVE a "discountCode" field AT ALL -- documents PREDATING this field's INTRODUCTION
+    // (covered earlier as SCHEMA evolution) simply DON'T have it, and are EXCLUDED here
+
+db.products.find({ price: { $type: "string" } }); // finds documents where "price" was
+    // ACCIDENTALLY stored as a STRING rather than a NUMBER -- USEFUL for finding and
+    // FIXING data-quality issues from a SCHEMA that evolved OR was inconsistently WRITTEN to
+```
+
+```text
+$exists: true/false -- filters based PURELY on WHETHER a field is PRESENT in the
+  document AT ALL, REGARDLESS of its VALUE
+
+$type: "string"/"number"/etc. -- filters based on the ACTUAL runtime TYPE a field
+  CURRENTLY holds -- USEFUL for a SCHEMALESS collection where DIFFERENT documents
+  (WRITTEN at DIFFERENT times, by DIFFERENT code versions) might hold DIFFERENT types
+  for the SAME field NAME
+```
+
+Because a schemaless collection provides no compile-time or database-enforced guarantee that every document shares the same fields or types, `$exists`/`$type` give you the query-level tools to explicitly account for this variability — either filtering it out, or specifically finding and auditing documents that don't match the shape your application code currently expects.
+
+**Common Pitfall:** writing a query that implicitly assumes every document in a schemaless collection has a specific field, without accounting for older documents (written before that field was introduced) simply lacking it entirely — an ordinary equality query against a missing field typically returns no match (rather than an error), which can silently and incorrectly exclude legitimate older documents from query results; `$exists` makes this handling explicit rather than accidental.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is a Compound Partition Key — combining multiple attributes into one partition key, like `tenantId#customerId` — and how does it let a multi-tenant application avoid a single tenant's data becoming a hot partition (covered earlier) by further subdividing within that tenant?**
+
+Using just `tenantId` alone as a partition key means every single item for a large, high-traffic tenant lands on the exact same physical partition — recreating the hot-partition problem (covered earlier) at the tenant level; combining `tenantId` with another, finer-grained attribute (`customerId`, a date range) into a compound key spreads that same tenant's data across multiple distinct partitions, avoiding the concentration entirely.
+
+```text
+Partition key = "tenantId" ALONE: Tenant A (a LARGE, HIGH-traffic customer) has ALL of
+  ITS data on ONE SINGLE physical partition -- EVERY request for Tenant A's data hits
+  THAT SAME partition -- a HOT partition, EXACTLY the problem covered earlier
+
+Partition key = "tenantId#customerId" (COMPOUND): Tenant A's data is now SPREAD across
+  MANY DIFFERENT partitions, ONE PER distinct customerId WITHIN that tenant -- NO
+  SINGLE partition holds ALL of Tenant A's data ANYMORE -- the HOT-partition risk is
+  STRUCTURALLY avoided, EVEN for a SINGLE, VERY large TENANT
+```
+
+Because the compound key introduces genuine, finer-grained variation into the partitioning decision (rather than relying solely on the coarser `tenantId`), it directly addresses the specific case where one large tenant's traffic would otherwise concentrate entirely on a single partition — a targeted fix for exactly the multi-tenant hot-partition scenario a naive, tenant-only partition key strategy is vulnerable to.
+
+**Common Pitfall:** using a single, coarse-grained attribute (like `tenantId` alone) as a partition key for a multi-tenant system with wildly varying tenant sizes — a small number of unusually large, high-traffic tenants can each independently create their own hot partition; a compound key incorporating a finer-grained, higher-cardinality attribute alongside the tenant identifier spreads even a single large tenant's own data across multiple partitions.
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is a DynamoDB Global Secondary Index (GSI), and how does it let you query a table by an entirely different partition/sort key combination than the table's own primary key, without a full table scan?**
+
+DynamoDB's base table can only be efficiently queried by its own defined primary key (partition key, optionally plus a sort key) — a GSI maintains a separate, automatically-kept-in-sync index projecting the table's items under a *completely different* partition/sort key combination, letting you efficiently query by that alternate access pattern without resorting to an expensive, full-table `Scan` operation.
+
+```text
+Base table: Orders, PRIMARY key = (CustomerId, OrderId) -- EFFICIENT for "get ALL orders
+  for THIS customer" -- but QUERYING "get all ORDERS with a SPECIFIC status" would REQUIRE
+  a FULL table SCAN, EXAMINING every SINGLE item, SINCE "Status" isn't PART of the primary key AT ALL
+
+GSI: partition key = Status, sort key = OrderDate -- MAINTAINS a SEPARATE, AUTOMATICALLY
+  SYNCHRONIZED copy of the SAME items, INDEXED by "Status" INSTEAD -- QUERYING "give me
+  all ORDERS with Status = 'Pending', SORTED by OrderDate" is NOW an EFFICIENT, INDEXED
+  query AGAINST the GSI, NOT a FULL table SCAN
+```
+
+Because a GSI is automatically, asynchronously kept in sync with the base table (a new write to the base table is reflected in every GSI shortly afterward, an eventually-consistent process unless configured otherwise), it lets an application support multiple, genuinely different query access patterns against the same underlying data — directly addressing the common NoSQL modeling challenge of a single table's primary key only efficiently supporting one specific access pattern, without needing a full scan for every other one.
+
+**Common Pitfall:** designing a DynamoDB table around only its most common access pattern, then resorting to expensive `Scan` operations for every other query need that doesn't match the table's own primary key — GSIs exist precisely to support these additional access patterns efficiently; a table design should account for every genuinely important query pattern upfront, provisioning a GSI for each one rather than falling back to full scans.
+
+---
+
 ---
