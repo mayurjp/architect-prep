@@ -1814,3 +1814,84 @@ Because the "approved" reference file lives in version control alongside the cod
 **Common Pitfall:** treating every Approval Test failure as automatically "just re-approve it" without actually reviewing the diff to confirm the change is legitimate — this defeats the entire purpose of the pattern, turning what should be a deliberate, reviewed gate against unintended regressions into a rubber-stamp that would catch nothing; the review step (actually reading the diff before approving) is what makes Approval Testing valuable, not merely having an approved file that exists.
 
 ---
+
+## Beginner — Question 19
+
+**Q19: How does a Golden Master test suite's initial bootstrapping step — capturing the first "approved" output from existing, presumably-correct production behavior — differ from a test written before any implementation exists, as in TDD (covered earlier)?**
+
+TDD (covered earlier) writes a test *before* any implementation exists, defining the expected behavior up front and letting the implementation follow — a Golden Master approach instead starts from an already-existing, already-running system whose *current* behavior is simply captured as the baseline, with no independent judgment about whether that behavior is actually "correct" — it's simply "whatever this system currently does," used specifically as a safety net for refactoring, not a specification of intended behavior.
+
+```text
+TDD: WRITE the test FIRST, describing WHAT the code SHOULD do -- the IMPLEMENTATION doesn't
+  YET exist -- the TEST defines correctness BEFORE any CODE is written to satisfy it
+
+Golden Master: an EXISTING, ALREADY-RUNNING system's CURRENT output is CAPTURED and
+  APPROVED, AS-IS -- NO judgment is made about whether THAT output is actually "correct" --
+  it's simply THE BASELINE going forward, used to DETECT any FUTURE, UNINTENDED CHANGE
+  during a refactor of the EXISTING system
+```
+
+Because a Golden Master is captured from behavior that already exists (often for a legacy system with no existing tests at all, about to undergo a risky refactor), it makes no claim about correctness — this is precisely the same distinction covered earlier under Characterization Testing, and a Golden Master test suite is essentially Characterization Testing applied at a larger, whole-output scale (a full report, a complex generated document) rather than a single method's return value.
+
+**Common Pitfall:** treating a captured Golden Master baseline as validated, correct behavior simply because it was captured from a "real," already-running system — a legacy system's current behavior might include long-standing, undiscovered bugs; the Golden Master's purpose is purely to detect *unintended change* during a refactor, not to certify that the captured baseline behavior was ever actually correct in the first place.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: Why does Test Data Anonymization matter for using production-like data in a test environment, even when that data is used only internally, by a development/test team?**
+
+Even data used purely internally, by a trusted development or QA team, still represents real, sensitive information about real people (customer names, addresses, transaction histories) — anonymizing or scrubbing genuinely sensitive fields before using production-derived data in a test environment reduces the actual harm if that test environment is ever compromised, accidentally exposed, or simply accessed by more people than the original production data's access controls intended.
+
+```text
+Test environment ACCESS is often LESS RESTRICTIVE than PRODUCTION's OWN (MORE developers,
+  MORE QA staff, POSSIBLY WEAKER network/access CONTROLS, since it's "JUST a test
+  environment") -- USING RAW, UNANONYMIZED production DATA there means a WIDER set of
+  PEOPLE now has ACCESS to GENUINELY sensitive customer information, WITHOUT the SAME
+  ACCESS restrictions the ORIGINAL production data was PROTECTED by
+```
+
+```text
+ANONYMIZED test data: real NAMES replaced with FAKE ones, REAL addresses REPLACED with
+  PLAUSIBLE but FICTIONAL ones, PAYMENT details REPLACED with TEST-only VALUES -- the DATA
+  still has REALISTIC SHAPE/VOLUME/DISTRIBUTION characteristics for GENUINELY useful
+  testing, WITHOUT exposing ANY REAL person's ACTUAL sensitive information AT ALL
+```
+
+Because a test environment's access controls and monitoring are frequently less rigorous than production's own (an intentional trade-off, since a test environment isn't meant to be as tightly locked down), copying genuinely sensitive production data into it without anonymization effectively widens the exposure of that sensitive data beyond what its original collection and storage were ever intended to permit — a real privacy/compliance risk, not merely a theoretical one.
+
+**Common Pitfall:** copying a full production database snapshot directly into a test/staging environment "for realistic testing" without any anonymization step — this exposes genuinely sensitive customer data to a broader set of people and a less rigorously controlled environment than production's own access model was ever designed for, a real compliance and privacy risk many data-protection regulations (and simple good practice) specifically require guarding against.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is Pact Broker's "can-i-deploy" check, and how does querying it before a deployment let a team automatically verify compatibility with every currently-deployed consumer version as part of the pipeline?**
+
+Rather than manually tracking which consumer versions are currently deployed and whether a new provider version is actually compatible with all of them, a CI/CD pipeline can query the Pact Broker's `can-i-deploy` command before deploying — it answers a concrete, automatable question: "given every consumer version currently running in production, has this specific provider version's contract verification (covered earlier) actually passed against all of them?"
+
+```bash
+pact-broker can-i-deploy \
+    --pacticipant OrderService \
+    --version 2.3.1 \
+    --to-environment production
+# QUERIES the Pact Broker: "has OrderService version 2.3.1 been VERIFIED compatible with
+# EVERY consumer VERSION currently DEPLOYED to production?" -- returns a CLEAR yes/no,
+# gating the DEPLOYMENT PIPELINE automatically, based on ACTUAL, RECORDED verification results
+```
+
+```text
+WITHOUT can-i-deploy: a TEAM might DEPLOY a NEW provider version that's ACTUALLY
+  incompatible with ONE specific, STILL-DEPLOYED consumer version, DISCOVERING the
+  BREAKAGE only AFTER it's ALREADY live in PRODUCTION
+
+WITH can-i-deploy: the PIPELINE automatically CHECKS compatibility AGAINST every
+  CURRENTLY-DEPLOYED consumer version, BEFORE the deployment EVEN PROCEEDS -- an
+  INCOMPATIBLE change is CAUGHT and BLOCKED, AUTOMATICALLY, as a PIPELINE GATE
+```
+
+Because the Pact Broker maintains a live record of exactly which contract verifications have passed for which specific provider/consumer version pairs, the `can-i-deploy` check transforms Consumer-Driven Contract Testing (covered earlier) from a passive, informational practice into an active, automated deployment gate — directly preventing a genuinely breaking change from reaching production, rather than merely documenting after the fact that it would have broken something.
+
+**Common Pitfall:** running contract verification tests as part of CI but never actually gating deployments on their results via a mechanism like `can-i-deploy` — this means a verification failure is *visible* somewhere in CI logs, but doesn't actually *prevent* an incompatible provider version from being deployed anyway; the real safety benefit of Consumer-Driven Contract Testing comes from actively gating deployments on verification results, not merely running the checks informationally.
+
+---

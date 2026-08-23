@@ -1586,3 +1586,100 @@ Because the padding bytes serve no functional purpose beyond forcing physical se
 **Common Pitfall:** applying cache-line padding indiscriminately across every field in a data-heavy struct "just in case" — padding meaningfully increases memory footprint and can hurt cache locality for genuinely *related* fields that benefit from being on the same cache line (loaded together in one cache fetch); padding should be applied surgically, specifically to fields identified (via profiling) as suffering genuine False Sharing contention, not as a blanket default.
 
 ---
+
+## Beginner — Question 19
+
+**Q19: What is `Stopwatch.GetTimestamp()`/`Stopwatch.Frequency`, and how does this low-level API avoid a small amount of object-allocation/method-call overhead compared to the ordinary `Stopwatch` class's `Elapsed` property, for a genuinely hot measurement path?**
+
+The ordinary `Stopwatch` class requires instantiating an object (`new Stopwatch()`), calling `Start()`/`Stop()`, and reading `.Elapsed` (a `TimeSpan`, itself a value type but with some conversion overhead) — `Stopwatch.GetTimestamp()` is a static method returning a raw `long` tick count directly, with `Stopwatch.Frequency` telling you how many ticks correspond to one second, letting you compute elapsed time with no object allocation and minimal method-call overhead at all.
+
+```csharp
+// Ordinary Stopwatch -- an OBJECT allocation, Start()/Stop() calls, a TimeSpan conversion
+var sw = Stopwatch.StartNew();
+DoWork();
+var elapsed = sw.Elapsed;
+
+// Low-level static API -- NO object allocation, JUST raw timestamp arithmetic
+long start = Stopwatch.GetTimestamp();
+DoWork();
+long end = Stopwatch.GetTimestamp();
+double elapsedSeconds = (end - start) / (double)Stopwatch.Frequency;
+```
+
+```text
+Ordinary Stopwatch: allocates an OBJECT, has METHOD-call overhead for Start()/Stop(), and
+  CONVERTS to a TimeSpan -- for the OVERWHELMING majority of measurement needs, this
+  overhead is COMPLETELY negligible and IRRELEVANT
+
+Stopwatch.GetTimestamp()/Frequency: PURE static method calls, RAW long arithmetic -- ZERO
+  object ALLOCATION, MINIMAL overhead -- matters ONLY in a GENUINELY hot path measuring
+  ITSELF very FREQUENTLY (measuring OVERHEAD of the MEASUREMENT itself becoming SIGNIFICANT)
+```
+
+Because the ordinary `Stopwatch` class's overhead is genuinely negligible for the vast majority of measurement scenarios, the low-level static API is a niche optimization reserved specifically for cases where measurement itself happens so frequently (inside a very hot, tightly-looped code path) that even the ordinary `Stopwatch` class's small overhead becomes a measurable fraction of what's actually being measured.
+
+**Common Pitfall:** reaching for the low-level `GetTimestamp()`/`Frequency` API for ordinary application-level timing needs (measuring how long an HTTP request took, an infrequent background job's duration) where the ordinary `Stopwatch` class's negligible overhead is completely irrelevant — this trades away `Stopwatch`'s clearer, more convenient API for a performance benefit that only actually matters in genuinely hot, frequently-repeated measurement scenarios.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: How does pre-sizing a `Dictionary<TKey, TValue>` via its constructor's capacity parameter avoid repeated, incremental resizing when the approximate final size is already known upfront?**
+
+A `Dictionary<TKey, TValue>` grows its internal backing array automatically as items are added, but each resize operation involves allocating a new, larger backing array and rehashing every existing entry into it — if the approximate final number of items is already known in advance, passing that count to the constructor lets the dictionary allocate appropriately-sized storage from the start, avoiding the repeated allocate-and-rehash cycles that growing incrementally would otherwise require.
+
+```csharp
+// WITHOUT pre-sizing -- the dictionary GROWS INCREMENTALLY, RESIZING (and REHASHING
+// every existing entry) MULTIPLE times as 10,000 items are added ONE BY ONE
+var dict = new Dictionary<string, int>();
+for (int i = 0; i < 10000; i++) dict[$"key{i}"] = i;
+
+// WITH pre-sizing -- the dictionary ALLOCATES appropriately-SIZED storage UPFRONT --
+// ZERO resize/rehash operations needed DURING the ENTIRE population loop
+var presized = new Dictionary<string, int>(capacity: 10000);
+for (int i = 0; i < 10000; i++) presized[$"key{i}"] = i;
+```
+
+```text
+WITHOUT pre-sizing: the dictionary's BACKING array GROWS through SEVERAL DOUBLING steps
+  (e.g., 4 -> 8 -> 16 -> ... -> ~16,384) as 10,000 items are ADDED -- EACH resize
+  REHASHES every EXISTING entry INTO the NEW, LARGER array -- REPEATED, WASTED work
+
+WITH pre-sizing: ONE single, appropriately-sized ALLOCATION upfront -- NO resize/rehash
+  operations occur AT ALL during the ENTIRE population loop
+```
+
+Because each resize operation's cost scales with however many items are already in the dictionary at that point (every existing entry must be rehashed into the new array), populating a dictionary with a known, sizable number of entries without pre-sizing pays this rehashing cost repeatedly and unnecessarily — pre-sizing when the approximate final count is known upfront is a simple, low-effort optimization for exactly this common pattern.
+
+**Common Pitfall:** populating a large dictionary in a tight loop without ever pre-sizing it, even when the approximate final item count is already known at the point of construction (reading a fixed number of rows from a database, processing a known-size batch) — this pays repeated, avoidable resize/rehash costs that a simple constructor capacity argument would have eliminated entirely.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is `RuntimeHelpers.EnsureSufficientExecutionStack`, and how does explicitly checking for available stack space let recursive code fail gracefully rather than crashing the entire process via an unrecoverable `StackOverflowException`?**
+
+An ordinary `StackOverflowException` in .NET is specifically designed to be unrecoverable — it always terminates the entire process immediately, since the runtime can't safely guarantee enough stack space remains to even run exception-handling code correctly at that point; `RuntimeHelpers.EnsureSufficientExecutionStack()` lets deeply-recursive code proactively check whether *enough* stack space remains *before* actually risking an overflow, throwing an ordinary, catchable `InsufficientExecutionStackException` instead if space is running low.
+
+```csharp
+void ProcessDeepStructure(Node node, int depth)
+{
+    RuntimeHelpers.EnsureSufficientExecutionStack(); // THROWS a CATCHABLE exception if stack
+        // space is RUNNING LOW -- BEFORE an ACTUAL, UNRECOVERABLE StackOverflowException
+        // would have OCCURRED further DOWN the recursion
+    foreach (var child in node.Children) ProcessDeepStructure(child, depth + 1);
+}
+
+try { ProcessDeepStructure(rootNode, 0); }
+catch (InsufficientExecutionStackException)
+{
+    // GRACEFUL handling -- the PROCESS itself SURVIVES -- a StackOverflowException,
+    // by CONTRAST, would have KILLED the ENTIRE process, WITH NO catch block EVER running
+}
+```
+
+Because an actual `StackOverflowException` cannot be caught at all under normal circumstances (the CLR terminates the process immediately, precisely because it can't trust remaining stack space to even run a `catch` block safely), proactively checking remaining stack space *before* it's actually exhausted is the only way to let genuinely deep, potentially unbounded recursion (processing an arbitrarily nested tree structure from untrusted input, for instance) fail gracefully instead of crashing the entire process outright.
+
+**Common Pitfall:** processing deeply or unpredictably nested recursive data (a tree structure whose depth depends on untrusted, external input) without any stack-depth safeguard at all — a maliciously or accidentally deeply-nested input can trigger an actual `StackOverflowException`, immediately terminating the entire process with no opportunity for graceful error handling; `EnsureSufficientExecutionStack()` (or, more robustly, converting recursion to an explicit, heap-allocated stack/iterative approach) avoids this unrecoverable failure mode.
+
+---

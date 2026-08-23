@@ -1570,4 +1570,91 @@ Because compressing individual rows into columnar format one at a time would be 
 
 ---
 
+## Beginner — Question 19
+
+**Q19: Why does omitting a schema prefix (writing just `Products` instead of `dbo.Products`) risk ambiguity or a subtle performance cost from the optimizer needing to resolve which schema was meant?**
+
+A table name without an explicit schema prefix is resolved using each user's own default schema setting — this works fine when everyone shares the same default (`dbo`), but if two different objects with the same name exist in different schemas, or if a user's default schema differs from what the query author assumed, the query can silently resolve to the *wrong* object entirely, and the resolution step itself adds a small, avoidable lookup cost the optimizer must perform on every single query lacking an explicit schema.
+
+```sql
+SELECT * FROM Products;       -- resolves using the CURRENT user's DEFAULT schema -- AMBIGUOUS,
+                                 -- and pays a SMALL lookup COST to RESOLVE which "Products" is MEANT
+
+SELECT * FROM dbo.Products;   -- EXPLICIT -- NO ambiguity, NO resolution lookup NEEDED --
+                                 -- ALWAYS refers to the EXACT SAME table, REGARDLESS of who RUNS it
+```
+
+```text
+User A's default schema: dbo    -- "SELECT * FROM Products" resolves to "dbo.Products"
+User B's default schema: sales  -- the SAME QUERY resolves to "sales.Products" INSTEAD --
+                                    a COMPLETELY DIFFERENT table, if ONE happens to EXIST there TOO
+```
+
+Because schema-qualified names remove any dependency on a session's own default-schema setting, they're both more predictable (the exact same query always resolves to the exact same object, regardless of who runs it) and marginally more efficient (no runtime schema-resolution step needed) — a small, consistent best practice that avoids an entire class of "why did this query behave differently for a different user" confusion.
+
+**Common Pitfall:** writing queries/stored procedures without schema-qualifying table names, relying on every user/service account happening to share the same default schema — this works until a user with a different default schema (or a new schema introduced later, containing a same-named object) causes the exact same query text to silently resolve to a different, unintended table.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is SQL Server's `TRY_PARSE` function, and how does it additionally support culture-aware parsing, beyond what `TRY_CONVERT`/`TRY_CAST` (covered earlier) provide?**
+
+`TRY_PARSE` converts a string to a target type using culture-specific formatting rules (which date format, which decimal separator convention) — letting you correctly parse a string formatted according to a *specific* locale's conventions, something `TRY_CONVERT`/`TRY_CAST` (covered earlier) don't directly support, since they use SQL Server's own fixed, generally locale-agnostic conversion rules.
+
+```sql
+SELECT TRY_PARSE('25/12/2026' AS DATE USING 'en-GB') AS BritishDate; -- day/month/YEAR format
+SELECT TRY_PARSE('12/25/2026' AS DATE USING 'en-US') AS AmericanDate; -- month/day/YEAR format
+-- BOTH parse a DIFFERENTLY-ORDERED date string CORRECTLY, based on the SPECIFIED culture
+```
+
+```text
+TRY_CONVERT/TRY_CAST: use SQL Server's OWN internal conversion rules -- NO explicit CULTURE
+  parameter -- a STRING formatted per a SPECIFIC locale's convention MIGHT be
+  MISINTERPRETED (or FAIL to convert) if it doesn't match the SERVER's OWN default
+  interpretation of the STRING's format
+
+TRY_PARSE: accepts an EXPLICIT "USING 'culture-name'" clause -- CORRECTLY interprets a
+  string FORMATTED per THAT SPECIFIC locale's OWN conventions, REGARDLESS of the SERVER's
+  own DEFAULT settings
+```
+
+Because `TRY_PARSE` explicitly accounts for locale-specific formatting differences (date ordering, decimal separators, thousands separators), it's the more appropriate choice specifically when converting a string known to originate from a particular culture's formatting convention — `TRY_CONVERT`/`TRY_CAST` remain simpler and sufficient for values already in an unambiguous, standard format.
+
+**Common Pitfall:** using `TRY_CONVERT`/`TRY_CAST` to parse a date/number string sourced from a system using a different locale's formatting convention than the SQL Server instance's own defaults — this can silently misinterpret the value (reading a day-first date as month-first, for instance) or fail the conversion outright; `TRY_PARSE`'s explicit culture parameter is the correct tool when the source data's formatting convention is known and needs to be respected precisely.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is a Nested Loop Join execution plan operator, and how does the optimizer choose it specifically when one side of the join is small and an index exists on the join column of the other, larger side?**
+
+A Nested Loop Join iterates through every row of the *smaller* input (the "outer" side), and for each one, performs an indexed lookup into the *larger* input (the "inner" side) to find matching rows — this is efficient specifically because the small outer side keeps the number of indexed lookups manageable, while the index on the larger inner side makes each individual lookup itself cheap and fast.
+
+```sql
+SELECT o.Id, c.Name
+FROM Orders o
+JOIN Customers c ON o.CustomerId = c.Id
+WHERE o.Status = 'Pending'; -- suppose this FILTERS Orders down to just a FEW HUNDRED rows,
+                              -- while Customers has MILLIONS -- and Customers.Id has an INDEX
+```
+
+```text
+Nested Loop Join: for EACH of the FEW HUNDRED filtered Orders rows (the SMALL, OUTER side),
+  performs ONE indexed LOOKUP into Customers (the LARGE, INNER side) via its Id INDEX --
+  a FEW HUNDRED cheap, INDEXED lookups TOTAL -- EFFICIENT specifically BECAUSE the OUTER
+  side is SMALL and the INNER side's LOOKUP is INDEXED (and thus CHEAP)
+
+If Orders were NOT already filtered down to a SMALL set (say, MILLIONS of matching rows
+  INSTEAD): a Nested Loop Join would require MILLIONS of INDIVIDUAL indexed lookups --
+  at THAT point, a Hash Join or Merge Join (ALTERNATIVE join STRATEGIES) typically become
+  MORE EFFICIENT instead
+```
+
+Because the total cost of a Nested Loop Join scales with the *outer* side's row count multiplied by the cost of each individual inner-side lookup, it's specifically efficient when the outer side is small — the query optimizer's cost-based estimation (covered earlier under statistics/execution plans) is precisely what determines whether this join strategy, versus a Hash or Merge Join, will actually perform better for a given query's specific row-count estimates.
+
+**Common Pitfall:** manually forcing a Nested Loop Join hint on a query where the "outer" side turns out to actually be large (due to inaccurate assumptions, or stale statistics, covered earlier, misestimating the actual row count) — this can produce a Nested Loop Join performing far worse than a Hash Join would have, since the cost scales directly with the outer side's row count; letting the optimizer choose based on accurate, up-to-date statistics is usually preferable to manually forcing a specific join strategy.
+
+---
+
 ---

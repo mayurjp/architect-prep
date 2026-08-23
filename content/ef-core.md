@@ -1743,4 +1743,96 @@ Because the default behavior ties a stored database value directly to a C# class
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is EF Core's Cascade Delete behavior, configured via `OnDelete(DeleteBehavior.Cascade)`, and how does it let deleting a parent entity automatically delete its dependent children without the application explicitly deleting each one itself?**
+
+`DeleteBehavior.Cascade` tells EF Core (and, once a migration is applied, the database itself via a `ON DELETE CASCADE` foreign key constraint) that deleting a parent row should automatically delete every dependent child row referencing it — the application removes just the parent, and the cascade takes care of removing its children without any explicit, separate delete calls for each one.
+
+```csharp
+modelBuilder.Entity<Order>()
+    .HasMany(o => o.Lines)
+    .WithOne(l => l.Order)
+    .OnDelete(DeleteBehavior.Cascade); // deleting an Order AUTOMATICALLY deletes its OrderLines TOO
+
+context.Orders.Remove(order); // removes JUST the Order -- its Lines are automatically REMOVED as well
+await context.SaveChangesAsync(); // generates a DELETE for the Order AND (via the DB's cascade
+                                     // constraint, or EF Core's OWN in-memory cascade for TRACKED children) its Lines
+```
+
+```text
+WITHOUT Cascade: deleting an Order while its OrderLines STILL reference it VIOLATES the
+  foreign key CONSTRAINT -- the DELETE fails, UNLESS the application FIRST explicitly
+  deletes EVERY dependent OrderLine itself, in the CORRECT order
+
+WITH Cascade: the DELETE of the PARENT automatically PROPAGATES to its DEPENDENT children
+  -- ONE simple "Remove(order)" call CORRECTLY removes the ENTIRE dependent GRAPH
+```
+
+Because this cascading behavior is configured once, declaratively, at the relationship level, an application never needs to manually orchestrate the correct order of deletions across a dependent object graph — though `DeleteBehavior` also supports alternatives (`Restrict`, `SetNull`) for relationships where cascading deletion isn't actually the desired behavior.
+
+**Common Pitfall:** enabling Cascade Delete for a relationship where accidentally deleting a parent should NOT silently delete a large, potentially important, dependent object graph — cascading delete can be dangerous for relationships where an accidental parent deletion should instead be blocked (`DeleteBehavior.Restrict`) or handled explicitly, rather than silently propagating destruction through an entire dependent hierarchy.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is `context.Entry(entity).State`, and how does directly inspecting or setting an entity's current tracked state let you debug or manually correct unexpected change-tracking behavior?**
+
+`context.Entry(entity)` returns an `EntityEntry` giving direct access to an entity's current tracking state (`Added`, `Modified`, `Unchanged`, `Deleted`, `Detached`) — useful both for debugging *why* EF Core is (or isn't) generating an expected SQL statement, and for manually correcting the tracked state when the default binding/tracking behavior doesn't match what you actually need.
+
+```csharp
+var entry = context.Entry(someEntity);
+Console.WriteLine(entry.State); // DIRECTLY inspect the CURRENT tracked state -- USEFUL for
+                                  // DEBUGGING "why didn't SaveChanges() generate an UPDATE for this?"
+
+entry.State = EntityState.Modified; // MANUALLY force it to Modified, if the DEFAULT tracking
+                                       // behavior didn't already mark it that way itself
+```
+
+```text
+DEBUGGING scenario: "I MODIFIED a property, but SaveChanges() generated NO update statement
+  AT ALL" -- checking entry.State REVEALS it's STILL "Unchanged" -- perhaps the entity was
+  LOADED via AsNoTracking() (covered EARLIER), which NEVER tracks changes AT ALL -- the
+  ROOT CAUSE becomes IMMEDIATELY visible by INSPECTING the state DIRECTLY
+```
+
+Because this API exposes exactly what EF Core's Change Tracker (covered earlier) currently believes about an entity, it's a genuinely useful diagnostic tool when change-tracking behavior seems to diverge from expectations — and, in narrower cases, a direct override mechanism for correcting that state when the default binding logic doesn't produce the tracking state you actually need.
+
+**Common Pitfall:** manually setting `entry.State` as a routine workaround for unexpected tracking behavior without first understanding *why* the state ended up unexpected in the first place (an `AsNoTracking()` query, a detached entity from a different `DbContext` instance) — treating the symptom by force-setting state can mask a deeper misunderstanding of how the entity actually became untracked or incorrectly tracked to begin with.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does `ExecuteUpdateAsync` (covered earlier) bypassing Change Tracking also bypass the optimistic concurrency check a normal `SaveChanges()`-based update would have enforced via a Concurrency Token (covered earlier)?**
+
+A normal, tracked update with a Concurrency Token (`RowVersion`, covered earlier) generates an `UPDATE ... WHERE Id = @id AND RowVersion = @expectedVersion`, correctly detecting a conflicting concurrent modification — `ExecuteUpdateAsync` (covered earlier) translates directly to a bulk SQL `UPDATE` based purely on your own `Where()` clause, with no automatic concurrency-token check included at all, unless you explicitly add one yourself to that same `Where()` clause.
+
+```csharp
+// Normal, TRACKED update -- AUTOMATICALLY includes the RowVersion check
+product.Price = 29.99m;
+await context.SaveChangesAsync(); // generates: UPDATE ... WHERE Id=5 AND RowVersion=@expected
+
+// ExecuteUpdateAsync -- NO automatic concurrency check AT ALL, UNLESS explicitly ADDED
+await context.Products
+    .Where(p => p.Id == 5) // does NOT automatically include "AND RowVersion = @expected"
+    .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.Price, 29.99m));
+// -- a CONCURRENT modification COULD be SILENTLY overwritten, since NO version check happened AT ALL
+```
+
+```text
+Correctly ADDING the concurrency check MANUALLY to an ExecuteUpdateAsync call:
+  await context.Products
+      .Where(p => p.Id == 5 && p.RowVersion == expectedRowVersion) // MANUALLY included
+      .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.Price, 29.99m));
+  -- and then CHECKING the returned ROW COUNT (0 means the version DIDN'T match -- a CONFLICT)
+```
+
+Because `ExecuteUpdateAsync` bypasses the entire Change Tracking pipeline that normally generates the concurrency-token comparison automatically, code relying on optimistic concurrency protection (covered earlier as essential for preventing Lost Updates) must explicitly re-add that same check to its own `Where()` clause and manually inspect the returned affected-row count — the automatic protection a tracked `SaveChanges()` call provides doesn't carry over to bulk operations at all.
+
+**Common Pitfall:** switching a tracked, concurrency-protected update to `ExecuteUpdateAsync` purely for its performance benefit (covered earlier), without realizing this also silently removes the automatic optimistic-concurrency protection that update previously had — for genuinely concurrency-sensitive data, the concurrency-token check must be manually re-added to the `ExecuteUpdateAsync` call's own filter, with the affected-row count checked to detect a conflict, rather than assuming the same protection carries over automatically.
+
+---
+
 ---
