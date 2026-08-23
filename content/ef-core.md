@@ -2099,3 +2099,114 @@ Because these events are plain, ordinary .NET events rather than a formal interc
 **Common Pitfall:** reaching for a full `ISaveChangesInterceptor` implementation for a need that's purely observational (simple logging around save operations) — the plain events provide the same visibility with far less boilerplate for cases that don't actually need to modify anything about the save operation itself.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What does `DbSet<T>.AsAsyncEnumerable()` do, and how does it let you stream query results asynchronously, processing each row as it arrives rather than waiting for the entire result set to materialize first?**
+
+Calling `.ToListAsync()` waits for *every* row to be retrieved and materialized into a `List<T>` before your code can process any of them — `.AsAsyncEnumerable()` instead returns an `IAsyncEnumerable<T>` you can iterate with `await foreach`, processing each entity as soon as its row arrives from the database, without waiting for the entire result set to finish loading first.
+
+```csharp
+// ToListAsync -- waits for the ENTIRE result set before you can process ANY of it
+var allOrders = await context.Orders.ToListAsync();
+foreach (var order in allOrders) { ProcessOrder(order); }
+
+// AsAsyncEnumerable -- processes EACH row as soon as IT arrives, without waiting for the rest
+await foreach (var order in context.Orders.AsAsyncEnumerable())
+{
+    ProcessOrder(order); // starts processing the FIRST row immediately, while LATER rows are still streaming in
+}
+```
+
+```text
+ToListAsync(): ALL rows must ARRIVE and be materialized into a List BEFORE
+  your code can process EVEN the first one -- for a LARGE result set,
+  this means HOLDING every row in memory SIMULTANEOUSLY
+
+AsAsyncEnumerable(): EACH row is handed to your CODE as SOON as it arrives
+  -- for a LARGE result set, you never need to hold MORE than one row (or
+  a small buffer) in MEMORY at once, and processing can BEGIN immediately
+  rather than waiting for the WHOLE set to finish loading
+```
+
+Because streaming avoids materializing an entire large result set into memory at once, `AsAsyncEnumerable()` is particularly valuable for genuinely large query results (exporting millions of rows, processing a large batch) where `ToListAsync()`'s "load everything, then process" model would otherwise consume significant memory holding data that could have started being processed much earlier.
+
+**Common Pitfall:** using `AsAsyncEnumerable()` while the `DbContext` itself is disposed or reused for another operation before the `await foreach` loop finishes — since rows are streamed incrementally rather than fully materialized upfront, the underlying database connection/reader must remain open for the entire duration of the enumeration, meaning the `DbContext` can't be safely used for a different, concurrent operation until that streaming loop completes.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is `OwnsMany` (an Owned Collection), and how does it extend the Owned Type concept (`OwnsOne`, covered earlier) to a collection of owned instances, mapped without requiring a separate, independently-queryable entity?**
+
+`OwnsOne` (covered earlier) maps a single value-object property as columns on the owner's own table (or a dedicated table, depending on configuration) — `OwnsMany` extends the same "no independent identity, always accessed through the owner" concept to a *collection* of such value objects, mapped to their own table (since a collection can't flatten onto the owner's single row) but still without the full entity-type ceremony (its own `DbSet`, independent querying) a genuine entity relationship would require.
+
+```csharp
+public class Order
+{
+    public int Id { get; set; }
+    public List<OrderNote> Notes { get; set; } = new(); // NOT a full entity -- just OWNED data
+}
+public class OrderNote                  // no Id property of its own -- not independently identified
+{
+    public string Text { get; set; } = string.Empty;
+    public DateTime AddedAt { get; set; }
+}
+
+modelBuilder.Entity<Order>().OwnsMany(o => o.Notes, note =>
+{
+    note.WithOwner().HasForeignKey("OrderId"); // EF Core manages this FK internally
+    note.ToTable("OrderNotes");
+});
+```
+
+```text
+A full One-to-Many entity relationship: OrderNote would be its OWN entity,
+  with its OWN DbSet, independently QUERYABLE, requiring explicit foreign
+  key/navigation configuration LIKE any other entity relationship
+
+OwnsMany: OrderNote is NEVER independently queried or referenced -- it's
+  ALWAYS accessed strictly THROUGH its owning Order, mapped to its OWN
+  table PURELY as an implementation detail of HOW Order's Notes collection
+  is PERSISTED, not as a genuinely independent domain concept
+```
+
+Because an owned collection's items have no meaningful identity or lifecycle outside their owner (an `OrderNote` never exists independently of its `Order`), `OwnsMany` correctly models this "always owned, never independent" relationship without the unnecessary ceremony of a full entity type — directly mirroring the same semantic distinction `OwnsOne` provides for a single value object, just extended to a collection.
+
+**Common Pitfall:** reaching for `OwnsMany` for a collection whose items genuinely *do* have independent identity and lifecycle (an `OrderLine` that might reasonably be queried, referenced, or modified independently of its parent `Order`) — `OwnsMany` is appropriate specifically for collections of value-object-like data with no independent existence; a collection of genuine, independently-meaningful entities should instead use an ordinary entity relationship.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What does `Metadata.SetIsTableExcludedFromMigrations(true)` do for an entity, and how does excluding it from Migrations let a table be managed by an entirely separate process while EF Core still queries it normally?**
+
+Normally, every entity EF Core knows about is included when generating Migrations, meaning EF Core expects to fully own that table's schema — excluding a specific entity from Migrations tells EF Core "don't ever generate schema changes for this table," letting a table genuinely be owned and evolved by something else entirely (a legacy system's own separate migration process, a different team's independently-versioned schema, a database view) while EF Core still maps and queries it as an ordinary entity.
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<LegacyAuditLog>()
+        .Metadata.SetIsTableExcludedFromMigrations(true);
+    // EF Core will NEVER generate a migration attempting to create/alter/drop this table,
+    // even though it's still a FULLY mapped, queryable entity in the model
+}
+```
+
+```text
+WITHOUT excluding the table: EF Core's next migration might attempt to
+  CREATE or ALTER a table that ALREADY exists, owned by a COMPLETELY
+  separate system's own migration process -- a genuine CONFLICT between
+  TWO different systems both believing they OWN that table's schema
+
+WITH SetIsTableExcludedFromMigrations(true): EF Core NEVER touches this
+  table's SCHEMA via its own migrations -- it still QUERIES/updates ROWS
+  in it normally, as an ORDINARY mapped entity, but treats the table's
+  actual SCHEMA definition as someone ELSE's responsibility entirely
+```
+
+Because this setting cleanly separates "EF Core can read/write this table's *data*" from "EF Core owns this table's *schema*," it's the correct tool for integrating with a table genuinely managed elsewhere (a legacy system, a separate microservice's own migrations, a reporting view) without EF Core's own migration tooling ever attempting a conflicting schema change against it.
+
+**Common Pitfall:** excluding a table from Migrations without also ensuring some *other* process actually keeps that table's schema in sync with EF Core's expected entity shape — excluding it from Migrations only stops EF Core from *generating* schema changes; it does nothing to prevent a genuine mismatch between EF Core's expected column shape and the table's actual, externally-managed schema, which would still cause runtime query failures if the two drift out of sync.
+
+---

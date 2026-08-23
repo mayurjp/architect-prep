@@ -1925,3 +1925,86 @@ Because a production incident is often investigated well after it occurred (a DB
 **Common Pitfall:** relying exclusively on `sys.dm_os_wait_stats` for post-incident investigation, only to discover the server has been restarted (or the counters otherwise reset) since the incident occurred, losing all relevant historical wait data — Query Store's persisted, per-query wait statistics survive exactly this scenario, since they're stored in the database itself rather than in a volatile, restart-reset server-wide counter.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What do the seed and increment values in `IDENTITY(1,1)` control, and how do they determine the starting value and step size for auto-generated primary keys?**
+
+`IDENTITY(seed, increment)` configures an `IDENTITY` column's (covered earlier) automatic value generation — `seed` is the value the *first* inserted row receives, and `increment` is how much each *subsequent* row's value increases by — letting a table's auto-generated keys start from any chosen number and step by any chosen amount, rather than always starting at 1 and counting by 1.
+
+```sql
+CREATE TABLE Orders (
+    Id INT IDENTITY(1000, 5) PRIMARY KEY, -- first row gets 1000, next gets 1005, then 1010...
+    CustomerName NVARCHAR(100)
+);
+
+INSERT INTO Orders (CustomerName) VALUES ('Alice'); -- Id = 1000
+INSERT INTO Orders (CustomerName) VALUES ('Bob');   -- Id = 1005
+```
+
+```text
+IDENTITY(1, 1) (the common default): first row gets 1, EACH subsequent
+  row's value increases by 1 -- 1, 2, 3, 4...
+
+IDENTITY(1000, 5): first row gets 1000, EACH subsequent row's value
+  increases by 5 -- 1000, 1005, 1010, 1015...
+```
+
+Because a custom seed and increment can be used deliberately (assigning different, non-overlapping ID ranges to different database replicas in a multi-master setup, for instance — each replica seeded/incremented so their generated IDs never collide), understanding these two parameters explains both the ordinary default behavior and the less common, deliberate customizations some multi-node architectures rely on.
+
+**Common Pitfall:** assuming an `IDENTITY` column's values are always perfectly sequential with no gaps — a failed transaction that inserted (and then rolled back) a row still consumed that identity value, which is never reused; gaps in an `IDENTITY` column's sequence are expected, normal behavior, not evidence of a bug or data loss.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is `sys.dm_exec_procedure_stats`, and how does it let a DBA identify the most expensive stored procedures specifically, as distinct from ad-hoc query statistics (`sys.dm_exec_query_stats`, covered earlier)?**
+
+`sys.dm_exec_query_stats` (covered earlier) aggregates statistics per individual cached query plan, regardless of whether that query came from an ad-hoc statement or a stored procedure — `sys.dm_exec_procedure_stats` instead aggregates statistics at the *stored procedure* level specifically, giving a DBA a more directly actionable view when trying to identify which entire *procedures* (rather than individual query plans within them) are consuming the most resources.
+
+```sql
+SELECT OBJECT_NAME(object_id) AS ProcedureName,
+       execution_count, total_worker_time / execution_count AS avg_cpu_time,
+       total_elapsed_time / execution_count AS avg_duration
+FROM sys.dm_exec_procedure_stats
+ORDER BY total_worker_time DESC;
+```
+
+```text
+sys.dm_exec_query_stats: aggregates PER individual cached QUERY PLAN --
+  a STORED PROCEDURE containing FIVE separate SQL statements shows up as
+  FIVE separate rows, each representing ONE statement WITHIN it
+
+sys.dm_exec_procedure_stats: aggregates PER stored PROCEDURE as a WHOLE
+  -- the SAME procedure's total resource consumption ACROSS all its
+  internal statements is rolled UP into ONE single, directly actionable row
+```
+
+Because many production database workloads route the bulk of their traffic through stored procedures rather than raw ad-hoc SQL, having a procedure-level aggregation gives a DBA a more directly useful starting point — "which stored procedure, overall, is consuming the most CPU" — before needing to drill down into `sys.dm_exec_query_stats` for the specific statement within that procedure actually responsible.
+
+**Common Pitfall:** using `sys.dm_exec_procedure_stats` alone to fully diagnose a slow stored procedure — it identifies *which* procedure is expensive overall, but not *which specific statement inside it* is the actual bottleneck; that finer-grained diagnosis still requires drilling into `sys.dm_exec_query_stats` (or Query Store, covered earlier) for the individual statements within the identified procedure.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is SQL Server's "Batch Mode on Rowstore," and how does processing rows in batches — rather than one row at a time — speed up CPU-bound analytical queries even without a Columnstore index (covered earlier) present at all?**
+
+Batch-mode execution, historically exclusive to queries touching a Columnstore index (covered earlier), processes rows in efficient batches of roughly 900 at a time rather than the traditional row-mode execution's one-row-at-a-time processing — modern SQL Server versions extended this same batch-mode execution engine to work over ordinary Rowstore tables too, letting CPU-intensive analytical queries benefit from batch processing's efficiency even on tables with no Columnstore index at all.
+
+```text
+Row-mode execution (traditional): the QUERY engine processes ONE row at a
+  TIME, through EACH operator in the execution PLAN -- significant
+  PER-ROW overhead accumulates across MILLIONS of rows
+
+Batch Mode on Rowstore: the SAME query, over an ORDINARY Rowstore table,
+  processes ROWS in batches of ~900 AT a time -- the PER-ROW overhead is
+  AMORTIZED across the entire BATCH, meaningfully reducing CPU cost for
+  CPU-intensive operations (aggregations, joins) over LARGE row counts
+```
+
+Because this optimization specifically targets the CPU overhead of row-by-row processing rather than anything related to Columnstore's own columnar storage format, it benefits large-scale analytical queries (heavy aggregations, large joins) running against ordinary transactional (Rowstore) tables — a genuinely useful performance improvement for exactly the kind of reporting-style query that previously would have needed a dedicated Columnstore index to see this same class of CPU-efficiency benefit.
+
+**Common Pitfall:** assuming Batch Mode on Rowstore makes a dedicated Columnstore index unnecessary for genuinely large-scale analytical workloads — Batch Mode execution alone doesn't provide Columnstore's own storage-level benefits (compression, column-oriented I/O reduction, covered earlier); for a table whose *primary* purpose is large-scale analytical querying, a genuine Columnstore index still typically provides substantially better overall performance than Rowstore storage with Batch Mode execution alone.
+
+---
