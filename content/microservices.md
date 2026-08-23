@@ -2568,3 +2568,81 @@ Because the new implementation's output never actually drives real behavior duri
 **Common Pitfall:** running a Parallel Run comparison that includes any side-effecting behavior in the new implementation (a database write, an external API call) rather than a genuinely pure computation — Parallel Run's safety guarantee depends entirely on the new implementation's execution having zero observable side effects; a new implementation that writes data or calls external systems during the comparison phase can cause real, unintended consequences despite its *return value* being correctly discarded.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is a Service Catalog, and how does a centralized, browsable registry of every microservice — with its owning team and documentation — help a growing organization avoid the "nobody knows what services exist or who owns them" problem?**
+
+As the number of independently-deployable microservices in an organization grows into the dozens or hundreds, informal, tribal knowledge about "which team owns this service" or "does a service already exist for this capability" breaks down entirely — a Service Catalog addresses this directly: a centralized, browsable directory listing every known service, its owning team, its documentation/API contract, and often its current health/on-call information, giving anyone in the organization a single, authoritative place to answer "what exists, and who do I talk to about it."
+
+```text
+WITHOUT a Service Catalog: a NEW engineer (or even an EXISTING one, on an
+  UNFAMILIAR team) has NO reliable way to discover WHETHER a service
+  already exists for a given CAPABILITY, or WHO actually owns a specific
+  service they need to INTEGRATE with -- relies entirely on TRIBAL
+  knowledge and asking AROUND
+
+WITH a Service Catalog: ONE centralized, SEARCHABLE directory lists EVERY
+  known service, its OWNING team, its DOCUMENTATION/API contract, and
+  often its CURRENT operational status -- a genuine, authoritative SOURCE
+  of truth, rather than relying on WHOEVER happens to remember
+```
+
+Because the entire value proposition of microservices' independent ownership and deployability breaks down operationally once nobody can actually find or understand the growing sprawl of services that exist, a Service Catalog is less a "nice to have" and more a genuine operational necessity once an organization's service count crosses a threshold where tribal knowledge alone can no longer keep up — directly complementing the Chassis pattern (covered earlier) as another piece of standardized organizational infrastructure supporting a microservices architecture at scale.
+
+**Common Pitfall:** treating a Service Catalog as a one-time documentation exercise rather than a living, continuously-maintained system — a catalog that quickly falls out of date (services added without corresponding catalog entries, ownership changes never reflected) rapidly loses the trust and habitual use that make it valuable in the first place, often requiring the catalog's own maintenance to be automated (populated from CI/CD metadata, service manifests) rather than relying on manual updates alone.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is a Saga Log, and how does persisting an Orchestrator-based Saga's step-by-step progress let it correctly recover and resume after the orchestrator process itself crashes mid-saga?**
+
+An Orchestrator-based Saga (covered extensively) coordinates a multi-step business process by explicitly calling each participating service in sequence — if the orchestrator process itself crashes partway through, it needs some durable record of exactly which steps had already completed successfully before it can safely resume (rather than either re-executing already-completed steps, or losing track of the saga entirely). A Saga Log persists this step-by-step progress to durable storage after each step completes, letting a restarted orchestrator instance read that log and resume exactly where the crashed instance left off.
+
+```text
+Saga steps: 1. Reserve inventory (DONE) -> 2. Charge payment (DONE) ->
+  3. Schedule shipment (IN PROGRESS when the orchestrator CRASHED)
+
+WITHOUT a Saga Log: a RESTARTED orchestrator has NO durable record of
+  which steps ALREADY completed -- it might INCORRECTLY re-execute step 1
+  (re-reserving ALREADY-reserved inventory) or LOSE track of the saga
+  entirely, leaving it PERMANENTLY stuck in an incomplete STATE
+
+WITH a Saga Log: the RESTARTED orchestrator reads the PERSISTED log,
+  sees steps 1 and 2 already COMPLETED, and resumes EXACTLY at step 3 --
+  no DUPLICATE re-execution of already-done steps, and NO lost saga
+  progress
+```
+
+Because an orchestrator process crashing mid-saga is a genuinely expected failure mode in any long-running distributed process (directly connecting to the earlier-covered need for "persisted, resumable state" for a Saga spanning days or weeks), a Saga Log is the concrete persistence mechanism making that resumability actually possible — distinct from the Outbox Pattern's message-relay log (covered under Messaging), which solves the different problem of reliably publishing events, not tracking a multi-step orchestration's own progress.
+
+**Common Pitfall:** relying purely on in-memory orchestrator state to track saga progress, assuming the orchestrator process itself will simply never crash — any sufficiently long-running orchestrated process will eventually experience a crash, redeploy, or restart at some point; a Saga Log's durable, persisted record of progress is what makes recovery from that inevitable event actually possible, rather than losing the entire in-flight saga's progress irretrievably.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is the difference between Head-Based and Tail-Based distributed tracing sampling, and how can Tail-Based sampling preferentially keep traces containing errors even though that decision happens after the entire trace has already completed?**
+
+Head-Based sampling decides whether to record a trace at the very *start* of a request — before any of its downstream calls have even happened — typically via a simple random percentage, with no knowledge yet of whether this particular trace will turn out to be interesting (an error, unusually high latency). Tail-Based sampling instead defers that decision until the *entire* trace has completed across every service it touched, letting the sampling decision be informed by the trace's actual, complete outcome — deliberately keeping a much higher percentage of traces that contain an error or unusually high latency, and discarding a larger fraction of routine, uninteresting successful traces.
+
+```text
+Head-Based sampling: decides "record this trace? yes/no" at the VERY
+  START, via a SIMPLE random percentage (say, 1% of ALL requests) -- has
+  NO knowledge yet of whether THIS specific trace will turn out to be an
+  ERROR or a slow OUTLIER -- a rare, IMPORTANT error trace has the SAME
+  small chance of being SAMPLED as any ordinary, boring SUCCESSFUL one
+
+Tail-Based sampling: WAITS until the ENTIRE trace, across every SERVICE
+  it touched, has COMPLETED -- THEN decides whether to KEEP it, based on
+  its ACTUAL outcome -- an ERROR or unusually SLOW trace can be KEPT with
+  MUCH higher probability (or ALWAYS), while ROUTINE successful traces
+  are sampled MUCH more sparingly
+```
+
+Because Tail-Based sampling's decision genuinely depends on information (the trace's final outcome) that simply doesn't exist yet at the moment Head-Based sampling must decide, Tail-Based sampling requires buffering every trace's complete span data somewhere (typically at a collector layer) until the trace finishes — a real infrastructure and latency cost, but one that pays off by dramatically increasing the odds that exactly the traces most valuable for debugging (errors, outliers) are the ones actually retained, rather than being randomly discarded at the same rate as routine, uninteresting traffic.
+
+**Common Pitfall:** using Head-Based sampling at a low percentage for a system where rare, hard-to-reproduce errors are the primary debugging concern — a 1% random sample means a rare error occurring in roughly 1% of requests has only a 1-in-10,000 chance of actually being captured, potentially leaving exactly the traces most needed for debugging entirely unsampled; Tail-Based sampling directly addresses this specific gap by deferring the decision until the outcome is actually known.
+
+---

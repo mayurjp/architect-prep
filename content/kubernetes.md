@@ -2137,3 +2137,112 @@ Because a VM-based sandboxing runtime's overhead is a genuine, fixed resource co
 **Common Pitfall:** configuring `PodOverhead` values that don't accurately reflect a specific runtime's actual measured overhead — an underestimated `PodOverhead` reproduces exactly the scheduling-inaccuracy problem this feature exists to solve, while an overestimated one wastes genuinely available cluster capacity by making the scheduler believe less room exists on a node than the runtime's overhead actually costs.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is the difference between a Kubernetes `Service`'s `port` and `targetPort` fields, and how does this distinction let a Service expose a different external port than the container's own actual listening port?**
+
+A Service's `port` is the port *other things in the cluster* use when addressing the Service itself — `targetPort` is the port the actual container behind that Service is genuinely listening on. These don't need to match: a Service can present itself on a conventional, easy-to-remember port (like 80) while forwarding traffic to a container whose application happens to listen on a completely different port (like 8080).
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service
+spec:
+  ports:
+  - port: 80          # OTHER things in the cluster call the Service on THIS port
+    targetPort: 8080  # traffic is FORWARDED to the container's ACTUAL listening port
+  selector:
+    app: api
+```
+
+```text
+Other Pods calling THIS Service: connect to "api-service:80" -- using the
+  SERVICE's own port (80), REGARDLESS of what port the ACTUAL container
+  behind it happens to be listening on
+
+The Service FORWARDS that traffic to: whatever port the CONTAINER itself
+  is genuinely LISTENING on (targetPort: 8080) -- the CALLER never needs
+  to know or CARE about this actual, underlying container port at all
+```
+
+Because callers only ever need to know the Service's own `port`, this indirection lets a container's actual application listen on whatever port its own runtime/framework happens to default to (a Node.js app on 3000, a .NET app on 8080) while still being reachable at a clean, conventional port (80/443) from everything else in the cluster — the Service acts as a stable abstraction over whatever the container's own internal listening port actually is.
+
+**Common Pitfall:** assuming `port` and `targetPort` must always be identical, and hardcoding the container's actual application port as the Service's own exposed `port` — while this works, it unnecessarily exposes an implementation detail (the container's specific listening port) to every caller, rather than presenting a clean, conventional port at the Service level regardless of what the underlying container happens to use internally.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: How does configuring TLS on a Kubernetes `Ingress` — referencing a `Secret` containing a certificate and private key — let TLS termination happen at the Ingress controller, so backend Pods can communicate over plain HTTP internally without each one managing its own certificate?**
+
+An `Ingress` resource's `tls` section references a `Secret` holding a TLS certificate and private key — the Ingress controller uses that certificate to terminate HTTPS connections from external clients, then forwards the now-decrypted request to backend Pods over plain HTTP within the (presumably trusted) cluster network, meaning individual backend services never need their own certificate or any TLS-handling code at all.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-ingress
+spec:
+  tls:
+  - hosts: ["api.example.com"]
+    secretName: api-tls-cert  # references a Secret containing tls.crt/tls.key
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /
+        backend:
+          service: { name: api-service, port: { number: 80 } } # PLAIN HTTP internally
+```
+
+```text
+WITHOUT centralized TLS termination: EVERY individual backend Pod would
+  need its OWN certificate, its OWN TLS-handling code/library -- managing
+  certificate ROTATION and configuration SEPARATELY for EVERY service
+
+WITH TLS terminated AT the Ingress: ONE certificate, configured ONCE, at
+  the Ingress controller -- EVERY backend Pod simply speaks PLAIN HTTP
+  internally, with ZERO TLS-related code or CONFIGURATION of its own needed
+```
+
+Because certificate management (obtaining, rotating, renewing) is genuinely operational overhead, centralizing it at the Ingress layer — often automated further via a tool like cert-manager, which can automatically provision and renew certificates from Let's Encrypt — means individual application teams never need to think about TLS certificates at all for their own services, letting that entire concern live in one centralized, cluster-level place.
+
+**Common Pitfall:** assuming TLS termination at the Ingress means traffic is "fully encrypted end-to-end" all the way to the actual backend Pod — by default, the Ingress-to-backend hop is plain, unencrypted HTTP; a genuinely end-to-end encrypted setup requires additional configuration (a service mesh's mTLS, covered under Microservices, or backend TLS re-encryption) beyond simple Ingress-level TLS termination alone.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is a Custom Resource Definition's `status` subresource, and how does separating an object's desired state (`spec`) from its observed state (`status`) — updated through a separate API endpoint — prevent a controller's status updates from being overwritten by a concurrent spec edit, and vice versa?**
+
+Without the `status` subresource enabled, a CRD's entire object (both `spec` and `status` together) is updated as one single unit — meaning a controller updating just the `status` field risks a race condition with a user simultaneously editing the `spec`, where one update could silently clobber the other. Enabling the `status` subresource splits these into two genuinely separate API endpoints (`/spec` effectively updated via the main resource, `/status` updated via its own dedicated endpoint), letting a controller update status concurrently with a user editing spec, without either one's update overwriting the other's.
+
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+spec:
+  versions:
+  - name: v1
+    subresources:
+      status: {} # enables status as a SEPARATE, independently-updatable subresource
+```
+
+```text
+WITHOUT the status subresource: a USER editing .spec.replicas AND a
+  CONTROLLER simultaneously updating .status.currentReplicas are BOTH
+  writing to the SAME single object -- a RACE condition where ONE update
+  can silently OVERWRITE the other's changes
+
+WITH the status subresource enabled: .spec updates go through the MAIN
+  resource endpoint; .status updates go through a SEPARATE, dedicated
+  /status endpoint -- a USER'S spec edit and a CONTROLLER's status update
+  happening AT THE SAME TIME no longer CONFLICT with each other at all
+```
+
+Because a controller's entire job typically involves continuously observing actual state and writing it back to `.status` while a user might independently be editing `.spec` at any moment, this separation is essential for any genuinely robust Operator/controller pattern (covered earlier) — without it, a sufficiently active controller and a sufficiently active user could end up in a persistent, hard-to-diagnose "fighting over the same object" race condition.
+
+**Common Pitfall:** building a custom controller against a CRD without enabling the `status` subresource, then writing both spec and status fields through the same generic update call — this recreates exactly the race condition the subresource split exists to prevent, and can produce confusing, intermittent data loss when a user's edit and the controller's own reconciliation loop happen to overlap in time.
+
+---

@@ -1910,3 +1910,89 @@ Because this remapping happens transparently at the kernel's user-namespace leve
 **Common Pitfall:** assuming user namespace remapping alone makes running containers as root inside the container fully safe, removing any need to also follow the earlier-covered best practice of running as a non-root user *inside* the container — remapping limits the blast radius of a successful *escape*, but a compromised process still has full root privileges *within* the container's own namespace, able to do damage to anything reachable from inside that boundary; the two mitigations address different layers and are complementary, not substitutes for each other.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What does `docker inspect` do, and how does it let you retrieve a container or image's full, detailed metadata — its configuration, mounts, and network settings — beyond what `docker ps`/`docker images` summarize?**
+
+`docker ps` and `docker images` show a brief, human-scannable summary line per container/image — `docker inspect` instead returns the complete, detailed JSON metadata for a specific container or image, including its full environment variables, mounted volumes, network configuration, resource limits, and dozens of other fields the summary commands deliberately omit for readability.
+
+```bash
+docker inspect my-container
+# returns a LARGE JSON document including:
+#   .Config.Env         -- every environment variable actually set
+#   .Mounts              -- every volume/bind mount and its exact paths
+#   .NetworkSettings      -- IP address, exposed ports, network mode
+#   .HostConfig.Memory    -- the actual configured memory limit
+
+docker inspect --format '{{.NetworkSettings.IPAddress}}' my-container # extract JUST one field
+```
+
+```text
+docker ps: "my-container, running, Up 2 hours" -- a QUICK, scannable
+  SUMMARY, deliberately OMITTING most configuration detail
+
+docker inspect: the COMPLETE underlying JSON configuration -- EVERY
+  environment variable, mount, network SETTING, and resource LIMIT
+  actually applied to this SPECIFIC container
+```
+
+Because `docker ps`/`docker images` are intentionally terse for everyday scanning, `docker inspect` is the tool reached for when actually debugging a specific container's exact configuration — confirming an environment variable's actual value, verifying a volume mounted to the expected path, or checking the precise resource limits applied — with its `--format` flag (using Go template syntax) letting you extract just one specific field rather than wading through the entire JSON document by hand.
+
+**Common Pitfall:** guessing at a running container's actual configuration based on the original `docker run` command used to start it, rather than confirming directly via `docker inspect` — a container's actual runtime configuration can differ from what was originally specified (due to defaults, Compose file merging, or an image's own `Dockerfile` defaults), and `docker inspect` provides the definitive, ground-truth answer rather than relying on memory of the original launch command.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What does Docker's `--add-host` flag do, and how does manually adding a custom host-to-IP mapping inside a container let it resolve a hostname that isn't resolvable via normal DNS?**
+
+`--add-host` injects an additional entry into a container's internal `/etc/hosts` file, mapping a specific hostname to a specific IP address — commonly used to let a container resolve a service running directly on the host machine (which doesn't have its own normal DNS entry) or to point a specific hostname at a different address than public DNS would normally resolve, entirely within that one container's own resolution.
+
+```bash
+docker run --add-host=host.internal:host-gateway myapp
+# inside the container, "host.internal" now resolves to the HOST machine's own IP,
+# letting the containerized app reach a service running DIRECTLY on the host
+```
+
+```text
+WITHOUT --add-host: a container has NO built-in way to resolve a hostname
+  for a service running DIRECTLY on the host machine (the host isn't
+  reachable via NORMAL container networking DNS)
+
+WITH --add-host=host.internal:host-gateway: the CONTAINER's own
+  /etc/hosts gains an ENTRY mapping "host.internal" to the HOST's actual
+  IP -- application code inside the container can now simply CONNECT to
+  "host.internal," exactly like any OTHER hostname
+```
+
+Because a containerized application often needs to reach something running on the developer's own host machine during local development (a database GUI tool, a mock server not itself containerized), `--add-host`'s `host-gateway` special value provides Docker's own built-in, portable way to resolve "the host machine's IP" without needing to hardcode a specific, potentially-changing IP address manually.
+
+**Common Pitfall:** hardcoding a specific IP address via `--add-host` instead of using the special `host-gateway` value — a hardcoded IP can silently become stale if the host's own network configuration changes (a different Docker network, a different machine's IP entirely), while `host-gateway` dynamically resolves to whatever the actual host gateway IP currently is, remaining portable across different environments.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is the OCI (Open Container Initiative) Image Format, and how does OCI compliance let an image built by Docker run correctly under an entirely different container runtime — containerd, CRI-O, Podman — without modification?**
+
+The OCI Image Format is a vendor-neutral, standardized specification defining exactly how a container image's filesystem layers, configuration, and manifest should be structured — Docker's own image format has, for years, been essentially OCI-compliant, meaning an image `docker build` produces can be pulled and run by any other OCI-compliant runtime (Kubernetes' own containerd, Red Hat's Podman/CRI-O) without any conversion or compatibility shim needed.
+
+```text
+WITHOUT a standardized format: an image built by ONE specific tool/runtime
+  might only run CORRECTLY under that SAME tool/runtime -- portability
+  across DIFFERENT container ecosystems would require CUSTOM conversion
+  or compatibility layers for EVERY combination
+
+WITH the OCI Image Format as a shared STANDARD: Docker, containerd,
+  Podman, and Kubernetes' own runtime ALL understand the SAME underlying
+  image structure -- an image built with `docker build` runs CORRECTLY
+  under Kubernetes (which uses containerd, NOT Docker itself, internally)
+  with ZERO modification needed
+```
+
+Because Kubernetes itself no longer uses Docker's own daemon directly as its container runtime (having moved to the Container Runtime Interface, running images via containerd or CRI-O instead), the fact that an image built with `docker build` still runs correctly inside a Kubernetes cluster is a direct, practical consequence of both Docker and Kubernetes' runtime relying on the shared, standardized OCI Image Format underneath their different tooling.
+
+**Common Pitfall:** assuming Docker itself is somehow required to actually *run* a Docker-built image in production — the OCI standard means the image itself is portable across compliant runtimes; a Kubernetes cluster running images built via `docker build` doesn't need Docker installed anywhere in that cluster at all, since its own OCI-compliant runtime (containerd, typically) handles execution directly.
+
+---

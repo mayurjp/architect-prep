@@ -2354,3 +2354,78 @@ Because designing Degraded Mode behavior requires explicitly identifying, for ev
 **Common Pitfall:** treating every dependency as equally critical, with no distinction between "must work for the core experience to function at all" and "nice to have, but the system remains genuinely useful without it" — without this classification made explicit upfront, a team has no principled basis for deciding where Degraded Mode fallback behavior is actually worth the engineering investment to build, versus where a dependency failing legitimately should bring down the whole request.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is Capacity Planning, and how does the consequence of under-provisioning differ from the consequence of over-provisioning?**
+
+Capacity Planning is the exercise of estimating a system's expected peak load (requests per second, storage growth rate, concurrent users) ahead of time and translating that estimate into the actual server, database, and network capacity needed to handle it — under-provisioning risks a system falling over exactly when it matters most (a launch, a traffic spike), while over-provisioning simply wastes money on unused capacity, a real but far less catastrophic cost.
+
+```text
+UNDER-provisioning: peak TRAFFIC arrives, and the SYSTEM doesn't have
+  enough CAPACITY to handle it -- requests TIME OUT, the database becomes
+  a BOTTLENECK, the system becomes UNAVAILABLE exactly when USERS most
+  need it to WORK (a product launch, a viral moment, a holiday SALE)
+
+OVER-provisioning: the SYSTEM comfortably handles peak traffic with ROOM
+  to spare -- but SIGNIFICANT compute/storage capacity sits UNUSED most
+  of the TIME, representing genuinely WASTED spend -- a real cost, but
+  one that doesn't RISK an outage the way UNDER-provisioning does
+```
+
+Because the two failure modes have such different severities — an outage during a critical moment versus ongoing, unnecessary cost — capacity planning generally errs toward some deliberate margin of over-provisioning (or, more modernly, relies on auto-scaling, covered elsewhere, to dynamically add capacity as real demand actually materializes rather than needing to guess a fixed number correctly upfront) rather than cutting capacity estimates as close to the expected minimum as possible.
+
+**Common Pitfall:** basing capacity planning purely on *average* expected load rather than realistic *peak* load — a system provisioned for its average traffic will reliably fail during any burst, spike, or seasonal peak significantly above that average, which is often precisely when the system's availability matters most to the business.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is Request Hedging, and how does sending a request to multiple redundant backend replicas simultaneously — using whichever responds first and canceling the others — trade extra load for improved tail latency?**
+
+Rather than waiting for one specific backend replica's response and potentially getting stuck behind that one replica's occasional slow response (contributing to poor p99 tail latency, covered earlier), Request Hedging sends the same request to two or more redundant replicas at once (or with a short staggered delay), accepts whichever response arrives first, and cancels the rest — trading additional load (extra redundant requests) for a meaningfully better worst-case response time.
+
+```text
+WITHOUT hedging: a CLIENT sends ONE request to ONE specific replica -- if
+  THAT particular replica happens to be having a SLOW moment (a GC pause,
+  a transient hiccup), the CLIENT's response time directly REFLECTS that
+  one replica's bad LUCK
+
+WITH hedging: the SAME request is sent to TWO replicas simultaneously (or
+  the SECOND sent after a short delay if the FIRST hasn't responded yet)
+  -- whichever RESPONDS first "wins," and the OTHER request is simply
+  CANCELED -- the CLIENT's response time reflects the FASTER of the two,
+  dramatically reducing the CHANCE of being stuck behind ANY one replica's
+  occasional slow RESPONSE
+```
+
+Because a single slow replica's occasional bad response directly determines a client's own tail latency without hedging, sending redundant requests to independent replicas makes it statistically far less likely that *both* happen to be slow simultaneously — a real, practical technique (used internally by systems like Google's own infrastructure) for improving p99 latency specifically, at the direct cost of roughly doubling (or more) the total request volume a backend must handle.
+
+**Common Pitfall:** applying Request Hedging broadly across a system's every request without considering the resulting load multiplication — hedging every single request effectively doubles (or more) total backend load, which can be a reasonable trade for a small number of genuinely latency-critical operations, but becomes an expensive, wasteful default applied indiscriminately across an entire system's traffic.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is a "Poison Pill" message at the system-design level, and how does a message that deterministically crashes every consumer attempting to process it differ from an ordinary transient failure in terms of detection and mitigation?**
+
+An ordinary transient failure (a temporary network blip, a momentarily overloaded downstream service) tends to succeed on retry — a Poison Pill is fundamentally different: it's a specific message or request whose content itself deterministically triggers a crash or unhandled exception in *every* consumer that attempts to process it, meaning naive retry logic doesn't help at all and can actively make things worse, since each retry simply reproduces the exact same crash again.
+
+```text
+Ordinary transient failure: a REQUEST fails due to a TEMPORARY condition
+  (a network blip, a momentarily overloaded DOWNSTREAM service) -- RETRYING
+  the SAME request shortly afterward often SUCCEEDS, since the underlying
+  CONDITION was genuinely temporary
+
+Poison Pill: a SPECIFIC message's CONTENT itself (a malformed field, an
+  edge case the consumer's code doesn't handle) DETERMINISTICALLY crashes
+  ANY consumer that processes it -- RETRYING produces the EXACT SAME
+  crash, EVERY time, since the underlying CAUSE is the message's own
+  content, not a TEMPORARY external condition at all
+```
+
+Because a Poison Pill's failure is deterministic rather than transient, naive retry-based resilience strategies (covered extensively elsewhere) not only fail to help but can actively worsen the situation — repeatedly crashing consumer instances, potentially triggering cascading restarts or exhausting a Dead Letter Queue's own retry budget (covered under Messaging) — making rapid, automated detection of "this specific message consistently causes a crash, regardless of which consumer instance handles it" an essential capability distinct from ordinary transient-failure handling.
+
+**Common Pitfall:** configuring aggressive automatic retry logic without any mechanism to distinguish a genuinely transient failure from a deterministic, message-content-caused crash — blindly retrying a Poison Pill message can trigger a cascading pattern of repeated consumer crashes and restarts, potentially destabilizing an entire consumer fleet, rather than quickly isolating the single problematic message to a Dead Letter Queue and continuing to process everything else normally.
+
+---
