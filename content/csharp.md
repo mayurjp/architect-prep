@@ -1752,4 +1752,87 @@ Because the returned reference points directly at the actual underlying memory r
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is the null-coalescing operator (`??`), as distinct from `??=` (covered earlier), and how does it let you provide a fallback value for a nullable expression inline, without an explicit `if`/`else`?**
+
+`a ?? b` evaluates to `a` if `a` is non-null, or `b` otherwise — a compact, inline way to supply a default/fallback value for a possibly-null expression, without writing a separate conditional statement.
+
+```csharp
+string? name = GetUserName(); // might return null
+string displayName = name ?? "Guest"; // "Guest" used ONLY if 'name' is actually null
+
+// equivalent, WITHOUT ??:
+string displayName2;
+if (name is not null) displayName2 = name;
+else displayName2 = "Guest";
+```
+
+```text
+name is null      -> "displayName" becomes "Guest" (the FALLBACK, right-hand side)
+name is "Alice"   -> "displayName" becomes "Alice" (the ORIGINAL, left-hand side, UNCHANGED)
+```
+
+Because `??` can be chained (`a ?? b ?? c`) and embedded directly within a larger expression (unlike a full `if`/`else` statement), it's especially useful for compactly expressing "use this value, or fall back to that one, or ultimately fall back to this last default" in a single, readable line — `??=` (covered earlier) is the closely related assignment variant, applying this same fallback logic specifically when assigning back into the original variable.
+
+**Common Pitfall:** confusing `??` (an expression producing a fallback *value*) with `??=` (an *assignment* that only executes if the target is currently null) — `a ?? b` never modifies `a` itself, it simply evaluates to one value or the other; `a ??= b` actually assigns `b` back into `a` when applicable, a meaningfully different operation despite the similar syntax.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is a C# `record`'s auto-generated `ToString()` override, and how does it print every property's name/value automatically, useful for debugging/logging without writing a custom `ToString()` yourself?**
+
+The compiler automatically generates a `ToString()` override for every `record` type, printing the record's type name followed by each property's name and current value in a structured, readable format — no manual override needed, unlike an ordinary `class`, which inherits `object`'s unhelpful default `ToString()` (just the type's full name) unless a developer explicitly overrides it.
+
+```csharp
+public record Order(int Id, string Status, decimal Total);
+
+var order = new Order(5, "Shipped", 129.99m);
+Console.WriteLine(order); // "Order { Id = 5, Status = Shipped, Total = 129.99 }" -- AUTOMATICALLY,
+                            // with NO custom ToString() override WRITTEN at all
+
+public class OrderClass { public int Id; public string Status = ""; }
+var orderClass = new OrderClass { Id = 5, Status = "Shipped" };
+Console.WriteLine(orderClass); // "OrderClass" -- the USELESS default, UNLESS ToString() is
+                                 // EXPLICITLY overridden by the developer THEMSELVES
+```
+
+Because this auto-generated `ToString()` prints every property's current value in a structured way, logging or debugging a `record` instance immediately gives a genuinely useful, readable representation — directly contributing to why `record` types are often favored for DTOs and simple data-carrying types where this "prints its own contents usefully" behavior is a real, low-cost convenience.
+
+**Common Pitfall:** writing a redundant, manual `ToString()` override on a `record` type purely to print its properties — the compiler already generates exactly this behavior automatically; a manual override is only needed if you want output genuinely different from the framework-generated default format.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is C#'s `scoped` modifier (C# 11) for `ref`/`ref struct` parameters, and how does explicitly restricting a reference's escape scope let the compiler allow patterns it would otherwise reject as unsafe?**
+
+Ordinary `ref`-safety rules (covered earlier) are conservative by default, sometimes rejecting a pattern that's actually safe simply because the compiler can't prove it — `scoped` lets you explicitly promise "this reference will never be stored anywhere that outlives this method call," giving the compiler the extra information it needs to permit patterns (like storing a `Span<T>` in a field temporarily within a tightly-scoped operation) that its default, conservative analysis would otherwise disallow.
+
+```csharp
+void ProcessBuffer(scoped Span<byte> buffer) // 'scoped' PROMISES this reference will NEVER
+{                                              // ESCAPE beyond THIS method call
+    // the COMPILER can now ALLOW certain patterns here that it would OTHERWISE
+    // CONSERVATIVELY reject, since it KNOWS 'buffer' can never be STORED somewhere
+    // LONGER-LIVED than this METHOD's own execution
+}
+```
+
+```text
+WITHOUT scoped: the COMPILER must CONSERVATIVELY assume a ref/ref-struct PARAMETER MIGHT
+  be STORED somewhere LONGER-LIVED (a FIELD, a RETURNED value) -- REJECTING some GENUINELY
+  SAFE patterns purely because it CANNOT PROVE they're safe WITHOUT that GUARANTEE
+
+WITH scoped: the DEVELOPER explicitly PROMISES the reference NEVER escapes THIS call's OWN
+  scope -- the COMPILER can NOW permit ADDITIONAL patterns it previously HAD to reject,
+  since THIS specific SAFETY concern is EXPLICITLY ruled OUT by the PROMISE
+```
+
+Because `scoped` narrows what the compiler needs to conservatively guard against, it unlocks additional flexibility for code working with `ref struct`/`Span<T>`-based APIs (covered earlier) in ways the compiler's default, more cautious rules would otherwise prevent — a targeted escape hatch for genuinely safe patterns the general rules can't automatically verify on their own.
+
+**Common Pitfall:** applying `scoped` to a parameter whose reference genuinely does need to escape beyond the method call (stored in a field, returned to the caller) — this would violate the very promise `scoped` makes, and the compiler (or, in a worse case, undetected unsafe behavior) depends on that promise actually being true; `scoped` should only be applied when the reference's lifetime is genuinely, provably confined to the method's own execution.
+
+---
+
 ---

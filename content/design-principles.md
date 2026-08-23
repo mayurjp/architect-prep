@@ -1818,4 +1818,87 @@ Because the *interface* (`INotifier`) is conceptually owned by the high-level po
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What is DRY's boundary when it comes to test code specifically, and why do many teams deliberately tolerate more repetition in tests than they would in production logic?**
+
+DRY (covered earlier) exists to avoid duplicating *knowledge* — repeated business logic that would need updating in multiple places if it changed — but a test's whole purpose is to independently verify a specific behavior, and making tests *too* DRY (extracting shared setup/assertion logic aggressively) can make an individual test harder to read in isolation, since understanding what it actually verifies now requires following several layers of shared helper abstraction.
+
+```csharp
+// SOME repetition, but EACH test reads CLEARLY, IN ISOLATION, with NO need to trace THROUGH shared helpers
+[Fact]
+public void Withdraw_SufficientBalance_DecreasesBalance()
+{
+    var account = new Account(initialBalance: 100);
+    account.Withdraw(30);
+    Assert.Equal(70, account.Balance);
+}
+
+[Fact]
+public void Withdraw_InsufficientBalance_ThrowsException()
+{
+    var account = new Account(initialBalance: 100); // SAME setup line, REPEATED -- but the TEST
+                                                        // remains TRIVIALLY readable ON ITS OWN
+    Assert.Throws<InvalidOperationException>(() => account.Withdraw(200));
+}
+```
+
+Because a test's primary job is to clearly communicate *what specific behavior it verifies* to a future reader (often while debugging a failure), a small amount of repeated setup across tests is often a worthwhile trade for each test remaining self-contained and immediately understandable — over-applying DRY to test code can produce a tangle of shared fixtures/helpers that makes any single test's actual intent harder to follow at a glance, the opposite of what a good test suite should provide.
+
+**Common Pitfall:** aggressively extracting shared setup/helper logic across many tests purely to eliminate repetition, without considering that this can make each individual test's behavior harder to understand in isolation — unlike production code, where DRY's cost/benefit calculus strongly favors deduplication, test code's readability-in-isolation value often justifies tolerating more repetition than would be acceptable in the application logic itself.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does "Encapsulate What Varies" (covered earlier) apply to a database technology choice itself, and how does hiding the data-access mechanism behind a Repository interface (covered under Clean Architecture) let a team defer or later change that decision without rewriting business logic?**
+
+The choice of *which* database technology to use (SQL versus NoSQL, covered broadly elsewhere) is exactly the kind of decision likely to change or need reconsidering as a system's requirements evolve — applying "Encapsulate What Varies" here means business logic depends only on a Repository *interface* (covered under Clean Architecture), never directly on a specific database's own API, letting the actual underlying technology be swapped later without touching any of the business logic that depends on it.
+
+```csharp
+public interface IOrderRepository { Task<Order?> GetByIdAsync(int id); Task SaveAsync(Order order); }
+
+// Business logic depends ONLY on the INTERFACE -- has NO IDEA whether the IMPLEMENTATION
+// underneath is SQL Server, MongoDB, or ANYTHING else
+public class PlaceOrderHandler
+{
+    private readonly IOrderRepository _repository;
+    public async Task HandleAsync(PlaceOrderCommand command) { /* uses _repository, NOTHING database-SPECIFIC */ }
+}
+
+// The ACTUAL database choice is ENTIRELY confined to the IMPLEMENTATION, SWAPPABLE independently
+public class SqlOrderRepository : IOrderRepository { /* EF Core / SQL Server specifics HERE */ }
+public class MongoOrderRepository : IOrderRepository { /* MongoDB specifics HERE, INSTEAD */ }
+```
+
+Because the database technology decision is genuinely likely to be revisited (a NoSQL migration for scale reasons, a SQL migration for stronger consistency needs), encapsulating it behind an interface from the start means that decision can be deferred, experimented with, or reversed later, touching only the Repository's concrete implementation — never the business logic that depends on the abstraction, directly embodying "Encapsulate What Varies"'s guidance to identify likely-to-change decisions and wall them off behind a stable interface.
+
+**Common Pitfall:** letting business logic call a specific database technology's own API directly (raw EF Core `DbContext` queries scattered throughout Use Case handlers, for instance) rather than behind a Repository interface — this couples business logic directly to a decision (which database technology) that's specifically the kind of thing likely to change, making any future migration require touching every piece of business logic that made that direct dependency, rather than just the isolated Repository implementation.
+
+---
+
+## Advanced — Question 19
+
+**Q19: How does the Interface Segregation Principle's guidance relate to the Robustness Principle (Postel's Law, covered earlier) — specifically, how does an interface accepting the narrowest possible input type while returning the richest reasonable output type embody both principles simultaneously?**
+
+ISP (covered earlier) recommends narrow, client-specific interfaces — applied to a method's *parameter* type specifically, this means accepting the least demanding, most general type that still satisfies the method's actual needs (an `IEnumerable<T>` rather than requiring a full `List<T>` if you only ever iterate it) — directly mirroring Postel's Law's "be conservative in what you send, liberal in what you accept": accepting a broad, general input type is "liberal," while returning a specific, richly-typed result is being appropriately "conservative" about what you promise callers.
+
+```csharp
+// "Liberal" in what it ACCEPTS -- the NARROWEST, MOST GENERAL interface that ACTUALLY satisfies the need
+public decimal SumPrices(IEnumerable<decimal> prices) => prices.Sum();
+// accepts ANY IEnumerable<decimal> -- a List<decimal>, an Array, a LINQ query result, ANYTHING --
+// NOT needlessly REQUIRING a SPECIFIC, MORE RESTRICTIVE type like List<decimal> SPECIFICALLY
+
+// "Conservative" in what it RETURNS -- a SPECIFIC, RICHLY-TYPED result, not an OVERLY GENERIC one
+public IReadOnlyList<Order> GetRecentOrders() => _orders.Where(o => o.IsRecent).ToList();
+// returns a SPECIFIC, well-understood TYPE -- NOT an overly VAGUE "object" or "IEnumerable"
+// that would FORCE every CALLER to figure out WHAT it actually CONTAINS
+```
+
+Because accepting the broadest reasonable parameter type minimizes what a caller is *forced* to provide (directly embodying ISP's "don't require more than genuinely needed" principle, applied to parameter typing rather than interface member count) while returning a specific, well-typed result maximizes what a caller can *reliably* do with the output, this combined convention serves both principles' underlying goals simultaneously — genuinely flexible for callers on the input side, genuinely informative and useful for callers on the output side.
+
+**Common Pitfall:** requiring an overly specific, restrictive parameter type (demanding a concrete `List<T>` when any `IEnumerable<T>` would genuinely suffice) purely out of habit — this unnecessarily narrows which callers can use the method, forcing some to materialize a `List<T>` purely to satisfy an unnecessarily restrictive signature, directly working against both ISP's and Postel's Law's shared guidance toward accepting the least demanding input type that actually meets the method's real needs.
+
+---
+
 ---

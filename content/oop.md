@@ -1908,3 +1908,94 @@ Because a class not specifically *designed* to be safely subclassed (with carefu
 **Common Pitfall:** leaving every class unsealed "just in case someone needs to extend it later" without deliberately designing safe, well-considered extension points — an unsealed class that was never actually designed with subclassing in mind can be silently broken by a subclass relying on implementation details the base class's author never intended to expose or guarantee stable, exactly the Fragile Base Class Problem sealing (with composition as the alternative extension mechanism) is meant to avoid.
 
 ---
+
+## Beginner — Question 20
+
+**Q20: What is the difference between an object's Identity and its State, and how can two objects have identical state yet be considered different objects unless equality is explicitly overridden (covered earlier)?**
+
+Identity refers to *which specific instance* an object is — even if you construct two objects with exactly the same property values, they're still two genuinely separate instances occupying different memory locations, with C#'s default reference equality treating them as unequal — State refers to the actual *data* an object currently holds, which can be identical between two otherwise-distinct instances.
+
+```csharp
+public class Point { public int X, Y; }
+
+var p1 = new Point { X = 5, Y = 10 };
+var p2 = new Point { X = 5, Y = 10 }; // SAME state as p1 -- but a COMPLETELY DIFFERENT instance
+
+Console.WriteLine(p1 == p2); // FALSE -- default REFERENCE equality -- DIFFERENT identities,
+                               // REGARDLESS of their IDENTICAL state
+Console.WriteLine(p1.X == p2.X && p1.Y == p2.Y); // TRUE -- their STATE happens to MATCH
+```
+
+```text
+Identity: "IS this the SAME OBJECT (SAME memory LOCATION) as that ONE?" -- p1 and p2 are
+  DIFFERENT objects, REGARDLESS of what DATA they CURRENTLY hold
+
+State: "DOES this object's CURRENT DATA match that ONE's?" -- p1's and p2's STATE happens
+  to be IDENTICAL, even though they are TWO SEPARATE, DISTINCT instances
+```
+
+Because C#'s default `==`/`Equals` for a reference type checks *identity* (are these literally the same object), not *state*, two objects with matching data still compare as unequal unless a class explicitly overrides equality to compare state instead (covered earlier, as the mechanism behind a `record`'s or Value Object's value-based equality) — understanding this distinction clarifies exactly what the default behavior actually checks, and why overriding `Equals`/`GetHashCode` is necessary to get value-based comparison instead.
+
+**Common Pitfall:** assuming two objects constructed with identical property values will automatically compare as equal via `==`/`Equals` — for an ordinary class (without an equality override), this comparison checks identity, not state, and will return `false` for two separately-constructed instances even with perfectly matching data, a frequent source of confusion for anyone expecting value-based comparison by default.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is Primitive Obsession as a code smell, and how does representing a domain concept as a plain primitive type rather than a dedicated Value Object (covered under Clean Architecture) lose type-level guarantees?**
+
+Primitive Obsession describes overusing bare primitive types (`string`, `decimal`, `int`) to represent domain concepts that actually have their own rules and identity (an email address, a monetary amount, a phone number) — using a plain `string` for an email address means the compiler can't distinguish a validated, well-formed email from an arbitrary, unvalidated string, and any validation logic must be manually re-applied everywhere the value is used, rather than being guaranteed by the type itself.
+
+```csharp
+// PRIMITIVE OBSESSION -- a PLAIN string, with NO type-level guarantee it's actually a VALID email
+public class User { public string Email { get; set; } = ""; }
+// nothing STOPS "User.Email = 'not an email at all';" from COMPILING perfectly fine
+
+// a dedicated VALUE OBJECT (covered under Clean Architecture) -- VALIDATES itself, GUARANTEES validity
+public class EmailAddress
+{
+    public string Value { get; }
+    private EmailAddress(string value) { Value = value; }
+    public static EmailAddress Parse(string raw) =>
+        IsValidEmail(raw) ? new EmailAddress(raw) : throw new ArgumentException("Invalid email");
+}
+public class User { public EmailAddress Email { get; set; } = null!; } // GUARANTEED valid, by TYPE alone
+```
+
+Because a plain primitive type carries no information about the domain-specific rules a value is supposed to satisfy, every piece of code handling it must independently remember to validate/handle it correctly — a dedicated Value Object instead makes an invalid state simply unrepresentable (you can't construct an `EmailAddress` from invalid input at all), moving validation from "something every caller must remember" to "something the type itself structurally guarantees."
+
+**Common Pitfall:** representing many distinct domain concepts as generic, interchangeable primitives (using a plain `string` for both an email address and a phone number, or a bare `decimal` for both a price and a discount percentage) — this loses not just validation guarantees but also basic type safety, since a method accidentally passed a phone number where an email was expected would compile without error, since both are simply "a string" as far as the type system is concerned.
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is the "History Constraint" — the third, less commonly discussed formal LSP rule alongside contravariant parameters and covariant returns (covered earlier) — and how does a subtype adding a new, mutable field violating its own class's invariants break substitutability even without touching any inherited method at all?**
+
+The History Constraint states that a subtype must not allow state changes (through its own new methods/fields) that the base type's invariants wouldn't have permitted — even if a subtype never overrides any inherited method, simply adding new members that let its own state evolve in ways inconsistent with what client code (written against the base type) assumes about the object's behavior over time, still violates LSP.
+
+```csharp
+public class Account // BASE class INVARIANT: "Balance can NEVER go negative"
+{
+    public decimal Balance { get; protected set; }
+    public void Deposit(decimal amount) { Balance += amount; }
+}
+
+public class OverdraftAccount : Account // adds a NEW field/method -- NEVER overrides ANYTHING inherited
+{
+    public void AllowNegativeBalance(decimal amount) { Balance -= amount; } // a NEW method,
+        // letting Balance go NEGATIVE -- violates the BASE class's OWN invariant, EVEN THOUGH
+        // "Deposit()" itself was NEVER touched/overridden AT ALL
+}
+
+// CLIENT code written AGAINST "Account", relying on "Balance is NEVER negative":
+void PrintAccountStatus(Account account) { if (account.Balance < 0) throw new InvalidOperationException(); }
+// this INVARIANT, ASSUMED SAFE for ANY "Account," is SILENTLY VIOLATED for an OverdraftAccount
+// instance passed in HERE -- EVEN THOUGH OverdraftAccount NEVER overrode ANY of Account's OWN methods
+```
+
+Because the History Constraint concerns the *evolution of an object's state over its lifetime* — not merely the signatures of individual method overrides — a subtype can violate LSP purely by introducing new behavior that lets its state drift outside what the base type's own invariants promised, entirely independent of the contravariant-parameter/covariant-return rules (covered earlier) governing individual method signatures.
+
+**Common Pitfall:** verifying LSP compliance purely by checking that every *overridden* method's signature follows the contravariant-parameter/covariant-return rules (covered earlier), while overlooking that a subtype's genuinely *new* methods/fields can independently violate the base type's invariants — the History Constraint specifically catches this broader, state-evolution-focused violation that signature-level checks alone don't cover.
+
+---

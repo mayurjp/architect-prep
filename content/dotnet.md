@@ -1749,4 +1749,82 @@ Because a library author often wants to support both environments (ordinary JIT-
 
 ---
 
+## Beginner — Question 20
+
+**Q20: Why does calling `Console.ReadKey`/`Console.ReadLine` from an async context without `Task.Run` still block the calling thread, since neither method has an async overload at all?**
+
+`Console.ReadKey`/`Console.ReadLine` are purely synchronous APIs — there's no `ReadLineAsync()` equivalent for reading from the console's standard input the way `StreamReader.ReadLineAsync()` exists for a file — calling them directly inside an `async` method doesn't magically make them non-blocking; the calling thread still blocks exactly as it would in ordinary synchronous code, waiting for the user to actually type something.
+
+```csharp
+async Task DoWorkAsync()
+{
+    await Task.Delay(100); // genuinely ASYNC -- frees the thread while WAITING
+    string? input = Console.ReadLine(); // BLOCKS the calling thread SYNCHRONOUSLY -- being
+                                          // INSIDE an 'async' method does NOT change THIS at all
+}
+```
+
+```text
+'async'/'await' only make a METHOD *capable* of yielding CONTROL back at an 'await' point --
+  a method being MARKED 'async' does NOT retroactively make EVERY call WITHIN it non-blocking --
+  Console.ReadLine() has NO async-capable IMPLEMENTATION to await AT ALL, so it BLOCKS,
+  REGARDLESS of the SURROUNDING method's OWN 'async' modifier
+```
+
+Because `async`/`await` only changes behavior at points where you actually `await` a genuinely asynchronous operation, calling a purely synchronous API like `Console.ReadLine()` inside an `async` method has exactly the same blocking behavior it would have anywhere else — if genuinely non-blocking console input were needed (rare, but possible via `Console.In.ReadLineAsync()` for redirected/piped input specifically), a different, explicitly async-capable API would be required.
+
+**Common Pitfall:** assuming any code called from within an `async` method automatically becomes non-blocking simply by virtue of the enclosing method being marked `async` — `async`/`await` only provides non-blocking behavior at genuine `await` points on actually-asynchronous operations; calling a purely synchronous API (like `Console.ReadLine()`) from inside an `async` method still blocks the calling thread exactly as it would anywhere else.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What does `[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]` do, and how does conditionally omitting a property only when it holds its default value reduce payload size without losing information for non-default values?**
+
+Rather than always serializing every property (including ones sitting at their type's default value, like `0` for an `int` or `null` for a reference type), this condition tells `System.Text.Json` to omit a property from the JSON output *specifically* when its current value equals the default — genuinely present, non-default values still serialize normally, so no actual information is lost, while the common "this field wasn't set to anything meaningful" case produces a smaller payload.
+
+```csharp
+public class ProductDto
+{
+    public string Name { get; set; } = "";
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int DiscountPercent { get; set; } // OMITTED from JSON if it's STILL 0 (the DEFAULT) --
+                                               // INCLUDED normally if it's ANY OTHER, NON-DEFAULT value
+}
+
+// DiscountPercent = 0   -> { "name": "Widget" }                          -- OMITTED entirely
+// DiscountPercent = 15  -> { "name": "Widget", "discountPercent": 15 }   -- INCLUDED normally
+```
+
+Because the omission only happens for the specific, default value (not an arbitrary subset of values), no genuine information is lost — a consumer deserializing the JSON back still correctly reconstructs `DiscountPercent = 0` for the omitted case, since that's exactly what a missing property would default to anyway, while genuinely meaningful, non-default values remain fully visible in the payload.
+
+**Common Pitfall:** applying `WhenWritingDefault` to a property where `0`/`null`/`false` is actually a meaningful, intentional value distinct from "not set" (as opposed to genuinely representing the absence of a value) — for such a property, omitting it based purely on matching the type's default could create ambiguity for a consumer that needs to distinguish "explicitly set to zero" from "never set at all," a distinction this condition alone cannot preserve.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is `GC.KeepAlive`, and how does it prevent the Garbage Collector from prematurely collecting an object still logically in use via unmanaged code, even though no managed code appears to reference it anymore at that point?**
+
+The GC can, in principle, collect an object the moment its last *managed* reference is no longer used later in a method — but if that object's underlying unmanaged resource (a native handle, a pointer passed via P/Invoke) is still being used by unmanaged code the GC has no visibility into, an early collection could finalize/free that resource while native code is still actively using it; `GC.KeepAlive(obj)` is a no-op call that simply keeps a live managed reference to `obj` at that specific point, preventing the GC from considering it collectible before that line executes.
+
+```csharp
+void CallNativeFunction()
+{
+    var handle = new SafeFileHandle(nativePointer, ownsHandle: true);
+    NativeMethods.DoWorkWithHandle(handle.DangerousGetHandle()); // native code now HOLDS the raw pointer
+    // WITHOUT GC.KeepAlive: the JIT could theoretically determine 'handle' is NO LONGER
+    // "used" by MANAGED code after the LINE above, and the GC could COLLECT it WHILE the
+    // NATIVE call is STILL actively USING the underlying pointer -- a USE-AFTER-FREE risk
+    GC.KeepAlive(handle); // GUARANTEES 'handle' stays ALIVE (not collected) at LEAST until HERE
+}
+```
+
+Because the GC and JIT can be more aggressive than intuition might suggest about when an object's last *managed* use actually occurs (potentially collecting it even before a method fully returns, if the JIT can prove no further managed code touches it), `GC.KeepAlive` provides an explicit, simple mechanism to extend an object's guaranteed lifetime specifically past a point where unmanaged code might still be relying on it — a narrow but genuinely important tool for interop-heavy code.
+
+**Common Pitfall:** assuming an object stays alive for an entire method's duration simply because it's referenced somewhere earlier in that method — the GC's actual collection eligibility is based on the *last* point a reference is genuinely used, which the JIT can determine more precisely (and earlier) than intuition suggests; interop code passing a raw handle/pointer to unmanaged code needs `GC.KeepAlive` specifically to guard against a premature collection the JIT would otherwise correctly, but dangerously, permit.
+
+---
+
 ---

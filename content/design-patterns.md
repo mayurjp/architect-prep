@@ -2143,3 +2143,105 @@ Because the Servant class itself carries the shared behavior externally (via met
 **Common Pitfall:** forcing several unrelated classes to implement a shared interface purely so a single operation can be applied polymorphically across them, when a Servant class could provide that same operation externally without requiring any relationship between the classes at all — the Servant pattern is specifically useful for avoiding this kind of artificial coupling introduced purely to support one incidental, shared behavior.
 
 ---
+
+## Beginner — Question 20
+
+**Q20: What is the Chain of Responsibility pattern's simplest form — a linked list of handlers, each deciding whether to process a request or pass it along — and how does this structure let a request be handled without the sender knowing which handler will actually process it?**
+
+Each handler in the chain holds a reference to the *next* handler — when a request arrives, the current handler either processes it directly or passes it along to the next one in the chain — the original sender simply hands the request to the *first* handler and never needs to know (or care) which specific handler in the chain ultimately ends up processing it.
+
+```csharp
+public abstract class SupportHandler
+{
+    protected SupportHandler? Next;
+    public SupportHandler SetNext(SupportHandler next) { Next = next; return next; }
+    public abstract void Handle(Ticket ticket);
+}
+
+public class Tier1Support : SupportHandler
+{
+    public override void Handle(Ticket ticket)
+    {
+        if (ticket.Severity == "Low") Console.WriteLine("Tier 1 resolves it");
+        else Next?.Handle(ticket); // PASSES it along -- doesn't KNOW or CARE who handles it NEXT
+    }
+}
+
+var chain = new Tier1Support();
+chain.SetNext(new Tier2Support()).SetNext(new Tier3Support());
+chain.Handle(new Ticket { Severity = "High" }); // the SENDER just hands it to the FIRST handler
+```
+
+Because the sender only ever interacts with the *first* handler in the chain, and each handler independently decides "do I handle this, or pass it on," the overall chain can be reconfigured (handlers added, removed, or reordered) without the sender's own code ever needing to change — it always just hands a request to the chain's starting point and trusts the chain itself to route it correctly.
+
+**Common Pitfall:** having the sender explicitly check conditions and call a specific handler directly (an `if`/`else if` chain choosing which handler to invoke), rather than letting each handler in an actual chain decide for itself whether to process or forward the request — this reintroduces the sender's own tight coupling to every possible handler and their selection logic, exactly the coupling the Chain of Responsibility pattern is designed to eliminate.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does the Composite pattern's recursive structure — a Composite node's own children being either leaves or further Composites — let an arbitrarily deep tree be traversed with the same, uniform interface at every level?**
+
+Because a Composite node's children are typed as the *same* shared interface the Composite itself implements, a child can be either a simple Leaf or *another* Composite containing its own further children — this recursive structure means client code calling an operation on the top-level node automatically triggers the same operation cascading down through however many levels of nesting actually exist, with no special-casing needed for "how deep does this tree actually go."
+
+```csharp
+public interface IFileSystemItem { long GetSize(); }
+
+public class File : IFileSystemItem { public long Size; public long GetSize() => Size; } // LEAF
+
+public class Folder : IFileSystemItem // COMPOSITE -- its CHILDREN are ALSO IFileSystemItem
+{
+    private readonly List<IFileSystemItem> _children = new(); // each CHILD could be a File OR ANOTHER Folder
+    public void Add(IFileSystemItem item) => _children.Add(item);
+    public long GetSize() => _children.Sum(c => c.GetSize()); // RECURSIVELY calls GetSize() on
+        // EVERY child -- REGARDLESS of whether EACH child is a SIMPLE File or ANOTHER, NESTED Folder
+}
+
+var root = new Folder();
+root.Add(new File { Size = 100 });
+var subFolder = new Folder(); // a Folder NESTED inside the ROOT Folder
+subFolder.Add(new File { Size = 200 });
+root.Add(subFolder);
+Console.WriteLine(root.GetSize()); // 300 -- CORRECTLY sums ACROSS an ARBITRARILY DEEP tree,
+                                     // with NO special CASE needed for the NESTING depth AT ALL
+```
+
+Because each Composite's `GetSize()` simply delegates to its children's own `GetSize()` — regardless of whether those children happen to be Leaves or further Composites — the recursion naturally handles a tree of *any* depth without the calling code (or the Composite's own implementation) ever needing to know how deep the actual structure goes at any given moment.
+
+**Common Pitfall:** writing traversal logic that explicitly checks "is this a Leaf or a Composite" and branches accordingly at the *client* code level, rather than relying on the uniform interface's polymorphic dispatch to handle both cases identically — this reintroduces exactly the kind of type-checking client code the Composite pattern's whole design is meant to eliminate, since the pattern's benefit comes specifically from treating leaves and composites through one shared, uniform interface.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is the Interpreter pattern's relationship to a recursive-descent parser, and how does each grammar rule mapping to its own "Expression" class embody the pattern's structure directly?**
+
+A recursive-descent parser is a very common, concrete implementation technique for building an Abstract Syntax Tree from a grammar — the Interpreter pattern's structure maps onto it almost directly: each grammar production rule (a "number," an "addition expression," a "multiplication expression") becomes its own class implementing a shared `Expression` interface with an `Interpret()` (or `Evaluate()`) method, and parsing recursively constructs a tree of these expression objects that can then be evaluated by recursively calling `Interpret()` down through the tree.
+
+```csharp
+public interface IExpression { int Interpret(); }
+
+public class NumberExpression : IExpression // ONE grammar RULE -- a literal NUMBER
+{
+    private readonly int _value;
+    public NumberExpression(int value) { _value = value; }
+    public int Interpret() => _value;
+}
+
+public class AddExpression : IExpression // ANOTHER grammar RULE -- an ADDITION
+{
+    private readonly IExpression _left, _right;
+    public AddExpression(IExpression left, IExpression right) { _left = left; _right = right; }
+    public int Interpret() => _left.Interpret() + _right.Interpret(); // RECURSIVELY interprets its OWN children
+}
+
+// Parsing "3 + 4" produces: new AddExpression(new NumberExpression(3), new NumberExpression(4))
+var expr = new AddExpression(new NumberExpression(3), new NumberExpression(4));
+Console.WriteLine(expr.Interpret()); // 7
+```
+
+Because each grammar rule corresponds to exactly one Expression class, and a recursive-descent parser naturally builds up a tree of these objects by recursively matching the grammar's own nested structure, the Interpreter pattern isn't merely *analogous* to this parsing technique — it's essentially the object-oriented vocabulary for describing precisely what a recursive-descent parser's output (an Abstract Syntax Tree of typed nodes, each knowing how to evaluate itself) actually is.
+
+**Common Pitfall:** treating the Interpreter pattern as a purely academic, rarely-applicable GoF pattern (as the earlier coverage noted regarding how rarely it's hand-implemented in typical application code) without recognizing that its underlying structure is exactly what's already happening, likely without anyone calling it "the Interpreter pattern" explicitly, inside any regex engine, expression evaluator, or hand-written recursive-descent parser a codebase might already contain.
+
+---
