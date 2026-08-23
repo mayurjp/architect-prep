@@ -1670,4 +1670,94 @@ Because the negotiation process walks the client's stated preferences in descend
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What do `[Consumes]`/`[Produces]` do when applied at the controller level rather than per-action, and how does this let every action in that controller share the same content-type expectations by default?**
+
+Applying `[Consumes]`/`[Produces]` directly on the controller class (rather than repeating it on every individual action) sets a default content-type expectation for *every* action within that controller — an individual action can still override it with its own `[Consumes]`/`[Produces]` if it genuinely needs different behavior, but otherwise inherits the controller-level default automatically.
+
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+[Produces("application/json")] // EVERY action in THIS controller defaults to producing JSON
+public class ProductsController : ControllerBase
+{
+    [HttpGet] public IActionResult GetAll() => Ok(products); // inherits "application/json" AUTOMATICALLY
+
+    [HttpGet("{id}/export")]
+    [Produces("text/csv")] // OVERRIDES the controller-level default for THIS one specific action
+    public IActionResult ExportCsv(int id) => Ok(csvData);
+}
+```
+
+Because most controllers have a consistent content-type convention across nearly all their actions (a JSON-only API, for instance), setting it once at the controller level avoids repeating the same attribute on every single action — while still preserving the ability for one specific action with genuinely different needs (exporting CSV, for instance) to override it locally.
+
+**Common Pitfall:** repeating an identical `[Produces("application/json")]` attribute on every single action within a controller where all of them share the same convention — this is exactly the kind of repeated boilerplate a single controller-level attribute eliminates, with individual actions only needing their own attribute when they genuinely deviate from that shared default.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is Web API's automatic `400 Bad Request` wrapping of `ModelState` errors into a `ValidationProblemDetails` response, and how does its structured `errors` dictionary differ from a generic `ProblemDetails` response (covered earlier)?**
+
+`[ApiController]`'s automatic model-state validation (covered earlier) doesn't just return a bare `400` — it wraps the validation failures into `ValidationProblemDetails`, a specialized extension of the general `ProblemDetails` shape (covered earlier) that adds a structured `errors` dictionary mapping each invalid *field name* to its own list of specific validation-error messages, letting a client precisely associate each error with the exact field that caused it.
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+  "title": "One or more validation errors occurred.",
+  "status": 400,
+  "errors": {
+    "Email": ["The Email field is required."],
+    "Age": ["The Age field must be between 0 and 120."]
+  }
+}
+```
+
+```text
+Generic ProblemDetails (covered earlier): a SINGLE "detail" STRING describing ONE overall
+  problem -- NO structured, PER-FIELD breakdown
+
+ValidationProblemDetails: EXTENDS ProblemDetails with an "errors" DICTIONARY -- KEYED by
+  the SPECIFIC field name, EACH mapping to its OWN list of SPECIFIC error MESSAGES -- lets
+  a CLIENT (a FORM, a UI) display EACH error DIRECTLY next to the FIELD that CAUSED it
+```
+
+Because a UI form typically wants to display a specific validation message directly beneath the specific field that failed (rather than one generic error message for the whole submission), `ValidationProblemDetails`'s structured, per-field `errors` dictionary is precisely the shape a client-side form needs to map each server-side validation failure back to its corresponding UI field automatically.
+
+**Common Pitfall:** manually constructing a custom error response shape for validation failures rather than relying on `[ApiController]`'s automatic `ValidationProblemDetails` generation — this reinvents a standardized shape the framework already provides consistently across every action, and risks producing an inconsistent error format across different endpoints if each one hand-rolls its own validation-error response independently.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is a Minimal API Endpoint Filter Factory (`AddEndpointFilterFactory`), and how does it let a filter inspect an endpoint's own metadata/parameters once, at startup, to decide how it should behave for each specific endpoint — rather than re-inspecting on every single request?**
+
+An ordinary `IEndpointFilter` (covered earlier) runs its logic fresh on every single request — a Filter *Factory* instead runs once, at application startup, for each endpoint it's applied to, inspecting that endpoint's specific parameter types/metadata *once*, and returning a filter delegate already specialized for that specific endpoint — avoiding repeated, per-request reflection/inspection work that would otherwise happen on every single call.
+
+```csharp
+app.MapPost("/orders", CreateOrder)
+   .AddEndpointFilterFactory((factoryContext, next) =>
+   {
+       // this INSPECTION runs ONCE, at STARTUP, for THIS specific endpoint --
+       var hasIdempotencyKeyParam = factoryContext.MethodInfo.GetParameters()
+           .Any(p => p.Name == "idempotencyKey");
+
+       if (!hasIdempotencyKeyParam) return next; // this ENDPOINT doesn't NEED the filter's logic at ALL --
+                                                    // skip WRAPPING it ENTIRELY, ZERO per-request OVERHEAD
+
+       return async invocationContext => // a FILTER DELEGATE, ALREADY SPECIALIZED for THIS endpoint
+       {
+           // idempotency-key-specific logic HERE, runs on EVERY request TO this SPECIFIC endpoint
+           return await next(invocationContext);
+       };
+   });
+```
+
+Because the expensive, one-time inspection (checking an endpoint's parameter list, metadata) happens exactly once at startup rather than being repeated on every incoming request, a Filter Factory is meaningfully more efficient than an ordinary filter that would need to perform equivalent per-request checks — genuinely useful when a filter's behavior needs to vary based on characteristics of the specific endpoint it's applied to, determined once rather than re-derived on every call.
+
+**Common Pitfall:** implementing an ordinary `IEndpointFilter` that performs reflection-based inspection of the current request/endpoint on *every* invocation, when that inspection's result would actually be identical for every request to that same endpoint — an Endpoint Filter Factory lets this one-time-per-endpoint work happen exactly once, at startup, rather than repeatedly, redundantly, on every single request.
+
+---
+
 ---

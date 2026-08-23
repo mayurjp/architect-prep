@@ -1496,3 +1496,84 @@ Because both a per-stream and a connection-wide window exist simultaneously, HTT
 **Common Pitfall:** assuming HTTP/2's stream multiplexing (covered earlier) alone is sufficient to guarantee fair, balanced resource usage across streams — without Flow Control's window-based back-pressure mechanism, one stream sending data far faster than its receiver can process it could still overwhelm the shared connection, degrading every other multiplexed stream's effective throughput; Flow Control is what actually enforces fairness and prevents this specific failure mode.
 
 ---
+
+## Beginner — Question 19
+
+**Q19: What are the two valid formats for the `Retry-After` header (a number of seconds, or an HTTP-date), and how must a client correctly handle both possible forms when parsing it?**
+
+`Retry-After` can be expressed either as a plain integer representing a number of seconds to wait, or as a full HTTP-date specifying the exact date/time to retry after — a client parsing this header must check which form it actually received (a numeric string versus a formatted date string) and handle each correctly, rather than assuming only one format will ever appear.
+
+```http
+HTTP/1.1 503 Service Unavailable
+Retry-After: 120
+```
+```http
+HTTP/1.1 503 Service Unavailable
+Retry-After: Wed, 21 Oct 2026 07:28:00 GMT
+```
+
+```csharp
+if (int.TryParse(retryAfterValue, out int seconds))
+{
+    // it was the NUMERIC-seconds form -- wait THIS MANY seconds from NOW
+}
+else if (DateTimeOffset.TryParse(retryAfterValue, out var retryDate))
+{
+    // it was the HTTP-DATE form -- wait UNTIL this SPECIFIC date/time
+}
+```
+
+Because the specification explicitly permits either format, a client that only handles one (assuming it's always a plain number, for instance) will fail to correctly parse a response using the other form — a robust client-side implementation must check for and correctly handle both possibilities rather than assuming a single, fixed format.
+
+**Common Pitfall:** writing client code that only parses `Retry-After` as a plain integer, without also handling the HTTP-date form — a server legitimately using the date format (perhaps to communicate a specific, absolute retry time rather than a relative duration) would cause this client code to fail silently or throw, simply because it never anticipated the header's other valid format.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is the `If-Match: *` (a wildcard, rather than a specific ETag) conditional request, and how does it let a client express "only proceed if this resource exists at all," regardless of its current ETag value?**
+
+Rather than checking against one specific, known ETag value (covered earlier for optimistic concurrency), `If-Match: *` matches *any* existing representation of the resource — it succeeds as long as the resource exists in some form at all, and fails only if the resource doesn't exist — a different, simpler check than "does this exact version still match," useful for expressing "update this if it's still there" without caring about its specific current state.
+
+```http
+PUT /api/products/5 HTTP/1.1
+If-Match: *
+```
+```text
+IF the resource EXISTS (in ANY current state/version): the request PROCEEDS normally --
+  If-Match: * doesn't CARE what the SPECIFIC current ETag IS, only that the RESOURCE itself
+  is PRESENT at all
+
+IF the resource does NOT exist: the request FAILS with 412 Precondition Failed -- EVEN
+  though there's NO SPECIFIC ETag to COMPARE against, the WILDCARD still REQUIRES the
+  resource to EXIST for the PRECONDITION to be SATISFIED
+```
+
+Because this wildcard form checks existence rather than a specific version match, it's useful for a different concurrency concern than the version-specific `If-Match: "abc123"` (covered earlier) — expressing "I want to update this resource, but only if it's genuinely still there (hasn't been deleted by someone else)," without caring about intervening modifications to its content.
+
+**Common Pitfall:** confusing `If-Match: *` with `If-Match: "specific-etag"` as though they served the identical purpose — the wildcard form only guards against the resource having been *deleted*, providing no protection against a *concurrent modification* (a lost update) the way a specific ETag value would; using the wildcard when genuine version-conflict detection is actually needed leaves that concurrency risk unaddressed.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is TLS 1.3's "Early Data" (0-RTT), and what specific replay-attack risk does sending application data before the TLS handshake fully completes introduce for non-idempotent requests?**
+
+TLS 1.3's 0-RTT mode lets a client that has previously connected to a server send *application data* (an HTTP request) immediately, in its very first flight of packets, before the full handshake has completed — reducing connection setup latency, but at a real security cost: this "early data" has no built-in protection against replay, meaning an attacker who captures and resends the same early-data packet could cause the server to process the exact same request a second time.
+
+```text
+ORDINARY TLS 1.3 handshake: client and SERVER exchange handshake MESSAGES FIRST -- ONLY
+  AFTER the handshake COMPLETES does the CLIENT send its ACTUAL HTTP request -- NO
+  possibility of a CAPTURED, RESENT handshake message causing DUPLICATE application-level effects
+
+0-RTT (Early Data): the CLIENT sends its HTTP request IMMEDIATELY, BEFORE the handshake
+  has EVEN fully completed -- an ATTACKER who CAPTURES this EARLY packet can RESEND it --
+  the SERVER has NO built-in way to detect this is a REPLAY, and might PROCESS the SAME
+  request TWICE -- for a NON-idempotent request (a PAYMENT charge), this is a GENUINE RISK
+```
+
+Because 0-RTT data is specifically vulnerable to replay in a way ordinary, fully-handshaked TLS traffic isn't, a server accepting early data must explicitly guard non-idempotent operations against it — commonly by simply refusing to process genuinely state-changing requests (payments, account modifications) if they arrive as early data at all, reserving the latency benefit specifically for safe, idempotent requests (a GET) where processing the same request twice causes no harm.
+
+**Common Pitfall:** enabling TLS 1.3's 0-RTT/Early Data broadly across an entire application without restricting which kinds of requests are allowed to use it — accepting early data for a genuinely non-idempotent operation (a payment, an account state change) reopens a real replay-attack vector that ordinary, fully-handshaked TLS traffic doesn't have; 0-RTT's latency benefit should be reserved specifically for requests where processing the same request twice is provably harmless.
+
+---

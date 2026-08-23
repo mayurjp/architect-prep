@@ -1669,4 +1669,88 @@ Because this adapter bridges the gap between a server-side-only custom validatio
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is the difference between a Controller Action's "action name" and its C# method name, and how does `[ActionName]` let a method be routed under a different name than what it's actually called in code?**
+
+By default, MVC's routing uses a method's actual C# name as its action name — `[ActionName]` overrides this, letting the *route* refer to the action by a different name than the method's own identifier, useful when a method's C# name (perhaps constrained by needing a unique overload signature) doesn't match the URL segment you actually want to expose.
+
+```csharp
+[HttpPost]
+[ActionName("Delete")] // the ROUTE uses "Delete" -- even though the C# METHOD is named differently
+public IActionResult DeleteConfirmed(int id) // C# needs a DIFFERENT name here to avoid an OVERLOAD CLASH
+                                               // with a GET "Delete(int id)" action showing a confirmation page
+{
+    // ... actually performs the deletion ...
+}
+```
+
+```text
+WITHOUT [ActionName]: the ROUTE would be "DeleteConfirmed" -- NOT the "Delete" URL a
+  CONFIRMATION-page's own submitted FORM is actually POSTING TO
+
+WITH [ActionName("Delete")]: the C# method can be named WHATEVER avoids a NAMING CONFLICT
+  (here, avoiding TWO methods both named "Delete" with DIFFERENT HTTP verbs but the SAME
+  parameter LIST) -- while the ROUTE itself STILL correctly responds to "/Products/Delete"
+```
+
+Because C# doesn't allow two methods with identical signatures even if they'd be routed differently by HTTP verb, `[ActionName]` provides an escape hatch letting the C# method have whatever name avoids the language-level conflict, while still exposing the intended, conventional route name externally.
+
+**Common Pitfall:** renaming a C# action method for internal clarity without realizing its route name changes along with it (since the route name defaults to the method name) — this can silently break any existing links, form action URLs, or bookmarks pointing at the old route name; `[ActionName]` lets the method be renamed internally while explicitly preserving its external, routed name.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: How does generating a redirect via `RedirectToAction`/`RedirectToRoute` based on route values, rather than a hardcoded URL string, keep the redirect correct even if the target action's route template changes later?**
+
+`RedirectToAction("Details", new { id = 5 })` asks the routing system to *generate* the correct URL from the current route configuration, rather than the developer hand-constructing a literal string like `"/Products/Details/5"` — if the route template for that action later changes (a URL restructuring, adding an area prefix), every `RedirectToAction` call referencing it automatically produces the updated, correct URL without needing to be manually edited.
+
+```csharp
+// GENERATED from route configuration -- automatically stays CORRECT if the route TEMPLATE changes
+return RedirectToAction("Details", "Products", new { id = 5 });
+
+// HARDCODED string -- SILENTLY becomes WRONG the moment the underlying route template changes
+return Redirect("/Products/Details/5");
+```
+
+```text
+Route template CHANGES from "/Products/Details/{id}" to "/catalog/products/{id}" (a URL
+  RESTRUCTURING) -- RedirectToAction("Details", "Products", new { id = 5 }) AUTOMATICALLY
+  produces "/catalog/products/5" -- NO code CHANGE needed, ANYWHERE it's CALLED
+
+The HARDCODED Redirect("/Products/Details/5") call STILL produces the OLD, now-INCORRECT URL,
+  SILENTLY, until SOMEONE remembers to manually FIND and UPDATE every SUCH hardcoded string
+```
+
+Because route-value-based redirect generation defers to the *current*, live routing configuration rather than baking in a specific URL string at the point the redirect code was written, it decouples "where does this redirect actually go" from "what does the current URL structure happen to be" — directly analogous to `IUrlHelper`/`Url.Action()` (covered earlier) providing this same benefit for ordinary link generation.
+
+**Common Pitfall:** hardcoding literal URL strings in `Redirect()` calls throughout a codebase rather than using `RedirectToAction`/`RedirectToRoute` — every hardcoded string becomes a silent liability the moment any referenced route's template changes, requiring a manual, error-prone search-and-replace across the entire codebase rather than the URLs simply regenerating correctly on their own.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is a custom `IObjectModelValidator`, and when would you replace the framework's entire validation pipeline rather than just adding to it via Data Annotations/FluentValidation (covered earlier)?**
+
+`IObjectModelValidator` is the top-level abstraction MVC uses to validate an entire bound model — Data Annotations and FluentValidation (covered earlier) both plug *into* this existing pipeline as validation sources it consults, but replacing `IObjectModelValidator` itself means substituting the *entire* validation orchestration mechanism, appropriate only for a genuinely unusual scenario (a completely custom validation framework that doesn't fit the standard "attributes/rules attached to a model" paradigm MVC's default pipeline assumes).
+
+```csharp
+public class CustomObjectModelValidator : IObjectModelValidator
+{
+    public void Validate(ActionContext actionContext, ValidationStateDictionary? validationState,
+        string prefix, object? model)
+    {
+        // COMPLETELY custom validation orchestration -- NOT relying on Data Annotations OR
+        // FluentValidation's USUAL integration points AT ALL -- a GENUINELY unusual scenario
+    }
+}
+```
+
+Because most validation needs are entirely satisfied by extending the *existing* pipeline (adding Data Annotations attributes, registering FluentValidation validators, adding a custom `IModelValidator` for a specific scenario) rather than replacing the whole orchestration mechanism, implementing a custom `IObjectModelValidator` is a rare, advanced escape hatch — reserved for scenarios where the validation model itself is fundamentally incompatible with the assumptions MVC's default pipeline makes, not a typical customization point.
+
+**Common Pitfall:** implementing a custom `IObjectModelValidator` to solve a validation need that could have been satisfied by simply adding a custom `ValidationAttribute` or FluentValidation rule to the *existing* pipeline — replacing the entire validation orchestration is a significant undertaking that loses the benefit of the framework's already-battle-tested default behavior, and should be reserved for genuinely exceptional cases where extending the existing pipeline truly isn't sufficient.
+
+---
+
 ---

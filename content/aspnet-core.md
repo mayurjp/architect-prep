@@ -1749,4 +1749,86 @@ Because `ConfigureKestrel`'s code-level API exposes far richer, per-endpoint con
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is a route template's optional parameter (`{id?}`) and default value (`{page=1}`) syntax, and how do they let a single route handle a request with or without that specific segment present?**
+
+`{id?}` marks a route segment as optional — a request URL that omits it still matches the route, with the parameter simply receiving its type's default (or `null` for a nullable type) — `{page=1}` instead supplies a specific default value used whenever that segment is omitted, rather than leaving it as the type's generic default.
+
+```csharp
+app.MapGet("/products/{id?}", (int? id) =>
+{
+    return id.HasValue ? Results.Ok($"Product {id}") : Results.Ok("All products");
+});
+// GET /products    -> matches, 'id' is null
+// GET /products/5  -> matches, 'id' is 5
+
+app.MapGet("/search/{page=1}", (int page) => Results.Ok($"Page {page}"));
+// GET /search      -> matches, 'page' defaults to 1 (the EXPLICIT default, not just int's default of 0)
+// GET /search/3    -> matches, 'page' is 3
+```
+
+Because both variants let the *same* route template handle a request whether or not a specific segment is actually present, they avoid needing to register two entirely separate routes (one with the segment, one without) purely to support an optional piece of URL structure — a small but genuinely useful routing convenience for endpoints where a parameter is either genuinely optional or has a sensible, well-known default.
+
+**Common Pitfall:** confusing `{id?}` (optional, defaults to the type's own default/null) with `{page=1}` (always has a specific, explicit default value) — an optional parameter without an explicit default can surprise code expecting a specific fallback value (like `0` or `1`) if the type's actual default (`null` for a nullable, `0` for a plain `int`) isn't what the code actually wants when the segment is omitted.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is the convention of wrapping `app.UseMiddleware<T>()` inside a named extension method (the `app.UseMyMiddleware()` pattern), and how does this make a middleware's registration self-documenting and consistent with the framework's own built-in `app.Use*()` conventions?**
+
+Every built-in ASP.NET Core middleware (`UseRouting()`, `UseAuthentication()`, `UseStaticFiles()`) is actually a thin extension method wrapping a call to `UseMiddleware<T>()` (or an equivalent lower-level registration) internally — following this same convention for a custom middleware means its registration reads identically to the framework's own built-ins, rather than exposing the more generic, less self-documenting `UseMiddleware<CustomMiddleware>()` call directly in `Program.cs`.
+
+```csharp
+// WITHOUT the convention -- generic, requires the reader to KNOW what "RequestTimingMiddleware" does
+app.UseMiddleware<RequestTimingMiddleware>();
+
+// WITH the convention -- a NAMED extension method, matching the FRAMEWORK's OWN style
+public static class RequestTimingMiddlewareExtensions
+{
+    public static IApplicationBuilder UseRequestTiming(this IApplicationBuilder app)
+        => app.UseMiddleware<RequestTimingMiddleware>();
+}
+
+app.UseRequestTiming(); // reads IDENTICALLY to app.UseRouting(), app.UseAuthentication(), etc.
+```
+
+Because `Program.cs`'s middleware registration section becomes a readable, ordered list of `app.UseXyz()` calls when every custom middleware follows this same extension-method convention, a developer scanning the pipeline configuration can understand what's registered without needing to separately look up what each raw `UseMiddleware<T>()` call actually does — a small stylistic convention that meaningfully improves `Program.cs`'s own readability at scale.
+
+**Common Pitfall:** registering custom middleware via the generic `app.UseMiddleware<T>()` call directly in `Program.cs`, rather than wrapping it in a named extension method — this works identically at runtime, but makes the middleware pipeline's registration section noticeably less self-documenting than one where every registration follows the same, consistent `app.UseXyz()` naming convention the framework's own built-ins use.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is `IHostLifetime` (as distinct from `IHostedService`, covered earlier), and how does it govern the outermost layer of the host's own startup/shutdown signaling — beneath which `IHostedService` instances themselves start and stop?**
+
+`IHostedService` (covered earlier) represents application-level background work started and stopped as part of the host's lifecycle — `IHostLifetime` sits one layer beneath that, controlling how the host itself integrates with its *surrounding* environment's own start/stop signaling (a Windows Service Control Manager, a systemd unit, or simply the console's Ctrl+C handling) — it's what actually decides when the host considers itself "started" or receives an external stop signal in the first place.
+
+```csharp
+var builder = Host.CreateApplicationBuilder(args);
+// Under the hood, ".UseWindowsService()" or ".UseSystemd()" swaps in a DIFFERENT IHostLifetime
+// implementation -- one that KNOWS how to correctly respond to THAT SPECIFIC environment's
+// OWN start/stop signaling conventions, rather than the DEFAULT ConsoleLifetime
+builder.Services.AddSystemd(); // registers a systemd-AWARE IHostLifetime implementation
+```
+
+```text
+ConsoleLifetime (the DEFAULT): listens for Ctrl+C / SIGTERM directly, as an ORDINARY console process
+
+WindowsServiceLifetime: integrates with the WINDOWS Service Control Manager's OWN start/stop
+  PROTOCOL -- REPORTS status BACK to the SCM correctly (e.g. "SERVICE_START_PENDING", then
+  "SERVICE_RUNNING") -- something a PLAIN ConsoleLifetime has NO KNOWLEDGE of AT ALL
+
+SystemdLifetime: integrates with systemd's OWN service-readiness NOTIFICATION protocol
+  (sd_notify) -- tells systemd "I am NOW ready" at the CORRECT moment, in the FORMAT systemd expects
+```
+
+Because different deployment environments (a Windows Service, a systemd-managed Linux service, a plain interactive console) each have their own distinct conventions for signaling "I've started" or "please stop," `IHostLifetime` is the abstraction point letting the *same* application code (and its registered `IHostedService`s) run correctly under any of these environments, simply by swapping which `IHostLifetime` implementation is registered — `IHostedService.StartAsync`/`StopAsync` themselves are invoked in relation to whatever `IHostLifetime` decides the actual start/stop timing should be.
+
+**Common Pitfall:** deploying an application as a Windows Service or systemd unit without registering the corresponding `UseWindowsService()`/`UseSystemd()` call — without the environment-appropriate `IHostLifetime`, the application may not correctly report its status back to the surrounding service manager (appearing to hang in a "starting" state, or not shutting down cleanly when the service manager requests it), even though the application's own `IHostedService` logic is completely correct.
+
+---
+
 ---

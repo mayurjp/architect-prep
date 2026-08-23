@@ -2442,3 +2442,99 @@ Because a webhook receiver is, functionally, a public HTTP endpoint accepting *i
 **Common Pitfall:** implementing a webhook receiver endpoint that trusts any incoming request's payload without verifying a signature or shared secret at all — since the endpoint is, by necessity, publicly reachable (the whole point of a webhook is that the external API can reach it), failing to verify authenticity means anyone who discovers the URL can send arbitrary, forged "events" that the receiving application will act on as if they were genuine.
 
 ---
+
+## Beginner — Question 20
+
+**Q20: What is a resource's Canonical URL convention, as distinct from a "self" link (covered earlier), and how does it tell a crawler or cache which URL is the authoritative one when the same resource is reachable via multiple different paths?**
+
+When the same underlying resource is reachable via more than one URL (a product accessible both via `/products/5` and `/categories/electronics/products/5`), a canonical link explicitly declares which one is the "real," authoritative URL — telling crawlers and caches to treat all the other equivalent URLs as pointing at that same canonical one, rather than treating them as separate, independent resources.
+
+```http
+GET /categories/electronics/products/5 HTTP/1.1
+```
+```http
+HTTP/1.1 200 OK
+Link: </products/5>; rel="canonical"
+```
+
+```text
+BOTH "/products/5" AND "/categories/electronics/products/5" return the SAME underlying data --
+  WITHOUT a canonical link, a CRAWLER/cache might treat THEM as TWO SEPARATE resources
+  (wasting crawl budget, or CACHING two REDUNDANT copies of the SAME thing)
+
+WITH the canonical link: crawlers/caches KNOW "/products/5" is the ONE, AUTHORITATIVE URL --
+  ANY OTHER path reaching the SAME resource is treated as an ALIAS, NOT a SEPARATE entity
+```
+
+Because a resource legitimately reachable through multiple URL paths (nested under different parent resources, or accessible via multiple valid query patterns) would otherwise appear to search engines or caches as several distinct, duplicate resources, the canonical link resolves this ambiguity explicitly — directly borrowed from the same `<link rel="canonical">` convention used in HTML/SEO, applied here at the HTTP header level for an API response.
+
+**Common Pitfall:** exposing the same resource under multiple URL paths without declaring a canonical one — this can cause a cache to store redundant copies of identical data under different keys, and can confuse any tooling (analytics, crawlers) that assumes each distinct URL represents a genuinely distinct resource.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is Overposting Protection via a read-only DTO field — a REST-API-level companion to the Mass Assignment vulnerability covered under App Security — and how does a DTO explicitly omitting a field from its write shape provide defense-in-depth beyond careful binding code alone?**
+
+Rather than relying purely on careful, manually-written binding logic to avoid Mass Assignment (covered under App Security), a *write* DTO can structurally omit any field a client should never be able to set (an `IsAdmin` flag, an internal `CreatedAt` timestamp) — meaning even if binding logic elsewhere is written carelessly, there's simply no property on the DTO's own type for a malicious extra field in the request body to bind onto at all.
+
+```csharp
+// WRITE DTO -- structurally has NO "IsAdmin" property AT ALL -- a client CANNOT set it,
+// REGARDLESS of how CAREFULLY (or CARELESSLY) the binding code that CONSUMES this DTO is written
+public record CreateUserRequest(string Email, string Password);
+
+// READ DTO -- CAN include "IsAdmin", since THIS shape is only ever used for OUTPUT, never BINDING
+public record UserResponse(int Id, string Email, bool IsAdmin);
+```
+
+```text
+An ATTACKER's request body: { "email": "a@b.com", "password": "x", "isAdmin": true }
+
+Binding AGAINST "CreateUserRequest": the "isAdmin" FIELD in the REQUEST BODY has NO
+  MATCHING property on the DTO AT ALL -- it's SIMPLY IGNORED, STRUCTURALLY, REGARDLESS
+  of WHAT the binding code itself DOES -- NO possibility of it ever being HONORED
+```
+
+Because the DTO's own type definition is the actual, structural boundary (rather than relying purely on careful runtime logic to filter out unwanted fields), this provides a genuine defense-in-depth layer: even a future, careless code change elsewhere can't accidentally reopen the Mass Assignment vulnerability, since the sensitive field simply has nowhere to bind to on the write-side DTO's own shape.
+
+**Common Pitfall:** using a single, shared DTO type for both reading and writing a resource, containing every field (including sensitive ones like `IsAdmin`) — even careful, manually-written binding code can be inadvertently changed later to include a field that should have stayed write-protected; separate read and write DTOs (with the write DTO structurally omitting sensitive fields) close this gap at the type level, not just through runtime discipline.
+
+---
+
+## Advanced — Question 20
+
+**Q20: For a multi-step, long-running operation, how should an Idempotency-Key's TTL be designed, and what should happen if a retry arrives while the original request is still in progress?**
+
+Unlike a fast, synchronous operation (covered earlier), a long-running operation's idempotency key must be remembered for at least as long as the operation itself might reasonably take to complete, plus a buffer — and critically, a retry arriving *while* the original request is still actively being processed needs to be handled distinctly from a retry arriving *after* it has already finished, typically by returning a "still processing" response rather than either re-executing the operation or waiting indefinitely.
+
+```csharp
+[HttpPost("reports")]
+public async Task<IActionResult> GenerateReport(string idempotencyKey, ReportRequest request)
+{
+    var existing = await _idempotencyStore.GetAsync(idempotencyKey);
+    if (existing is { Status: "InProgress" })
+        return Accepted(new { message = "Already processing, check back later" }); // NEITHER re-executes NOR blocks
+    if (existing is { Status: "Completed" })
+        return Ok(existing.Result); // returns the ALREADY-COMPUTED result, WITHOUT recomputing it AGAIN
+
+    await _idempotencyStore.MarkInProgressAsync(idempotencyKey);
+    var result = await GenerateReportInternalAsync(request); // the ACTUAL, potentially SLOW operation
+    await _idempotencyStore.MarkCompletedAsync(idempotencyKey, result);
+    return Ok(result);
+}
+```
+
+```text
+Retry arrives WHILE the ORIGINAL request is STILL in progress: the SERVER recognizes an
+  "InProgress" status for THIS key, and returns a RESPONSE indicating "still WORKING on it" --
+  NEITHER starting a REDUNDANT second execution NOR making the RETRYING client WAIT indefinitely
+
+Retry arrives AFTER the original has ALREADY completed: the SERVER returns the ALREADY-
+  COMPUTED result DIRECTLY, from the idempotency STORE -- WITHOUT recomputing anything
+```
+
+Because a long-running operation genuinely takes meaningful time, the idempotency key's tracked state needs an explicit "in progress" status distinct from "not yet started" and "completed" — a retry landing in the middle of that window needs its own handling path (report status, don't re-execute, don't block), which a simple "have we seen this key before" boolean check (adequate for a fast, synchronous operation) doesn't account for.
+
+**Common Pitfall:** designing idempotency-key tracking only with a simple binary "seen it or not" flag, adequate for fast operations but insufficient for genuinely long-running ones — a retry arriving mid-flight needs to be recognized as a distinct state ("already in progress, not yet done") rather than either triggering a second, redundant execution or being treated identically to a retry arriving after completion.
+
+---
