@@ -2630,3 +2630,83 @@ Because the presence or absence of the `cancel` link is computed by the server u
 **Common Pitfall:** having a client independently hardcode its own copy of the business rule governing which states permit cancellation (checking `order.status === "Pending" || order.status === "Processing"` directly in client code), rather than simply checking for the presence of a `cancel` link in the response — this duplicates business logic across the client and server, and the two copies can silently drift out of sync if the server's actual rule changes without the client being updated to match.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: Why does a `PATCH` request's response body conventionally return the full, updated resource — rather than just the changed fields — and how does this help a client stay in sync with server-side computed fields a partial update might have also affected?**
+
+A `PATCH` request itself only sends the *fields being changed* — but the server's response typically returns the *entire*, current resource, since applying that partial change might have triggered other, server-computed side effects (a recalculated `Total`, an updated `LastModified` timestamp) the client sending the `PATCH` had no way to independently know about; returning the full resource lets the client immediately see the complete, current, authoritative state after the update.
+
+```http
+PATCH /api/orders/5 HTTP/1.1
+Content-Type: application/json-patch+json
+
+{ "quantity": 3 }
+```
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{ "id": 5, "quantity": 3, "unitPrice": 29.99, "total": 89.97, "lastModified": "2026-08-23T10:00:00Z" }
+```
+
+```text
+The CLIENT only SENT "quantity: 3" -- but the RESPONSE ALSO reflects "total" (RECALCULATED,
+  SERVER-side, from quantity * unitPrice) and "lastModified" (UPDATED AUTOMATICALLY) --
+  NEITHER of which the CLIENT'S own PATCH request DIRECTLY specified -- returning the FULL
+  resource lets the CLIENT immediately SEE these SERVER-computed SIDE EFFECTS, WITHOUT
+  needing a SEPARATE follow-up GET request JUST to LEARN what ACTUALLY changed
+```
+
+Because a partial update can trigger server-side computed changes beyond just the fields explicitly sent, returning the complete, current resource state avoids the client needing to guess at (or separately re-fetch) what else might have changed as a consequence — a client wanting to update its own local cache/UI state has everything it needs directly in the `PATCH` response itself.
+
+**Common Pitfall:** having a `PATCH` endpoint return only a bare success status (or an empty body) rather than the full, updated resource — this forces the client to issue a separate follow-up `GET` request just to learn the resource's actual current state, including any server-computed fields the `PATCH` itself may have indirectly affected, an avoidable extra round-trip.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does API Gateway-level response caching, as distinct from origin-server caching (covered under HTTP), specifically reduce load on backend services without requiring each backend to implement its own caching logic?**
+
+Ordinary HTTP caching (covered under HTTP) relies on the *origin server itself* setting appropriate `Cache-Control` headers, with intermediate caches respecting them — Gateway-level caching instead lets the API Gateway itself cache responses based on centrally-configured policy, entirely independent of whether the specific backend service behind it implements any caching logic of its own at all.
+
+```text
+Origin-server caching (covered under HTTP): EACH backend SERVICE must ITSELF set
+  APPROPRIATE Cache-Control headers -- CACHING behavior is DECIDED, and IMPLEMENTED,
+  PER-SERVICE, INDIVIDUALLY
+
+Gateway-level caching: the GATEWAY itself is CONFIGURED (centrally, ONCE) to CACHE
+  responses for SPECIFIC routes/endpoints -- the BACKEND service BEHIND it needs NO
+  caching-specific code AT ALL -- the GATEWAY intercepts REPEATED requests and serves
+  them DIRECTLY from ITS OWN cache, WITHOUT even FORWARDING them to the BACKEND
+```
+
+Because the Gateway sits in front of every request regardless of which specific backend ultimately handles it, centralizing caching policy there means individual backend services never need to implement their own caching logic just to benefit from reduced load — a genuinely useful separation of concerns, letting backend teams focus purely on business logic while the Gateway (owned by a separate, infrastructure-focused team) handles the caching concern uniformly across every service behind it.
+
+**Common Pitfall:** requiring every individual backend microservice to implement its own response-caching logic, when a shared API Gateway sitting in front of all of them could apply the same caching policy centrally, once — this duplicates caching implementation effort across many services and risks inconsistent caching behavior between them, when a single, centrally-configured Gateway policy would apply uniformly.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is Consumer-Driven API Design, as distinct from Consumer-Driven Contract Testing (covered earlier), and how does designing an endpoint's actual shape around what consuming clients genuinely need sometimes justify a deliberate deviation from strict REST purity?**
+
+Consumer-Driven Contract Testing (covered earlier) verifies an *already-designed* API against consumer expectations — Consumer-Driven API Design instead applies at the earlier, actual design stage: shaping an endpoint's response structure, granularity, or even its verb/URL conventions based on what the *actual, known consuming clients* genuinely need, rather than purely following an idealized, textbook resource-per-endpoint REST model that might force those clients into unnecessary extra round-trips or awkward client-side data assembly.
+
+```text
+STRICT, textbook REST purity: "GET /orders/5" returns JUST the order -- the CLIENT needing
+  the order PLUS its customer PLUS its line items must make THREE SEPARATE requests,
+  PURELY to STAY faithful to "one endpoint PER resource"
+
+Consumer-Driven API design: the TEAM KNOWS the PRIMARY consuming CLIENT (a SPECIFIC mobile
+  app) ALWAYS needs order+customer+lineItems TOGETHER, in ONE screen -- the ENDPOINT is
+  DELIBERATELY designed to RETURN all THREE together (via "?include=", covered EARLIER,
+  or simply as the ENDPOINT's OWN NATIVE shape) -- a DELIBERATE deviation from STRICT
+  one-resource-PER-endpoint PURITY, JUSTIFIED by the ACTUAL, KNOWN consumer's REAL need
+```
+
+Because an API ultimately exists to serve its actual consumers rather than to satisfy an abstract architectural ideal, deliberately shaping an endpoint around known, real consumer needs (even at the cost of strict REST purity) is a legitimate, pragmatic design choice — the same underlying philosophy behind GraphQL's (covered elsewhere) entire approach, and behind the Backend for Frontend pattern (covered under Microservices) tailoring an API specifically to one client's actual needs.
+
+**Common Pitfall:** rigidly adhering to strict, textbook REST resource modeling even when it's well-known that the actual consuming clients need data shaped differently — this forces clients into unnecessary extra round-trips or client-side data assembly purely to satisfy an architectural ideal, when a deliberate, consumer-informed deviation would genuinely serve the API's actual purpose better.
+
+---

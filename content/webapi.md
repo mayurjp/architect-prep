@@ -1851,4 +1851,92 @@ Because Minimal API's filter model uses a simpler delegate signature (return a v
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is the difference between the zero-argument `Ok()` and `Ok(value)` overloads, and how does an action's choice between them communicate whether a successful response carries a body at all?**
+
+`Ok()` (no argument) produces a `200 OK` response with an empty body — `Ok(value)` produces a `200 OK` response whose body contains the serialized `value` — the choice directly reflects whether the specific operation genuinely has meaningful data to return on success, or whether success itself is the only information the caller actually needs.
+
+```csharp
+[HttpPost("mark-as-read")]
+public IActionResult MarkAsRead(int notificationId)
+{
+    _service.MarkAsRead(notificationId);
+    return Ok(); // 200 OK, EMPTY body -- there's NOTHING further the CALLER needs, BEYOND
+                   // "yes, this SUCCEEDED"
+}
+
+[HttpGet("{id}")]
+public IActionResult GetProduct(int id)
+{
+    var product = _repository.Find(id);
+    return Ok(product); // 200 OK, WITH the ACTUAL product data IN the body -- the CALLER
+                           // genuinely NEEDS this data BACK
+}
+```
+
+Because the two overloads correspond to two genuinely different response shapes (empty versus populated body), choosing the appropriate one communicates the operation's actual intent clearly — an operation that's purely an action/command (mark as read, delete) typically has nothing further to return, while a query naturally returns the requested data alongside its success status.
+
+**Common Pitfall:** returning `Ok(new { })`/`Ok("")` (an artificial, empty-but-non-null body) for an action with genuinely nothing to return, rather than simply calling the zero-argument `Ok()` — this produces an unnecessary, meaningless body in the response, when the plain `Ok()` overload already correctly and simply expresses "succeeded, nothing further to say."
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is `[ApiExplorerSettings(IgnoreApi = true)]`, and how does it let a specific controller/action be excluded from Swagger/OpenAPI generation entirely, without removing it from the application's actual routing?**
+
+`[ApiExplorerSettings(IgnoreApi = true)]` tells the API Explorer (covered earlier, the mechanism feeding Swagger/OpenAPI generation) to skip a specific action entirely when building the generated documentation — the action remains fully functional and reachable via its normal route, it simply never appears in the generated Swagger UI/OpenAPI spec, useful for internal, diagnostic, or otherwise not-meant-for-public-documentation endpoints.
+
+```csharp
+[HttpGet("internal/debug-info")]
+[ApiExplorerSettings(IgnoreApi = true)] // STILL fully FUNCTIONAL/reachable -- just EXCLUDED
+public IActionResult GetDebugInfo() => Ok(_diagnostics.GetSnapshot()); // from the GENERATED
+                                                                          // Swagger/OpenAPI documentation
+```
+
+```text
+WITHOUT IgnoreApi: this INTERNAL diagnostic endpoint would APPEAR in the PUBLIC-facing
+  Swagger UI, ALONGSIDE every GENUINE, intended-for-CONSUMERS API endpoint -- CONFUSING,
+  and POTENTIALLY exposing an INTERNAL implementation detail to EXTERNAL API consumers
+
+WITH IgnoreApi: the ENDPOINT remains FULLY functional -- but is COMPLETELY ABSENT from
+  the GENERATED documentation -- external CONSUMERS never even SEE it LISTED at ALL
+```
+
+Because this attribute affects only what appears in *generated documentation*, not the endpoint's actual routing or accessibility, it's specifically useful for internal/diagnostic endpoints that genuinely need to exist and remain reachable but shouldn't clutter or be discoverable through an API's public-facing documentation surface.
+
+**Common Pitfall:** assuming `[ApiExplorerSettings(IgnoreApi = true)]` actually restricts *access* to an endpoint — it only affects documentation visibility; the endpoint remains fully reachable to anyone who knows (or guesses) its route, and genuine access control still requires proper authentication/authorization (covered under App Security/Identity), not merely hiding it from generated docs.
+
+---
+
+## Advanced — Question 21
+
+**Q21: How does mutating `EndpointFilterInvocationContext.Arguments` — replacing an argument's value before calling `next()` — let a Minimal API filter transform or sanitize input without the endpoint delegate itself needing to know the transformation happened?**
+
+An `IEndpointFilter` can directly modify the `Arguments` list before invoking `next()` — since the actual endpoint delegate receives its parameters *from* this same list, a filter replacing an argument's value transparently changes what the endpoint delegate actually sees, without that delegate's own code needing any awareness that a transformation occurred upstream.
+
+```csharp
+app.MapPost("/comments", (string text) => Results.Ok($"Saved: {text}"))
+   .AddEndpointFilter(async (context, next) =>
+   {
+       var originalText = context.GetArgument<string>(0);
+       var sanitized = HtmlSanitizer.Sanitize(originalText); // SANITIZES the RAW input --
+       context.Arguments[0] = sanitized; // REPLACES the argument DIRECTLY, IN PLACE
+       return await next(context); // the ENDPOINT delegate RECEIVES the ALREADY-SANITIZED
+                                     // value -- it has NO IDEA any TRANSFORMATION happened AT ALL
+   });
+```
+
+```text
+The ENDPOINT delegate's OWN code: "(string text) => Results.Ok($"Saved: {text}")" -- NEVER
+  references SANITIZATION at ALL -- it simply RECEIVES whatever value is IN "Arguments[0]"
+  by the TIME "next()" actually INVOKES it -- the FILTER's mutation happened TRANSPARENTLY, UPSTREAM
+```
+
+Because the endpoint delegate's parameters are populated directly from this same `Arguments` list regardless of whether a filter modified an entry beforehand, a filter can implement genuinely transparent, cross-cutting input transformation (sanitization, normalization, default-value substitution) that every endpoint sharing the filter benefits from automatically, with zero endpoint-level code changes needed to opt into the transformation.
+
+**Common Pitfall:** implementing input sanitization/transformation logic redundantly inside every individual endpoint delegate, rather than centralizing it in a shared `IEndpointFilter` that mutates `Arguments` before the delegate ever runs — this duplicates the same transformation logic across every endpoint needing it, exactly the kind of repeated cross-cutting concern a filter is specifically designed to centralize.
+
+---
+
 ---

@@ -1831,4 +1831,94 @@ Because `IApplicationModelProvider` participates in the actual construction phas
 
 ---
 
+## Beginner — Question 20
+
+**Q20: How does `<partial>` (or `Html.Partial()`) let a reusable Partial View accept a different model type than its parent view's own model, letting the same partial be embedded across multiple, otherwise-unrelated parent views?**
+
+A Partial View declares its own `@model` type, independent of whatever model its parent view is using — the parent explicitly passes the specific piece of data the partial actually needs, letting the same reusable partial be embedded inside many different parent views, each with its own, entirely different overall model, as long as each parent supplies the specific data the partial expects.
+
+```html
+<!-- _AddressSummary.cshtml -- a REUSABLE partial, with its OWN, INDEPENDENT model type -->
+@model Address
+<p>@Model.Street, @Model.City @Model.PostalCode</p>
+
+<!-- OrderDetails.cshtml -- the PARENT's OWN model is "Order", NOT "Address" -->
+@model Order
+<partial name="_AddressSummary" model="Model.ShippingAddress" /> <!-- passes JUST the Address PIECE -->
+
+<!-- CustomerProfile.cshtml -- a COMPLETELY DIFFERENT parent, with ITS OWN, UNRELATED model -->
+@model Customer
+<partial name="_AddressSummary" model="Model.HomeAddress" /> <!-- the SAME partial, REUSED here TOO -->
+```
+
+Because the partial's own model type is completely decoupled from whatever the parent view's model happens to be, the exact same partial (and its rendering logic) can be embedded across many otherwise-unrelated views, each supplying just the specific slice of data the partial actually needs — a genuine reuse mechanism avoiding duplicated markup for a commonly-repeated UI fragment (an address block, a product card).
+
+**Common Pitfall:** duplicating the same markup fragment directly inside multiple parent views (copy-pasting an address-formatting block into both `OrderDetails.cshtml` and `CustomerProfile.cshtml`) rather than extracting it into a reusable Partial View with its own, independent model — this means any future change to that shared fragment's markup requires updating every duplicated copy, rather than a single, shared partial.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is `ModelState.Remove()`, and how does explicitly removing a specific property's validation errors let a controller selectively ignore a field's validation under a specific business condition, without disabling validation for the entire model?**
+
+`ModelState.Remove("PropertyName")` clears any validation errors already recorded for a specific property — letting a controller conditionally decide "for this particular request/scenario, don't enforce this one field's validation rule," without needing to disable Data Annotations validation (covered earlier) for the entire model or write an entirely separate, duplicated model type just for this one edge case.
+
+```csharp
+[HttpPost]
+public IActionResult UpdateProfile(ProfileViewModel model)
+{
+    if (model.IsGuestCheckout)
+    {
+        ModelState.Remove(nameof(model.PhoneNumber)); // for a GUEST checkout SPECIFICALLY,
+            // PhoneNumber's [Required] validation (covered EARLIER) is SELECTIVELY ignored --
+            // EVERY OTHER field's validation STILL applies NORMALLY
+    }
+    if (!ModelState.IsValid) return View(model);
+    // ...
+}
+```
+
+Because this selectively clears validation state for just one specific property rather than affecting the model's validation wholesale, it's a targeted tool for handling genuine, conditional validation exceptions (a field required in most cases, but not for one specific, well-understood scenario) without needing a separate ViewModel or a more complex custom validation attribute just to express that single conditional exception.
+
+**Common Pitfall:** reaching for `ModelState.Clear()` (wiping *every* property's validation state) when the actual need is only to exempt one specific field under one specific condition — this disables validation entirely for the whole model, potentially letting genuinely invalid data through for fields that should still be validated normally; `ModelState.Remove()` targets just the specific property that needs the conditional exception.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is `ActionDescriptor.Properties`, and how does a custom convention (covered earlier) stashing arbitrary metadata there let a later-running filter retrieve and act on that same metadata, without a shared, strongly-typed attribute class connecting the two?**
+
+`ActionDescriptor.Properties` is a simple, general-purpose dictionary attached to every action's descriptor — a custom `IActionModelConvention` (covered earlier) running at startup can stash arbitrary metadata into it (computed once, when the model is built), and a Filter (covered earlier) running later, per-request, can retrieve that same metadata from `context.ActionDescriptor.Properties` — letting the two pieces of code communicate without needing to define and share a dedicated, strongly-typed attribute class connecting them.
+
+```csharp
+// A CUSTOM convention, at STARTUP -- computes something ONCE, stashes it in Properties
+public class CachePolicyConvention : IActionModelConvention
+{
+    public void Apply(ActionModel action)
+    {
+        var isCacheable = action.Selectors.Any(s => s.ActionConstraints.OfType<HttpMethodActionConstraint>()
+            .Any(c => c.HttpMethods.Contains("GET")));
+        action.Properties["IsCacheable"] = isCacheable; // STASHED, computed ONCE, at STARTUP
+    }
+}
+
+// A FILTER, LATER, PER-REQUEST -- RETRIEVES that SAME stashed metadata
+public class CachingFilter : IActionFilter
+{
+    public void OnActionExecuting(ActionExecutingContext context)
+    {
+        if (context.ActionDescriptor.Properties.TryGetValue("IsCacheable", out var value) && (bool)value!)
+        {
+            // act on the PRE-COMPUTED metadata -- NO re-computation NEEDED, NO shared ATTRIBUTE class REQUIRED
+        }
+    }
+}
+```
+
+Because `Properties` is a general, untyped dictionary rather than a specific, compile-time-checked contract, this pattern trades some type safety for flexibility — letting a convention and a filter share arbitrary computed metadata without either needing to reference a dedicated, formally-defined attribute type, useful specifically when the metadata is genuinely internal, framework-level plumbing rather than something meant to be part of a public, well-documented API surface.
+
+**Common Pitfall:** overusing `ActionDescriptor.Properties`'s loosely-typed, string-keyed dictionary for metadata that's actually meant to be a stable, well-understood part of the application's own design — since it provides no compile-time type checking or discoverability, a typo in the key string (or a mismatched expected type) fails silently at runtime rather than being caught at compile time; a proper, dedicated attribute class remains the better choice when the metadata is meant to be a first-class, intentional part of the application's design rather than internal, ad-hoc plumbing.
+
+---
+
 ---

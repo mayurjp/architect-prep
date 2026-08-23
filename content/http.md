@@ -1659,3 +1659,98 @@ Because QUIC's stream independence is implemented at the transport protocol leve
 **Common Pitfall:** assuming HTTP/2's multiplexing (covered earlier) fully solves head-of-line blocking, without recognizing it still inherits TCP's own transport-layer ordering guarantee across the entire shared connection — a single lost packet under HTTP/2 can still stall every multiplexed stream simultaneously; only HTTP/3's QUIC-based, genuinely independent streams eliminate this deeper, transport-level blocking that HTTP/2's own multiplexing never actually addressed.
 
 ---
+
+## Beginner — Question 21
+
+**Q21: What is the `Accept-Charset` header, and why has it largely fallen out of practical use as UTF-8 became the near-universal default?**
+
+`Accept-Charset` let a client specify which character encodings it could handle for a response — historically meaningful when different systems commonly used different encodings (Latin-1, various regional encodings) — but with UTF-8 becoming the overwhelmingly dominant, near-universal default encoding across the modern web, there's rarely any genuine ambiguity left for this header to actually negotiate.
+
+```http
+Accept-Charset: utf-8, iso-8859-1;q=0.5
+```
+
+```text
+HISTORICALLY: DIFFERENT systems/regions commonly used DIFFERENT character ENCODINGS --
+  Accept-Charset genuinely HELPED negotiate WHICH one a CLIENT could ACTUALLY handle
+
+TODAY: UTF-8 is the NEAR-universal DEFAULT across VIRTUALLY every modern WEB server,
+  browser, and API -- THERE's rarely any GENUINE encoding AMBIGUITY left to NEGOTIATE --
+  Accept-Charset has become LARGELY VESTIGIAL, RARELY sent OR meaningfully HONORED
+```
+
+Because the practical need this header once addressed has been almost entirely resolved by UTF-8's universal adoption, most modern HTTP clients/servers simply assume UTF-8 by default without any explicit negotiation at all — `Accept-Charset` remains part of the HTTP specification, but its real-world relevance has diminished to the point of being largely a historical curiosity rather than an actively-used negotiation mechanism.
+
+**Common Pitfall:** implementing explicit `Accept-Charset` negotiation logic for a modern API, assuming it's still a meaningfully active part of content negotiation — in practice, defaulting to UTF-8 universally (without any charset negotiation at all) is the standard, expected behavior for virtually every modern HTTP API, making explicit `Accept-Charset` handling largely unnecessary engineering effort for a problem UTF-8's dominance has already solved.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does Content-Security-Policy's `report-uri`/`report-to` directive let a browser automatically report CSP violations back to a specified endpoint, letting a team detect a misconfigured (or actively exploited) policy without waiting for a user to report it manually?**
+
+`report-uri`/`report-to` (the newer, more flexible replacement) tells a browser to send a structured JSON report to a specified endpoint whenever a page's Content-Security-Policy (covered earlier) blocks something — giving a team automatic, real-time visibility into policy violations (a legitimate script accidentally blocked by an overly strict policy, or a genuine XSS attempt being blocked in the wild) without depending on a user noticing and manually reporting broken functionality.
+
+```http
+Content-Security-Policy: default-src 'self'; report-uri /csp-violation-report
+```
+```json
+// a BROWSER automatically POSTS this JSON to "/csp-violation-report" whenever
+// SOMETHING on the page VIOLATES the POLICY
+{
+  "csp-report": {
+    "document-uri": "https://example.com/page",
+    "violated-directive": "script-src",
+    "blocked-uri": "https://evil-attacker.com/malicious.js"
+  }
+}
+```
+
+```text
+WITHOUT reporting: a CSP violation SIMPLY fails SILENTLY in the USER's OWN browser
+  console -- the TEAM has NO VISIBILITY at ALL unless a USER happens to NOTICE broken
+  functionality and MANUALLY reports it
+
+WITH report-uri/report-to: EVERY violation, ACROSS every USER's browser, is AUTOMATICALLY
+  reported BACK to the TEAM's OWN endpoint -- REAL-TIME, AGGREGATE visibility into BOTH
+  accidental POLICY misconfigurations AND genuine, ACTIVE attack attempts BEING blocked
+```
+
+Because this reporting happens automatically and at scale (every affected user's browser reports independently), a team gets much faster, more complete visibility into both accidental over-restriction (breaking legitimate functionality) and genuine attempted exploitation being successfully blocked — turning CSP from a purely preventive, "fire and forget" control into one with active, ongoing observability.
+
+**Common Pitfall:** deploying a Content-Security-Policy without configuring violation reporting at all — this means a misconfigured, overly-restrictive policy silently breaks legitimate functionality with no automated signal reaching the team, often only discovered much later when a user happens to notice and report broken behavior manually; reporting provides essential, immediate visibility CSP enforcement alone doesn't.
+
+---
+
+## Advanced — Question 21
+
+**Q21: How can an ordinary, non-gRPC HTTP/2 response also use Trailers (covered under gRPC) for a genuinely different use case — communicating a checksum computed only after an entire large body has finished streaming?**
+
+Trailers (covered under gRPC as the mechanism carrying `grpc-status`) aren't exclusive to gRPC — any HTTP/2 (or chunked HTTP/1.1, covered earlier) response can include trailing headers sent *after* the body, which is exactly the right place for metadata that genuinely can't be known until the entire body has finished being generated, such as a checksum computed incrementally while streaming a large file, only finalized once every byte has actually been sent.
+
+```http
+HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Trailer: Content-MD5
+
+[... a LARGE file body, streamed in CHUNKS ...]
+
+Content-MD5: 5d41402abc4b2a76b9719d911017c592   <-- a TRAILER -- the CHECKSUM could ONLY be
+                                                     COMPUTED once the ENTIRE body had ACTUALLY
+                                                     been fully STREAMED, NOT known UPFRONT
+```
+
+```text
+WITHOUT trailers: computing a WHOLE-body checksum would REQUIRE either BUFFERING the
+  ENTIRE body IN MEMORY first (DEFEATING the point of STREAMING it), or SENDING the
+  checksum SEPARATELY, OUT-OF-BAND, in an ENTIRELY different REQUEST
+
+WITH trailers: the CHECKSUM is COMPUTED incrementally, AS the body STREAMS, and SENT
+  as a TRAILER IMMEDIATELY after the LAST chunk -- NO buffering, NO separate REQUEST needed
+```
+
+Because trailers let genuinely body-dependent metadata be communicated without sacrificing the streaming benefit of not buffering the entire response upfront, they solve a real problem beyond gRPC's specific status-code use case — any scenario needing to communicate something only computable *after* a large, streamed body has fully completed can use this same underlying HTTP mechanism.
+
+**Common Pitfall:** assuming HTTP Trailers are a gRPC-specific mechanism with no relevance to ordinary REST/HTTP APIs — trailers are a general HTTP/2 (and chunked HTTP/1.1) capability, usable by any application needing to communicate body-dependent metadata after a streamed response completes, not something exclusive to gRPC's particular use of them.
+
+---
