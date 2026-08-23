@@ -1438,4 +1438,78 @@ Because this choice is made per-query rather than being a single, fixed, databas
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is a Key-Value store's TTL-based expiration (as distinct from a Document database's TTL Index, covered earlier), and how does Redis's `EXPIRE` command let a key automatically disappear after a set duration?**
+
+Setting a TTL (time-to-live) on a Redis key tells the server to automatically delete that specific key once the configured duration elapses — no application code needs to remember to clean it up itself, making this a natural fit for inherently temporary data (a session token, a temporary lock, a rate-limit counter) that should simply cease to exist after a known window.
+
+```bash
+SET session:abc123 "user-data-here"
+EXPIRE session:abc123 3600   # this KEY AUTOMATICALLY disappears after 3600 seconds (1 hour)
+
+# equivalent, in ONE command:
+SETEX session:abc123 3600 "user-data-here"
+```
+
+```text
+WITHOUT a TTL: an APPLICATION would need its OWN scheduled cleanup JOB, periodically
+  scanning for and DELETING expired session KEYS itself -- EXTRA infrastructure, EXTRA code
+
+WITH a TTL: Redis ITSELF automatically REMOVES the key the MOMENT its configured DURATION
+  elapses -- NO external cleanup JOB, NO application code, REQUIRED AT ALL
+```
+
+Because Redis handles the actual expiration internally (via a combination of lazy expiration on access and periodic active scanning), an application gets automatic, reliable cleanup of temporary data without needing to build and maintain its own separate cleanup mechanism — directly analogous to a Document database's TTL Index (covered earlier), just applied to Redis's simpler key-value model.
+
+**Common Pitfall:** storing genuinely temporary data (a session, a short-lived lock) without ever setting a TTL, relying instead on manually deleting it at the "right" moment in application code — if that cleanup code path is ever skipped (an exception, a crashed process before cleanup runs), the temporary data lingers indefinitely; a TTL provides a guaranteed cleanup mechanism that doesn't depend on the application's own code successfully executing a cleanup step.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is the trade-off between Fan-Out on Write and Fan-Out on Read for a social-media-style feed, and how does pre-computing each follower's feed at post time trade write amplification for dramatically faster reads?**
+
+Fan-Out on Write pre-computes and stores a copy of a new post directly into *every one of its author's followers'* own feed data structures at the moment the post is created — Fan-Out on Read instead stores nothing extra at write time, and computes a user's feed on demand by querying and merging posts from everyone they follow each time they open their feed.
+
+```text
+Fan-Out on Write: a user with 1 MILLION followers POSTS -- the SYSTEM immediately writes a
+  COPY of that post into ALL 1 MILLION followers' OWN precomputed feed structures --
+  EXPENSIVE at WRITE time (1 million WRITES for ONE post), but EVERY follower's OWN feed
+  READ is TRIVIALLY fast afterward (just READ their OWN already-precomputed feed)
+
+Fan-Out on Read: NOTHING extra happens at POST time -- but EVERY TIME a user OPENS their
+  feed, the SYSTEM must QUERY and MERGE posts from EVERYONE they FOLLOW, ON DEMAND --
+  CHEAP at WRITE time, but POTENTIALLY EXPENSIVE (and SLOWER) at EVERY SINGLE READ
+```
+
+Because reads (a user checking their feed) typically happen far more often than writes (a user posting) for most social platforms, Fan-Out on Write trades a large amount of write-time work (amplified across every follower) for dramatically cheaper, near-instant reads — the right choice specifically when the read:write ratio strongly favors reads, which is the common case; a user with an unusually massive follower count (a celebrity) can still be handled with a hybrid approach, falling back to Fan-Out on Read specifically for such outlier accounts.
+
+**Common Pitfall:** applying Fan-Out on Write uniformly, including for accounts with an extremely large follower count — a single post from a celebrity account with 50 million followers would trigger 50 million individual writes, an genuinely enormous, potentially system-straining burst of work; production systems commonly use a hybrid approach, falling back to Fan-Out on Read specifically for unusually high-follower-count accounts to avoid this write-amplification extreme.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is a Gossip Protocol for cluster membership (as used by Cassandra/DynamoDB-style systems), and how does letting nodes periodically exchange state with a few random peers let cluster-wide information propagate without a single point of failure?**
+
+Rather than relying on one centralized coordinator to track which nodes are currently up, down, or joining/leaving the cluster (a single point of failure), a Gossip Protocol has each node periodically pick a few random other nodes and exchange its current knowledge of cluster state with them — over successive rounds, this information spreads exponentially through the entire cluster, without ever depending on any single, centralized component being available.
+
+```text
+Node A periodically picks a FEW RANDOM peers (say, 3 OTHER nodes) and EXCHANGES its
+  CURRENT view of cluster state with THEM -- "here's what I KNOW about EVERY node's
+  status" -- those 3 peers do the SAME thing with THEIR OWN random peers, NEXT round
+
+ROUND 1: Node A's INFORMATION reaches 3 OTHER nodes
+ROUND 2: THOSE 3 nodes EACH spread it to 3 MORE (EXPONENTIAL growth) -- WITHIN a FEW rounds,
+  the ENTIRE cluster (even ONE with THOUSANDS of nodes) has CONVERGED on a CONSISTENT view
+  of CLUSTER membership -- WITHOUT ANY single, CENTRALIZED coordinator EVER being INVOLVED
+```
+
+Because no single node's failure can prevent the rest of the cluster from continuing to gossip and converge on accurate membership information, this approach avoids the single-point-of-failure risk a centralized cluster coordinator would introduce — at the cost of some inherent propagation delay (it takes a few rounds for information to reach every node, rather than being instantly, globally known the moment it changes) and eventual, rather than immediate, consistency of cluster-membership views across all nodes.
+
+**Common Pitfall:** assuming Gossip Protocol-based cluster membership provides instantaneous, globally-consistent knowledge of every node's status — because information spreads probabilistically over successive gossip rounds, there's a brief window where different nodes may have a slightly different, still-converging view of cluster membership; this eventual-consistency characteristic of the gossip mechanism itself needs to be accounted for by anything relying on cluster membership information being immediately accurate everywhere.
+
+---
+
 ---

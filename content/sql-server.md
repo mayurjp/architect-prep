@@ -1482,4 +1482,92 @@ Because latch-free row-versioning eliminates the specific contention point that 
 
 ---
 
+## Beginner — Question 18
+
+**Q18: Why does a SQL Server `UNIQUE` constraint (unlike a Primary Key) allow multiple `NULL` values, and how does SQL Server's treatment of `NULL` as "unknown" rather than a comparable value explain this?**
+
+A Primary Key requires every value to be both unique *and* non-null — a `UNIQUE` constraint only requires uniqueness among the *actual, known* values present, and since `NULL` represents "unknown" (covered earlier) rather than a specific, comparable value, SQL Server doesn't consider two `NULL`s to be "duplicates" of each other at all, allowing multiple rows with `NULL` in a uniquely-constrained column to coexist.
+
+```sql
+CREATE TABLE Users (
+    Id INT PRIMARY KEY,
+    Email NVARCHAR(200) UNIQUE NULL -- UNIQUE, but explicitly NULLABLE
+);
+
+INSERT INTO Users VALUES (1, NULL); -- succeeds
+INSERT INTO Users VALUES (2, NULL); -- ALSO succeeds -- TWO NULLs COEXIST, since NEITHER is
+                                       -- considered a "DUPLICATE" of the OTHER at ALL
+
+INSERT INTO Users VALUES (3, 'a@b.com'); -- succeeds
+INSERT INTO Users VALUES (4, 'a@b.com'); -- FAILS -- a GENUINE duplicate of an ACTUAL, KNOWN value
+```
+
+```text
+"NULL = NULL" evaluates to UNKNOWN, NOT true (covered earlier) -- a UNIQUE constraint's
+  DUPLICATE-CHECKING logic is BUILT on this SAME semantic -- SQL Server CANNOT (and does NOT)
+  treat TWO NULLs as "the SAME value," so it NEVER flags them as VIOLATING uniqueness
+```
+
+Because this behavior directly follows from SQL's three-valued logic treatment of `NULL` (covered earlier) rather than being a special-cased exception, it's consistent with how `NULL` behaves everywhere else in SQL Server — a column meant to represent "optional, at-most-one-value-if-present" (an optional secondary email, for instance) can use `UNIQUE NULL` and correctly allow many rows to simply have no value at all.
+
+**Common Pitfall:** assuming a `UNIQUE` constraint on a nullable column prevents *multiple* rows from having no value, the same way it prevents duplicate actual values — this is a common, easy-to-overlook misunderstanding; if a column genuinely needs to guarantee at most one row can have any given state (including "no value"), a different mechanism (a filtered unique index specifically excluding NULLs, or a `NOT NULL` constraint if a value is always required) is needed instead.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is SQL Server's `STRING_AGG` function, and how does it let you concatenate multiple rows' values into one single, delimited string directly in SQL, without application-side string-building code?**
+
+`STRING_AGG` is an aggregate function (like `SUM`/`COUNT`) that concatenates a group of rows' string values into one combined string, separated by a specified delimiter — computed entirely within the SQL query itself, avoiding the need to fetch individual rows back to the application and manually build the concatenated string there.
+
+```sql
+SELECT CustomerId, STRING_AGG(ProductName, ', ') AS Products
+FROM OrderItems
+GROUP BY CustomerId;
+```
+```text
+CustomerId | Products
+-----------|----------------------------------
+42         | Widget, Gadget, Gizmo
+```
+
+```text
+WITHOUT STRING_AGG: the APPLICATION would need to FETCH every individual OrderItem row,
+  then MANUALLY loop through them, building the CONCATENATED string ITSELF, in APPLICATION code
+
+WITH STRING_AGG: the DATABASE performs the CONCATENATION directly, as PART of the query --
+  the APPLICATION receives ALREADY-COMBINED, READY-TO-USE strings, ONE PER GROUP
+```
+
+Because this aggregation happens directly within the database engine rather than requiring the application to fetch raw rows and assemble the string itself, `STRING_AGG` reduces both the amount of data transferred over the network (fewer, pre-aggregated rows) and the amount of application-side code needed purely for string assembly — a genuinely convenient built-in for a common reporting/display need.
+
+**Common Pitfall:** fetching every individual row back to the application purely to manually concatenate values that could have been aggregated directly in SQL via `STRING_AGG` — this transfers more data than necessary and duplicates string-building logic that the database itself can perform more efficiently as part of the query.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is a SQL Server Columnstore Index's Delta Store, and how does it let newly-inserted rows be queried immediately even though they haven't yet been compressed into the columnstore's own columnar format?**
+
+Compressing rows into a Columnstore Index's efficient columnar format (covered earlier) is a relatively expensive, batch-oriented operation — rather than compressing every single new row immediately as it's inserted (which would make individual inserts prohibitively slow), SQL Server temporarily holds newly-inserted rows in an ordinary, row-based "Delta Store," which a query transparently combines with the already-compressed columnstore data, until a background process eventually compresses the delta rows into the columnstore proper.
+
+```text
+A row is INSERTED into a Columnstore-indexed table: it goes DIRECTLY into the DELTA STORE
+  (an ORDINARY, ROW-based structure) FIRST -- NOT immediately COMPRESSED into COLUMNAR format
+
+A QUERY against this table TRANSPARENTLY combines: (1) the ALREADY-COMPRESSED columnstore
+  data, PLUS (2) whatever ROWS currently SIT in the delta store -- the QUERY sees a
+  CONSISTENT, COMPLETE view, REGARDLESS of WHICH physical structure a given ROW happens
+  to CURRENTLY reside in
+
+A BACKGROUND process (the "tuple mover") PERIODICALLY compresses ACCUMULATED delta-store
+  rows INTO the columnstore's OWN columnar format, ONCE ENOUGH rows have accumulated
+```
+
+Because compressing individual rows into columnar format one at a time would be prohibitively expensive for typical insert-heavy workloads, the Delta Store defers that expensive compression work to a background process operating on accumulated batches — letting individual inserts remain fast (simply appending to the row-based delta store) while queries still see a complete, correct, immediately-consistent view spanning both the compressed columnstore and the not-yet-compressed delta rows.
+
+**Common Pitfall:** assuming a Columnstore Index means every single row is always stored in compressed, columnar format at all times — recently-inserted rows genuinely sit in the row-based Delta Store until the background tuple-mover process compresses them; understanding this two-tier structure explains why a table's actual physical storage layout can be a mix of both formats simultaneously, and why queries need to transparently reconcile both.
+
+---
+
 ---

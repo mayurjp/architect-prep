@@ -1497,3 +1497,92 @@ Because network payloads and file contents are typically already UTF-8 bytes, co
 **Common Pitfall:** reaching for `Utf8JsonReader`'s low-level, manual token-by-token API for ordinary, non-performance-critical JSON deserialization — its forward-only, imperative style is meaningfully more verbose and error-prone to use correctly than simply deserializing into a strongly-typed object via `JsonSerializer.Deserialize<T>`; the zero-allocation benefit is worth the added complexity specifically for genuinely hot, high-throughput parsing paths, not as a universal default for all JSON handling.
 
 ---
+
+## Beginner — Question 18
+
+**Q18: What is the difference between Latency and Response Time — two often-conflated terms — and how does Response Time include both latency and the actual processing/service time, making it the broader of the two?**
+
+Latency narrowly refers to the delay before a response *starts* arriving (largely network transit time) — Response Time is the *total* time from sending a request to fully receiving the complete response, including both that network latency *and* however long the server actually took to process the request and generate its response.
+
+```text
+Response Time = Network Latency (round trip) + Server Processing Time + (any QUEUING delay
+                 waiting for a THREAD/connection to become AVAILABLE)
+
+A request with LOW network latency (10ms) but a SLOW, CPU-intensive server-side operation
+  (2000ms to actually COMPUTE the response) has a TOTAL Response Time of ~2010ms -- the
+  LATENCY component alone (10ms) would MASSIVELY UNDERSTATE the user's ACTUAL experienced delay
+```
+
+Because latency alone only captures the network transit portion, focusing exclusively on reducing latency (via a CDN, geographic proximity, covered under System Design) while ignoring server-side processing time can leave the user's actual, total experienced delay largely unimproved if the processing time itself dominates — Response Time is the metric that actually reflects what a user experiences end-to-end, and is the more meaningful target for most performance optimization efforts.
+
+**Common Pitfall:** optimizing purely for reduced network latency (deploying closer to users, using a faster CDN) while a slow server-side operation continues to dominate the actual, total response time — the user's real, experienced delay is governed by Response Time as a whole, and latency-focused optimizations alone provide little benefit if server-side processing is the actual bottleneck.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is `ArrayPool<T>.Shared`'s `Return()` method's `clearArray` parameter, and why does not clearing a returned array — the default behavior — risk a subtle data-leakage bug if the next renter assumes a freshly-zeroed array?**
+
+By default, `ArrayPool<T>.Shared.Return(array)` does *not* clear the array's contents before returning it to the pool — the next code that rents that same underlying array (via `Rent()`) will see whatever stale data was left in it from the *previous* renter, unless it explicitly overwrites every element it cares about before reading from it.
+
+```csharp
+var buffer = ArrayPool<byte>.Shared.Rent(1024);
+FillWithSensitiveData(buffer); // e.g., a password, a security token
+ArrayPool<byte>.Shared.Return(buffer); // default: clearArray = false -- the SENSITIVE data STILL SITS in the array
+
+// LATER, a COMPLETELY DIFFERENT piece of code rents from the SAME pool:
+var reused = ArrayPool<byte>.Shared.Rent(1024); // MIGHT be the EXACT SAME underlying array --
+// if this code ASSUMES a freshly-ZEROED array (rather than explicitly OVERWRITING what it needs),
+// it could ACCIDENTALLY read/leak the PREVIOUS renter's SENSITIVE data STILL SITTING in it
+```
+
+```text
+ArrayPool<byte>.Shared.Return(buffer, clearArray: true); // EXPLICITLY zeroes the array
+                                                            // BEFORE returning it to the POOL --
+                                                            // SLIGHTLY slower, but AVOIDS this LEAKAGE risk
+```
+
+Because `ArrayPool<T>`'s entire performance benefit comes from reusing the *same* underlying memory across many rent/return cycles without the cost of re-allocating and re-zeroing it every time, the default `clearArray: false` behavior is a deliberate performance choice — but it means any code handling genuinely sensitive data in a rented array should explicitly pass `clearArray: true` on return, accepting the small extra cost specifically to avoid the data-leakage risk.
+
+**Common Pitfall:** renting an array from `ArrayPool<T>.Shared` and assuming it starts out zeroed/clean (the way a brand-new array allocation would) — a pooled array frequently contains leftover data from whatever the previous renter last wrote into it, and code must explicitly overwrite (or only read) the specific portion it actually populated, rather than assuming any unwritten region is safely zero.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is Cache Line Padding, and how does deliberately wasting some memory to ensure two hot fields land on separate cache lines eliminate the False Sharing penalty covered earlier?**
+
+False Sharing (covered earlier) occurs when two logically-independent variables happen to share the same physical CPU cache line, causing unrelated threads writing to each to contend as if they were accessing the same data — Cache Line Padding deliberately inserts unused filler bytes between two hot fields specifically to push them onto genuinely separate cache lines, eliminating the false contention entirely, at the cost of the wasted padding memory.
+
+```csharp
+// VULNERABLE to False Sharing -- 'CounterA' and 'CounterB' likely share the SAME cache line
+public class Counters
+{
+    public long CounterA; // written by THREAD 1
+    public long CounterB; // written by THREAD 2 -- but SITS right NEXT to CounterA in MEMORY
+}
+
+// PADDED -- explicit filler bytes FORCE the two fields onto SEPARATE cache lines
+[StructLayout(LayoutKind.Explicit, Size = 128)] // a TYPICAL cache line is 64 bytes -- 128 GUARANTEES separation
+public struct PaddedCounters
+{
+    [FieldOffset(0)] public long CounterA;   // occupies the FIRST cache line
+    [FieldOffset(64)] public long CounterB;  // EXPLICITLY placed on a SEPARATE, SECOND cache line
+}
+```
+
+```text
+WITHOUT padding: CounterA and CounterB likely SHARE ONE 64-byte cache line -- Thread 1's
+  WRITE to CounterA invalidates the ENTIRE cache line for Thread 2's CPU core, EVEN THOUGH
+  Thread 2 NEVER touches CounterA at ALL -- FALSE, UNNECESSARY contention
+
+WITH padding: CounterA and CounterB are FORCED onto SEPARATE cache lines -- Thread 1's
+  writes NEVER invalidate ANYTHING Thread 2's core has CACHED -- the FALSE SHARING penalty
+  is COMPLETELY eliminated, at the COST of the WASTED padding BYTES
+```
+
+Because the padding bytes serve no functional purpose beyond forcing physical separation between the two hot fields, this technique deliberately trades a small, fixed amount of extra memory for eliminating a genuinely real, measurable performance penalty in high-contention, multi-threaded hot paths — .NET's own `System.Threading.PaddedReference`-style patterns (and libraries like `System.Runtime.CompilerServices` padding helpers) exist specifically to make this pattern easier to apply correctly.
+
+**Common Pitfall:** applying cache-line padding indiscriminately across every field in a data-heavy struct "just in case" — padding meaningfully increases memory footprint and can hurt cache locality for genuinely *related* fields that benefit from being on the same cache line (loaded together in one cache fetch); padding should be applied surgically, specifically to fields identified (via profiling) as suffering genuine False Sharing contention, not as a blanket default.
+
+---

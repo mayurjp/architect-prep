@@ -1725,3 +1725,92 @@ Because a purely structural DOM assertion has no concept of visual layout, spaci
 **Common Pitfall:** relying solely on DOM-based assertion testing for UI correctness, assuming "the right elements exist with the right text" is equivalent to "the page actually looks correct" — these are genuinely different properties, and a purely structural test suite provides zero protection against visual-only regressions, which specifically require a pixel-comparison-based approach like Visual Regression Testing to catch.
 
 ---
+
+## Beginner — Question 18
+
+**Q18: What is a Code Coverage percentage, and why does achieving 100% coverage not guarantee a codebase is actually well-tested?**
+
+Code Coverage measures what fraction of a codebase's lines/branches were *executed at least once* while running the test suite — it says nothing at all about whether the test suite actually *verified* the correct behavior for those executed lines; a test can execute a line of code without asserting anything meaningful about what that line actually did.
+
+```csharp
+public decimal CalculateDiscount(decimal price, bool isVip)
+{
+    if (isVip) return price * 0.8m;
+    return price;
+}
+
+[Fact]
+public void CalculateDiscount_Test()
+{
+    var result = CalculateDiscount(100, true); // EXECUTES both branches across a FEW calls --
+    // 100% CODE COVERAGE achieved -- but THIS test has NO ASSERTION at ALL checking
+    // WHETHER "result" is actually CORRECT -- it just CALLS the method, and COVERAGE tools
+    // COUNT that as "TESTED," even though NOTHING was actually VERIFIED
+}
+```
+
+```text
+100% code coverage TELLS you: "every LINE/branch was EXECUTED at least ONCE, SOMEWHERE
+  in the test SUITE"
+
+100% code coverage does NOT tell you: "every LINE's ACTUAL BEHAVIOR was CORRECTLY VERIFIED"
+  -- a test can EXECUTE a line WITHOUT ever ASSERTING anything MEANINGFUL about its RESULT
+```
+
+Because coverage is purely an *execution* metric, not a *correctness-verification* metric, a codebase can have 100% coverage and still ship serious bugs — precisely the scenario covered in an earlier scenario question ("95% coverage but production failures") — Mutation Testing (covered earlier) is specifically designed to measure the *deeper* question coverage alone cannot: whether the test suite's assertions would actually *catch* an introduced bug, not merely whether the code ran.
+
+**Common Pitfall:** treating a high code coverage percentage as proof of a well-tested codebase, and setting team goals purely around maximizing that number — this can incentivize writing tests that merely *execute* code (to boost the coverage metric) without meaningfully *asserting* on its correctness, producing a misleadingly high coverage number alongside a test suite that provides far less actual protection than the percentage would suggest.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: How does verifying a Spy Test Double's call count/arguments after the fact differ in testing style from a Mock's up-front expectation-setting (both covered earlier as Test Double sub-types)?**
+
+A Mock is configured with expectations *before* the code under test runs ("I expect this method to be called exactly once, with these arguments"), and typically fails the test automatically if those expectations aren't met — a Spy instead simply *records* what happened as calls occur, with assertions written *afterward*, inspecting the recorded call history to verify the expected interactions took place.
+
+```csharp
+// MOCK style -- expectations set UP-FRONT, BEFORE the code under test even RUNS
+var mockEmailService = new Mock<IEmailService>();
+mockEmailService.Setup(s => s.Send(It.IsAny<string>())).Verifiable(); // expectation DECLARED first
+orderService.PlaceOrder(order); // code under test RUNS
+mockEmailService.Verify(s => s.Send(It.IsAny<string>()), Times.Once); // VERIFIES the pre-set expectation
+
+// SPY style -- NO up-front expectation -- just RECORDS what happened, ASSERTED on AFTERWARD
+var spyEmailService = new SpyEmailService();
+orderService.PlaceOrder(order); // code under test RUNS
+Assert.Equal(1, spyEmailService.SendCallCount); // ASSERTS on the RECORDED history, AFTER the fact
+Assert.Equal(order.CustomerEmail, spyEmailService.LastSentTo);
+```
+
+Because a Mock's up-front expectation-setting reads as "here's what I expect to happen" declared before execution, while a Spy's after-the-fact assertion reads as "here's what actually happened, let me check it," the two represent genuinely different testing styles (often called "interaction testing via expectation" versus "interaction testing via recorded observation") — some teams and testing libraries lean toward one style consistently, though both accomplish the same fundamental goal of verifying a dependency was called correctly.
+
+**Common Pitfall:** conflating "Mock" and "Spy" as interchangeable terms for any test double that tracks calls — while both verify interactions occurred, a Mock's defining characteristic is its up-front expectation declaration (often failing immediately/automatically if unmet), while a Spy's defining characteristic is passively recording history for the test to inspect and assert on afterward; recognizing this distinction helps when reading testing-library documentation that uses these terms precisely.
+
+---
+
+## Advanced — Question 18
+
+**Q18: How does Approval Testing's version-controlled "approved" file and diff-based review workflow let a human reviewer explicitly approve a legitimate, intentional change to a large, complex output?**
+
+An Approval Test (covered earlier) compares a test's current output against a previously "approved" reference file checked into version control — when the actual output legitimately changes (a genuine, intentional improvement to a generated report's format), the test fails, but the workflow specifically supports a human reviewing the *diff* between the old approved file and the new output, and explicitly re-approving it (overwriting the approved file with the new output) as a deliberate, reviewed action, rather than the test simply being deleted or the assertion loosened.
+
+```text
+approved-report-2026-01.txt  <-- the CURRENTLY approved, version-controlled REFERENCE file
+
+Test run produces a NEW output -- DIFFERS from the approved file -- the TEST FAILS
+
+A DEVELOPER reviews the DIFF (via a diff TOOL, or the approval-testing FRAMEWORK's own
+  REVIEW UI) between the OLD approved file and the NEW output -- if the CHANGE is
+  LEGITIMATE and INTENTIONAL, they EXPLICITLY "approve" it -- the NEW output BECOMES the
+  NEW approved file, COMMITTED to VERSION CONTROL as a DELIBERATE, REVIEWED change
+
+IF the CHANGE was an UNINTENDED regression INSTEAD: the developer does NOT approve it --
+  the TEST FAILURE correctly SIGNALS a BUG that needs FIXING, not a re-approval
+```
+
+Because the "approved" reference file lives in version control alongside the code, the *history* of what changed and when — and, via the commit that updated it, *why* (referencing the PR/commit message explaining the intentional change) — is preserved just like any other tracked file, giving a clear audit trail distinguishing deliberate, reviewed changes from accidental regressions that were never actually approved.
+
+**Common Pitfall:** treating every Approval Test failure as automatically "just re-approve it" without actually reviewing the diff to confirm the change is legitimate — this defeats the entire purpose of the pattern, turning what should be a deliberate, reviewed gate against unintended regressions into a rubber-stamp that would catch nothing; the review step (actually reading the diff before approving) is what makes Approval Testing valuable, not merely having an approved file that exists.
+
+---

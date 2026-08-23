@@ -1645,4 +1645,102 @@ Because most many-to-many relationships genuinely don't need any data beyond the
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is the `[Column]` Data Annotation attribute, and how does it let a C# property map to a database column with a different name or type than what the property itself declares?**
+
+`[Column]` overrides EF Core's default convention-based column mapping (which assumes a column shares the property's own name and an inferred type) — letting a C# property named one way map to an existing database column named differently, useful when connecting to a pre-existing database whose column naming doesn't match C#'s usual PascalCase convention.
+
+```csharp
+public class Product
+{
+    public int Id { get; set; }
+
+    [Column("prod_name", TypeName = "varchar(200)")] // MAPS to a DIFFERENT column name AND explicit SQL type
+    public string Name { get; set; } = "";
+}
+```
+
+```text
+WITHOUT [Column]: EF Core assumes a COLUMN named "Name" EXISTS, of WHATEVER type it infers
+  from the C# property's OWN type -- if the ACTUAL database column is named "prod_name"
+  INSTEAD, EF Core would FAIL to find it, or CREATE a DIFFERENT column via a MIGRATION
+
+WITH [Column("prod_name", ...)]: the C# property "Name" CORRECTLY maps to the EXISTING
+  "prod_name" column -- NO mismatch, NO migration attempting to CREATE a REDUNDANT column
+```
+
+Because `[Column]` decouples a property's C# name/type from its actual database column's name/type, it's essential when EF Core needs to work against an existing database schema that doesn't already follow EF Core's own naming conventions — without it, EF Core would either fail to find the expected column or attempt to create a new, incorrectly-named one via migrations.
+
+**Common Pitfall:** relying purely on EF Core's default naming convention when connecting to a pre-existing database whose columns don't already follow that same convention — this produces confusing "column not found" errors or unintended migration-generated schema changes; `[Column]` (or the equivalent Fluent API configuration) explicitly bridges this naming mismatch.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: How does EF Core automatically resolve a child entity's foreign key value when a new parent and child are both added together in the same `SaveChanges()` call, before the parent's real, database-generated key is even known?**
+
+When you add a new parent entity (with an `IDENTITY`-generated key, covered under SQL Server) and a new child entity referencing it in the *same* change-tracking session, EF Core internally tracks a temporary, placeholder key value for the not-yet-saved parent — once `SaveChanges()` actually inserts the parent and learns its real, database-assigned key, EF Core automatically substitutes that real value into the child's foreign key before inserting the child, entirely transparently.
+
+```csharp
+var author = new Author { Name = "New Author" }; // Id is NOT yet known -- will be database-GENERATED
+var book = new Book { Title = "New Book", Author = author }; // references the AUTHOR object directly,
+                                                                 // NOT its (not-yet-existing) Id value
+
+context.Authors.Add(author);
+context.Books.Add(book);
+await context.SaveChangesAsync();
+// EF Core INSERTS "author" FIRST, learns its REAL, database-GENERATED Id, then AUTOMATICALLY
+// uses THAT real Id as "book.AuthorId" when INSERTING "book" -- ALL handled TRANSPARENTLY
+```
+
+```text
+BEFORE SaveChanges(): EF Core internally tracks a TEMPORARY, PLACEHOLDER key value for
+  "author" (since its REAL Id doesn't EXIST yet) -- "book"'s FK is LINKED to THAT temporary
+  placeholder, via the NAVIGATION property relationship, NOT a hardcoded NUMBER
+
+DURING SaveChanges(): EF Core INSERTS "author" FIRST, RECEIVES back its REAL, database-
+  ASSIGNED Id -- AUTOMATICALLY substitutes that REAL value in for "book"'s foreign key,
+  BEFORE inserting "book" -- the DEVELOPER never had to MANUALLY wire this UP at all
+```
+
+Because EF Core's Change Tracker understands the relationship between `book.Author` and `author` at the object-reference level (rather than requiring the developer to manually set `book.AuthorId` to some value), it can correctly sequence the two inserts and substitute the real generated key automatically — a genuine convenience letting related objects be created and saved together in natural, object-oriented style rather than manually managing the insert-order and key-propagation logic by hand.
+
+**Common Pitfall:** manually attempting to set a new child entity's foreign key property to some guessed or default value before the parent has actually been saved (rather than simply assigning the navigation property reference and letting EF Core resolve the actual key automatically) — this bypasses the automatic key-propagation mechanism and risks the child ending up with an incorrect, stale, or entirely wrong foreign key value once the parent's real key is actually assigned.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is EF Core's `HasDiscriminator` customization for TPH inheritance mapping (covered earlier), and how does using a custom discriminator value keep a database column's stored values stable even if a C# class is later renamed?**
+
+By default, EF Core's TPH discriminator column (covered earlier) stores the full C# class name as its value — `HasDiscriminator` lets you configure a custom, explicit value instead (a short string, a numeric code), decoupling the actual stored database value from whatever the C# class happens to be named at any given point in time.
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.Entity<Payment>()
+        .HasDiscriminator<string>("PaymentType")
+        .HasValue<CreditCardPayment>("CC")   // CUSTOM value -- NOT the FULL class name "CreditCardPayment"
+        .HasValue<BankTransferPayment>("BT"); // CUSTOM value -- NOT "BankTransferPayment"
+}
+```
+
+```text
+WITHOUT HasDiscriminator: the STORED discriminator value is the FULL C# class NAME itself
+  (e.g., "MyApp.Domain.CreditCardPayment") -- RENAMING the class LATER (a REFACTOR) would
+  make EXISTING rows' STORED discriminator values NO LONGER MATCH the class's NEW name,
+  requiring a DATA MIGRATION just to KEEP EXISTING rows correctly RECOGNIZED
+
+WITH a CUSTOM discriminator value ("CC", "BT"): the class can be FREELY renamed LATER (a
+  PURE C# refactor) WITHOUT touching the DATABASE at ALL -- the STORED "CC"/"BT" values
+  remain STABLE and CORRECT, COMPLETELY DECOUPLED from whatever the C# class is CURRENTLY named
+```
+
+Because the default behavior ties a stored database value directly to a C# class's fully-qualified name — a genuinely fragile coupling, since renaming a class is an ordinary, low-risk refactor in C# but would otherwise require a corresponding data migration — explicitly choosing stable, short discriminator values up front avoids this brittleness entirely, letting future class renames remain a purely code-level concern with zero database impact.
+
+**Common Pitfall:** relying on EF Core's default full-class-name discriminator values for a TPH hierarchy expected to evolve over time — a routine class rename later requires either a data migration updating every existing row's stored discriminator value, or leaves the database with now-stale values that no longer match any actual C# class name; choosing explicit, custom discriminator values from the start avoids this entirely.
+
+---
+
 ---
