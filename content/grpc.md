@@ -1718,4 +1718,101 @@ Because a per-call retry policy alone has no visibility into how many *other* ca
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is `google.protobuf.Empty`, and how does using it for an RPC that genuinely needs no input or output data avoid defining a pointless, empty custom message type just to satisfy Protobuf's requirement that every RPC have a request/response type?**
+
+Every gRPC method requires a declared request and response message type — for an operation that genuinely has no meaningful data to send or receive (a `Ping` health-check call, a `ClearCache` command needing no parameters and no result), `google.protobuf.Empty` is a pre-defined, shared, genuinely empty message type provided by Protobuf's own well-known types, avoiding the need to invent a new, equally-empty custom message just to satisfy the method signature requirement.
+
+```protobuf
+import "google/protobuf/empty.proto";
+
+service CacheService {
+  rpc ClearCache(google.protobuf.Empty) returns (google.protobuf.Empty); // NO custom, POINTLESS
+    // "ClearCacheRequest"/"ClearCacheResponse" message TYPES needed -- REUSES the SHARED, WELL-KNOWN Empty type
+}
+```
+
+```text
+WITHOUT Empty: EVERY RPC needing NO real input/output STILL requires DEFINING its OWN,
+  entirely EMPTY custom message type ("ClearCacheRequest {}", "ClearCacheResponse {}") --
+  PURE boilerplate, ADDING NOTHING beyond SATISFYING the SYNTAX requirement
+
+WITH google.protobuf.Empty: ONE SHARED, WELL-KNOWN type SERVES this EXACT purpose,
+  REUSABLE across EVERY RPC that genuinely needs NO data in EITHER direction
+```
+
+Because `Empty` is a standard, universally-recognized type across every language's Protobuf/gRPC implementation, using it signals clearly and consistently "this operation intentionally carries no data" — avoiding both the boilerplate of defining a new empty type per RPC and any ambiguity about whether an empty custom message might eventually need fields added to it.
+
+**Common Pitfall:** defining a new, custom empty message type for every parameterless RPC (`PingRequest {}`, `ClearCacheRequest {}`) rather than reusing the shared `google.protobuf.Empty` type — this is pure, avoidable boilerplate; `Empty` exists specifically to be reused across every genuinely data-free RPC, rather than each one inventing its own equivalent, empty type.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is the generated `XyzService.XyzServiceBase` class, and how does it let your implementation override only the specific methods it needs, while inheriting sensible defaults for anything unimplemented?**
+
+For every service defined in a `.proto` file, `protoc` generates an abstract base class (`XyzServiceBase`) with a virtual method per RPC, each with a default implementation that simply returns an `UNIMPLEMENTED` status — your actual service implementation inherits from this generated base and overrides only the specific methods it actually implements, with any method you don't override automatically returning the framework-generated "not implemented" response rather than requiring you to explicitly stub out every single method the `.proto` file happens to declare.
+
+```csharp
+public class ProductService : Products.ProductsBase // GENERATED base class
+{
+    public override Task<Product> GetProduct(GetProductRequest request, ServerCallContext context)
+    {
+        // YOUR implementation for JUST this ONE method
+        return Task.FromResult(new Product { Id = request.Id, Name = "Widget" });
+    }
+    // ANY OTHER RPC declared in the .proto file (e.g. "DeleteProduct") that you DON'T override
+    // AUTOMATICALLY inherits the GENERATED base class's DEFAULT -- returning an "UNIMPLEMENTED"
+    // gRPC status -- WITHOUT you needing to write ANY stub code for it YOURSELF
+}
+```
+
+Because the generated base class already provides a reasonable default for every declared RPC, a service implementation only needs to write code for the methods it actually supports — useful during incremental development (implementing one RPC at a time while the `.proto` file already declares the full, eventual API surface) without needing placeholder stub implementations for methods not yet built.
+
+**Common Pitfall:** manually writing a stub implementation throwing `NotImplementedException` for every RPC not yet built, unaware the generated base class already provides this exact behavior (returning a proper gRPC `UNIMPLEMENTED` status, which clients handle correctly) automatically — this is unnecessary boilerplate duplicating what the generated base class already does correctly and idiomatically on its own.
+
+---
+
+## Advanced — Question 18
+
+**Q18: How does a client-side interceptor combined with `CallOptions.WithDeadline` correctly propagate a shrinking deadline across a chain of nested gRPC calls, computing each downstream call's remaining deadline by subtracting elapsed time from the original?**
+
+Deadline Propagation (covered earlier) means a downstream call should inherit the *remaining* time budget from its caller's own deadline, not get a fresh, full deadline of its own — a client interceptor can compute this automatically: reading the current call's own remaining deadline (via the incoming `ServerCallContext.Deadline`, when this same process is also a server relaying the request further), subtracting however much time has already elapsed, and applying that shrinking remainder as the deadline for the next, downstream call.
+
+```csharp
+public class DeadlinePropagationInterceptor : Interceptor
+{
+    public override TResponse BlockingUnaryCall<TRequest, TResponse>(
+        TRequest request, ClientInterceptorContext<TRequest, TResponse> context,
+        BlockingUnaryCallContinuation<TRequest, TResponse> continuation)
+    {
+        var incomingDeadline = GetCurrentServerCallContext()?.Deadline; // the DEADLINE THIS
+            // process itself was GIVEN, as a SERVER handling an EARLIER, INBOUND call
+        if (incomingDeadline.HasValue)
+        {
+            var options = context.Options.WithDeadline(incomingDeadline.Value); // PROPAGATES
+                // the SAME ABSOLUTE deadline forward -- the DOWNSTREAM call gets WHATEVER
+                // TIME actually REMAINS, NOT a FRESH, FULL deadline of its OWN
+            context = new ClientInterceptorContext<TRequest, TResponse>(context.Method, context.Host, options);
+        }
+        return continuation(request, context);
+    }
+}
+```
+
+```text
+Original caller sets a 5-SECOND deadline -- 2 seconds ELAPSE before THIS service makes its
+  OWN downstream call -- the INTERCEPTOR propagates the SAME absolute DEADLINE forward --
+  the DOWNSTREAM call effectively has ONLY 3 seconds REMAINING, NOT a FRESH 5 seconds
+  of its OWN -- PREVENTING the TOTAL chain from EXCEEDING what the ORIGINAL caller actually
+  WAITED for
+```
+
+Because propagating the same *absolute* deadline (rather than each hop granting itself a fresh, full timeout) ensures the entire chain of nested calls collectively respects the original caller's actual time budget, this interceptor-based automation removes the need for every individual service in a call chain to manually recompute and pass along the shrinking remaining time itself — centralizing this cross-cutting concern exactly the way an interceptor is meant to.
+
+**Common Pitfall:** having each service in a call chain apply its own fresh, fixed deadline to its downstream calls, rather than propagating the shrinking remainder of the original caller's deadline — this can let a multi-hop chain's total elapsed time far exceed what the original caller was actually willing to wait for, since each hop independently "resets the clock" rather than correctly inheriting an ever-shrinking time budget from the top of the chain.
+
+---
+
 ---

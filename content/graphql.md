@@ -1797,4 +1797,103 @@ Because the interface contract spans subgraph boundaries rather than being confi
 
 ---
 
+## Beginner — Question 18
+
+**Q18: How does a schema's `schema { query: ... }` declaration let it explicitly name which type serves as each root operation, rather than assuming a fixed type name?**
+
+While `Query`, `Mutation`, and `Subscription` are the conventional names for a schema's three root types (covered earlier), GraphQL's `schema` keyword lets a schema explicitly declare *which* type actually serves each root role — meaning the root types don't strictly have to be named exactly "Query"/"Mutation"/"Subscription" at all, though virtually every real-world schema follows the convention for clarity.
+
+```graphql
+schema {
+  query: RootQueryType        # explicitly DECLARES "RootQueryType" as the QUERY root
+  mutation: RootMutationType  # explicitly DECLARES "RootMutationType" as the MUTATION root
+}
+
+type RootQueryType { products: [Product!]! }
+type RootMutationType { createProduct(input: ProductInput!): Product! }
+```
+
+```text
+MOST schemas OMIT the explicit "schema { ... }" block ENTIRELY, relying on the DEFAULT
+  convention: a type LITERALLY named "Query" is AUTOMATICALLY treated as the query root,
+  "Mutation" as the mutation root, and so ON -- the EXPLICIT declaration is ONLY needed
+  when a schema wants to use a DIFFERENT type NAME for one of these ROOTS
+```
+
+Because the explicit `schema` block is optional and the default naming convention (`Query`/`Mutation`/`Subscription`) is virtually universal in practice, most schemas never need to write it out explicitly at all — but understanding that the root type names are actually a *convention*, not a hardcoded language requirement, clarifies what the `schema` declaration is doing on the rare occasion a schema does specify it explicitly.
+
+**Common Pitfall:** assuming a type *must* be named exactly "Query" for GraphQL to recognize it as the query root — while overwhelmingly the convention, the actual mechanism is the (often implicit, default) `schema` declaration mapping a root operation to whichever type is actually designated; recognizing this distinction avoids confusion when encountering a schema that deviates from the naming convention for its own specific reasons.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is a GraphQL client's Optimistic UI Update, and how does it trade a small risk of needing to roll back for a significantly more responsive-feeling user interface?**
+
+Rather than waiting for a mutation's actual server response before updating what the user sees, an Optimistic Update immediately applies the *expected* result to the local cache the instant the mutation is fired — the UI updates instantly, as if the mutation had already succeeded — and only rolls back to the previous state if the server's actual response later indicates the mutation failed.
+
+```javascript
+// Apollo Client -- an OPTIMISTIC response, applied IMMEDIATELY, BEFORE the server ACTUALLY responds
+client.mutate({
+  mutation: LIKE_POST,
+  variables: { postId: 5 },
+  optimisticResponse: {
+    likePost: { id: 5, likes: currentLikes + 1, __typename: "Post" } // ASSUMED result, shown INSTANTLY
+  }
+});
+// the UI updates IMMEDIATELY, showing the INCREMENTED like count -- LONG BEFORE the ACTUAL
+// server round-trip even COMPLETES -- if the mutation LATER actually FAILS, the CACHE
+// AUTOMATICALLY reverts to the PREVIOUS state
+```
+
+```text
+WITHOUT optimistic updates: the USER clicks "Like" -- the UI shows NO CHANGE until the
+  FULL server round-trip COMPLETES (potentially HUNDREDS of milliseconds) -- feels SLUGGISH
+
+WITH optimistic updates: the UI updates INSTANTLY, the MOMENT the user CLICKS -- feels
+  IMMEDIATE and RESPONSIVE -- the SMALL risk: if the mutation ULTIMATELY fails (a NETWORK
+  error, a SERVER-side validation failure), the UI must ROLL BACK to its PREVIOUS state,
+  which can be a BRIEF, slightly JARRING correction, though this is RARE in practice
+```
+
+Because most mutations succeed the overwhelming majority of the time, assuming success immediately and rolling back only in the rare failure case produces a UI that *feels* dramatically more responsive for the common case, at the cost of occasionally needing a brief, visible correction for the uncommon failure case — a deliberate, broadly-accepted trade-off in modern interactive UI design.
+
+**Common Pitfall:** applying optimistic updates to a mutation whose outcome is genuinely uncertain or frequently fails (rather than one that succeeds the overwhelming majority of the time) — for a mutation with a meaningfully high failure rate, the frequent, visible rollback corrections can feel more jarring and confusing to users than simply waiting for the real server response in the first place; optimistic updates are best reserved for mutations that reliably succeed.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What is GraphQL Federation's `@override` directive, and how does it let one subgraph explicitly take ownership of a field previously (or still) defined in a different subgraph, supporting an incremental migration of a field's ownership between subgraphs?**
+
+`@override` lets a subgraph declare "I am now the authoritative source for this field, taking over from whichever subgraph previously owned it" — the Gateway's schema composition then routes queries for that field to the new, overriding subgraph instead of the original one, letting a team migrate a field's ownership from one service to another gradually and safely, without requiring a coordinated, simultaneous cutover across both subgraphs at once.
+
+```graphql
+# Subgraph B is TAKING OVER ownership of "Product.inventoryCount" FROM Subgraph A
+type Product @key(fields: "id") {
+  id: ID!
+  inventoryCount: Int! @override(from: "SubgraphA") // Subgraph B is NOW authoritative for THIS field
+}
+```
+
+```text
+BEFORE @override: Subgraph A owns "Product.inventoryCount" -- the GATEWAY routes ALL
+  queries for this FIELD to Subgraph A
+
+Subgraph B DECLARES @override(from: "SubgraphA") for the SAME field: the GATEWAY now
+  routes QUERIES for "inventoryCount" to Subgraph B INSTEAD -- Subgraph A's OWN (now
+  REDUNDANT) definition of the SAME field is SIMPLY IGNORED by the Gateway's composition
+
+ONCE the MIGRATION is CONFIRMED successful, Subgraph A's team can SAFELY remove the FIELD
+  from THEIR OWN schema ENTIRELY -- the @override declaration on Subgraph B ALREADY made
+  it the SOLE, AUTHORITATIVE owner, REGARDLESS of whether Subgraph A's OWN definition
+  still TECHNICALLY exists or NOT
+```
+
+Because `@override` lets the new owning subgraph unilaterally declare ownership without requiring the original subgraph to be modified or redeployed simultaneously, teams can migrate field ownership incrementally and safely — deploying the new subgraph's `@override`d field first, confirming everything works correctly, and only *afterward* removing the now-redundant definition from the original subgraph, at their own pace.
+
+**Common Pitfall:** attempting to migrate a field's ownership between subgraphs by simultaneously removing it from the original subgraph and adding it to the new one in one coordinated deployment — this requires precisely timing two separate deployments together, risking a window where neither subgraph (or both, ambiguously) claims the field; `@override` removes this coordination requirement entirely, letting the new subgraph claim ownership first while the original subgraph's now-redundant definition is cleaned up later, independently.
+
+---
+
 ---

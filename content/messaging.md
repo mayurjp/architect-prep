@@ -1560,4 +1560,90 @@ Because the overwhelming majority of real-world Kafka reads target *recent* data
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is a RabbitMQ wildcard Topic binding (`orders.*`), and how does it let one queue receive multiple related routing keys without binding to each one individually?**
+
+A Topic Exchange (as distinct from Direct or Fanout, covered earlier) supports wildcard patterns in a queue's binding — `*` matches exactly one routing-key segment, and `#` matches zero or more — letting a single binding capture an entire family of related routing keys without the tedium of a separate, explicit binding for every individual key.
+
+```csharp
+channel.ExchangeDeclare("orders-topic", ExchangeType.Topic);
+channel.QueueBind("all-order-events-queue", "orders-topic", routingKey: "orders.*"); // matches
+    // "orders.created", "orders.shipped", "orders.cancelled" -- ANY single SEGMENT after "orders."
+
+channel.QueueBind("audit-queue", "orders-topic", routingKey: "orders.#"); // matches ANY
+    // number of SEGMENTS after "orders." -- "orders.created", "orders.shipped.express", etc.
+```
+
+```text
+Routing key "orders.created"  -> matches BOTH "orders.*" AND "orders.#"
+Routing key "orders.shipped"  -> matches BOTH "orders.*" AND "orders.#"
+Routing key "orders.shipped.express" -> matches ONLY "orders.#" (TWO segments AFTER "orders."
+                                          -- "orders.*" ONLY matches EXACTLY one segment)
+```
+
+Because a single wildcard binding can capture an entire category of related events without enumerating each specific routing key explicitly, adding a brand-new event type (`orders.refunded`) automatically flows to any queue already bound with a matching wildcard pattern (`orders.*` or `orders.#`) — no binding configuration change needed for the new event type to be picked up by existing, already-wildcard-bound consumers.
+
+**Common Pitfall:** binding a queue to every specific routing key individually (`orders.created`, `orders.shipped`, `orders.cancelled`, each its own separate binding) rather than using a single wildcard pattern — this requires remembering to add a new explicit binding every time a new, related event type is introduced, whereas a wildcard binding automatically captures new matching routing keys without any binding configuration change at all.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: Why must a Saga's compensating transactions run in the reverse order of the original steps' execution, rather than the same forward order?**
+
+A Saga's forward steps often build on each other — step 3 might depend on state step 2 established — so undoing them correctly requires reversing that dependency chain: compensating the *most recently completed* step first, then working backward, exactly mirroring how you'd unwind a call stack, ensuring each compensation runs against a state that still reflects everything *after* it hasn't yet been undone.
+
+```text
+FORWARD execution order: Step 1 (reserve inventory) -> Step 2 (charge payment) -> Step 3
+  (schedule shipment) -- Step 3 FAILS
+
+CORRECT compensation ORDER (REVERSE of forward execution): compensate Step 2 FIRST (refund
+  the payment) -> THEN compensate Step 1 (release the inventory RESERVATION)
+  -- Step 3 itself never NEEDS compensation, since it NEVER actually SUCCEEDED
+
+INCORRECT (forward) compensation order: attempting to COMPENSATE Step 1 (release
+  inventory) BEFORE Step 2 (refund payment) could leave the SYSTEM in a BRIEFLY inconsistent
+  state -- the INVENTORY is released WHILE the CUSTOMER's payment is STILL held, EVEN
+  THOUGH the ORDER is ALREADY being UNWOUND
+```
+
+Because later steps may have been built assuming earlier steps' effects were already in place, unwinding in the same order they were applied risks compensating a step whose *own* preconditions (established by a later, not-yet-compensated step) haven't been cleanly resolved yet — reversing the order mirrors exactly how a call stack unwinds, compensating the most recent, "innermost" completed effect first.
+
+**Common Pitfall:** implementing Saga compensation logic that runs compensating actions in the same forward order the original steps executed, rather than reversing it — this can produce a Saga that transiently occupies an inconsistent intermediate state during its own rollback, precisely the kind of correctness bug the reverse-order convention is specifically designed to avoid.
+
+---
+
+## Advanced — Question 18
+
+**Q18: How does a Kafka consumer configured with `isolation.level=read_committed` automatically skip over messages from an aborted transaction, achieving exactly-once semantics from the consumer's own perspective?**
+
+A transactional Kafka producer (covered earlier) can write messages as part of a transaction that's ultimately either committed or aborted — a consumer configured with `read_committed` isolation only ever sees messages belonging to *committed* transactions, with messages from an aborted transaction simply never becoming visible to it at all, as if they'd never been written in the first place.
+
+```csharp
+var config = new ConsumerConfig
+{
+    IsolationLevel = IsolationLevel.ReadCommitted // ONLY sees messages from COMMITTED transactions
+};
+```
+
+```text
+A transactional producer WRITES messages as PART of a transaction, then the TRANSACTION
+  ultimately ABORTS (a failure occurred BEFORE it could COMMIT) -- those MESSAGES were
+  PHYSICALLY written to the TOPIC's log, but MARKED as belonging to an ABORTED transaction
+
+A consumer with isolation.level=read_committed: NEVER sees those ABORTED-transaction
+  messages AT ALL -- they're SKIPPED over ENTIRELY, as if they had NEVER been WRITTEN
+
+A consumer with isolation.level=read_uncommitted (the DEFAULT): WOULD see EVERY message,
+  INCLUDING ones from an EVENTUALLY-aborted transaction -- potentially PROCESSING data
+  that the PRODUCER itself ultimately DECIDED was INVALID and rolled BACK
+```
+
+Because `read_committed` filters out exactly the messages a transactional producer's own rollback logic already decided shouldn't count, a consumer using this isolation level automatically stays consistent with the producer's transactional intent — this is the consumer-side half of the combined producer-transaction-plus-consumer-isolation-level mechanism that together delivers genuine Exactly-Once Semantics (covered earlier) across a full read-process-write pipeline.
+
+**Common Pitfall:** using a transactional producer (expecting exactly-once guarantees) while leaving consumers on the default `read_uncommitted` isolation level — this defeats the purpose of producer transactions entirely, since consumers would still see (and potentially act on) messages from transactions that were ultimately aborted; both sides — transactional production *and* `read_committed` consumption — are required together for the full exactly-once guarantee to actually hold.
+
+---
+
 ---
