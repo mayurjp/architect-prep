@@ -1577,3 +1577,85 @@ Because 0-RTT data is specifically vulnerable to replay in a way ordinary, fully
 **Common Pitfall:** enabling TLS 1.3's 0-RTT/Early Data broadly across an entire application without restricting which kinds of requests are allowed to use it — accepting early data for a genuinely non-idempotent operation (a payment, an account state change) reopens a real replay-attack vector that ordinary, fully-handshaked TLS traffic doesn't have; 0-RTT's latency benefit should be reserved specifically for requests where processing the same request twice is provably harmless.
 
 ---
+
+## Beginner — Question 20
+
+**Q20: What is the `Date` response header, and how does it let a client/cache know exactly when the server generated a given response, useful alongside `Age` (covered earlier) for computing cache freshness?**
+
+`Date` records the exact timestamp the server generated the response — combined with `Age` (covered earlier, telling a client how long an intermediate cache has already held a response), a client can compute exactly how old a piece of cached data actually is relative to `max-age` (covered earlier), correctly determining whether it's still fresh or needs revalidation.
+
+```http
+HTTP/1.1 200 OK
+Date: Sat, 22 Aug 2026 10:00:00 GMT
+Age: 45
+Cache-Control: max-age=60
+```
+
+```text
+"Date" tells you: the ORIGIN server GENERATED this response AT 10:00:00
+"Age" tells you: an INTERMEDIATE cache has ALREADY held it for 45 SECONDS since THEN
+"max-age" tells you: this response is CONSIDERED fresh for UP TO 60 seconds TOTAL
+
+COMBINING these: the response is CURRENTLY 45 seconds OLD, out of a 60-second FRESHNESS
+  budget -- STILL fresh, but WITH only 15 seconds of FRESHNESS remaining BEFORE the CLIENT
+  would need to REVALIDATE it
+```
+
+Because `Date` anchors *when* the response was actually generated at the origin, while `Age` accounts for any time it's already spent sitting in an intermediate cache before reaching the current recipient, together they let any downstream cache or client precisely compute a response's actual remaining freshness — rather than naively assuming a response just received is necessarily "brand new."
+
+**Common Pitfall:** assuming a response just received is always freshly generated, without checking `Age` — a response passing through one or more intermediate caches (a CDN, a proxy) may already be considerably older than its arrival time suggests, and `Date` combined with `Age` is what actually reveals this, rather than the mere moment of receipt.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: How does a client sending a large request body use the `100 Continue` interim response combined with `Expect: 100-continue` (covered earlier at a high level) to avoid uploading megabytes of data only to discover the server would have rejected it anyway?**
+
+A client sending `Expect: 100-continue` transmits only its request *headers* first, then pauses — the server inspects those headers (checking authentication, content length, or any other header-visible validation) and responds with `100 Continue` if it's willing to accept the body, or an appropriate error status immediately if not — the client only actually uploads the (potentially large) body after receiving that green light, avoiding wasted upload bandwidth for a request that was always going to be rejected.
+
+```http
+PUT /api/large-upload HTTP/1.1
+Expect: 100-continue
+Content-Length: 500000000
+Authorization: Bearer invalid-token
+```
+```http
+HTTP/1.1 401 Unauthorized
+```
+```text
+The CLIENT never actually UPLOADED any of the 500MB body AT ALL -- the SERVER rejected
+  the request based PURELY on the HEADERS (an INVALID auth token) -- had the CLIENT
+  UPLOADED the ENTIRE body FIRST, ONLY to be REJECTED afterward, that would have WASTED
+  a MASSIVE amount of UPLOAD bandwidth for NOTHING
+```
+
+Because header-only validation (auth, content-length limits, media-type acceptability) can often determine a request's fate without ever needing to see the actual body, this two-phase handshake specifically saves the cost of uploading a large payload that was destined for rejection anyway — most valuable precisely for large request bodies where the wasted-upload cost of skipping this check would be significant.
+
+**Common Pitfall:** implementing a client that always uploads a large request body immediately, without using `Expect: 100-continue` to check for header-level rejection first — for a request that turns out to be rejected due to something detectable from headers alone (bad auth, an oversized `Content-Length`), this wastes potentially significant upload bandwidth and time compared to a two-phase approach that checks first.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does HTTP/3's use of independent QUIC streams eliminate head-of-line blocking at the transport layer, deeper than HTTP/2's own multiplexing (covered earlier)?**
+
+HTTP/2's multiplexing (covered earlier) runs multiple logical streams over a *single* underlying TCP connection — but TCP itself guarantees strictly ordered, in-sequence byte delivery across the *entire* connection, meaning a single lost packet stalls delivery of *everything* behind it in that one ordered byte stream, even data belonging to a completely different, otherwise-unaffected HTTP/2 stream. QUIC (HTTP/3's transport, covered earlier) instead implements each stream as a genuinely independent entity at the transport layer itself — a lost packet on one QUIC stream only stalls *that* stream, with every other stream continuing to deliver data uninterrupted.
+
+```text
+HTTP/2 over TCP: Streams A, B, C are MULTIPLEXED over ONE TCP connection -- TCP itself has
+  NO CONCEPT of "streams" -- it's ONE single, STRICTLY ORDERED byte sequence -- a LOST
+  packet CONTAINING Stream A's data STALLS the ENTIRE connection's delivery, INCLUDING
+  Stream B's and Stream C's ALREADY-ARRIVED-but-UNDELIVERABLE data, until the LOST packet
+  is RETRANSMITTED and the ORDERED sequence can RESUME
+
+HTTP/3 over QUIC: Streams A, B, C are GENUINELY INDEPENDENT at the TRANSPORT layer ITSELF
+  -- a LOST packet BELONGING to Stream A ONLY stalls Stream A -- Streams B and C's data
+  continues to be DELIVERED and PROCESSED IMMEDIATELY, COMPLETELY UNAFFECTED by Stream A's
+  OWN packet loss
+```
+
+Because QUIC's stream independence is implemented at the transport protocol level itself (rather than being a purely application-layer concept multiplexed over one ordered TCP byte stream), HTTP/3 eliminates head-of-line blocking at a more fundamental layer than HTTP/2 ever could — HTTP/2's multiplexing solved the *application-layer* head-of-line blocking problem (one slow *request* blocking others), but remained vulnerable to this deeper, *transport-layer* blocking that only QUIC's genuinely independent streams actually resolve.
+
+**Common Pitfall:** assuming HTTP/2's multiplexing (covered earlier) fully solves head-of-line blocking, without recognizing it still inherits TCP's own transport-layer ordering guarantee across the entire shared connection — a single lost packet under HTTP/2 can still stall every multiplexed stream simultaneously; only HTTP/3's QUIC-based, genuinely independent streams eliminate this deeper, transport-level blocking that HTTP/2's own multiplexing never actually addressed.
+
+---

@@ -2538,3 +2538,95 @@ Because a long-running operation genuinely takes meaningful time, the idempotenc
 **Common Pitfall:** designing idempotency-key tracking only with a simple binary "seen it or not" flag, adequate for fast operations but insufficient for genuinely long-running ones — a retry arriving mid-flight needs to be recognized as a distinct state ("already in progress, not yet done") rather than either triggering a second, redundant execution or being treated identically to a retry arriving after completion.
 
 ---
+
+## Beginner — Question 21
+
+**Q21: What is the convention of returning an empty collection (`[]`) rather than `404 Not Found` when a query against a collection endpoint matches zero items, and why does this differ from a single-resource endpoint's `404` convention?**
+
+A collection endpoint (`GET /api/products?category=nonexistent`) represents "the set of items matching this query," and zero matching items is still a perfectly valid, successful outcome — an empty array — rather than an error condition; a single-resource endpoint (`GET /api/products/999`) instead represents "this one specific item," and if it doesn't exist, there genuinely is nothing to return at all, making `404` the semantically correct response there instead.
+
+```http
+GET /api/products?category=nonexistent-category HTTP/1.1
+```
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+[]
+```
+```http
+GET /api/products/999999 HTTP/1.1
+```
+```http
+HTTP/1.1 404 Not Found
+```
+
+```text
+Collection endpoint: "give me EVERYTHING matching this QUERY" -- ZERO matches is a
+  COMPLETELY VALID, SUCCESSFUL answer to that QUESTION -- 200 OK with an EMPTY array
+
+Single-resource endpoint: "give me THIS SPECIFIC item" -- if it DOESN'T exist, there's
+  GENUINELY nothing to RETURN -- 404 Not Found is the SEMANTICALLY correct RESPONSE
+```
+
+Because these two endpoint shapes represent fundamentally different questions ("what matches this filter" versus "does this specific thing exist"), applying `404` to a collection query that simply matched nothing would incorrectly signal "something went wrong" for what is actually a completely normal, successful outcome — a client filtering a product catalog by an unpopular category shouldn't need to special-case a `404` as if it were an error.
+
+**Common Pitfall:** returning `404` for a collection endpoint that legitimately matched zero items, treating "no results" the same as "resource not found" — this conflates two genuinely different situations, forcing a client's error-handling code to distinguish "the query matched nothing" from "something is actually broken," when the correct convention (`200` with an empty array) avoids this ambiguity entirely.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: How does a human-readable `Link` header pointing at migration documentation complement the machine-readable `Sunset`/`Deprecation` headers (covered earlier)?**
+
+The standardized `Sunset`/`Deprecation` headers (covered earlier) give automated tooling a precise, parseable retirement date — but they don't tell a human developer *what to actually do about it*; pairing them with a `Link` header pointing at human-readable migration documentation (`rel="deprecation"` or `rel="successor-version"`) gives a developer encountering the deprecation notice a direct, actionable path to understanding what's changing and how to migrate.
+
+```http
+HTTP/1.1 200 OK
+Sunset: Sat, 31 Dec 2026 23:59:59 GMT
+Deprecation: true
+Link: <https://api.example.com/docs/migrating-to-v2>; rel="deprecation"
+```
+
+```text
+Sunset/Deprecation headers ALONE: a MONITORING tool can DETECT "this endpoint IS deprecated,
+  RETIRING on THIS date" -- but a HUMAN developer STILL needs to go FIND out WHAT to actually
+  DO about it, SEPARATELY, through SOME other channel (documentation, a TEAM announcement)
+
+Link header, ADDED: the SAME response DIRECTLY points a DEVELOPER (or a TOOL surfacing this
+  to a developer) at the SPECIFIC migration GUIDE explaining EXACTLY what changed and HOW
+  to update THEIR integration -- MACHINE-readable METADATA, PLUS a HUMAN-actionable PATH
+```
+
+Because the machine-readable headers and the human-readable documentation link serve genuinely different audiences (automated tooling that can act on a date, and a human developer who needs to understand and implement an actual migration), including both together in the same response gives each audience exactly the information it needs, in the form it can actually use.
+
+**Common Pitfall:** setting the standardized `Sunset`/`Deprecation` headers without also providing a discoverable path to actual migration guidance — a monitoring tool might correctly flag the impending deprecation, but the developer responsible for acting on it still has to separately track down what changed and how to adapt, an avoidable extra step a simple `Link` header pointing at documentation would eliminate.
+
+---
+
+## Advanced — Question 21
+
+**Q21: How does an Order resource only including a `cancel` link when it's actually in a cancellable state let a client discover valid actions without hardcoding business-rule knowledge about which states allow cancellation?**
+
+Rather than the client independently knowing (and hardcoding) the business rule "an order can only be cancelled while in `Pending` or `Processing` status, never once `Shipped`," the server's HATEOAS response (covered earlier) simply *omits* the `cancel` link entirely whenever the order's current state doesn't actually permit cancellation — the client's logic becomes "does this response include a cancel link at all," rather than independently re-implementing and maintaining the same state-transition business rule the server already enforces.
+
+```json
+// an order in "Processing" status -- CANCELLATION is CURRENTLY allowed
+{ "id": 5, "status": "Processing", "_links": {
+    "self": { "href": "/api/orders/5" },
+    "cancel": { "href": "/api/orders/5/cancel", "method": "POST" }
+}}
+
+// the SAME order, LATER, in "Shipped" status -- CANCELLATION is NO LONGER allowed
+{ "id": 5, "status": "Shipped", "_links": {
+    "self": { "href": "/api/orders/5" }
+    // -- NO "cancel" link present AT ALL -- the CLIENT simply doesn't SHOW a cancel BUTTON,
+    //    WITHOUT needing to KNOW or HARDCODE the business RULE governing WHEN cancellation is allowed
+}}
+```
+
+Because the presence or absence of the `cancel` link is computed by the server using the exact same business logic that would ultimately accept or reject an actual cancellation attempt, a client checking "is this link present" can never disagree with what the server would actually allow — eliminating an entire class of bug where a client's independently-hardcoded assumption about valid state transitions drifts out of sync with the server's own, evolving business rules.
+
+**Common Pitfall:** having a client independently hardcode its own copy of the business rule governing which states permit cancellation (checking `order.status === "Pending" || order.status === "Processing"` directly in client code), rather than simply checking for the presence of a `cancel` link in the response — this duplicates business logic across the client and server, and the two copies can silently drift out of sync if the server's actual rule changes without the client being updated to match.
+
+---

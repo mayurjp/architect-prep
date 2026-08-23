@@ -1831,4 +1831,102 @@ Because different deployment environments (a Windows Service, a systemd-managed 
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is .NET 9's static asset fingerprinting via `app.MapStaticAssets()`, and how does content-hash-based file naming let a static asset be cached forever by the browser while still picking up a new version immediately when its content changes?**
+
+`MapStaticAssets()` automatically renames each static file to include a hash of its own content (`site.css` becomes `site.a1b2c3d4.css`) and rewrites references to it accordingly — because the filename itself changes the instant the file's content changes, the browser can safely cache the old filename with an extremely long, effectively "forever" cache lifetime, since a genuinely updated file simply has a *different* filename the browser has never seen before.
+
+```csharp
+app.MapStaticAssets(); // replaces the older UseStaticFiles() -- adds CONTENT-HASH fingerprinting
+
+<link rel="stylesheet" href="~/site.css" asp-append-version="true" />
+// RENDERS as: <link rel="stylesheet" href="/site.a1b2c3d4.css">
+// -- if "site.css"'s CONTENT ever changes, the HASH (and thus the FILENAME) changes TOO
+```
+
+```text
+WITHOUT fingerprinting: "site.css" ALWAYS has the SAME filename -- the BROWSER can't safely
+  cache it FOREVER, since a FUTURE deployment might CHANGE its content UNDER the SAME name --
+  requires a SHORTER cache lifetime, or CACHE-BUSTING query strings (covered EARLIER as an
+  ANTI-PATTERN for JSON DATA, but a COMMON, if IMPERFECT, workaround for STATIC assets too)
+
+WITH fingerprinting: "site.a1b2c3d4.css" -- the FILENAME itself is DERIVED from CONTENT --
+  a CHANGED file gets a COMPLETELY DIFFERENT filename -- the OLD filename can be CACHED
+  with an EFFECTIVELY INFINITE lifetime, since it will NEVER be REUSED for DIFFERENT content
+```
+
+Because the filename and the content are cryptographically tied together, there's no possibility of a stale cache serving outdated content under the same name — the browser's cache for `site.a1b2c3d4.css` never needs to be invalidated at all, since a genuinely changed file would simply produce (and be referenced by) an entirely new, never-before-seen filename.
+
+**Common Pitfall:** serving static assets without any fingerprinting/versioning mechanism and configuring a long browser cache lifetime for them anyway — this risks a browser continuing to serve a *stale*, previously-cached version of a file even after it's been updated on the server, since the unchanged filename gives the browser no signal that anything is actually different.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is a custom `IAuthorizationRequirement`/`IAuthorizationHandler` pair, and how does expressing a business rule as a Requirement let authorization logic be unit-tested independently of any controller?**
+
+Rather than embedding a business-specific authorization check directly inside a controller action (`if (order.Total > manager.ApprovalLimit) return Forbid();`), a custom `IAuthorizationRequirement` describes the rule declaratively, and a separate `IAuthorizationHandler` implements the actual evaluation logic — both are ordinary, independently-testable classes with no dependency on ASP.NET Core's controller pipeline at all.
+
+```csharp
+public class ApprovalLimitRequirement : IAuthorizationRequirement { public decimal OrderTotal { get; init; } }
+
+public class ApprovalLimitHandler : AuthorizationHandler<ApprovalLimitRequirement>
+{
+    protected override Task HandleRequirementAsync(AuthorizationHandlerContext context, ApprovalLimitRequirement requirement)
+    {
+        var limit = decimal.Parse(context.User.FindFirst("ApprovalLimit")!.Value);
+        if (requirement.OrderTotal <= limit) context.Succeed(requirement);
+        return Task.CompletedTask;
+    }
+}
+
+// UNIT TEST -- tests the HANDLER directly, with NO controller, NO HTTP pipeline, INVOLVED at ALL
+[Fact]
+public async Task Handler_OrderUnderLimit_Succeeds()
+{
+    var handler = new ApprovalLimitHandler();
+    var context = new AuthorizationHandlerContext(
+        new[] { new ApprovalLimitRequirement { OrderTotal = 500 } }, testUser, null);
+    await handler.HandleAsync(context);
+    Assert.True(context.HasSucceeded);
+}
+```
+
+Because the Requirement and Handler are plain C# classes implementing simple, well-defined interfaces, they can be instantiated and tested directly in an ordinary unit test — no need to spin up a test HTTP server or exercise the full MVC/authorization pipeline just to verify a specific business rule's logic behaves correctly for a given input.
+
+**Common Pitfall:** embedding a business-specific authorization rule directly inline inside a controller action's own code — this couples the rule's logic to the controller and makes it testable only via a full integration test exercising the entire HTTP pipeline, rather than a fast, isolated unit test directly targeting the rule's own evaluation logic as a standalone `IAuthorizationHandler`.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is Output Caching's `VaryByValue`, and how does caching a response keyed by an arbitrary, application-computed value let a response be cached per-tenant or per-feature-flag-state, beyond the route/query-based variation covered earlier?**
+
+`VaryByValue` lets you supply a custom function computing an arbitrary cache-key component from the current request — rather than being limited to varying the cache purely by route values or query string parameters (covered earlier), this lets a response be cached separately based on *any* application-specific dimension, such as the current tenant ID or which variant of a feature flag is active for the requesting user.
+
+```csharp
+app.MapGet("/dashboard", GetDashboard)
+   .CacheOutput(policy => policy.VaryByValue(request =>
+   {
+       var tenantId = request.HttpContext.User.FindFirst("tenant_id")?.Value ?? "default";
+       return new KeyValuePair<string, string>("tenant", tenantId); // CACHE KEY now INCLUDES the tenant
+   }));
+```
+
+```text
+WITHOUT VaryByValue: a CACHED "/dashboard" response would be SHARED across EVERY tenant --
+  Tenant A could POTENTIALLY see Tenant B's CACHED response, a GENUINE data-leakage RISK
+
+WITH VaryByValue(tenant-based function): EACH tenant gets its OWN, SEPARATELY cached
+  response -- Tenant A's cached response is NEVER served to Tenant B, since THEIR
+  computed CACHE KEYS DIFFER
+```
+
+Because the cache key can incorporate any application-specific value computed from the request (not just what's already present in the URL), this lets Output Caching correctly and safely support scenarios where the *same URL* legitimately needs a genuinely different cached response depending on context that isn't reflected in the route or query string at all — critical for multi-tenant applications or feature-flag-driven response variation, where caching without this distinction would risk serving one context's cached data to a completely different one.
+
+**Common Pitfall:** enabling Output Caching for a multi-tenant endpoint without `VaryByValue` (or an equivalent tenant-aware cache-key dimension) — this can cause one tenant's cached response to be served directly to a completely different tenant, a serious data-isolation failure specifically introduced by output caching that wasn't a risk before caching was added at all.
+
+---
+
 ---

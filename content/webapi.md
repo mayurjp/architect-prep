@@ -1760,4 +1760,95 @@ Because the expensive, one-time inspection (checking an endpoint's parameter lis
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What is the `[FromHeader]` attribute, and how does binding a specific HTTP header directly to an action parameter avoid manually reading `Request.Headers[...]` yourself?**
+
+`[FromHeader]` tells model binding to populate an action parameter directly from a named request header — the framework reads and assigns the value automatically, letting the parameter simply be used as an ordinary, strongly-typed method argument rather than requiring manual, string-keyed access into `Request.Headers`.
+
+```csharp
+[HttpGet]
+public IActionResult GetData([FromHeader(Name = "X-Api-Version")] string apiVersion)
+{
+    return Ok($"Requested version: {apiVersion}"); // 'apiVersion' is ALREADY populated,
+                                                      // STRONGLY typed, NO manual header lookup needed
+}
+
+// WITHOUT [FromHeader] -- manual, STRING-KEYED access, NO compile-time TYPE safety
+public IActionResult GetDataManual()
+{
+    var apiVersion = Request.Headers["X-Api-Version"].ToString();
+}
+```
+
+Because the binding happens automatically and the parameter is strongly typed like any other method argument, `[FromHeader]` makes an action's dependency on a specific header explicit and visible directly in its signature — a developer reading the method declaration immediately sees that it expects a particular header, rather than needing to read through the method body to discover a manual `Request.Headers[...]` lookup buried somewhere inside.
+
+**Common Pitfall:** manually reading `Request.Headers["SomeHeader"]` inside every action body that needs a specific header value, rather than declaring it as a `[FromHeader]`-bound parameter — this hides the action's actual header dependency inside the method body rather than making it visible in the method's own signature, and forgoes the small type-safety and readability benefit `[FromHeader]` binding provides for free.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: How does generating Swagger/OpenAPI operation descriptions from existing C# XML documentation comments avoid maintaining API documentation twice — once in code comments, once in separate Swagger attributes?**
+
+Rather than duplicating a method's description in both an XML doc comment (`/// <summary>...</summary>`) and a separate `[SwaggerOperation(Summary = "...")]` attribute, configuring Swashbuckle to read directly from the project's generated XML documentation file lets the *same* comment serve both purposes — IntelliSense/IDE tooltips *and* the generated OpenAPI specification — from one single source, rather than two independently-maintained copies that could drift apart.
+
+```csharp
+/// <summary>Retrieves a specific product by its unique identifier.</summary>
+/// <param name="id">The product's unique ID.</param>
+[HttpGet("{id}")]
+public IActionResult GetProduct(int id) => Ok(product);
+```
+```csharp
+// Program.cs -- tells Swashbuckle to READ from the SAME XML doc comments, GENERATING
+// the Swagger description DIRECTLY from THEM -- NO separate [SwaggerOperation] needed
+builder.Services.AddSwaggerGen(options =>
+{
+    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    options.IncludeXmlComments(Path.Combine(AppContext.BaseDirectory, xmlFile));
+});
+```
+
+Because the XML doc comment is the single, canonical source feeding both the IDE's IntelliSense tooltips and the generated OpenAPI documentation, a developer only ever needs to update one comment when an action's behavior or parameters change — eliminating the risk of the code-level documentation and the API-level documentation silently drifting out of sync with each other over time.
+
+**Common Pitfall:** maintaining both an XML doc comment *and* a separate `[SwaggerOperation]`/`[SwaggerParameter]` attribute describing the same thing — these two descriptions can easily drift apart as the code evolves, since updating one doesn't automatically update the other; configuring Swashbuckle to read from XML comments directly removes this duplicated maintenance burden entirely.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does a Minimal API `IEndpointFilter`'s ability to short-circuit and replace the response entirely differ from an MVC Action Filter's equivalent short-circuiting behavior (covered earlier)?**
+
+Both mechanisms let a filter intercept a request before the actual endpoint/action runs and produce a *different* result instead — structurally, an `IEndpointFilter` does this by simply returning its own result directly from its delegate instead of calling `next()` (or by inspecting/replacing whatever `next()` itself returned), mirroring MVC's `IActionFilter`/`IAsyncActionFilter`'s `context.Result` assignment (covered earlier) closely, but expressed through Minimal API's simpler, delegate-based filter signature rather than a context-object-based one.
+
+```csharp
+app.MapGet("/products/{id}", GetProduct)
+   .AddEndpointFilter(async (context, next) =>
+   {
+       var id = context.GetArgument<int>(0);
+       if (id <= 0) return Results.BadRequest("Invalid product ID"); // SHORT-CIRCUITS --
+           // 'next' is NEVER called -- the ENDPOINT delegate ITSELF never even RUNS
+
+       var result = await next(context); // calls the ACTUAL endpoint -- can ALSO
+           // INSPECT/REPLACE its result HERE, AFTER the fact, if NEEDED
+       return result;
+   });
+```
+
+```text
+MVC IAsyncActionFilter (covered earlier): sets "context.Result = new BadRequestResult();"
+  BEFORE calling "await next()" -- MVC's OWN pipeline machinery detects this ASSIGNMENT and
+  SKIPS invoking the actual action
+
+Minimal API IEndpointFilter: simply RETURNS a DIFFERENT value DIRECTLY from its OWN
+  delegate, WITHOUT calling "next" AT ALL -- a SIMPLER, more DIRECT expression of the
+  SAME underlying "short-circuit the pipeline" CONCEPT
+```
+
+Because Minimal API's filter model uses a simpler delegate signature (return a value, optionally calling `next`) rather than MVC's richer context-object with a settable `Result` property, achieving the same short-circuiting behavior is arguably more direct and less ceremony-laden in Minimal APIs — though both ultimately express the identical underlying idea: intercept before the real handler runs, and optionally skip it entirely in favor of a different response.
+
+**Common Pitfall:** assuming Minimal API filters require the same `context.Result =` assignment pattern MVC filters use — Minimal API's filter delegate signature is genuinely different (simply returning a value, rather than mutating a context property), and code written assuming MVC's specific pattern won't directly translate to how Minimal API's `IEndpointFilter` actually expresses the same short-circuiting behavior.
+
+---
+
 ---

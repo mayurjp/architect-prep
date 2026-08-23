@@ -1753,4 +1753,82 @@ Because most validation needs are entirely satisfied by extending the *existing*
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is `TryUpdateModelAsync`, and how does it let a controller explicitly control which properties get bound from a request, as an alternative to relying purely on action-parameter binding?**
+
+`TryUpdateModelAsync` explicitly binds request data onto an *already-existing* object (rather than constructing a new one via an action parameter), and its overloads let you specify exactly which properties are allowed to be updated — giving a controller fine-grained, explicit control over what a request is allowed to modify, directly guarding against Mass Assignment/Over-Posting (covered under App Security) without needing a separate, narrower DTO.
+
+```csharp
+[HttpPost]
+public async Task<IActionResult> UpdateProfile(int id)
+{
+    var user = await _db.Users.FindAsync(id);
+    // ONLY "Name" and "Email" can be updated FROM the request -- ANY other property
+    // (like "IsAdmin") the request BODY might CONTAIN is SIMPLY IGNORED, EXPLICITLY
+    var success = await TryUpdateModelAsync(user, "", u => u.Name, u => u.Email);
+    if (success) await _db.SaveChangesAsync();
+    return RedirectToAction("Index");
+}
+```
+
+Because the whitelist of updatable properties is specified explicitly at the call site rather than being implicit in a request's own shape, `TryUpdateModelAsync` provides an alternative form of Mass Assignment protection to using a dedicated write-DTO (covered under REST) — genuinely useful when updating an existing tracked entity directly is more convenient than mapping through a separate DTO type first.
+
+**Common Pitfall:** calling `TryUpdateModelAsync` without an explicit property whitelist (or with an overload that binds every public property by default) — this reopens exactly the Mass Assignment vulnerability the explicit-whitelist form is meant to prevent, since without restricting which properties are eligible, an attacker's request body could still set fields (like an `IsAdmin` flag) never intended to be client-controllable.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does a custom `IViewLocationExpander` (covered earlier) applied specifically within one Area let view-lookup conventions be customized differently from the rest of the application?**
+
+An `IViewLocationExpander` (covered earlier for multi-tenant view overrides) can inspect the current routing context — including which Area (covered earlier) a request is being handled within — and conditionally modify the set of view-lookup paths *only* for requests inside that specific Area, leaving the default convention untouched for every other, non-Area-scoped request.
+
+```csharp
+public class AdminAreaViewLocationExpander : IViewLocationExpander
+{
+    public IEnumerable<string> ExpandViewLocations(ViewLocationExpanderContext context, IEnumerable<string> viewLocations)
+    {
+        if (context.AreaName == "Admin") // ONLY modifies lookup PATHS for the "Admin" Area SPECIFICALLY
+        {
+            return new[] { "/Areas/Admin/Views/Shared/CustomTheme/{0}.cshtml" }.Concat(viewLocations);
+        }
+        return viewLocations; // EVERY OTHER area/non-area request: the DEFAULT convention, UNCHANGED
+    }
+    public void PopulateValues(ViewLocationExpanderContext context) { }
+}
+```
+
+Because the expander explicitly checks `context.AreaName` before modifying anything, this customization applies surgically to just one Area's views — letting, for instance, an "Admin" area use a genuinely different visual theme's view files without affecting how views are located anywhere else in the application, all through the same, single, centrally-registered expander.
+
+**Common Pitfall:** applying a global view-location customization intended for just one specific Area's needs without actually checking `context.AreaName` first — this can inadvertently alter view-lookup behavior application-wide, affecting views in completely unrelated areas/controllers that were never meant to be touched by the customization at all.
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is a custom `IApplicationModelProvider` (as distinct from `IApplicationModelConvention`, covered earlier), and how does it let you intervene even earlier in the model-building pipeline — constructing the initial `ApplicationModel` itself, rather than merely modifying an already-built one?**
+
+`IApplicationModelConvention` (covered earlier) runs *after* the `ApplicationModel` has already been constructed via reflection, letting you modify the resulting object graph — `IApplicationModelProvider` operates one step earlier, participating directly in *building* that graph in the first place, with an explicit `Order` determining which providers run before/after each other; this is the more fundamental, lower-level extension point the framework's own default reflection-based model construction is itself implemented as one instance of.
+
+```csharp
+public class CustomApplicationModelProvider : IApplicationModelProvider
+{
+    public int Order => -1000; // runs BEFORE the framework's OWN default provider (Order = 0)
+
+    public void OnProvidersExecuting(ApplicationModelProviderContext context)
+    {
+        // participates DIRECTLY in CONSTRUCTING the ApplicationModel -- NOT merely
+        // modifying an ALREADY-built one, the way IApplicationModelConvention does
+    }
+    public void OnProvidersExecuted(ApplicationModelProviderContext context) { }
+}
+```
+
+Because `IApplicationModelProvider` participates in the actual construction phase (with explicit ordering relative to other providers, including the framework's own default one), it's a genuinely lower-level, more powerful — and correspondingly more rarely-needed — extension point than `IApplicationModelConvention`; most customization needs (covered earlier) are fully satisfied by conventions modifying the already-built model, with providers reserved for the rare case of needing to influence the model's construction process itself.
+
+**Common Pitfall:** reaching for a custom `IApplicationModelProvider` for a customization need that `IApplicationModelConvention` (covered earlier, and far more commonly used) would have satisfied just as well — providers operate at a lower, more foundational level with real ordering complexity relative to the framework's own built-in provider; conventions are the appropriate, simpler tool for the overwhelming majority of "adjust the model after it's built" customization needs.
+
+---
+
 ---
