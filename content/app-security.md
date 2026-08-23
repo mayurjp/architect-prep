@@ -1800,4 +1800,82 @@ Because the actual point of injection is temporally and structurally *disconnect
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is a Honeypot Field — a hidden form field real users never fill, but automated bots often do — and how does checking whether it was filled let a server detect automated submission without a visible CAPTCHA challenge for every user?**
+
+A Honeypot Field is a form input hidden from real users via CSS (never actually visible or reachable via normal browsing), but still present in the underlying HTML — an automated bot filling out a form programmatically (rather than seeing and interacting with the visible page the way a human does) often fills in *every* field it finds, including the hidden one — the server simply checks "was this field filled in at all," and rejects the submission if so, since a genuine human user could never have seen or filled it.
+
+```html
+<input type="text" name="website" style="display:none" tabindex="-1" autocomplete="off" />
+<!-- INVISIBLE to a REAL human user via NORMAL browsing -- but an AUTOMATED bot SCRIPT,
+     PROGRAMMATICALLY filling EVERY input field it FINDS in the raw HTML, OFTEN fills THIS one too -->
+```
+
+```csharp
+if (!string.IsNullOrEmpty(request.Website)) // the HONEYPOT field -- a REAL user NEVER fills it
+{
+    return BadRequest(); // SILENTLY reject -- almost CERTAINLY an AUTOMATED bot submission
+}
+```
+
+Because a genuine human never sees (and therefore never fills) the hidden field, its presence in a submission is a strong, low-friction signal of automated activity — avoiding the user-facing friction a visible CAPTCHA challenge imposes on *every* legitimate user, while still catching a meaningful fraction of unsophisticated automated bot traffic.
+
+**Common Pitfall:** relying on a Honeypot Field as a complete, standalone defense against sophisticated, deliberately-targeted bot traffic — a bot specifically designed to evade this exact technique (rendering the page and respecting CSS visibility before filling fields) will not be caught by it at all; Honeypot Fields are a low-cost, low-friction filter for unsophisticated, generic bot traffic, not a comprehensive defense against a determined, targeted attacker.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is drag-and-drop-based UI redressing, a deeper variant of Clickjacking (covered earlier) beyond simple click-based framing, and how does it trick a user into dragging sensitive data across an invisible, overlaid element?**
+
+Ordinary Clickjacking (covered earlier) tricks a user into clicking something they didn't intend to by overlaying an invisible, legitimate element beneath what appears to be an innocuous button — drag-and-drop redressing extends this same underlying technique to a drag gesture: an attacker's page presents what looks like an innocent drag-and-drop game or interaction, but positions an invisible, legitimate page element (a text field containing sensitive data the user unknowingly drags, or a "confirm" button the drag gesture ultimately activates) beneath the visible interaction.
+
+```text
+Attacker's page shows: "Drag the star to WIN a PRIZE!" -- a SEEMINGLY harmless, GAME-like
+  interaction
+
+HIDDEN beneath the VISIBLE "star" element (via CSS opacity/z-index MANIPULATION, the SAME
+  technique covered earlier for CLICK-based Clickjacking): an INVISIBLE IFRAME containing
+  the VICTIM's ALREADY-logged-in email/social-media page, with a SENSITIVE piece of TEXT
+  (a PRIVATE message, a SECURITY code) positioned EXACTLY where the "drag" gesture OCCURS
+
+The USER's drag gesture, intended for the VISIBLE "game," ACTUALLY drags the HIDDEN,
+  SENSITIVE content INTO a field on the ATTACKER's OWN page, EXFILTRATING it
+```
+
+Because this exploits the exact same underlying vulnerability as ordinary Clickjacking — a legitimate page being invisibly overlaid/framed beneath attacker-controlled content — the same defense applies: `X-Frame-Options`/`Content-Security-Policy: frame-ancestors` (covered earlier) preventing the legitimate page from being framed at all closes off this drag-and-drop variant just as effectively as it closes off the simpler, click-based version.
+
+**Common Pitfall:** implementing Clickjacking defenses (frame-busting, `X-Frame-Options`) with a mental model limited specifically to "prevent malicious clicks," without recognizing the same underlying framing vulnerability enables other interaction types (drag-and-drop, even scroll-based redressing) — the actual fix (preventing the page from being framed at all) protects against every variant of this technique uniformly, regardless of which specific gesture an attacker chooses to exploit.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is Blind SQL Injection, and how does an attacker extract data character-by-character purely from a true/false (or timing) signal, when the application never directly reflects query results back in its response at all?**
+
+Ordinary SQL Injection (covered earlier) often relies on the application directly displaying query results or error messages back to the attacker — Blind SQL Injection instead works even when the application shows *nothing* about the query's actual result, by crafting an injected condition that causes an *observable but indirect* difference (the page behaves differently, or responds measurably slower) depending on whether the injected condition is true or false, letting an attacker extract data one bit — or one character — at a time through repeated, patient probing.
+
+```sql
+-- Attacker probes, ONE character at a time, whether the ADMIN password's FIRST character is 'a':
+'  AND (SELECT SUBSTRING(password,1,1) FROM Users WHERE username='admin') = 'a' --
+```
+```text
+IF the injected CONDITION is TRUE: the page behaves ONE way (e.g., "Welcome back" DISPLAYS,
+  a LOGIN succeeds, or a KNOWN-slow query is TRIGGERED, causing an OBSERVABLE DELAY)
+IF the injected CONDITION is FALSE: the page behaves a DIFFERENTLY OBSERVABLE way (e.g.,
+  "Invalid credentials," or NO artificial delay OCCURS)
+
+The ATTACKER repeats this PROCESS, TESTING every POSSIBLE character AT EACH position,
+  ONE AT A TIME -- SLOW (potentially THOUSANDS of REQUESTS), but EVENTUALLY extracts the
+  ENTIRE password (or ANY other data), CHARACTER by CHARACTER, WITHOUT the application
+  EVER directly DISPLAYING ANY query RESULT back to the ATTACKER at ALL
+```
+
+Because Blind SQL Injection requires no direct data reflection at all — only *some* observable behavioral difference correlated with the injected condition's truth value — it demonstrates that "the application never shows query results directly" is not, by itself, a meaningful defense against SQL Injection; the actual fix remains identical to ordinary SQL Injection's fix (parameterized queries, covered earlier), which prevents the injected condition from ever being evaluated as SQL logic in the first place, regardless of whether results would ever be visibly reflected back or not.
+
+**Common Pitfall:** assuming an application is safe from SQL Injection simply because it never directly displays database query results or detailed error messages to users — Blind SQL Injection specifically demonstrates that even a completely "silent" application (no visible errors, no reflected data) remains fully vulnerable if user input is concatenated unsafely into SQL; only parameterized queries actually close the vulnerability, regardless of how much (or how little) information the application's responses appear to leak.
+
+---
+
 ---

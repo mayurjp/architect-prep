@@ -1647,4 +1647,75 @@ Because ordinary authentication only confirms "this token is genuinely valid and
 
 ---
 
+## Beginner — Question 19
+
+**Q19: How does a password manager generating a unique, random password per site structurally prevent password reuse — the root cause Credential Stuffing (covered earlier) exploits?**
+
+Credential Stuffing (covered earlier) succeeds specifically because users reuse the same password across multiple sites — a password manager removes the *human incentive* to reuse passwords at all, since it generates and remembers a unique, strong, random password for every single site automatically, meaning the user never needs to actually remember (and therefore never needs to reuse) any of them.
+
+```text
+WITHOUT a password manager: a USER, needing to REMEMBER their OWN passwords, reuses THE
+  SAME (or a SLIGHTLY varied) password ACROSS many SITES, since MEMORIZING dozens of
+  GENUINELY unique passwords is IMPRACTICAL for a HUMAN
+
+WITH a password manager: EACH site gets its OWN, RANDOMLY-generated, GENUINELY unique
+  password -- the USER never needs to REMEMBER any of THEM individually (only the ONE
+  master PASSWORD/key unlocking the MANAGER itself) -- REUSE across SITES becomes
+  STRUCTURALLY unnecessary, REMOVING the ROOT CAUSE Credential Stuffing DEPENDS on
+```
+
+Because a breach at any *one* site now only ever leaks a password unique to that *one* site (rather than a password shared across many), Credential Stuffing's entire premise — that a leaked password from one breach is likely to also work elsewhere — simply doesn't hold for a user whose passwords are all genuinely unique; the password manager doesn't detect or block the attack directly, it eliminates the underlying vulnerability (reuse) the attack depends on entirely.
+
+**Common Pitfall:** treating password managers purely as a "convenience" tool for remembering passwords, without recognizing their deeper security value: structurally eliminating password reuse is one of the single most effective defenses against Credential Stuffing available to an individual user, arguably more impactful for that specific threat than most technical countermeasures a website itself could deploy.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is Consent in OAuth 2.0/OIDC — the screen a user sees asking "allow this app to access your profile" — and how does a user explicitly granting or denying specific scopes let them control what a third-party app can actually do on their behalf?**
+
+The Consent screen presents the user with the specific scopes (covered earlier) a client application is requesting, and requires the user's explicit approval before any token is actually issued — this gives the user direct, informed control over exactly what a third-party application is permitted to access or do with their account, rather than an application silently gaining whatever access it wants the moment authentication succeeds.
+
+```text
+A THIRD-PARTY app requests scopes: "profile.read", "email.read", "orders.write"
+
+The CONSENT screen shows the USER EXACTLY what's being REQUESTED: "ThisApp wants to:
+  - View your PROFILE information
+  - View your EMAIL address
+  - CREATE and MODIFY orders on your BEHALF"
+
+The USER can APPROVE all of it, or in SOME implementations, SELECTIVELY approve a SUBSET --
+  ONLY UPON explicit APPROVAL does the AUTHORIZATION server actually ISSUE a TOKEN
+  reflecting THOSE specific, USER-approved scopes
+```
+
+Because the user sees precisely what access is being requested *before* any token is issued, Consent is the actual mechanism giving OAuth's scope-based Least Privilege model (covered earlier) real, user-facing meaning — without a genuine consent step, an application could request broad scopes and simply be granted them without the user ever having a real opportunity to understand or object to what they're actually authorizing.
+
+**Common Pitfall:** an application requesting broader scopes than it actually needs, relying on users habitually clicking "Allow" on consent screens without carefully reading what's being requested — while this doesn't defeat the *mechanism* of consent, it does undermine its practical, real-world effectiveness as a genuine check on over-broad access requests, which is why scope minimization (covered earlier) by the requesting application remains an important complementary practice.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is Token Revocation (RFC 7009), and how does an Authorization Server explicitly invalidating a token before its natural expiry differ mechanically between a stateless JWT (requiring a denylist, covered earlier) and an opaque token (a simple database row deletion)?**
+
+Token Revocation lets an Authorization Server (or the token holder itself) explicitly invalidate a token before its natural expiration — for an *opaque* token (covered earlier — a random string requiring server-side lookup to validate), revocation is mechanically simple: delete or mark invalid the corresponding server-side database row, and the next validation lookup correctly fails. For a *stateless JWT*, there's no server-side row to delete at all — the token remains cryptographically valid on its own, forcing revocation to rely on an explicit denylist (covered earlier) the server must separately check on every validation.
+
+```text
+Opaque token revocation: "DELETE FROM tokens WHERE token_id = @id" -- ONE simple database
+  operation -- the NEXT time ANYONE tries to VALIDATE this token (a MANDATORY server-side
+  LOOKUP, covered earlier), the LOOKUP simply FINDS NOTHING -- revocation is IMMEDIATE and CLEAN
+
+JWT revocation: the TOKEN's OWN signature REMAINS cryptographically VALID FOREVER (until
+  its NATURAL expiry) -- REVOKING it EARLY requires ADDING its ID to an EXPLICIT DENYLIST
+  (covered earlier) -- EVERY validation must NOW ALSO check THIS denylist, REINTRODUCING
+  the SAME server-side LOOKUP cost JWTs were ORIGINALLY meant to AVOID
+```
+
+Because a JWT's core design advantage (covered earlier) is validating without a server-side lookup, adding revocation support via a denylist directly trades away that exact advantage — this is precisely why the choice between opaque tokens and JWTs (covered earlier) often comes down to whether genuine, immediate revocation capability matters more than a JWT's stateless-validation performance benefit for a given system's specific needs.
+
+**Common Pitfall:** choosing JWTs specifically for their stateless-validation performance benefit, then later needing genuine, immediate revocation capability and bolting on a denylist check to every validation — this reintroduces the exact server-side lookup cost JWTs were chosen to avoid in the first place; if immediate revocation is a known, upfront requirement, an opaque token (with its naturally simple, clean revocation model) may be the more appropriate choice from the start.
+
+---
+
 ---
