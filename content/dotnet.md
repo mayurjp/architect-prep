@@ -1920,4 +1920,98 @@ Because this mechanism lets a source generator optimize or entirely replace spec
 
 ---
 
+## Beginner — Question 22
+
+**Q22: What is `Enumerable.Chunk()` (.NET 6+), and how does it let you split a sequence into fixed-size batches directly, without hand-writing batching logic yourself?**
+
+`Chunk(size)` splits any `IEnumerable<T>` into a sequence of arrays, each containing up to `size` elements (the final chunk potentially smaller if the total count doesn't divide evenly) — replacing the manual index-tracking loop a developer would otherwise need to write to achieve the same batching behavior.
+
+```csharp
+var numbers = Enumerable.Range(1, 10);
+foreach (var batch in numbers.Chunk(3))
+{
+    Console.WriteLine(string.Join(",", batch)); // "1,2,3" then "4,5,6" then "7,8,9" then "10"
+}
+
+// WITHOUT Chunk() -- MANUAL, hand-written BATCHING logic
+var batches = new List<int[]>();
+for (int i = 0; i < numbers.Count(); i += 3)
+    batches.Add(numbers.Skip(i).Take(3).ToArray());
+```
+
+```text
+Chunk(3) on 10 items: produces FOUR batches -- [1,2,3], [4,5,6], [7,8,9], [10] --
+  the FINAL batch is SMALLER (JUST 1 item), SINCE 10 doesn't DIVIDE evenly by 3
+```
+
+Because batching a sequence into fixed-size groups is a genuinely common need (processing records in batches to avoid an oversized single API call, chunking work for parallel processing), having this built directly into the BCL eliminates a small but frequently-rewritten piece of manual looping/indexing logic that used to require hand-rolling or reaching for a third-party library.
+
+**Common Pitfall:** hand-writing a manual batching loop (tracking an index, using `Skip`/`Take` repeatedly) for a need `Enumerable.Chunk()` already solves directly and more efficiently in modern .NET — this reinvents a small but common piece of functionality the BCL now provides natively.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is .NET's `PriorityQueue<TElement, TPriority>` (.NET 6+), and how does its built-in implementation avoid needing a third-party library or a hand-rolled heap for a common algorithmic need?**
+
+A Priority Queue always returns/removes the element with the lowest (by default) priority value first, regardless of insertion order — a data structure needed for many common algorithms (Dijkstra's shortest path, task scheduling by urgency) that previously required either a third-party NuGet package or a hand-implemented binary heap, now provided directly as a BCL collection type.
+
+```csharp
+var pq = new PriorityQueue<string, int>();
+pq.Enqueue("Low priority task", priority: 10);
+pq.Enqueue("Urgent task", priority: 1);
+pq.Enqueue("Medium task", priority: 5);
+
+while (pq.Count > 0)
+    Console.WriteLine(pq.Dequeue()); // "Urgent task", THEN "Medium task", THEN "Low priority task" --
+                                       // ALWAYS the LOWEST priority VALUE first, REGARDLESS of
+                                       // the ORDER items were ORIGINALLY enqueued IN
+```
+
+```text
+BEFORE .NET 6: implementing a GENUINE priority QUEUE required EITHER a THIRD-PARTY NuGet
+  package, or HAND-writing a BINARY heap DATA structure YOURSELF -- a COMMON, but
+  NON-TRIVIAL algorithmic BUILDING block MISSING from the BCL
+
+WITH .NET 6+: PriorityQueue<TElement, TPriority> is PROVIDED directly, AS a STANDARD BCL
+  collection TYPE -- NO third-party DEPENDENCY, NO hand-ROLLED heap IMPLEMENTATION needed
+```
+
+Because this data structure underlies several well-known, commonly-needed algorithms, having it available directly in the BCL removes a genuine, previously-recurring "which library should I use, or should I just write my own heap" decision point — a small but genuinely useful addition for any code needing this specific access pattern.
+
+**Common Pitfall:** implementing a custom binary heap or reaching for a third-party priority-queue library in a codebase targeting .NET 6 or later, unaware that `PriorityQueue<TElement, TPriority>` is now provided directly in the BCL — this reinvents (or adds an unnecessary dependency for) functionality the framework already provides natively.
+
+---
+
+## Advanced — Question 25
+
+**Q25: What is `CollectionsMarshal.AsSpan()` for a `List<T>`, and how does it let you get a `Span<T>` directly over a list's internal backing array, enabling high-performance, allocation-free iteration/mutation without copying the list's data?**
+
+`List<T>` normally hides its internal backing array entirely — `CollectionsMarshal.AsSpan()` provides deliberate, explicit access to that internal array as a `Span<T>`, letting performance-critical code iterate or mutate the list's elements directly, in place, without the overhead of `List<T>`'s own indexer bounds-checking on every access, and without allocating any new array or copy at all.
+
+```csharp
+var list = new List<int> { 1, 2, 3, 4, 5 };
+Span<int> span = CollectionsMarshal.AsSpan(list); // DIRECT access to the LIST's OWN internal array --
+                                                     // NO copy, NO new ALLOCATION
+
+for (int i = 0; i < span.Length; i++) span[i] *= 2; // MUTATES the LIST's ACTUAL underlying data,
+                                                        // DIRECTLY, via the SPAN -- list is NOW {2,4,6,8,10}
+```
+
+```text
+WITHOUT CollectionsMarshal.AsSpan(): mutating EVERY element of a LARGE List<T> via its
+  ORDINARY indexer PAYS the (SMALL, but NON-ZERO) cost of List<T>'s OWN bounds-checking
+  and INDEXER overhead, on EVERY single ACCESS
+
+WITH CollectionsMarshal.AsSpan(): DIRECT, RAW access to the SAME underlying MEMORY, via a
+  Span<T> -- the SAME kind of TIGHT, EFFICIENT iteration ALREADY covered for ARRAYS/Spans
+  elsewhere, NOW available DIRECTLY over a List<T>'s OWN internal STORAGE, WITHOUT copying it
+```
+
+Because this method exposes what would ordinarily be a deliberately-hidden implementation detail (a `List<T>`'s internal array), it's specifically an escape hatch for genuinely performance-critical hot paths that need `Span<T>`'s efficiency benefits (covered elsewhere) applied directly to an existing `List<T>`'s data, without needing to convert it to an array first (which would require an actual copy).
+
+**Common Pitfall:** calling `list.ToArray()` purely to get array-like, `Span<T>`-style efficient access to a `List<T>`'s contents, when `CollectionsMarshal.AsSpan()` provides the same direct access without the cost of that intermediate array copy — reserved for genuinely performance-sensitive code, since `CollectionsMarshal.AsSpan()`'s returned span becomes invalid the moment the list's own capacity changes (an `Add()` that triggers a resize), a real correctness hazard for careless use.
+
+---
+
 ---

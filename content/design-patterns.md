@@ -2317,3 +2317,99 @@ Because a DI container already provides a general-purpose, configuration-driven 
 **Common Pitfall:** hand-writing a full Abstract Factory class hierarchy for a scenario a DI container's ordinary registration/resolution already handles perfectly well — for the common case of "give me an implementation of this interface," a DI container's built-in mechanism is simpler and requires less custom code; Abstract Factory earns its complexity specifically for the family-of-mutually-consistent-objects scenario a simple container registration doesn't directly express.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: How does the Facade pattern's distinction from Adapter (both covered earlier) come down to whether the underlying interface is "incompatible" (Adapter's job) or simply "too complex" (Facade's job)?**
+
+Adapter exists to bridge a genuine *incompatibility* — the client expects one interface shape, but the existing class exposes a completely different one, and Adapter translates between them — Facade instead addresses a different problem entirely: the underlying subsystem's interface(s) are perfectly usable and compatible as-is, just numerous and complex, and Facade simply provides one simpler, higher-level entry point in front of them.
+
+```csharp
+// ADAPTER -- bridges a GENUINE incompatibility -- the CLIENT expects "IPaymentProcessor,"
+// but the EXISTING class exposes a COMPLETELY different, INCOMPATIBLE shape
+public interface IPaymentProcessor { void Charge(decimal amount); }
+public class LegacyBillingSystem { public void ProcessTransaction(int cents) { } } // DIFFERENT shape
+public class BillingAdapter : IPaymentProcessor
+{
+    public void Charge(decimal amount) => _legacy.ProcessTransaction((int)(amount * 100));
+}
+
+// FACADE -- the UNDERLYING subsystem is PERFECTLY usable, just NUMEROUS and COMPLEX --
+// SIMPLIFIES, doesn't TRANSLATE an incompatible SHAPE
+public class OrderFacade
+{
+    public void PlaceOrder(Order order) // ONE simple ENTRY point
+    {
+        _inventory.Reserve(order.Items);   // EACH subsystem's OWN interface is PERFECTLY usable
+        _payment.Charge(order.Total);      // AS-IS -- Facade just COMBINES/simplifies CALLING them
+        _shipping.Schedule(order);
+    }
+}
+```
+
+Because Adapter's entire purpose is translating between two genuinely incompatible interface shapes, while Facade's purpose is purely reducing the *number* of interfaces a client needs to interact with directly (without translating anything), the two patterns solve genuinely different problems despite both superficially "wrapping" something — recognizing which specific problem you're actually facing (incompatibility versus complexity) determines which pattern actually applies.
+
+**Common Pitfall:** calling any wrapper class an "Adapter" regardless of whether it's actually bridging a genuine interface incompatibility or simply simplifying access to an already-compatible, just complex, subsystem — the distinction matters for communicating intent clearly: Adapter signals "these two shapes don't match," while Facade signals "this is unnecessarily complex to use directly."
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is the Proxy pattern's "Smart Reference" variant, as distinct from Virtual/Protection/Remote proxies (all covered earlier), and how does a proxy performing extra bookkeeping — reference counting, logging every access — differ from those other, more common variants?**
+
+Virtual, Protection, and Remote Proxies (covered earlier) each control *access* to the real object in a specific way (deferring creation, checking authorization, hiding network location) — a Smart Reference Proxy instead focuses on *bookkeeping* alongside ordinary delegation: tracking how many references to the real object currently exist (for reference-counted cleanup), logging every single access for auditing, or lazily loading a related object the first time it's actually touched, all while still transparently delegating the actual operation to the real object underneath.
+
+```csharp
+public class SmartReferenceProxy : IDocument
+{
+    private static int _referenceCount = 0;
+    private readonly IDocument _realDocument;
+
+    public SmartReferenceProxy(IDocument realDocument)
+    {
+        _realDocument = realDocument;
+        _referenceCount++; // EXTRA bookkeeping -- TRACKS how MANY references EXIST
+        Console.WriteLine($"Reference count: {_referenceCount}");
+    }
+
+    public string Read()
+    {
+        Console.WriteLine($"[AUDIT] Document accessed at {DateTime.UtcNow}"); // LOGS EVERY access
+        return _realDocument.Read(); // STILL delegates the ACTUAL operation TRANSPARENTLY
+    }
+}
+```
+
+Because this variant's defining characteristic is the *additional bookkeeping* performed alongside ordinary delegation — rather than controlling *whether* or *how* access happens the way Virtual/Protection/Remote Proxies do — it represents a genuinely distinct use case for the same underlying Proxy structure: transparently wrapping an object specifically to observe or track something about its usage, not to gate or defer access to it.
+
+**Common Pitfall:** conflating a Smart Reference Proxy's bookkeeping purpose with a Protection Proxy's access-control purpose, since both "wrap" a real object and both can involve some conditional logic — the distinguishing question is whether the wrapper's purpose is *tracking/observing* usage (Smart Reference) or *gating/restricting* it (Protection) — genuinely different intents, even when implemented with superficially similar-looking code.
+
+---
+
+## Advanced — Question 21
+
+**Q21: How does a fluent validation library's method chaining — `RuleFor().NotEmpty().MaximumLength()` — mirror the Builder pattern's general structure, with each chained method returning a builder-like object accumulating validation rules?**
+
+Each method in a fluent validation chain (`NotEmpty()`, `MaximumLength()`) doesn't immediately execute a validation check — instead, it *accumulates* a rule definition onto a shared builder-like object and returns that same object (or a related one) for further chaining, exactly mirroring the Builder pattern's core structure (covered earlier): each step configures part of a final, complex object (here, a complete validation rule set) before that fully-assembled rule set is actually used.
+
+```csharp
+public class InlineValidator<T> : AbstractValidator<T>
+{
+    public InlineValidator()
+    {
+        RuleFor(x => x.Email)
+            .NotEmpty()           // ACCUMULATES a rule -- returns a BUILDER-like object for CHAINING
+            .EmailAddress()        // ACCUMULATES ANOTHER rule, onto the SAME underlying RULE BUILDER
+            .MaximumLength(200);   // and ANOTHER -- EACH step configures PART of the FINAL, COMPLETE rule SET
+    }
+}
+// the ENTIRE chain BUILDS UP a COMPLETE validation RULE for "Email," STEP by STEP,
+// EXACTLY mirroring HOW a Builder (covered earlier) ACCUMULATES configuration BEFORE
+// the FINAL, ASSEMBLED object (HERE, a complete VALIDATION rule) is ACTUALLY used
+```
+
+Because each chained call configures one additional piece of the eventual, complete validation rule (rather than immediately performing any actual validation), the entire fluent chain is functionally a Builder — just one whose "final product" is a validation rule definition rather than a physical object like a `Car` or `Computer` (the more commonly-used illustrative examples covered earlier) — demonstrating the pattern's genuine applicability well beyond simple object-construction scenarios.
+
+**Common Pitfall:** viewing fluent, chainable APIs (validation libraries, LINQ's own query syntax, HTTP client builders) as an unrelated, purely stylistic convention distinct from "the Builder pattern," rather than recognizing them as concrete, everyday applications of the exact same underlying structural idea — accumulating configuration step-by-step before a final, complete result is actually used or produced.
+
+---

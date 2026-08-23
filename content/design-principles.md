@@ -1972,4 +1972,86 @@ Because an abstract package can be *extended* (new implementations added) withou
 
 ---
 
+## Beginner — Question 22
+
+**Q22: How does adding a configurable setting for something that has only ever had one actual value in practice represent the same speculative-generality waste YAGNI (covered earlier) warns against, just applied to configuration rather than code structure?**
+
+YAGNI (covered earlier) usually gets discussed in terms of code abstractions built for a hypothetical future need — the same waste applies just as directly to configuration: adding a config setting "in case we ever need to change this value" when, in practice, the value has never once actually varied, adds genuine complexity (another setting to document, validate, and reason about) for a flexibility need that has never materialized.
+
+```csharp
+// SPECULATIVE configuration -- a SETTING that has NEVER, in PRACTICE, held ANY value
+// OTHER than its OWN default, across the ENTIRE lifetime of the APPLICATION
+public class AppSettings { public int MaxRetryAttempts { get; set; } = 3; } // NEVER changed from 3, EVER
+
+// a SIMPLE constant achieves the SAME PRACTICAL outcome, with LESS overhead
+private const int MaxRetryAttempts = 3;
+```
+
+```text
+A configurable SETTING that has NEVER actually VARIED: adds REAL, ONGOING overhead
+  (documentation, VALIDATION, the COGNITIVE load of "is THIS actually configurable, or
+  JUST theoretically SO") for a FLEXIBILITY need that has NEVER, in PRACTICE, MATERIALIZED
+
+A plain CONSTANT: achieves the EXACT SAME practical OUTCOME, with NONE of that
+  UNNECESSARY, SPECULATIVE overhead -- IF the value EVER genuinely NEEDS to become
+  CONFIGURABLE later, THAT'S a SIMPLE, LOW-COST change to MAKE at THAT point
+```
+
+Because a configuration setting that's never actually been exercised in a different value is functionally indistinguishable from a hardcoded constant — except for the extra documentation, validation, and cognitive overhead it imposes — YAGNI's core guidance ("don't build for a need you don't actually have yet") applies with equal force here, just in the specific form of configuration surface area rather than code abstraction.
+
+**Common Pitfall:** making every conceivable value in an application configurable "just in case," when the overwhelming majority of these settings have never actually varied across the application's entire operational history — this bloats configuration surface area with speculative flexibility that was never actually needed, exactly the same waste YAGNI warns against for code abstractions, just manifesting as configuration sprawl instead.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: How does Robert Martin's original phrasing of the Single Responsibility Principle — "a class should have only one reason to change" — differ from the more casual "a class should do one thing" paraphrase, and why does the difference actually matter?**
+
+"Do one thing" is vague and subjective — nearly any class can be described as "doing one thing" if that thing is described broadly enough (an `OrderProcessor` "processes orders") — Martin's actual, more precise framing asks a different, more concrete question: how many distinct *stakeholders* or *reasons* could independently drive a change to this class's code, and are any of those reasons genuinely unrelated to each other?
+
+```csharp
+// "Does ONE thing" (BROADLY described) -- but has MULTIPLE, genuinely UNRELATED
+// REASONS to CHANGE, each driven by a DIFFERENT stakeholder
+public class Employee
+{
+    public decimal CalculatePay() { /* CHANGES when FINANCE changes PAY rules */ }
+    public string GenerateReport() { /* CHANGES when REPORTING requirements change */ }
+    public void Save() { /* CHANGES when the DATABASE schema/technology changes */ }
+}
+// THREE genuinely DIFFERENT REASONS to change, DRIVEN by THREE different STAKEHOLDERS
+// (Finance, Reporting, Database/Infrastructure teams) -- EVEN though it COULD be
+// DESCRIBED, VAGUELY, as "just an Employee class DOING employee STUFF"
+```
+
+Because "reasons to change" (tied to distinct stakeholders/actors) is a concrete, checkable question — "who would ask for THIS specific change, and is that the SAME person/team who'd ask for a DIFFERENT change elsewhere in this class" — while "does one thing" invites endless, unproductive debate about how broadly or narrowly to describe a class's purpose, Martin's actual framing gives a genuinely more actionable, less subjective test for whether a class has accumulated too many responsibilities.
+
+**Common Pitfall:** applying SRP using only the vague "does one thing" test, which can justify almost any class's scope depending on how broadly its "one thing" is described — Martin's actual "one reason to change" framing, tied to distinct stakeholders/actors, provides a considerably more concrete, checkable test for genuine responsibility-mixing that the looser paraphrase can too easily rationalize away.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is Connascence of Meaning, a specific, named sub-type of Connascence (covered broadly earlier), and how does two modules agreeing on the meaning of a specific, un-named magic value create a subtle, hard-to-detect coupling?**
+
+Connascence of Meaning describes coupling that exists purely because two separate pieces of code both need to agree on what a specific, otherwise-unremarkable value *means* — a raw integer `1` meaning "active status" in one module, silently assumed to mean the exact same thing wherever else it's used — with nothing in the code itself (no named constant, no enum) making this shared meaning explicit or discoverable.
+
+```csharp
+// Connascence of MEANING -- BOTH modules must AGREE that "1" MEANS "Active" --
+// but NOTHING in the code ITSELF makes THIS shared meaning EXPLICIT or DISCOVERABLE
+public class OrderValidator { public bool IsValid(Order o) => o.Status == 1; /* "1" means ACTIVE */ }
+public class OrderReport { public string Describe(Order o) => o.Status == 1 ? "Active" : "Inactive"; }
+// IF one module's DEVELOPER later needs a NEW status VALUE and CARELESSLY reuses "1"
+// for SOMETHING ELSE, the OTHER module SILENTLY breaks, with NO compile ERROR at ALL
+
+// REPLACING with a NAMED enum -- makes the SHARED meaning EXPLICIT, ELIMINATING this COUPLING
+public enum OrderStatus { Active = 1, Inactive = 2 }
+public class OrderValidator { public bool IsValid(Order o) => o.Status == OrderStatus.Active; }
+```
+
+Because raw magic values carry no self-describing information about what they actually mean, any code relying on a specific value's meaning is implicitly, invisibly coupled to every *other* piece of code that shares that same assumption — a genuinely subtle form of coupling, since nothing in the code's own structure signals the dependency exists at all, unlike an explicit method call or shared type reference a reader could actually trace.
+
+**Common Pitfall:** using raw magic values (unlabeled integers, strings) that carry an implicit, shared meaning across multiple pieces of code, rather than a named constant or enum making that meaning explicit — this creates invisible Connascence of Meaning that's genuinely difficult to detect through ordinary code reading, since nothing marks the coupling as existing at all until a change to one side silently breaks the other.
+
+---
+
 ---

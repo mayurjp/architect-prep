@@ -1925,4 +1925,105 @@ Because this feature avoids reflection's inherent per-call overhead while still 
 
 ---
 
+## Beginner — Question 23
+
+**Q23: How does combining `is` type-pattern matching with a property pattern (`obj is Person { Age: > 18 }`) let you check a type and inspect its properties in one single, concise expression?**
+
+A property pattern extends `is` pattern matching (covered earlier) to inspect a matched object's *properties* directly, in the same expression — rather than a separate type check followed by a separate cast and a separate property comparison, the entire "is this a Person, and if so, is their Age over 18" check collapses into a single, readable condition.
+
+```csharp
+if (obj is Person { Age: > 18 } adult) // CHECKS the type, INSPECTS a property, AND casts --
+{                                        // ALL in ONE expression
+    Console.WriteLine($"{adult.Name} is an adult");
+}
+
+// equivalent, WITHOUT property PATTERNS:
+if (obj is Person p && p.Age > 18)
+{
+    var adult = p;
+    Console.WriteLine($"{adult.Name} is an adult");
+}
+```
+
+```text
+"obj is Person { Age: > 18 } adult" -- CHECKS "is obj a Person?" AND "is ITS Age GREATER
+  than 18?" TOGETHER, IN ONE expression -- 'adult' is BOUND to the MATCHED, cast Person
+  instance, USABLE DIRECTLY inside the IF block
+```
+
+Because property patterns can be nested and combined with relational patterns (`>`, `<`, covered earlier) and logical patterns (`and`/`or`), a single `is` expression can express fairly sophisticated type-and-shape checks that would otherwise require several separate lines of type-checking, casting, and property comparison — genuinely improving readability for this common combined check.
+
+**Common Pitfall:** writing a separate type check, cast, and property comparison across multiple lines/conditions when a single property pattern expression would express the exact same check more concisely and readably — property patterns exist specifically to collapse this common combination into one clear, single expression.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is the "readonly struct field calling a non-readonly method" gotcha, and how does the compiler's defensive-copy behavior for a readonly field of a non-readonly struct type silently produce surprising semantics when calling a mutating method on it?**
+
+A `readonly` field holding a *mutable* struct type creates a subtle trap: calling any method on that field — even one that doesn't look like it should mutate anything — causes the compiler to silently create a *defensive copy* first (to guarantee the readonly field itself can never be modified), meaning the method call actually operates on a temporary copy, and any mutation the method performs is completely discarded, with no compiler warning at all.
+
+```csharp
+public struct Counter // a MUTABLE struct -- NOT marked readonly
+{
+    public int Value;
+    public void Increment() { Value++; } // MUTATES 'this' -- but 'this' isn't ref-safe for a readonly FIELD
+}
+
+public class Container
+{
+    public readonly Counter MyCounter; // a READONLY FIELD, holding a MUTABLE struct TYPE
+
+    public void Test()
+    {
+        MyCounter.Increment(); // COMPILES fine -- but the COMPILER silently creates a
+                                 // DEFENSIVE COPY of MyCounter FIRST, calls Increment() on
+                                 // THAT COPY -- MyCounter ITSELF is COMPLETELY UNCHANGED,
+                                 // with NO WARNING that the MUTATION was SILENTLY DISCARDED
+    }
+}
+```
+
+```text
+"MyCounter.Increment();" LOOKS like it should INCREMENT MyCounter.Value -- but SINCE
+  MyCounter is a READONLY field of a MUTABLE struct type, the COMPILER can't GUARANTEE
+  Increment() won't MUTATE something it SHOULDN'T -- it PLAYS IT SAFE by COPYING FIRST --
+  the REAL MyCounter field NEVER actually CHANGES, SILENTLY
+```
+
+Because this defensive copy happens completely silently, with no compiler warning that a mutation was effectively discarded, this is a genuinely easy-to-miss source of confusing bugs — the fix is either marking the struct type itself `readonly` (covered earlier, if it's genuinely meant to be immutable) or avoiding `readonly` on fields holding a mutable struct type entirely, using a regular field (or a reference type) instead.
+
+**Common Pitfall:** declaring a `readonly` field of a mutable struct type and calling what appears to be a mutating method on it, expecting the field's own state to actually change — the compiler's defensive-copy behavior silently discards the mutation, producing a confusing bug that's easy to overlook since the code compiles cleanly with no warning about what actually happened.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is `Unsafe.As<TFrom, TTo>()`, and how does it let you reinterpret a reference's type without any runtime type check or conversion at all, trading type safety for zero-cost reinterpretation?**
+
+An ordinary cast (`(TTo)obj`) performs an actual runtime type check, throwing an `InvalidCastException` if the object genuinely isn't the target type — `Unsafe.As<TFrom, TTo>()` instead performs *no* check whatsoever, simply reinterpreting the existing reference's bits as if they were the target type directly, at zero runtime cost, but with entirely undefined behavior if the underlying object's actual layout doesn't genuinely match the target type.
+
+```csharp
+object obj = new SomeClass();
+var reinterpreted = Unsafe.As<SomeClass>(obj); // NO runtime check AT ALL -- if 'obj' genuinely
+    // ISN'T a SomeClass (or COMPATIBLE layout), this produces UNDEFINED, POTENTIALLY
+    // MEMORY-CORRUPTING behavior -- COMPLETELY different from an ORDINARY, SAFE cast
+```
+
+```text
+Ordinary cast "(SomeClass)obj": PERFORMS an ACTUAL runtime type CHECK -- THROWS
+  InvalidCastException if 'obj' ISN'T ACTUALLY a SomeClass -- SAFE, but has a SMALL,
+  NON-ZERO runtime COST for the CHECK itself
+
+Unsafe.As<SomeClass>(obj): PERFORMS NO check AT ALL -- ZERO runtime COST -- but if 'obj'
+  ISN'T genuinely COMPATIBLE, the RESULT is UNDEFINED, POTENTIALLY CORRUPTING memory
+  or CRASHING the PROCESS ENTIRELY, WITH NO safe, RECOVERABLE exception AT ALL
+```
+
+Because this method trades away the safety net an ordinary cast provides in exchange for eliminating even the small cost of a runtime type check, it's reserved for genuinely performance-critical, low-level code where the caller has *already* independently guaranteed (through some other means) that the reinterpretation is actually valid — using it incorrectly doesn't produce a catchable exception the way a bad ordinary cast would, but genuinely undefined, potentially catastrophic behavior instead.
+
+**Common Pitfall:** using `Unsafe.As<TFrom, TTo>()` as a "faster cast" in ordinary application code where the small cost of an actual runtime type check is completely irrelevant — this trades away a safe, catchable exception for undefined behavior on a genuine type mismatch, a trade only justified in the narrowest, most performance-critical, already-independently-verified scenarios, never as a general-purpose casting shortcut.
+
+---
+
 ---

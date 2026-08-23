@@ -2086,3 +2086,103 @@ Because C#'s syntactic distinction between properties and methods carries this c
 **Common Pitfall:** implementing a property getter that actually performs expensive computation, a database call, or a meaningful side effect — this violates the conventional expectation a property's syntax carries (cheap, pure, side-effect-free), misleading a reader who reasonably assumes `obj.SomeProperty` is a trivial read; genuinely expensive or effectful operations should be expressed as methods, preserving the convention's informative value.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is the difference between a constructor overload and constructor chaining (`: this(...)`), and how does chaining let one constructor delegate to another, avoiding duplicated initialization logic across multiple overloads?**
+
+A constructor overload is simply another constructor with a different parameter list — without chaining, each overload might independently duplicate the same initialization logic; chaining (`: this(...)`) lets one constructor call *another* constructor on the same class first, before running its own additional body, letting the simpler overloads delegate their shared setup work to one, single, authoritative constructor.
+
+```csharp
+public class Order
+{
+    public int CustomerId { get; }
+    public string Status { get; }
+
+    public Order(int customerId) : this(customerId, "Pending") { } // DELEGATES to the OTHER
+                                                                       // constructor -- NO
+                                                                       // DUPLICATED logic HERE
+
+    public Order(int customerId, string status) // the ONE, AUTHORITATIVE constructor --
+    {                                             // ACTUALLY performs the INITIALIZATION
+        CustomerId = customerId;
+        Status = status;
+    }
+}
+```
+
+```text
+WITHOUT chaining: "Order(int customerId)" would need to DUPLICATE the SAME assignment
+  logic ITSELF ("CustomerId = customerId; Status = "Pending";") -- a SEPARATE COPY of
+  the SAME initialization CODE, REPEATED across EVERY overload NEEDING it
+
+WITH chaining (": this(...)"): the SIMPLER overload SIMPLY DELEGATES to the MORE COMPLETE
+  one, SUPPLYING a DEFAULT value for the MISSING parameter -- ZERO duplicated LOGIC
+```
+
+Because chaining ensures only *one* constructor actually contains the real initialization logic (with every other overload simply calling it with appropriate defaults), any future change to that shared initialization logic needs to happen in exactly one place — directly avoiding the maintenance risk of the same logic being duplicated (and potentially drifting out of sync) across multiple independent constructor overloads.
+
+**Common Pitfall:** duplicating the same initialization logic across multiple constructor overloads independently, rather than having simpler overloads chain to a more complete one via `: this(...)` — this risks the duplicated copies drifting out of sync with each other over time, as a future change to the shared initialization logic might only get applied to one overload and forgotten in the others.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is "Inappropriate Intimacy" as a code smell — a class reaching deeply into another's private/internal details, even if technically through public members — and how does this differ from ordinary, healthy collaboration between two well-designed classes?**
+
+Inappropriate Intimacy describes two classes that know far too much about each other's internal implementation details — even if every individual access technically goes through public members, the *sheer depth and frequency* of one class reaching into another's internals (repeatedly accessing several of its properties to replicate logic that arguably belongs on the other class) signals the two classes are more tightly coupled than a healthy, well-bounded collaboration should be.
+
+```csharp
+// INAPPROPRIATE INTIMACY -- OrderProcessor reaches DEEPLY into Order's internals,
+// REPEATEDLY, to REPLICATE logic that ARGUABLY belongs ON Order ITSELF
+public class OrderProcessor
+{
+    public decimal CalculateShippingCost(Order order)
+    {
+        if (order.Items.Sum(i => i.Weight) > 50 && order.ShippingAddress.Country != order.BillingAddress.Country)
+            return order.Items.Count * 5.0m + order.ShippingAddress.IsRemote ? 25m : 10m;
+        // ... REPEATEDLY reaching INTO order's OWN internal STRUCTURE, MULTIPLE levels deep
+    }
+}
+
+// HEALTHIER -- the LOGIC moves TO Order itself, WHICH already OWNS the RELEVANT data
+public class Order
+{
+    public decimal CalculateShippingCost() { /* the SAME logic, but NOW living WHERE the DATA already IS */ }
+}
+```
+
+Because healthy collaboration between two classes typically involves a narrow, well-defined set of interactions (a method call, a small number of property reads) rather than one class extensively reaching through multiple layers of another's internal structure, Inappropriate Intimacy is really Feature Envy (covered earlier) taken to a more extreme, structural degree — the fix is usually the same: relocate the logic to the class that actually owns the data it depends on, following the Information Expert principle (covered under Design Principles).
+
+**Common Pitfall:** allowing one class to repeatedly and extensively reach into another's internal structure (even through technically-public members) to implement logic that conceptually belongs to the class being reached into — this creates tight, brittle coupling between the two classes, since any change to the "reached into" class's internal structure risks breaking the other class's deeply-dependent logic.
+
+---
+
+## Advanced — Question 22
+
+**Q22: How does C#'s built-in covariant array unsoundness — `object[] arr = new string[3];` — let a runtime `ArrayTypeMismatchException` occur despite the code compiling successfully, connecting to LSP's substitutability concerns?**
+
+C# arrays are covariant by design (a historical language decision predating generics) — meaning `string[]` can be implicitly used wherever `object[]` is expected, since `string` is a subtype of `object` — but this covariance is *unsound*: nothing prevents code holding the `object[]`-typed reference from attempting to store an incompatible type into it, which the runtime must then detect and reject with an exception, since the compiler alone cannot catch it.
+
+```csharp
+string[] strings = new string[3];
+object[] objects = strings; // COMPILES fine -- ARRAYS are COVARIANT in C#
+
+objects[0] = 42; // COMPILES fine too (an int IS a VALID object) -- but THROWS
+                   // ArrayTypeMismatchException AT RUNTIME -- the UNDERLYING array is
+                   // ACTUALLY a string[], and an INT genuinely CANNOT be STORED into it,
+                   // DESPITE the COMPILER having NO WAY to catch THIS at COMPILE time
+```
+
+```text
+The COMPILER sees "objects" as object[] -- ASSIGNING "42" (an int, BOXED as an object)
+  is PERFECTLY VALID from THAT static TYPE's perspective -- the COMPILER has NO VISIBILITY
+  into the FACT that "objects" ACTUALLY REFERS to a string[] underneath -- ONLY the
+  RUNTIME, checking the ACTUAL array's TYPE at the MOMENT of the WRITE, can CATCH this
+```
+
+Because this specific covariance was baked into the language before generics (and their sound, `out`/`in`-annotated variance, covered earlier) existed, it represents a genuine, known unsoundness the language simply accepts and compensates for via a runtime check — directly illustrating why LSP's substitutability concerns (covered extensively earlier) aren't merely academic: a `string[]` being usable wherever `object[]` is expected looks like safe substitutability at the type level, but breaks down at the *behavioral* level the moment an incompatible write is attempted.
+
+**Common Pitfall:** assuming array covariance in C# is fully type-safe simply because it compiles without error — array covariance is a well-known, deliberate unsoundness in the language's type system, and any code writing into a covariant array reference should be aware that a runtime `ArrayTypeMismatchException` is a genuine possibility the compiler cannot rule out, unlike the sound, compiler-verified variance generics provide via `out`/`in` (covered earlier).
+
+---
