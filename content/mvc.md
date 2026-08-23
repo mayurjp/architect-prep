@@ -2113,3 +2113,110 @@ Because Razor Pages structurally colocates a page's UI and its handling logic �
 **Common Pitfall:** assuming Razor Pages and MVC Controllers are two entirely separate, mutually-exclusive frameworks requiring an all-or-nothing choice for an application — both share the exact same underlying routing, model binding, and filter infrastructure, and a single ASP.NET Core application commonly mixes both approaches, using Razor Pages for simpler, page-centric screens and full MVC Controllers for more complex, API-like, or Multi-View scenarios within the same project.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is `_ViewImports.cshtml`, and how does it let common Razor directives (`@using` namespace imports, `@addTagHelper` registrations) apply automatically to every view in a folder, without repeating them in each individual `.cshtml` file?**
+
+`_ViewImports.cshtml` is a special, conventionally-named file whose directives (`@using`, `@addTagHelper`, `@inject`, covered elsewhere) automatically apply to every view in the *same folder and its subfolders* — placing it once at the `Views` root, for instance, means every view throughout the application inherits the same namespace imports and Tag Helper registrations without each individual view needing to declare them itself.
+
+```cshtml
+@* Views/_ViewImports.cshtml *@
+@using MyApp.Models
+@using MyApp.ViewModels
+@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+```
+```cshtml
+@* Views/Products/Index.cshtml -- automatically has access to MyApp.Models,
+   MyApp.ViewModels, AND the built-in Tag Helpers, with NO explicit @using
+   or @addTagHelper needed in THIS specific file at all *@
+@model ProductViewModel
+<div asp-for="Name"></div>
+```
+
+```text
+WITHOUT _ViewImports.cshtml: EVERY single view repeats the SAME @using
+  statements and @addTagHelper registrations -- a COMMON namespace/registration
+  needed by EVERY view means EDITING every EXISTING view file to add it
+
+WITH _ViewImports.cshtml: COMMON directives are declared ONCE, at the
+  appropriate FOLDER level -- EVERY view in that folder (and its
+  SUBFOLDERS) automatically INHERITS them, with NO per-view repetition
+```
+
+Because `_ViewImports.cshtml` can be placed at multiple folder levels (a root-level one for application-wide defaults, plus a more specific one in a subfolder adding additional imports just for that area), it provides the same DRY benefit `_ViewStart.cshtml` (covered earlier for `Layout` assignment) provides for a different, specifically directive-oriented concern.
+
+**Common Pitfall:** placing Tag Helper registrations or namespace imports in every individual view file out of habit, without realizing `_ViewImports.cshtml` exists specifically to eliminate exactly this repetition — a change needed across every view (adding a new commonly-used namespace) then requires editing every single view file individually, rather than one shared `_ViewImports.cshtml`.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What are Display Templates and Editor Templates (`DisplayFor()`/`EditorFor()`), and how do they let a specific type's rendering be customized once and automatically reused everywhere that type appears in a view, rather than repeating markup per property?**
+
+Rather than hand-writing the same markup pattern every time a specific type (a `DateTime`, a custom `Money` value object) needs to be displayed or edited across many different views, a Display/Editor Template — a `.cshtml` partial placed in a conventionally-named folder (`DisplayTemplates`/`EditorTemplates`) — defines that rendering *once, per type*, and `DisplayFor()`/`EditorFor()` automatically locate and use the matching template for whatever type a given property actually is.
+
+```cshtml
+@* Views/Shared/EditorTemplates/Money.cshtml -- a template for the "Money" TYPE *@
+@model Money
+<div class="money-input">
+    <input asp-for="Amount" /> <select asp-for="Currency"><option>USD</option><option>EUR</option></select>
+</div>
+```
+```cshtml
+@* ANY view rendering a Money property automatically uses the SAME template *@
+@Html.EditorFor(m => m.Price)   @* renders the Money.cshtml template automatically *@
+@Html.EditorFor(m => m.Discount) @* SAME template reused, for a DIFFERENT Money property *@
+```
+
+```text
+WITHOUT Display/Editor Templates: EVERY view rendering a "Money" value
+  repeats the SAME multi-element markup pattern (amount input + currency
+  dropdown) BY HAND -- a CHANGE to how Money is displayed means EDITING
+  every view that happens to render one
+
+WITH a Money EditorTemplate defined ONCE: EditorFor(m => m.AnyMoneyProperty)
+  automatically LOCATES and uses that SAME template, EVERYWHERE a Money
+  value appears -- a FUTURE change to the template automatically applies
+  EVERYWHERE, with ZERO per-view edits needed
+```
+
+Because template lookup happens automatically based purely on the property's *type* — no explicit template name needs to be specified at each call site — Display/Editor Templates provide a genuinely DRY mechanism for rendering a specific domain type consistently across an entire application, directly complementing Tag Helpers and Partial Views (both covered earlier) as another tool in MVC's view-reuse toolkit, specifically scoped to per-type rendering conventions.
+
+**Common Pitfall:** manually repeating a complex type's rendering markup across many views instead of extracting it into a Display/Editor Template — beyond the maintenance burden, this also risks the rendering subtly drifting out of sync between different views over time, exactly the kind of duplication a per-type template is specifically designed to eliminate.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is `ModelMetadata`/`IModelMetadataProvider`, and how does it provide the single, unified source of metadata — display name, required-ness, data type — that both Data Annotations validation and Tag Helpers/Display Templates (all covered earlier) read from?**
+
+Rather than validation logic and rendering logic each independently re-inspecting a model's Data Annotations attributes, MVC centralizes that inspection into a single `ModelMetadata` object per property, built once by an `IModelMetadataProvider` — validation, Tag Helpers (`asp-for` reading a property's display name for a generated `<label>`), and Display/Editor Templates (covered earlier, choosing which template to use based on metadata) all consult this same, already-computed metadata rather than each re-parsing attributes independently.
+
+```csharp
+public class Product
+{
+    [Required]
+    [Display(Name = "Product Name")]
+    public string Name { get; set; }
+}
+```
+
+```text
+WITHOUT a unified ModelMetadata abstraction: VALIDATION logic inspects
+  [Required] directly; TAG HELPERS inspect [Display(Name=...)] directly;
+  DISPLAY TEMPLATES inspect the property's TYPE directly -- THREE separate
+  pieces of code each independently RE-DISCOVERING overlapping information
+  about the SAME property
+
+WITH ModelMetadata: ONE metadata object, built ONCE per property by
+  IModelMetadataProvider, captures ALL of this (IsRequired, DisplayName,
+  ModelType, and more) -- VALIDATION, Tag Helpers, and Display Templates
+  ALL read from this SAME, already-computed metadata OBJECT
+```
+
+Because this metadata is computed once and shared across every consumer that needs it, a custom `IDisplayMetadataProvider` (covered earlier) applying a cross-cutting display convention affects *every* consumer of that metadata simultaneously — a Tag Helper's rendered label, a Display Template's selection logic, and validation's error messages all automatically reflect the same customization, rather than needing to be updated in three separate places.
+
+**Common Pitfall:** assuming Data Annotations attributes are read independently and redundantly by validation, Tag Helpers, and templates — in practice, MVC's `ModelMetadata` abstraction means all three consume the exact same, centrally-computed metadata, which is precisely why a custom `IDisplayMetadataProvider` or `IValidationMetadataProvider` can influence validation, rendering, and template selection simultaneously through one single customization point.
+
+---

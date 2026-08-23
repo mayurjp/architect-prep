@@ -2139,3 +2139,104 @@ Because a first-party solution is maintained in lockstep with the framework's ow
 **Common Pitfall:** assuming the built-in `Microsoft.AspNetCore.OpenApi` package immediately provides full feature parity with Swashbuckle's years of accumulated customization options — as a newer, first-party alternative, it may lack specific advanced customization hooks an existing Swashbuckle-based setup already relies on, making a wholesale migration worth evaluating carefully against the project's actual customization needs rather than switching purely because it's now the "official" option.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What does the `[FromForm]` attribute do, and how does it let an action explicitly bind form-encoded request data — `multipart/form-data` or `application/x-www-form-urlencoded` — to a parameter, as distinct from `[FromBody]`'s JSON-specific binding?**
+
+`[FromBody]` (covered elsewhere) binds a parameter from a JSON request body — `[FromForm]` instead binds from form-encoded data, the format an HTML `<form>` submits by default (or the format used for file uploads via `multipart/form-data`), letting an action explicitly declare it expects this different content type rather than JSON.
+
+```csharp
+[HttpPost]
+public IActionResult Upload([FromForm] string description, [FromForm] IFormFile file)
+{
+    // 'description' and 'file' are bound from a multipart/form-data request,
+    // exactly what an <form enctype="multipart/form-data"> submission sends
+}
+```
+
+```text
+[FromBody]: binds from a JSON request BODY -- appropriate for a typical
+  JSON API client (a SPA's fetch() call, another SERVICE's HTTP client)
+
+[FromForm]: binds from FORM-encoded data -- appropriate for an ORDINARY
+  HTML <form> submission, OR specifically for FILE uploads via
+  multipart/form-data, which JSON cannot represent AT ALL
+```
+
+Because a request body can only be consumed *once*, and `[FromBody]`/`[FromForm]` each expect a fundamentally different content type/parsing approach, an action generally can't mix both on different parameters of the same request — file-upload endpoints in particular almost always need `[FromForm]` (or the framework's automatic inference for an `IFormFile` parameter) rather than `[FromBody]`, since JSON has no native way to represent binary file content.
+
+**Common Pitfall:** attempting to combine an `[FromBody]`-bound complex object parameter with an `[FromForm]`-bound `IFormFile` parameter on the same action — since the two attributes expect fundamentally incompatible request content types (JSON body versus multipart form data) reading from the same single request stream, this combination doesn't work; a request genuinely needing both file content and structured data typically sends the structured data as an additional form field (each field parsed individually) rather than mixing a JSON body with multipart form data.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: When would you still reach for the older, filter-based `IExceptionFilter` (covered under MVC) in a Web API, rather than the newer, centralized `IExceptionHandler` (.NET 8+, covered earlier)?**
+
+`IExceptionHandler` (covered earlier) provides one, application-wide, centralized place to handle every unhandled exception — `IExceptionFilter` operates at the MVC pipeline's own filter level (covered under MVC), letting exception-handling logic be scoped to a *specific* controller or action via attribute-based application, rather than applying globally to the entire application by default.
+
+```csharp
+// IExceptionHandler -- registered ONCE, applies GLOBALLY across the whole application
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+
+// IExceptionFilter -- can be applied SELECTIVELY, to just ONE controller/action
+[ServiceFilter(typeof(SpecialOrderExceptionFilter))]
+public class OrdersController : ControllerBase { /* ... */ }
+```
+
+```text
+IExceptionHandler: GLOBAL, application-wide exception handling -- the
+  RIGHT default choice for MOST APIs wanting one CONSISTENT error-response
+  shape across EVERY endpoint
+
+IExceptionFilter: SCOPED to specific controllers/actions via ATTRIBUTE
+  application -- appropriate when a SPECIFIC subset of endpoints needs
+  GENUINELY different exception-handling behavior than the REST of the API
+```
+
+Because most Web APIs want one single, consistent error-handling behavior across every endpoint, `IExceptionHandler`'s global-by-default model is usually the better fit for an API's overall error-handling strategy — `IExceptionFilter` remains useful specifically when a narrow subset of endpoints genuinely needs different exception-handling behavior than the rest of the application, a scoping capability `IExceptionHandler` alone doesn't directly provide.
+
+**Common Pitfall:** registering both `IExceptionHandler` and multiple `IExceptionFilter`s without a clear understanding of how they interact — filters run as part of the MVC pipeline (only for controller-based actions), while `IExceptionHandler` operates more centrally; mixing both without a deliberate strategy can lead to confusing, inconsistent error responses depending on exactly which code path an exception happens to propagate through.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is a custom `IOutputCachePolicy`, and how does it let output caching decisions (covered earlier) depend on arbitrary request context beyond the built-in `VaryBy` options?**
+
+The built-in Output Caching options (`VaryByQuery`, `VaryByHeader`, covered earlier) cover common cases, but a genuinely custom caching decision — caching only for authenticated users of a specific subscription tier, or varying the cache key based on a computed value not directly present in any single header — needs a custom `IOutputCachePolicy`, which lets you write arbitrary C# logic determining both *whether* a given response should be cached and *how* its cache key should be computed.
+
+```csharp
+public class PremiumUserCachePolicy : IOutputCachePolicy
+{
+    public ValueTask CacheRequestAsync(OutputCacheContext context, CancellationToken token)
+    {
+        var isPremium = context.HttpContext.User.HasClaim("tier", "premium");
+        context.EnableOutputCaching = isPremium; // only cache for PREMIUM users
+        context.CacheVaryByRules.VaryByValues.Add("tier", "premium");
+        return ValueTask.CompletedTask;
+    }
+    // ServeFromCacheAsync / ServeResponseAsync also implementable for finer control
+}
+
+builder.Services.AddOutputCache(options =>
+    options.AddPolicy("PremiumOnly", new PremiumUserCachePolicy()));
+```
+
+```text
+Built-in VaryBy options: cover COMMON cases (a specific query PARAMETER, a
+  specific HEADER value) -- declarative, but LIMITED to what those
+  built-in options DIRECTLY express
+
+Custom IOutputCachePolicy: ARBITRARY C# logic decides caching ELIGIBILITY
+  and cache-KEY computation -- can inspect ANYTHING available on
+  HttpContext (claims, computed VALUES, combinations of MULTIPLE factors)
+  that the built-in options CANNOT directly express
+```
+
+Because a custom policy has full access to `HttpContext` and can implement genuinely arbitrary logic, it's the appropriate escape hatch for caching decisions that don't map cleanly onto a simple header or query-parameter variation — at the cost of needing to write and maintain that logic explicitly, rather than relying on the built-in options' simpler, declarative configuration.
+
+**Common Pitfall:** implementing a custom `IOutputCachePolicy` whose caching-eligibility logic inadvertently ignores a security-sensitive distinction (caching a response containing user-specific data without properly varying the cache key by user identity) — a caching bug of this kind can leak one user's data to a different user who happens to receive the same cached response, a considerably more severe consequence than an ordinary caching correctness bug.
+
+---

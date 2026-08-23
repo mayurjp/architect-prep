@@ -2206,3 +2206,116 @@ Because this validation happens at the framework's own middleware layer — befo
 **Common Pitfall:** leaving `AllowedHosts` set to its permissive wildcard default (`"*"`, which accepts any Host header) in production — this default is convenient for local development (where the exact hostname isn't known in advance) but leaves a deployed application fully exposed to Host Header Injection; production deployments should explicitly configure `AllowedHosts` to the application's actual known hostname(s).
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What does `app.UseForwardedHeaders()` do, and how does it let an application correctly interpret `X-Forwarded-For`/`X-Forwarded-Proto` headers (covered under HTTP) from a reverse proxy, restoring the original client's real IP address and scheme?**
+
+When an application sits behind a reverse proxy (Nginx, a cloud load balancer), every request Kestrel actually sees originates from the proxy itself — the proxy's own IP, and typically plain HTTP even if the original client used HTTPS. `UseForwardedHeaders()` middleware reads the `X-Forwarded-For`/`X-Forwarded-Proto` headers the proxy sets and rewrites `HttpContext.Connection.RemoteIpAddress`/`HttpContext.Request.Scheme` to reflect the *original* client's real information, so application code (and other middleware, like HTTPS redirection) sees accurate values rather than the proxy's own.
+
+```csharp
+var app = builder.Build();
+
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+});
+// must run EARLY in the pipeline, BEFORE any middleware that reads RemoteIpAddress/Scheme
+```
+
+```text
+WITHOUT UseForwardedHeaders: RemoteIpAddress ALWAYS shows the PROXY's own
+  IP (every request LOOKS like it came from the SAME place) -- Scheme
+  ALWAYS shows "http," even for requests the ORIGINAL client sent over
+  HTTPS -- IP-based logging/rate-limiting and HTTPS-redirection logic
+  BOTH behave incorrectly
+
+WITH UseForwardedHeaders configured correctly: the MIDDLEWARE rewrites
+  these values FROM the trusted proxy's OWN X-Forwarded-* headers --
+  application code sees the GENUINE original client IP and SCHEME,
+  exactly as if the PROXY weren't there at all
+```
+
+Because this middleware trusts whatever the `X-Forwarded-*` headers claim, it must only be enabled when the application is genuinely deployed behind a *trusted* proxy — configuring `KnownProxies`/`KnownNetworks` restricts which upstream sources are actually trusted to set these headers, preventing an untrusted, directly-connecting client from simply spoofing its own `X-Forwarded-For` header to fake a different origin IP.
+
+**Common Pitfall:** enabling `UseForwardedHeaders()` without restricting `KnownProxies`/`KnownNetworks` to the actual trusted reverse proxy's address — without that restriction, any direct, untrusted client could set its own `X-Forwarded-For` header and have the application blindly trust it as the "real" client IP, defeating any IP-based security logic relying on that value.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is `IExceptionHandlerPathFeature`, and how does it let a custom error-handling endpoint retrieve details about the exception and the original request path that triggered it, when using `UseExceptionHandler` (covered earlier)?**
+
+`UseExceptionHandler("/Error")` (covered earlier) re-executes the request pipeline against a specified error-handling path once an unhandled exception occurs — but that error-handling endpoint doesn't automatically know *which* exception occurred, or what the *original* request path was, unless it explicitly retrieves that information from `HttpContext.Features.Get<IExceptionHandlerPathFeature>()`, which the exception-handling middleware populates before re-executing the pipeline.
+
+```csharp
+app.MapGet("/Error", (HttpContext context) =>
+{
+    var feature = context.Features.Get<IExceptionHandlerPathFeature>();
+    var exception = feature?.Error;         // the ACTUAL exception that was thrown
+    var originalPath = feature?.Path;        // the REQUEST path that triggered it
+
+    _logger.LogError(exception, "Unhandled exception at {Path}", originalPath);
+    return Results.Problem("An unexpected error occurred.");
+});
+```
+
+```text
+WITHOUT retrieving IExceptionHandlerPathFeature: the ERROR endpoint has NO
+  direct visibility into WHAT actually went wrong or WHERE the original
+  request was headed -- it can only return a GENERIC error message with
+  NO specific diagnostic context available to LOG
+
+WITH IExceptionHandlerPathFeature: the ERROR endpoint retrieves the EXACT
+  exception object AND the original request PATH directly from HttpContext
+  FEATURES -- enabling MEANINGFUL, specific logging even though the code
+  handling the error is COMPLETELY SEPARATE from the code that THREW it
+```
+
+Because `HttpContext.Features` (covered elsewhere as a general extensibility mechanism) is exactly how `UseExceptionHandler`'s middleware communicates the caught exception's details to the re-executed error-handling endpoint, understanding this specific feature is the key to writing an error handler that actually logs meaningful diagnostic information rather than a generic "something went wrong" with no further detail.
+
+**Common Pitfall:** returning a generic error response from the `/Error` endpoint without ever retrieving `IExceptionHandlerPathFeature`, leaving the actual exception details completely unlogged — this can turn a specific, diagnosable production error into an untraceable mystery, since the one place positioned to log the actual exception details never actually retrieves them.
+
+---
+
+## Advanced — Question 23
+
+**Q23: Why does a conventional middleware class registered via `UseMiddleware<T>()` get constructed only once, for the application's entire lifetime — even for dependencies that are normally Scoped — and why must a Scoped dependency instead be injected via the `InvokeAsync` method's parameters rather than the constructor?**
+
+A conventional middleware class (one that doesn't implement `IMiddleware`, covered elsewhere) is instantiated exactly *once*, at application startup, and that single instance handles every subsequent request for the application's entire lifetime — meaning any dependency injected into its *constructor* is also resolved only once, at that same startup moment. If that dependency is registered as Scoped (intended to be fresh per HTTP request, like a `DbContext`), injecting it via the constructor would capture the very first request's scoped instance and incorrectly reuse it for every subsequent request.
+
+```csharp
+public class MyMiddleware
+{
+    // WRONG: capturing a Scoped dependency in the CONSTRUCTOR --
+    // this is resolved ONCE, at startup, and reused INCORRECTLY for every request
+    public MyMiddleware(RequestDelegate next, AppDbContext db) { _next = next; _db = db; }
+
+    // CORRECT: a Scoped dependency is injected as an InvokeAsync PARAMETER instead --
+    // the framework resolves a FRESH instance from the CURRENT request's own scope, every call
+    public async Task InvokeAsync(HttpContext context, AppDbContext db)
+    {
+        // 'db' here is CORRECTLY scoped to THIS specific request
+        await _next(context);
+    }
+}
+```
+
+```text
+Constructor injection (conventional middleware): resolved ONCE, at
+  application STARTUP -- a Scoped dependency injected THIS way gets
+  PERMANENTLY "stuck" as whatever instance existed during THAT one-time
+  construction, silently REUSED (incorrectly) across EVERY subsequent
+  request
+
+InvokeAsync parameter injection: the FRAMEWORK resolves THESE parameters
+  freshly, from the CURRENT request's OWN DI scope, on EVERY single
+  invocation -- a Scoped dependency injected THIS way behaves CORRECTLY,
+  genuinely fresh per request
+```
+
+Because this is a genuinely easy mistake to make (constructor injection is the natural, default pattern everywhere else in ASP.NET Core), understanding *why* conventional middleware's constructor is special — a true singleton-lifetime constructor, despite the class handling per-request work — is essential for correctly consuming any Scoped dependency from within custom middleware; the framework doesn't produce a compile error for the incorrect pattern, only subtly wrong runtime behavior.
+
+**Common Pitfall:** injecting a Scoped dependency (most commonly a `DbContext`) into a conventional middleware's constructor, which compiles and even appears to work correctly during casual local testing (a single request at a time) — the bug only manifests under genuine concurrent, multi-request load, where every request incorrectly shares the exact same captured `DbContext` instance from the very first request, a `DbContext` (not being thread-safe, covered under EF Core) then producing corrupted or cross-contaminated data across unrelated requests.
+
+---

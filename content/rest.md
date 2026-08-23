@@ -2891,3 +2891,95 @@ Because a formal, automated ruleset removes the ambiguity and inconsistency of r
 **Common Pitfall:** relying entirely on manual code review to catch breaking schema changes, trusting that a human reviewer will always notice a subtle field rename or type change buried in a large pull request — an automated, schema-diffing CI check catches this class of mistake reliably and consistently, in a way manual review alone cannot guarantee across every single change, especially in a fast-moving codebase with many contributors.
 
 ---
+
+## Beginner — Question 25
+
+**Q25: What is the REST convention around trailing slashes in a URL (`/products/` versus `/products`), and why do most API frameworks/gateways enforce one consistent convention rather than treating both forms as always interchangeable?**
+
+While a trailing slash is often semantically harmless, treating `/products/` and `/products` as genuinely *different* URLs (two separate cache entries, two separate possible route matches) creates inconsistency — most frameworks and API gateways instead pick one canonical convention (typically no trailing slash) and either redirect the other form to it or reject it outright, ensuring a single resource is always reachable at exactly one canonical URL.
+
+```text
+WITHOUT a consistent convention: /products AND /products/ might be treated
+  as TWO separate cache entries, TWO separate log lines, or even FAIL to
+  match the SAME route depending on the framework's own routing rules --
+  confusing INCONSISTENCY for what SHOULD be the identical resource
+
+WITH a consistent convention (typically: NO trailing slash): the FRAMEWORK
+  either NORMALIZES /products/ to /products (a redirect), or SIMPLY never
+  generates/accepts the trailing-slash FORM in the first place -- every
+  reference to this resource CONSISTENTLY uses the SAME canonical URL
+```
+
+Because inconsistent trailing-slash handling can fragment caching, logging, and search-engine indexing across what should be treated as one single, identical resource, picking and consistently enforcing one convention (rather than treating both forms as interchangeably valid) avoids this fragmentation — the specific choice (with or without) matters far less than consistently applying whichever one is chosen throughout an entire API.
+
+**Common Pitfall:** allowing both forms to work identically as separate, independently-cacheable routes without any normalization between them — this can cause a CDN or intermediate cache to store two separate cached copies of what's conceptually the exact same resource, and can also cause duplicate-content issues for a public-facing API/documentation indexed by search engines.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is a "Bulk GET by IDs" endpoint convention (`GET /products?ids=1,2,3` or `POST /products/batch-get`), and how does it reduce N separate round trips to one, as a read-side counterpart to the Batch/Bulk Operation convention covered earlier for writes?**
+
+Fetching several specific resources by ID normally means either N separate `GET /products/{id}` requests (one round trip per resource) or a single request for the entire collection with client-side filtering (wasteful if only a handful of specific items are actually needed) — a Bulk GET endpoint accepts a list of IDs directly and returns exactly those items in one response, avoiding both the N-round-trip cost and the wasted-bandwidth cost of over-fetching an entire collection.
+
+```http
+GET /api/products?ids=101,205,309 HTTP/1.1
+```
+```json
+[
+  { "id": 101, "name": "Keyboard" },
+  { "id": 205, "name": "Mouse" },
+  { "id": 309, "name": "Monitor" }
+]
+```
+
+```text
+N separate GET requests: fetching 20 specific products by ID means 20
+  SEPARATE round trips -- LATENCY scales directly with the NUMBER of
+  items needed, exactly the N+1-style problem covered elsewhere
+
+ONE Bulk GET request: the SAME 20 products are retrieved in ONE round
+  trip -- LATENCY stays roughly CONSTANT regardless of how many specific
+  IDs are being requested TOGETHER
+```
+
+Because a client frequently needs to resolve a batch of known IDs into their full resource representations (rendering a list of items referenced elsewhere by ID, resolving a set of foreign keys client-side), a dedicated Bulk GET endpoint directly addresses this common access pattern — for a very large ID list exceeding a reasonable URL length, the `POST /products/batch-get` variant (sending IDs in the request body instead of a query string) avoids URL-length limitations a GET-with-query-string approach would eventually hit.
+
+**Common Pitfall:** choosing `GET` with a query-string ID list for a batch size that can grow arbitrarily large — URL length limits (varying by server/browser/proxy, but commonly a few thousand characters) can silently truncate or reject a sufficiently long ID list; a `POST`-based bulk-get endpoint (sending IDs in the request body, despite technically being a read operation) sidesteps this limitation for genuinely large batches.
+
+---
+
+## Advanced — Question 25
+
+**Q25: How does actually enforcing an API's Sunset date — returning `410 Gone` for requests to a deprecated endpoint after that date, rather than merely continuing to serve it indefinitely — differ in commitment from the purely advisory `Sunset`/`Deprecation` headers covered earlier?**
+
+The `Sunset`/`Deprecation` headers (covered earlier) are purely informational — they tell a client "this will stop working eventually," but the server can technically continue serving the endpoint indefinitely regardless of what those headers claim. Genuinely *enforcing* a sunset date means the server actually returns `410 Gone` (rather than a normal successful response) for any request to that endpoint made after the announced date, converting an advisory warning into an actual, binding commitment.
+
+```http
+# BEFORE the sunset date -- endpoint still works, but WARNS via headers
+HTTP/1.1 200 OK
+Sunset: Sat, 01 Nov 2026 00:00:00 GMT
+Deprecation: true
+
+# AFTER the sunset date -- the endpoint is ACTUALLY retired, not just warned about
+HTTP/1.1 410 Gone
+Link: <https://api.example.com/docs/migration-v2>; rel="successor-version"
+```
+
+```text
+Advisory-only Sunset header: the SERVER continues serving the ENDPOINT
+  indefinitely, REGARDLESS of what the header claims -- clients that
+  IGNORE the warning suffer NO actual consequence until (or UNLESS) the
+  team manually decides to ACTUALLY remove the endpoint LATER
+
+Enforced Sunset date: the SERVER genuinely STOPS serving the endpoint
+  (returning 410 Gone) once the ANNOUNCED date arrives -- clients that
+  ignored the WARNING now experience a GENUINE, immediate failure,
+  exactly as the advisory HEADER said would eventually happen
+```
+
+Because an advisory-only Sunset header provides no actual pressure to migrate if a lagging client team simply ignores it, genuinely enforcing the announced date — following through with an actual `410 Gone` — is what gives the Sunset header's warning real teeth, converting it from a polite suggestion into a binding commitment clients can actually rely on (and must actually act on) rather than something safely ignorable indefinitely.
+
+**Common Pitfall:** announcing a Sunset date via the header but then repeatedly pushing back the actual enforcement date when lagging clients complain — this trains API consumers to treat every future Sunset header announcement as an empty, non-binding threat, undermining the entire mechanism's usefulness for the *next* deprecation cycle, since clients learn from experience that the advertised date doesn't actually mean anything concrete.
+
+---

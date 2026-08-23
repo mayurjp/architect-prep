@@ -1933,3 +1933,83 @@ Because the expensive part of TLS is specifically the asymmetric cryptography us
 **Common Pitfall:** assuming Session Resumption provides the exact same security guarantees as a fresh, full handshake indefinitely — resumed sessions are typically bounded by a server-configured expiration window specifically because reusing session state forever would extend the security exposure of any compromise of that state far longer than intended; a resumed session's validity window is a deliberate, configurable trade-off between performance and how long a given negotiated secret remains trusted.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is a URL's Fragment (the `#section` portion after a `#`), and why is it never actually sent to the server as part of an HTTP request, unlike the path and query string?**
+
+A URL's Fragment identifier — everything after a `#` — is resolved entirely on the *client* side, typically used by a browser to scroll to a specific in-page anchor or by client-side JavaScript routing (a single-page application's own internal navigation) — the browser deliberately strips it off before sending the actual HTTP request, meaning the server never sees it at all, regardless of what it contains.
+
+```text
+https://example.com/docs/guide?version=2#installation-section
+                     \_______/ \________/ \___________________/
+                       PATH      QUERY          FRAGMENT
+
+The ACTUAL HTTP request sent to the SERVER:
+GET /docs/guide?version=2 HTTP/1.1
+                          ^^^ the fragment ("#installation-section") is
+                              NEVER included -- the browser HANDLES it
+                              ENTIRELY client-side, scrolling to that
+                              anchor once the PAGE has loaded
+```
+
+Because the fragment is never transmitted to the server, it cannot be used for anything requiring server-side awareness (routing decisions the server itself needs to make, data the server needs to log) — its role is fundamentally client-side, whether for in-page anchor navigation or for a client-side JavaScript router maintaining its own internal application state entirely within the browser.
+
+**Common Pitfall:** attempting to read a URL's fragment on the server side (expecting `Request.QueryString` or a similar server-side API to somehow expose it) — since the browser never actually sends the fragment as part of the HTTP request at all, there is no server-side mechanism that can ever observe it; any logic depending on the fragment's value must run entirely in client-side JavaScript.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is the `Timing-Allow-Origin` header, and how does it let a cross-origin resource opt in to exposing detailed Resource Timing API data to the embedding page's own JavaScript?**
+
+By default, a browser's Resource Timing API (which lets JavaScript measure how long a specific resource took to load) returns only coarse, limited timing data for a *cross-origin* resource, specifically to prevent a page from using detailed timing information to infer sensitive details about a resource it doesn't own — `Timing-Allow-Origin`, set by the resource's own server, explicitly opts in to exposing the full, detailed timing breakdown to a page from a specified (or any, via `*`) origin.
+
+```http
+HTTP/1.1 200 OK
+Timing-Allow-Origin: https://dashboard.example.com
+```
+
+```text
+WITHOUT Timing-Allow-Origin: JavaScript on a DIFFERENT origin measuring
+  this resource's load time via the Resource Timing API sees only COARSE,
+  LIMITED data (start/end time), with DETAILED breakdown (DNS lookup time,
+  TCP connect time, TLS negotiation time) DELIBERATELY hidden
+
+WITH Timing-Allow-Origin explicitly permitting the REQUESTING origin: the
+  SAME JavaScript now sees the FULL, DETAILED timing breakdown for that
+  cross-origin resource, exactly as if it were SAME-origin
+```
+
+Because detailed sub-resource timing data can potentially leak information about a third-party resource's internal network behavior (revealing details about infrastructure the embedding page has no legitimate need to know), browsers restrict it by default for cross-origin resources — `Timing-Allow-Origin` gives a resource's own server explicit, deliberate control over which origins are trusted enough to receive the fuller diagnostic detail, directly complementing the `Server-Timing` header (covered under Performance) that exposes a server's own internal timing breakdown.
+
+**Common Pitfall:** setting `Timing-Allow-Origin: *` broadly on a sensitive internal resource without considering that this exposes detailed timing information to *any* origin that happens to embed it — a more targeted, specific origin allowlist (rather than the unrestricted wildcard) is generally the safer default for a resource that isn't intended to be freely embeddable and measurable by arbitrary third-party pages.
+
+---
+
+## Advanced — Question 24
+
+**Q24: How can an intermediary proxy that doesn't support HTTP's `100 Continue` interim response silently swallow it, causing a client correctly implementing `Expect: 100-continue` (covered earlier) to hang indefinitely waiting for a response that never arrives?**
+
+A client sending `Expect: 100-continue` waits for the server's `100 Continue` interim response before actually transmitting the (potentially large) request body — if an intermediary proxy sitting between the client and the actual origin server doesn't correctly understand or forward this interim status code (older or non-compliant proxy software), it can effectively swallow the `100 Continue` response the origin server sent, leaving the client waiting indefinitely for a response it will never actually receive, since the proxy never relays it onward.
+
+```text
+Client -> Proxy: sends REQUEST headers with Expect: 100-continue,
+  WITHOUT yet sending the body
+
+Origin Server -> Proxy: correctly responds with "100 Continue"
+
+Proxy (non-compliant, doesn't handle 100 Continue correctly): FAILS to
+  forward this interim response back to the CLIENT -- perhaps waiting
+  for a FINAL response instead, or mishandling the INTERIM status entirely
+
+Client: still WAITING for "100 Continue" that will NEVER actually arrive
+  -- hangs INDEFINITELY (or until its own timeout expires), unable to
+  proceed with sending the REQUEST body at all
+```
+
+Because this failure mode depends entirely on a specific, non-compliant intermediary being present in the request path — something a client testing directly against the origin server would never observe — it's a notoriously difficult class of bug to reproduce and diagnose, often only surfacing in a specific production network topology involving a particular older proxy or load balancer that a local development/testing environment doesn't replicate.
+
+**Common Pitfall:** debugging a mysterious, proxy-topology-specific hang by focusing exclusively on the client and origin server's own code, without considering that an intermediary proxy in the actual production request path might be silently mishandling the `100 Continue` interim response — a client library's configurable option to simply disable `Expect: 100-continue` behavior (sending the body immediately, without waiting) is a common, pragmatic workaround once this specific incompatibility is identified.
+
+---
