@@ -1844,3 +1844,92 @@ Because avoiding a redundant TCP+TLS handshake for a subdomain that's genuinely 
 **Common Pitfall:** assuming HTTP/2's connection reuse is limited strictly to requests on the exact same hostname the connection was opened for — coalescing genuinely extends reuse across *different* hostnames when the IP-and-certificate conditions are met, meaning a site deliberately serving multiple subdomains from shared infrastructure with a wildcard certificate can benefit from connection reuse it might not realize is available.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is the `charset` parameter within a `Content-Type` header (e.g., `text/html; charset=utf-8`), and how does a missing or mismatched charset cause a browser to misinterpret non-ASCII text?**
+
+`Content-Type`'s `charset` parameter tells the receiving client exactly which character encoding was used to produce the response body's bytes — without it (or with an incorrect value), a browser has to *guess* the encoding, and a wrong guess turns perfectly valid non-ASCII bytes (accented letters, non-Latin scripts, emoji) into garbled, unreadable "mojibake" text on screen, even though the actual underlying data was never corrupted.
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+```
+
+```text
+Server sends UTF-8-encoded bytes representing "café" but OMITS charset:
+  browser GUESSES the encoding (perhaps defaulting to a DIFFERENT one) --
+  the SAME bytes get MISINTERPRETED, rendering as GARBLED characters
+  ("cafÃ©") even though the ORIGINAL bytes were perfectly valid UTF-8
+
+Server sends the SAME bytes WITH charset=utf-8 explicitly declared: the
+  browser decodes them CORRECTLY, rendering "café" exactly as INTENDED
+```
+
+Because the underlying bytes never change — only how they're *interpreted* — an explicit, correct `charset` declaration is what actually determines whether non-ASCII text renders correctly, making it a simple, easy-to-overlook detail with an outsized, immediately visible impact whenever it's missing or wrong.
+
+**Common Pitfall:** omitting `charset` from a `Content-Type` header and assuming modern browsers will "just figure it out" via content-sniffing — while browsers do attempt encoding detection as a fallback, this detection is heuristic and imperfect, and relying on it rather than explicitly declaring the actual encoding used risks garbled text for exactly the non-ASCII content most likely to matter to real users (names, addresses, internationalized content).
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is the `Clear-Site-Data` response header, and how does it let a server instruct a browser to purge cookies, cache, and other client-side storage for that origin — useful for implementing a definitive logout?**
+
+An ordinary logout typically clears a session cookie or invalidates a token server-side, but leaves other client-side state (cached pages, localStorage, IndexedDB) untouched — `Clear-Site-Data` lets a server's logout response explicitly instruct the browser to wipe specified categories of that origin's own client-side data, providing a more complete, "clean slate" logout than clearing authentication state alone.
+
+```http
+HTTP/1.1 200 OK
+Clear-Site-Data: "cookies", "cache", "storage"
+```
+
+```text
+Ordinary logout: SERVER invalidates the session/token -- but the BROWSER
+  still holds CACHED pages, localStorage entries, and OTHER client-side
+  state from the now-ended SESSION, potentially still ACCESSIBLE
+
+Logout WITH Clear-Site-Data: the SERVER's response explicitly tells the
+  BROWSER to purge cookies, cache, AND storage for this origin -- a
+  genuinely COMPLETE, "clean slate" logout, not just SERVER-side invalidation
+```
+
+Because sensitive application state can persist in client-side storage well beyond a server-side session's own invalidation, `Clear-Site-Data` closes that gap for security-sensitive applications (banking, healthcare) where leaving stale cached data or client-side storage behind after logout could pose a genuine risk, especially on a shared or public computer.
+
+**Common Pitfall:** assuming server-side session/token invalidation alone constitutes a complete logout — without `Clear-Site-Data` (or equivalent manual JavaScript clearing of localStorage/IndexedDB), sensitive data cached client-side during the session can remain accessible in the browser even after the server no longer considers that session valid.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is TLS Session Resumption via Session IDs and Session Tickets, and how does it let a returning client skip the full TLS handshake's expensive asymmetric cryptography on a subsequent connection?**
+
+A full TLS handshake (covered earlier) involves computationally expensive asymmetric cryptography to establish a shared secret — Session Resumption lets a client and server that have already completed one full handshake skip that expensive step on a subsequent connection, by having the server either cache the previous session's parameters (identified by a Session ID) or hand the client an encrypted "Session Ticket" it can present later, letting the server reconstruct the previous session's cryptographic state without repeating the full asymmetric handshake.
+
+```text
+Full TLS handshake (first connection): EXPENSIVE asymmetric cryptography
+  (certificate verification, key exchange) establishes a SHARED secret --
+  meaningful LATENCY and CPU cost, paid ONCE per NEW session
+
+Session Resumption (a LATER connection to the SAME server): the CLIENT
+  presents a previous Session ID/Ticket -- the SERVER recognizes it and
+  reconstructs the PRIOR session's cryptographic state directly, SKIPPING
+  the expensive asymmetric HANDSHAKE steps entirely -- a much CHEAPER,
+  abbreviated handshake completes the connection instead
+```
+
+```text
+Session ID: the SERVER caches session state, keyed by an ID it HANDS to
+  the CLIENT -- requires SERVER-side memory per cached session
+
+Session Ticket: the SERVER instead encrypts its OWN session state INTO an
+  opaque ticket handed to the CLIENT -- the SERVER stores NOTHING itself;
+  the CLIENT presents the ticket back, and the SERVER decrypts it to
+  RECOVER the session state -- avoids server-side memory cost ENTIRELY,
+  trading it for a small ENCRYPTION/decryption cost instead
+```
+
+Because the expensive part of TLS is specifically the asymmetric cryptography used to establish initial trust and a shared secret, and that expensive work produces a result (the negotiated session parameters) that's perfectly safe to reuse for a subsequent connection within a reasonable time window, Session Resumption provides a substantial latency and CPU improvement for any client reconnecting to a server it has recently already established a TLS session with — a meaningful optimization for a browser repeatedly reconnecting to the same site, or a microservice maintaining frequent connections to the same downstream dependency.
+
+**Common Pitfall:** assuming Session Resumption provides the exact same security guarantees as a fresh, full handshake indefinitely — resumed sessions are typically bounded by a server-configured expiration window specifically because reusing session state forever would extend the security exposure of any compromise of that state far longer than intended; a resumed session's validity window is a deliberate, configurable trade-off between performance and how long a given negotiated secret remains trusted.
+
+---

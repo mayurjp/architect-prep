@@ -2797,3 +2797,97 @@ Because Level 3's genuine benefit (a client that adapts automatically to server-
 **Common Pitfall:** treating Level 3 hypermedia as an unconditionally "more correct" or "more mature" goal every API should aspire to, without weighing whether the specific benefit (client-side adaptability to server-side changes without a corresponding client update) genuinely matters for a particular API's actual consumer relationship — for many APIs, the added implementation cost of full HATEOAS doesn't pay for itself relative to a simpler Level 2 design.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: Why does a `PATCH` request conventionally declare `Content-Type: application/merge-patch+json` or `application/json-patch+json`, explicitly naming which patch format (JSON Merge Patch versus JSON Patch, both covered earlier) the request body actually uses?**
+
+Since a `PATCH` request's body can validly be structured as either JSON Merge Patch's simple "overlay" object or JSON Patch's array of explicit operations (both covered earlier) — two genuinely different formats that happen to look superficially similar — the `Content-Type` header removes any ambiguity about which format a server should expect, letting it parse the body correctly without needing to guess or infer the format from the body's own shape.
+
+```http
+PATCH /api/products/5 HTTP/1.1
+Content-Type: application/merge-patch+json
+
+{ "price": 24.99 }
+```
+```http
+PATCH /api/products/5 HTTP/1.1
+Content-Type: application/json-patch+json
+
+[{ "op": "replace", "path": "/price", "value": 24.99 }]
+```
+
+```text
+WITHOUT an explicit Content-Type distinguishing the two formats: a SERVER
+  receiving `{ "price": 24.99 }` can't be CERTAIN whether this is a MERGE
+  PATCH overlay, or a MALFORMED JSON Patch operations array -- AMBIGUOUS
+
+WITH the explicit media type: the SERVER knows EXACTLY which parsing logic
+  to apply, BEFORE even examining the body's own STRUCTURE
+```
+
+Because the two patch formats are structurally different enough that a server needs to know in advance which one it's receiving in order to parse it correctly, declaring the specific patch media type in `Content-Type` is not merely a formality — it's the mechanism that actually resolves the ambiguity between two valid, differently-structured ways of expressing a partial update via the same HTTP method.
+
+**Common Pitfall:** building a `PATCH` endpoint that only ever supports one specific patch format but declares (or accepts) a generic `application/json` content type rather than the specific `application/merge-patch+json`/`application/json-patch+json` media type — this leaves the endpoint's actual expected format undocumented and unenforced, risking a client sending the wrong format's structure without any clear error indicating the mismatch.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is the REST convention of modeling a many-to-many relationship as its own dedicated sub-resource collection (`/orders/5/tags`), rather than embedding the related items directly as an array field on the parent resource?**
+
+Embedding a many-to-many relationship as a plain array field (`{ "id": 5, "tags": ["urgent", "wholesale"] }`) works for read-only display, but provides no natural way to add, remove, or paginate through that relationship independently — treating the relationship itself as its own addressable sub-resource collection (`/orders/5/tags`) gives it full CRUD semantics of its own, using the same HTTP-verb conventions already established for top-level resources.
+
+```http
+GET    /orders/5/tags          -- list this order's current tags
+POST   /orders/5/tags          -- add a new tag to this order
+DELETE /orders/5/tags/urgent   -- remove one specific tag from this order
+```
+
+```text
+Embedded array field: reading the RELATIONSHIP is simple (it's RIGHT there
+  in the parent's response), but ADDING/REMOVING one item REQUIRES sending
+  the ENTIRE modified array back via PUT/PATCH on the PARENT resource itself
+
+Sub-resource collection: the RELATIONSHIP itself is a FIRST-CLASS, addressable
+  resource -- adding/removing ONE item is a SINGLE, targeted request against
+  ITS OWN URL, with NO need to resend the entire, unrelated parent resource
+```
+
+Because a many-to-many relationship often needs to be modified independently of the rest of the parent resource's own fields, giving it a dedicated sub-resource URL lets a client add or remove a single related item with one small, targeted request — rather than needing to fetch the parent's full current state, modify an embedded array in memory, and PUT/PATCH the entire parent resource back just to add one tag.
+
+**Common Pitfall:** embedding a many-to-many relationship as a plain array field specifically because it's simpler for a *read* case, without considering how a client will actually need to *modify* that relationship later — the sub-resource-collection convention costs a little more design effort upfront but avoids forcing every future relationship modification through a clumsy "resend the whole parent" pattern.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What does it mean to formally classify a REST API change as "backward-compatible" versus "breaking" (adding a new optional field is compatible; removing or renaming an existing field is breaking), and how does enforcing this classification as an explicit contract test in CI catch an accidental breaking change before release?**
+
+Rather than relying on a developer's own judgment call about whether a given schema change is "probably fine," an explicit, automated contract check — comparing a proposed API response schema against the previously-published one, according to a formal compatibility ruleset (new optional fields: compatible; removed/renamed/type-changed fields: breaking) — catches a genuinely breaking change in CI, before it ever reaches production and affects real consumers who weren't expecting it.
+
+```text
+Backward-compatible changes (safe to ship without a version bump):
+  - Adding a new, OPTIONAL response field
+  - Adding a new, OPTIONAL request parameter
+  - Widening an ENUM's accepted values (if the consumer already tolerates unknowns)
+
+Breaking changes (require careful migration / a new API version):
+  - Removing an EXISTING response field
+  - RENAMING a field (even if the underlying MEANING is unchanged)
+  - Changing a field's TYPE (string to number) or making an OPTIONAL field REQUIRED
+```
+
+```text
+CI pipeline step: compare the PROPOSED OpenAPI schema against the LAST
+  PUBLISHED one, using a schema-diffing tool applying this EXACT ruleset --
+  a BREAKING change automatically FAILS the build, forcing an EXPLICIT,
+  deliberate decision (version bump, deprecation period) RATHER than an
+  ACCIDENTAL, unreviewed breaking change silently reaching PRODUCTION
+```
+
+Because a formal, automated ruleset removes the ambiguity and inconsistency of relying on individual developer judgment about what "probably won't break anyone," treating schema compatibility as an explicit, CI-enforced contract test catches an accidental breaking change (a field quietly renamed during a refactor, an enum value silently removed) at the exact point it's introduced — directly analogous to Consumer-Driven Contract Testing (covered under Microservices), but validating an API's evolution against its own published history rather than against a specific consumer's expectations.
+
+**Common Pitfall:** relying entirely on manual code review to catch breaking schema changes, trusting that a human reviewer will always notice a subtle field rename or type change buried in a large pull request — an automated, schema-diffing CI check catches this class of mistake reliably and consistently, in a way manual review alone cannot guarantee across every single change, especially in a fast-moving codebase with many contributors.
+
+---

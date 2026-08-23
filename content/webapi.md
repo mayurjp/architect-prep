@@ -2033,4 +2033,109 @@ Because this is the same underlying pipeline API Explorer itself is built from (
 
 ---
 
+## Beginner — Question 23
+
+**Q23: How does `CreatedAtAction()` correctly set both a POST endpoint's response body AND its `Location` header (covered under REST) in a single call, for a properly-formed `201 Created` response?**
+
+A REST-compliant `201 Created` response (covered earlier) needs both the created resource in its body and a `Location` header pointing at that resource's own URL — `CreatedAtAction()` generates both pieces at once, computing the `Location` header's URL from a specified action name and route values, rather than requiring the developer to manually construct that URL string themselves.
+
+```csharp
+[HttpPost]
+public IActionResult Create(ProductDto dto)
+{
+    var product = _repository.Add(dto);
+    return CreatedAtAction(nameof(GetById), new { id = product.Id }, product);
+    // Sets: 201 status, Location: /api/products/42, AND the body to 'product'
+}
+
+[HttpGet("{id}")]
+public IActionResult GetById(int id) { /* ... */ }
+```
+
+```text
+Manually constructing the response: STATUS CODE (201), Location HEADER
+  (built by HAND, string-concatenating a URL), AND the response BODY --
+  THREE separate things to get RIGHT, easy to let one DRIFT out of sync
+
+CreatedAtAction(): ONE call computes ALL three correctly, deriving the
+  Location URL from the ACTUAL route template of the named action --
+  automatically staying CORRECT even if that action's route CHANGES later
+```
+
+Because `CreatedAtAction()` derives the `Location` header's URL from the actual, currently-configured route of the named action (rather than a hardcoded string), the generated link stays correct automatically even if that action's route template is later changed — directly avoiding the risk of a manually-built `Location` header silently becoming stale after a routing refactor.
+
+**Common Pitfall:** manually building a `201 Created` response by hand-concatenating a URL string for the `Location` header — this duplicates knowledge of the target action's route template outside of the routing system itself, and silently goes stale the moment that route template changes, unlike `CreatedAtAction()`'s route-aware URL generation.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: How does ASP.NET Core Web API's built-in `IFormFile`/`IFormFileCollection` model binding support streaming a large file upload, rather than buffering the entire file into memory before an action method runs?**
+
+By default, ASP.NET Core buffers a multipart form's file content into memory (or a temporary disk file, for very large uploads) before an action's `IFormFile` parameter is populated — for genuinely large files, this buffering step itself is the source of the memory-pressure risk covered in an earlier scenario. Streaming the upload instead means reading the multipart body directly, section by section, writing each file's bytes straight to its final destination (disk, blob storage) without ever holding the complete file in application memory at once.
+
+```csharp
+// Default IFormFile binding -- the FRAMEWORK buffers the file BEFORE the action runs
+[HttpPost]
+public async Task<IActionResult> Upload(IFormFile file)
+{
+    using var stream = file.OpenReadStream();
+    await _blobStorage.SaveAsync(stream); // by this point, buffering ALREADY happened
+}
+
+// Manual streaming -- reads the multipart body directly, WITHOUT full buffering first
+[HttpPost]
+[DisableFormValueModelBinding] // opts OUT of the framework's default buffering behavior
+public async Task<IActionResult> UploadStreamed()
+{
+    var reader = new MultipartReader(boundary, Request.Body);
+    var section = await reader.ReadNextSectionAsync();
+    await _blobStorage.SaveAsync(section.Body); // streams DIRECTLY, no full in-memory buffer
+}
+```
+
+```text
+Default IFormFile binding: the ENTIRE file is buffered (memory or temp disk)
+  BEFORE the action method's own code even RUNS -- for a sufficiently LARGE
+  file, this buffering step ALONE can exhaust available memory
+
+Manual streaming via MultipartReader: bytes flow DIRECTLY from the incoming
+  REQUEST to their final DESTINATION, section by section -- the COMPLETE
+  file NEVER exists all at once in application MEMORY
+```
+
+Because true streaming avoids the default buffering step entirely, it's the correct approach for an endpoint expecting genuinely large file uploads (video, large document sets) where the default `IFormFile` binding's buffering behavior would itself become the memory-pressure bottleneck — at the cost of noticeably more manual, low-level code compared to simply accepting an `IFormFile` parameter.
+
+**Common Pitfall:** assuming `IFormFile` itself is inherently memory-unsafe for any file size — for reasonably-sized uploads (a typical document, a modest image), the framework's default buffering behavior is perfectly adequate and far simpler to write; true manual streaming is a deliberate trade-off reserved specifically for endpoints anticipating uploads large enough that the default buffering step's memory/disk cost becomes a genuine concern.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is ASP.NET Core's built-in OpenAPI document generation (`Microsoft.AspNetCore.OpenApi`, introduced in .NET 9), and how does it differ from relying on the third-party Swashbuckle package for generating an API's Swagger/OpenAPI specification?**
+
+For years, generating an OpenAPI document for an ASP.NET Core API required a third-party package (Swashbuckle being the dominant choice, referenced throughout earlier coverage of `IOperationFilter`/`ISchemaFilter`) — .NET 9 introduced first-party, built-in OpenAPI document generation via `Microsoft.AspNetCore.OpenApi`, letting `AddOpenApi()`/`MapOpenApi()` produce a spec-compliant document without any third-party dependency at all, though initially with a narrower customization surface than Swashbuckle's mature filter ecosystem.
+
+```csharp
+// .NET 9's built-in OpenAPI support -- no third-party package required
+builder.Services.AddOpenApi();
+var app = builder.Build();
+app.MapOpenApi(); // exposes the generated OpenAPI JSON document at /openapi/v1.json
+```
+
+```text
+Swashbuckle (third-party, the long-standing default): mature, WIDELY
+  adopted, EXTENSIVE customization via IOperationFilter/ISchemaFilter
+  (covered earlier) -- but an EXTERNAL dependency to install and keep updated
+
+Microsoft.AspNetCore.OpenApi (built-in, .NET 9+): FIRST-PARTY, no external
+  package needed -- narrower CUSTOMIZATION surface initially, but directly
+  MAINTAINED alongside the framework itself, closing a long-standing gap
+  where OpenAPI generation had NO official, first-party option at all
+```
+
+Because a first-party solution is maintained in lockstep with the framework's own release cycle and requires zero third-party dependency management, it's an attractive default for new projects specifically targeting .NET 9+ — while existing projects with substantial investment in Swashbuckle's richer customization (`IOperationFilter`/`ISchemaFilter`, covered earlier) may reasonably continue using it until the built-in option's own customization capabilities mature further.
+
+**Common Pitfall:** assuming the built-in `Microsoft.AspNetCore.OpenApi` package immediately provides full feature parity with Swashbuckle's years of accumulated customization options — as a newer, first-party alternative, it may lack specific advanced customization hooks an existing Swashbuckle-based setup already relies on, making a wholesale migration worth evaluating carefully against the project's actual customization needs rather than switching purely because it's now the "official" option.
+
 ---

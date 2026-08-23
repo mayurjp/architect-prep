@@ -2014,4 +2014,102 @@ Because both validation sources ultimately populate the exact same `ModelState` 
 
 ---
 
+## Beginner — Question 22
+
+**Q22: What is Razor's `@model` directive, and how does declaring a view's strongly-typed model at the top of a `.cshtml` file enable IntelliSense and compile-time checking of model member access?**
+
+Placing `@model MyApp.ViewModels.ProductViewModel` at the top of a view tells the Razor compiler exactly what type `Model` refers to throughout that file — every subsequent reference to `Model.Name` or `Model.Price` is then checked against that actual type, both for IntelliSense while writing the view and for a genuine compile-time error if a referenced property doesn't exist.
+
+```cshtml
+@model MyApp.ViewModels.ProductViewModel
+
+<h1>@Model.Name</h1>
+<p>@Model.Price.ToString("C")</p>
+```
+
+```text
+WITHOUT @model (relying on dynamic ViewBag/plain `dynamic` Model): 
+  @Model.Naem (a TYPO) compiles FINE -- fails ONLY at RUNTIME, when the
+  view actually RENDERS, with a confusing RuntimeBinderException
+
+WITH @model MyApp.ViewModels.ProductViewModel:
+  @Model.Naem is caught IMMEDIATELY at COMPILE TIME (Razor views are
+  compiled), since ProductViewModel has no property named "Naem" --
+  the TYPO never reaches a live REQUEST at all
+```
+
+Because a typo or an outdated property reference in an untyped view only surfaces once that specific code path actually executes at runtime, `@model`'s strongly-typed declaration catches an entire category of view-rendering bugs during the build itself — directly why MVC convention strongly favors a purpose-built, strongly-typed ViewModel (covered elsewhere) passed via `@model`, rather than loosely-typed `ViewBag`/`dynamic` access throughout a view.
+
+**Common Pitfall:** relying on `ViewBag`/`dynamic` for a view's primary data, reasoning it's simpler to avoid defining a dedicated ViewModel class — this trades away exactly the compile-time safety `@model` provides, deferring what would have been an immediate build error into a runtime failure discovered only when that specific view is actually rendered, potentially in production.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: How do a form's `asp-antiforgery`-generated hidden field and a POST action's `[ValidateAntiForgeryToken]` attribute work together to implement CSRF protection (covered under App Security) concretely within the MVC pipeline?**
+
+MVC's `<form>` Tag Helper (covered earlier) automatically injects a hidden input containing a unique, per-session anti-forgery token into the rendered HTML — `[ValidateAntiForgeryToken]` on the receiving POST action then verifies that submitted token matches what the server expects, rejecting the request with a `400 Bad Request` if it's missing or doesn't match, exactly the mechanism that defeats a forged cross-site request (which has no way to obtain a legitimate token in the first place).
+
+```cshtml
+<form asp-action="Create" method="post">
+  @* the form Tag Helper automatically emits a hidden anti-forgery token field *@
+  <input asp-for="Name" />
+  <button type="submit">Save</button>
+</form>
+```
+```csharp
+[HttpPost]
+[ValidateAntiForgeryToken]
+public IActionResult Create(ProductViewModel model) { /* only reached if the token is valid */ }
+```
+
+```text
+Legitimate form submission: the FORM includes the SERVER-issued hidden
+  token -- [ValidateAntiForgeryToken] CONFIRMS it matches -- request PROCEEDS
+
+Forged cross-site request (a malicious site auto-submitting a form
+  targeting this SAME endpoint): has NO WAY to obtain or include the
+  legitimate, SESSION-specific token -- [ValidateAntiForgeryToken] REJECTS
+  it with 400 Bad Request, BEFORE the action method's own logic ever runs
+```
+
+Because the Tag Helper's automatic token generation and the attribute's automatic validation are two halves of the same mechanism, applying `[ValidateAntiForgeryToken]` to a POST action only actually works correctly if the corresponding form was rendered via MVC's own Tag Helpers (which emit the token) — a form built entirely by hand, without using `asp-action`/the `<form>` Tag Helper, would need to manually include the equivalent token itself.
+
+**Common Pitfall:** applying `[ValidateAntiForgeryToken]` to a POST action whose corresponding form was hand-written without Razor's `<form>` Tag Helper (and thus never actually emits the required hidden token field) — every legitimate submission then fails validation exactly like a forged one would, since the token the attribute expects was simply never included in the request at all.
+
+---
+
+## Advanced — Question 23
+
+**Q23: How do Razor Pages' `OnGet`/`OnPostAsync` handler-method naming convention and page-specific model binding differ fundamentally from MVC's Controller/Action routing model, despite both ultimately resolving to a similar underlying endpoint?**
+
+Razor Pages colocates a page's markup (`.cshtml`) with its own dedicated `PageModel` class (`.cshtml.cs`) — rather than a Controller's actions being matched by an explicit route template and method name, a Razor Page's handler methods are matched by *HTTP verb plus naming convention* (`OnGet` handles GET, `OnPost` handles POST, `OnPostDeleteAsync` handles a POST from a form specifying `asp-page-handler="Delete"`), with the page's own URL implicitly derived from its file path rather than an explicit route attribute.
+
+```csharp
+// Pages/Products/Edit.cshtml.cs
+public class EditModel : PageModel
+{
+    [BindProperty]
+    public ProductViewModel Product { get; set; }
+
+    public void OnGet(int id) { Product = _repository.GetById(id); }         // handles GET /Products/Edit/5
+    public IActionResult OnPostAsync() { /* handles POST /Products/Edit */ } // handles the page's form POST
+}
+```
+
+```text
+MVC Controller: an explicit ROUTE template maps a URL to a SPECIFIC
+  controller class + action METHOD, decoupled from any particular VIEW file
+
+Razor Page: the URL is derived DIRECTLY from the page's FILE location
+  (Pages/Products/Edit.cshtml -> /Products/Edit) -- HANDLER methods within
+  the SAME PageModel class are selected by HTTP VERB + naming convention,
+  with the MARKUP and its handling LOGIC living side-by-side in ONE
+  colocated PAIR of files, rather than a SEPARATE Controller and View
+```
+
+Because Razor Pages structurally colocates a page's UI and its handling logic — trading MVC's separation-of-concerns split (Controller separate from View) for a page-centric organization better suited to simpler, page-oriented applications (a CRUD admin screen, a form-heavy site) — patterns oriented around a Controller's own lifecycle (Action Filters, `IActionModelConvention`, both covered earlier) have direct Razor Pages counterparts (Page Filters, `IPageModelConvention`), but a codebase built primarily around Razor Pages generally doesn't reach for View Components (covered earlier) or a Controller/View split at all for its own pages' core structure.
+
+**Common Pitfall:** assuming Razor Pages and MVC Controllers are two entirely separate, mutually-exclusive frameworks requiring an all-or-nothing choice for an application — both share the exact same underlying routing, model binding, and filter infrastructure, and a single ASP.NET Core application commonly mixes both approaches, using Razor Pages for simpler, page-centric screens and full MVC Controllers for more complex, API-like, or Multi-View scenarios within the same project.
+
 ---

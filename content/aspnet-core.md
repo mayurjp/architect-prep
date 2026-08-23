@@ -2111,4 +2111,98 @@ Because the union type is checked at compile time (attempting to return a result
 
 ---
 
+## Beginner — Question 22
+
+**Q22: What is `launchSettings.json`, and how does it configure local-development launch profiles (ports, environment variables) without affecting how the application actually runs once deployed to production?**
+
+`launchSettings.json` lives under a project's `Properties` folder and defines one or more named "profiles" — each specifying settings like which port(s) to listen on locally, which environment variable values (`ASPNETCORE_ENVIRONMENT`) to set, and whether to launch a browser automatically — used only by local development tools (Visual Studio, `dotnet run`, the CLI) and never read or deployed as part of a production publish.
+
+```json
+{
+  "profiles": {
+    "MyApi": {
+      "commandName": "Project",
+      "launchUrl": "swagger",
+      "applicationUrl": "https://localhost:7123;http://localhost:5123",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
+```
+
+```text
+launchSettings.json: read ONLY by local DEVELOPMENT tooling (dotnet run,
+  Visual Studio's "Start" button) -- NEVER included in a PUBLISHED/deployed
+  output, and has NO effect on how the app behaves in PRODUCTION
+
+Production configuration: comes from ACTUAL environment variables, appsettings.
+  {Environment}.json, or the HOSTING platform's own configuration -- entirely
+  SEPARATE from anything in launchSettings.json
+```
+
+Because `launchSettings.json` is purely a local development convenience and is excluded from what actually gets deployed, a developer can freely customize their own local ports or environment variables without any risk of those local-only settings accidentally affecting a production or staging deployment — the production environment's actual configuration is controlled entirely through separate mechanisms (real environment variables, `appsettings.Production.json`, a hosting platform's own settings).
+
+**Common Pitfall:** assuming a value set in `launchSettings.json` (like `ASPNETCORE_ENVIRONMENT`) will also apply once the application is deployed and run outside of local development tooling — this file is never read by a production host; the equivalent environment variable must be set through the actual deployment target's own configuration mechanism (a container's environment variables, an App Service's application settings).
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is ASP.NET Core's Request Decompression Middleware (`.NET 7+`), and how does it let a server accept a compressed request body, automatically decompressing it before model binding runs?**
+
+Response Compression (covered earlier) reduces the size of data sent *from* the server — Request Decompression Middleware handles the opposite direction, automatically decompressing an incoming request body (a client sending `Content-Encoding: gzip`/`br`) before the rest of the pipeline (including model binding) ever sees it, letting bandwidth-conscious clients compress their uploads without the server needing custom decompression code.
+
+```csharp
+builder.Services.AddRequestDecompression();
+var app = builder.Build();
+app.UseRequestDecompression(); // must run BEFORE model binding/action execution
+
+app.MapPost("/api/orders", (Order order) => Results.Ok(order)); // 'order' is bound from the DECOMPRESSED body
+```
+
+```text
+Client sends: POST /api/orders, Content-Encoding: gzip, [compressed bytes]
+
+WITHOUT Request Decompression: the RAW, STILL-COMPRESSED bytes reach model
+  binding -- binding FAILS, since it expects PLAIN JSON, not gzip bytes
+
+WITH Request Decompression middleware: the MIDDLEWARE transparently
+  DECOMPRESSES the body FIRST -- model binding sees ORDINARY, uncompressed
+  JSON, exactly as if the client had sent it uncompressed
+```
+
+Because this middleware handles decompression transparently and generically for any endpoint, it removes the need for individual actions to manually detect and decompress a compressed request body — particularly valuable for clients on constrained networks (mobile, IoT devices) uploading meaningfully large payloads where compressing the request itself provides a genuine bandwidth savings.
+
+**Common Pitfall:** registering `UseRequestDecompression()` after other middleware that already tries to read the request body (a custom logging middleware buffering and inspecting the raw body) — decompression must happen before anything downstream attempts to interpret the body's bytes, or that earlier middleware will see the still-compressed, unreadable data instead of the decompressed content.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is ASP.NET Core's Host Filtering Middleware and its `AllowedHosts` configuration, and how does validating a request's `Host` header at the application level defend against Host Header Injection (covered under App Security)?**
+
+Host Header Injection (covered under App Security) exploits an application trusting a client-supplied `Host` header for something security-sensitive (building a password-reset link, for instance) — ASP.NET Core's Host Filtering Middleware, configured via the `AllowedHosts` setting, rejects any incoming request whose `Host` header doesn't match one of an explicitly-configured allowlist of legitimate hostnames, closing this attack vector at the framework level before application code ever runs.
+
+```json
+// appsettings.json
+{ "AllowedHosts": "www.example.com;api.example.com" }
+```
+
+```text
+WITHOUT Host Filtering: an ATTACKER sends a request with a FORGED Host
+  header (Host: evil-attacker.com) -- if APPLICATION code naively trusts
+  this header (to BUILD a password-reset link, for instance), the ATTACKER
+  can POISON that link to point at their OWN domain
+
+WITH AllowedHosts configured: ASP.NET Core's Host Filtering Middleware
+  REJECTS the request OUTRIGHT (400 Bad Request) BEFORE it ever reaches
+  application code, since "evil-attacker.com" isn't in the ALLOWLIST
+```
+
+Because this validation happens at the framework's own middleware layer — before routing, model binding, or any application code runs — it provides a centralized, easy-to-configure defense against Host Header Injection that doesn't rely on every individual piece of application code remembering to validate the `Host` header itself, closing the gap at its earliest possible point in the pipeline.
+
+**Common Pitfall:** leaving `AllowedHosts` set to its permissive wildcard default (`"*"`, which accepts any Host header) in production — this default is convenient for local development (where the exact hostname isn't known in advance) but leaves a deployed application fully exposed to Host Header Injection; production deployments should explicitly configure `AllowedHosts` to the application's actual known hostname(s).
+
 ---
