@@ -1896,4 +1896,97 @@ Because `@override` lets the new owning subgraph unilaterally declare ownership 
 
 ---
 
+## Beginner — Question 19
+
+**Q19: Why do GraphQL Enum values conventionally use SCREAMING_SNAKE_CASE, differing from a type/field's own camelCase naming convention?**
+
+GraphQL's community convention treats Enum *values* as constant, fixed identifiers — similar in spirit to how many programming languages format constants — while types and fields (representing structured, queryable data) follow camelCase/PascalCase instead; this distinction gives a schema reader an immediate visual signal about what kind of schema element they're looking at, purely from its casing style.
+
+```graphql
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  SHIPPED
+  CANCELLED
+}
+
+type Order {
+  id: ID!
+  status: OrderStatus!    # field name -- camelCase
+  customerName: String!   # field name -- camelCase
+}
+```
+
+```text
+Enum VALUES (PENDING, SHIPPED, CANCELLED): SCREAMING_SNAKE_CASE -- signals "a FIXED,
+  CONSTANT identifier from a KNOWN, closed SET of possible VALUES"
+
+Type/field NAMES (Order, status, customerName): camelCase/PascalCase -- signals "a
+  STRUCTURAL, QUERYABLE piece of the schema's OWN shape"
+```
+
+Because this is purely a community convention rather than a language-enforced requirement, a schema *could* technically use any casing style for enum values — but following the widely-adopted convention makes a schema instantly recognizable and consistent with virtually every other public GraphQL API a developer is likely to have already encountered, reducing unnecessary cognitive friction when reading an unfamiliar schema.
+
+**Common Pitfall:** mixing casing conventions inconsistently within the same schema (some enums using SCREAMING_SNAKE_CASE, others using camelCase or PascalCase) — this creates unnecessary friction for anyone reading the schema, since the casing convention itself is meant to convey information about what kind of schema element they're looking at, and inconsistency undermines that signal.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: How does a GraphQL client's cache normalization key strategy — typically `id` plus `__typename` — let it correctly de-duplicate the same logical object appearing multiple times across different queries?**
+
+A GraphQL client's normalized cache (covered earlier for optimistic updates) needs a reliable way to recognize "this object returned by Query A is the *same* logical object as one returned by Query B" — combining `__typename` (covered earlier) with the object's own `id` field produces a globally unique cache key (`Product:5`, for instance), letting the client store just *one* copy of that object's data regardless of how many different queries happened to fetch it, and correctly update every place it's referenced when any one query causes it to change.
+
+```graphql
+query { featuredProduct { id name price } }
+query { searchResults { products { id name price } } }
+```
+
+```text
+BOTH queries HAPPEN to return the SAME underlying Product (id: 5) -- the CLIENT's cache
+  NORMALIZES both responses using the KEY "Product:5" -- STORING ONE SINGLE, SHARED
+  copy of THAT object's data, RATHER than TWO SEPARATE, DUPLICATE copies
+
+If a LATER mutation UPDATES Product 5's price: the CACHE updates THAT ONE normalized
+  entry -- BOTH the "featuredProduct" view AND the "searchResults" view AUTOMATICALLY
+  reflect the NEW price, since BOTH actually POINT AT the SAME underlying CACHE entry
+```
+
+Because normalization keys the cache by logical object identity rather than by query shape, updating one object's data anywhere in the application automatically and correctly propagates to every UI location displaying that same object — a genuinely powerful benefit that a naive, per-query cache (storing each query's response independently, with no shared object identity) couldn't provide.
+
+**Common Pitfall:** querying a type that lacks a stable, unique `id` field (or omitting `id` from a query's selection set even when the type has one) — without a reliable identity key, the client's cache can't correctly recognize that two different queries returned the "same" logical object, falling back to storing duplicate, independently-cached copies that won't stay in sync with each other when one is updated.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is GraphQL's `@stream` directive for a list field, as distinct from `@defer` (covered earlier for a single field), and how does it let individual items within a large list be delivered incrementally as they become available?**
+
+`@defer` (covered earlier) lets a *specific field* arrive later than the rest of a response — `@stream` applies this same incremental-delivery idea specifically to a *list*, letting individual list items be delivered one (or a batch) at a time as they're resolved, rather than the client needing to wait for the *entire* list to finish resolving before receiving any of it at all.
+
+```graphql
+query {
+  recentOrders @stream(initialCount: 5) {
+    id
+    total
+  }
+}
+```
+
+```text
+WITHOUT @stream: the CLIENT waits for ALL 500 "recentOrders" to FINISH resolving (each
+  POTENTIALLY requiring its OWN downstream data fetch) BEFORE receiving ANY of them AT ALL
+
+WITH @stream(initialCount: 5): the FIRST 5 items are DELIVERED IMMEDIATELY, as SOON as
+  they're READY -- the REMAINING items STREAM IN incrementally, ONE (or a BATCH) at a
+  TIME, as EACH becomes AVAILABLE -- the CLIENT can start RENDERING the FIRST results
+  WHILE the REST are STILL being RESOLVED, rather than WAITING for the WHOLE list
+```
+
+Because a genuinely large list where each item requires its own potentially-slow resolution (an N+1-prone field per item, or a genuinely expensive per-item computation) would otherwise force a client to wait for the single slowest item before seeing *any* results, `@stream` lets the client render a fast, progressively-updating UI — showing early results immediately while later ones continue arriving, directly extending `@defer`'s "don't make the fast parts wait for the slow parts" principle to the specific case of a list's individual items.
+
+**Common Pitfall:** applying `@defer` to an entire large list field (deferring the whole list as one unit) when the actual goal is progressive, item-by-item delivery — `@defer` treats a field as one atomic, all-or-nothing deferred unit; `@stream` is the directive specifically designed for incrementally delivering a list's individual items one at a time, a genuinely different capability than deferring a field as a single whole.
+
+---
+
 ---

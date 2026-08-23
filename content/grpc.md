@@ -1815,4 +1815,91 @@ Because propagating the same *absolute* deadline (rather than each hop granting 
 
 ---
 
+## Beginner — Question 19
+
+**Q19: How does registering a typed gRPC client via `AddGrpcClient<T>()` manage the underlying channel's lifetime, avoiding the same socket-exhaustion/DNS-staleness issues covered for `HttpClient` (under Performance)?**
+
+`AddGrpcClient<T>()` registers a gRPC client following the same underlying pattern as `IHttpClientFactory` (covered under Performance) — it manages a pooled, correctly-lifetimed `HttpClient`/channel behind the scenes, meaning application code injecting the typed gRPC client automatically benefits from the same socket-reuse and periodic-connection-recycling behavior, without needing to manually manage a raw `GrpcChannel` instance itself.
+
+```csharp
+builder.Services.AddGrpcClient<Greeter.GreeterClient>(options =>
+{
+    options.Address = new Uri("https://localhost:5001");
+}); // registers a TYPED client -- the FRAMEWORK manages the UNDERLYING channel's
+     // LIFETIME, POOLING, and CONNECTION recycling AUTOMATICALLY
+
+public class MyService(Greeter.GreeterClient client) // simply INJECT the typed client --
+{                                                       // NO manual channel management needed AT ALL
+    public async Task CallGreeterAsync() => await client.SayHelloAsync(new HelloRequest());
+}
+```
+
+```text
+WITHOUT AddGrpcClient: manually creating a "new GrpcChannel(...)" per CALL risks the SAME
+  socket-EXHAUSTION problem COVERED for HttpClient -- REUSING ONE channel FOREVER risks the
+  SAME DNS-staleness problem -- BOTH extremes have REAL downsides
+
+WITH AddGrpcClient: the FRAMEWORK applies the SAME battle-tested POOLING/RECYCLING
+  strategy ALREADY covered for IHttpClientFactory, AUTOMATICALLY, for gRPC CHANNELS TOO
+```
+
+Because gRPC channels are built on top of HTTP/2 connections with essentially the same lifecycle concerns as ordinary `HttpClient` usage (covered under Performance), `AddGrpcClient<T>()` extends that same, already-understood solution to gRPC specifically — letting application code simply inject a typed client via DI without needing to separately reason about channel pooling, DNS staleness, or connection recycling itself.
+
+**Common Pitfall:** manually constructing a `GrpcChannel` instance per call (or, at the other extreme, one single static channel held forever with no lifetime management) rather than using `AddGrpcClient<T>()` — this reproduces exactly the same socket-exhaustion-versus-DNS-staleness trade-off already solved for ordinary `HttpClient` usage (covered under Performance), which `AddGrpcClient` already handles correctly out of the box.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What are gRPC's `MaxReceiveMessageSize`/`MaxSendMessageSize` channel options, and how do they protect a service from an accidentally or maliciously oversized message consuming excessive memory, mirroring the request-size-limiting concept covered under Web API?**
+
+By default, gRPC channels have a message-size limit, but it can be configured explicitly — `MaxReceiveMessageSize` caps how large an incoming message a service is willing to accept before rejecting it outright, and `MaxSendMessageSize` caps how large an outgoing message a client will attempt to send — directly analogous to `[RequestSizeLimit]` (covered under Web API), just applied at the gRPC channel level rather than an individual HTTP action.
+
+```csharp
+services.AddGrpc(options =>
+{
+    options.MaxReceiveMessageSize = 4 * 1024 * 1024; // 4MB -- REJECTS anything LARGER OUTRIGHT
+    options.MaxSendMessageSize = 4 * 1024 * 1024;
+});
+```
+
+```text
+WITHOUT an explicit limit: a CLIENT (accidentally, or MALICIOUSLY) sending an ENORMOUS
+  message could FORCE the SERVER to allocate a CORRESPONDINGLY enormous amount of MEMORY
+  just to RECEIVE and DESERIALIZE it -- a GENUINE resource-exhaustion RISK
+
+WITH an EXPLICIT limit: any message EXCEEDING the CONFIGURED size is REJECTED OUTRIGHT,
+  BEFORE the SERVER commits to ALLOCATING memory for the FULL, OVERSIZED payload
+```
+
+Because an unbounded message size limit exposes a service to exactly the same resource-exhaustion risk an unbounded HTTP request body would (covered under Web API), configuring an explicit, appropriate ceiling protects gRPC services the same way — a small but genuinely important hardening step, especially for a publicly-reachable gRPC endpoint.
+
+**Common Pitfall:** leaving gRPC message size limits at their default (or an overly generous, hand-picked value) without considering the actual, legitimate maximum message size the service genuinely needs to handle — an unnecessarily large limit leaves more resource-exhaustion attack surface than the service's real requirements justify.
+
+---
+
+## Advanced — Question 19
+
+**Q19: How do `PooledConnectionIdleTimeout`/`KeepAlivePingDelay` (covered earlier for ordinary `HttpClient`) apply equally to a long-lived gRPC channel's underlying HTTP/2 connection?**
+
+Because a gRPC channel is, under the hood, built on the exact same `SocketsHttpHandler`-based HTTP/2 connection infrastructure ordinary `HttpClient` uses, the same connection-lifetime and keepalive tuning options covered earlier apply directly — configuring `PooledConnectionIdleTimeout` (how long an idle connection stays pooled before being closed) and `KeepAlivePingDelay` (how often to send an application-level ping detecting a "half-open" connection, covered earlier) works identically for a gRPC channel's underlying transport as it does for an ordinary HTTP client.
+
+```csharp
+var handler = new SocketsHttpHandler
+{
+    PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5), // SAME option, SAME meaning, as
+                                                              // COVERED earlier for HttpClient
+    KeepAlivePingDelay = TimeSpan.FromSeconds(60),           // detects a HALF-OPEN connection,
+                                                              // EXACTLY the SAME mechanism COVERED earlier
+    KeepAlivePingTimeout = TimeSpan.FromSeconds(30),
+};
+var channel = GrpcChannel.ForAddress("https://localhost:5001", new GrpcChannelOptions { HttpHandler = handler });
+```
+
+Because gRPC's transport layer is genuinely the same underlying HTTP/2 infrastructure (not a separate, gRPC-specific connection-management stack), every connection-lifecycle lesson already covered for ordinary `HttpClient` usage — pooled connection lifetime, keepalive-based half-open detection — transfers directly to tuning a long-lived gRPC channel's own connection behavior, without needing to learn a separate, gRPC-specific set of concepts.
+
+**Common Pitfall:** assuming gRPC channels require an entirely separate, gRPC-specific set of connection-tuning knowledge distinct from ordinary `HttpClient` — since gRPC channels share the exact same `SocketsHttpHandler`-based transport, the connection-lifetime and keepalive concepts already covered for `HttpClient` (under Performance) apply directly and identically, without needing to be relearned separately for gRPC specifically.
+
+---
+
 ---

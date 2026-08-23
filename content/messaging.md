@@ -1646,4 +1646,92 @@ Because `read_committed` filters out exactly the messages a transactional produc
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is the difference between a per-message TTL (set when publishing) and a per-queue TTL (a default applying to every message), and how does an individual message overriding the queue's own default let a specific, time-sensitive message expire faster than others?**
+
+A queue-level TTL sets a default expiration applying to every message published to that queue — a per-message TTL, set individually at publish time, overrides that default for just that one specific message, letting a genuinely time-sensitive message (a live sports score update, a one-time password) expire much sooner than the queue's general-purpose default would otherwise allow.
+
+```csharp
+// Queue-level DEFAULT -- applies to EVERY message UNLESS overridden
+channel.QueueDeclare("notifications", arguments: new Dictionary<string, object> { { "x-message-ttl", 3600000 } }); // 1 HOUR default
+
+// PER-message override -- THIS specific message expires MUCH sooner than the queue's OWN default
+var properties = channel.CreateBasicProperties();
+properties.Expiration = "5000"; // 5 SECONDS -- overrides the QUEUE's 1-hour DEFAULT, for THIS message ONLY
+channel.BasicPublish("", "notifications", properties, otpCodeBytes);
+```
+
+```text
+Queue default TTL: 1 HOUR -- MOST messages (a general notification) are FINE living that LONG
+Per-message TTL: 5 SECONDS -- a ONE-TIME password is USELESS after a FEW seconds -- OVERRIDING
+  the QUEUE's default lets THIS SPECIFIC message EXPIRE much FASTER, REFLECTING its OWN,
+  GENUINELY shorter USEFUL lifetime, WITHOUT affecting ANY OTHER message on the SAME queue
+```
+
+Because different messages passing through the *same* queue can have genuinely different freshness requirements, per-message TTL override lets a queue's general default serve the common case while still letting individually time-sensitive messages express their own, tighter expiration — avoiding either an overly aggressive queue-wide default (prematurely expiring messages that didn't need it) or an overly lax one (letting genuinely stale, time-sensitive messages linger).
+
+**Common Pitfall:** relying purely on a queue-level default TTL for messages with genuinely different freshness requirements — a one-size-fits-all default is either too aggressive for long-lived messages or too lax for genuinely time-sensitive ones; per-message TTL override lets each message express its own actual expiration need precisely.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is Kafka's Sticky Partition Assignment strategy, and how does minimizing partition movement during a rebalance (covered earlier) reduce the disruption a rebalance causes?**
+
+The default partition-assignment strategies (range, round-robin) recompute partition assignments from scratch during a rebalance, potentially reassigning partitions to *different* consumer instances than they were previously on, even when the actual membership change was small — the Sticky strategy instead specifically tries to preserve each consumer's existing partition assignments as much as possible, only moving the minimum number of partitions actually necessary to accommodate the membership change.
+
+```properties
+partition.assignment.strategy=org.apache.kafka.clients.consumer.StickyAssignor
+```
+
+```text
+6 partitions, 3 consumers (2 partitions EACH) -- Consumer C CRASHES, TRIGGERING a rebalance
+
+Range/Round-Robin strategy: RECOMPUTES the ENTIRE assignment from SCRATCH -- POTENTIALLY
+  reassigns partitions PREVIOUSLY held by Consumer A to CONSUMER B INSTEAD, and VICE
+  VERSA -- EVEN partitions that DIDN'T strictly NEED to MOVE get SHUFFLED anyway
+
+Sticky strategy: PRESERVES Consumer A's and Consumer B's EXISTING partition ASSIGNMENTS
+  as MUCH as possible -- ONLY the 2 partitions PREVIOUSLY held by the CRASHED Consumer C
+  actually get REASSIGNED (SPLIT between A and B) -- MINIMIZING the TOTAL disruption CAUSED
+```
+
+Because each partition reassignment forces the receiving consumer to re-establish its own local state for that partition (re-fetching offsets, potentially re-warming any in-memory state tied to it), minimizing unnecessary partition movement directly reduces the total disruption and recovery time a rebalance causes — the Sticky strategy specifically targets this efficiency, mattering most for consumer groups where partition reassignment carries real cost (a stateful stream-processing application, for instance).
+
+**Common Pitfall:** using Kafka's older default partition-assignment strategies for a consumer group where partition reassignment is genuinely costly (rebuilding significant local state per partition) — this causes more disruption than necessary during a rebalance, moving partitions that didn't actually need to move; the Sticky strategy (or its Cooperative Sticky variant, reducing rebalance-related pauses even further) directly addresses this unnecessary churn.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is SQS FIFO's Message Group ID feature, and how does it let strict ordering be guaranteed within a group while still allowing parallel processing across different groups?**
+
+Within a single Message Group (identified by a shared `MessageGroupId`), SQS FIFO guarantees strict, in-order delivery and processing — but messages belonging to *different* groups are processed fully independently and in parallel, letting a system achieve the strong ordering guarantee where it's actually needed (all events for one specific customer, in order) while still scaling throughput across many groups simultaneously, rather than being forced into one single, globally-ordered, and therefore inherently serialized, queue.
+
+```csharp
+// Messages for Customer 42 -- ALL share the SAME group -- STRICTLY ordered RELATIVE to each OTHER
+SendMessage(new SendMessageRequest { MessageGroupId = "customer-42", MessageBody = "OrderPlaced" });
+SendMessage(new SendMessageRequest { MessageGroupId = "customer-42", MessageBody = "PaymentProcessed" });
+
+// Messages for a DIFFERENT customer -- a DIFFERENT group -- processed COMPLETELY INDEPENDENTLY,
+// IN PARALLEL with Customer 42's OWN messages -- NO ordering RELATIONSHIP between the TWO groups AT ALL
+SendMessage(new SendMessageRequest { MessageGroupId = "customer-99", MessageBody = "OrderPlaced" });
+```
+
+```text
+WITHIN "customer-42"'s group: STRICT order GUARANTEED -- "OrderPlaced" is ALWAYS
+  processed BEFORE "PaymentProcessed", for THIS customer SPECIFICALLY
+
+ACROSS "customer-42" and "customer-99": NO ordering RELATIONSHIP at ALL -- BOTH groups'
+  messages can be PROCESSED SIMULTANEOUSLY, IN PARALLEL -- the SYSTEM'S OVERALL throughput
+  SCALES with the NUMBER of DISTINCT, INDEPENDENTLY-processable GROUPS
+```
+
+Because ordering is scoped specifically to each Message Group rather than the entire queue globally, this design directly mirrors Kafka's own partition-based ordering model (covered earlier — ordering guaranteed within a partition, not across the whole topic) — letting an application achieve strict, meaningful ordering exactly where the business logic actually requires it (per-entity event sequencing) without sacrificing overall system throughput to a single, fully-serialized processing queue.
+
+**Common Pitfall:** putting every message into the same, single Message Group purely out of simplicity, rather than choosing a group ID that reflects the actual entity needing ordered processing (per-customer, per-order) — this forces the entire queue's processing to be fully serialized, one message at a time, discarding the parallel-throughput benefit that correctly-scoped, per-entity groups would have provided.
+
+---
+
 ---
