@@ -1757,4 +1757,102 @@ Because these standards are enforced declaratively via a simple namespace label 
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is a Kubernetes Job's `ttlSecondsAfterFinished`, and how does it let a completed Job be automatically cleaned up after a set duration, rather than accumulating indefinitely?**
+
+By default, a completed Kubernetes `Job` (and its Pods) remains in the cluster indefinitely after finishing, purely for later inspection — `ttlSecondsAfterFinished` tells Kubernetes to automatically delete the Job (and its associated Pods) once the specified number of seconds has elapsed after completion, preventing an accumulation of long-finished Jobs from cluttering the cluster over time.
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+spec:
+  ttlSecondsAfterFinished: 3600  # AUTOMATICALLY deleted 1 HOUR after completing
+  template:
+    spec:
+      containers: [{ name: report-generator, image: my-report-job }]
+      restartPolicy: Never
+```
+
+```text
+WITHOUT ttlSecondsAfterFinished: a RECURRING CronJob (covered earlier) creating a NEW Job
+  EVERY hour ACCUMULATES an EVER-GROWING number of COMPLETED, FINISHED Jobs sitting
+  AROUND indefinitely -- CLUTTERING "kubectl get jobs" output, and CONSUMING SOME
+  small amount of etcd STORAGE for EACH one
+
+WITH ttlSecondsAfterFinished: EACH completed Job is AUTOMATICALLY cleaned UP after its
+  configured GRACE period -- the CLUSTER doesn't ACCUMULATE an EVER-GROWING BACKLOG of
+  LONG-finished Jobs that NOBODY is actually GOING to inspect ANYMORE
+```
+
+Because a recurring scheduled workload (a nightly report Job, a periodic cleanup task) can accumulate many completed Job objects over time if never cleaned up, `ttlSecondsAfterFinished` provides automatic garbage collection specifically calibrated to how long you actually want completed Jobs available for inspection/debugging before they're no longer needed — balancing the value of recent history against the cost of unbounded accumulation.
+
+**Common Pitfall:** running a frequently-recurring CronJob without `ttlSecondsAfterFinished` (or the CronJob's own `successfulJobsHistoryLimit`/`failedJobsHistoryLimit`, a related mechanism) — completed Jobs accumulate indefinitely, cluttering cluster resource listings and consuming unnecessary etcd storage for Job history nobody actually reviews after a reasonable grace period.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is a Kubernetes Ingress's `pathType` field (`Exact`/`Prefix`/`ImplementationSpecific`), and how does the choice affect which incoming request paths actually match a given routing rule?**
+
+`pathType: Exact` matches only the *exact* specified path, character for character — `pathType: Prefix` matches the specified path and anything beginning with it (segment-aware) — `pathType: ImplementationSpecific` defers the exact matching semantics to whatever the specific Ingress Controller implementation decides, useful for controller-specific advanced matching (regex, for instance) not covered by the two standardized types.
+
+```yaml
+rules:
+  - http:
+      paths:
+        - path: /api
+          pathType: Prefix   # matches "/api", "/api/orders", "/api/orders/5" -- ANY path
+                              # STARTING with "/api" (respecting SEGMENT boundaries)
+        - path: /health
+          pathType: Exact    # matches ONLY "/health" EXACTLY -- NOT "/health/live", "/healthcheck", etc.
+```
+
+```text
+pathType: Exact  -- request path MUST match the SPECIFIED path PRECISELY, CHARACTER for CHARACTER
+pathType: Prefix -- request path MATCHES if it STARTS with the SPECIFIED path (at a SEGMENT
+                    boundary) -- "/api" MATCHES "/api/orders", but NOT "/apiextra" (NOT a
+                    SEGMENT-aligned prefix)
+pathType: ImplementationSpecific -- the MATCHING semantics DEPEND entirely on WHICH Ingress
+                    Controller is ACTUALLY running -- LESS portable ACROSS different controllers
+```
+
+Because choosing the wrong `pathType` can cause an Ingress rule to match either too broadly (an overly permissive `Prefix` accidentally catching requests meant for a different rule) or too narrowly (an `Exact` match missing legitimate sub-paths a client actually needs routed), understanding the precise matching semantics of each type is essential for correctly predicting which incoming requests a given Ingress rule will actually capture.
+
+**Common Pitfall:** using `pathType: ImplementationSpecific` out of habit or unfamiliarity with the standardized `Exact`/`Prefix` types — this ties the Ingress manifest's actual matching behavior to whichever specific controller happens to be running, making the manifest less portable across different Ingress Controller implementations than using the standardized, controller-agnostic `Exact`/`Prefix` types would.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What are Kubernetes Topology Spread Constraints, and how do they let Pods be distributed evenly across failure domains — zones, nodes — as a more flexible alternative to Pod Anti-Affinity (covered earlier)?**
+
+Pod Anti-Affinity (covered earlier) expresses a binary, hard-or-soft rule about avoiding co-location with specific other Pods — Topology Spread Constraints instead directly express the actual goal ("spread my Pods evenly across these failure domains") as a quantifiable "max skew" (the maximum allowed difference in Pod count between the most- and least-populated domain), giving the scheduler more direct, flexible control over achieving genuinely even distribution rather than approximating it through anti-affinity rules.
+
+```yaml
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1                          # AT MOST 1 Pod DIFFERENCE between ANY two zones
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule     # a HARD requirement -- REFUSE to schedule if it would VIOLATE the skew
+      labelSelector:
+        matchLabels: { app: my-api }
+```
+
+```text
+3 replicas, 3 AVAILABILITY ZONES, maxSkew: 1: the SCHEDULER places AT MOST 1 EXTRA Pod in
+  ANY zone RELATIVE to the LEAST-populated one -- typically resulting in a PERFECTLY EVEN
+  1-1-1 DISTRIBUTION ACROSS all THREE zones, DIRECTLY expressing the ACTUAL desired OUTCOME
+
+Pod Anti-Affinity (covered earlier): expresses a RULE about AVOIDING co-location with
+  SPECIFIC other Pods -- can APPROXIMATE even distribution, but LESS DIRECTLY, and with
+  LESS PRECISE control over the ACTUAL resulting SKEW across MULTIPLE topology domains SIMULTANEOUSLY
+```
+
+Because Topology Spread Constraints directly express the actual distribution goal as a quantifiable skew tolerance (rather than a collection of pairwise avoidance rules that only indirectly approximate even distribution), they provide more precise, predictable control specifically for the common "spread my replicas evenly across zones/nodes for resilience" requirement — a more direct tool for a goal Anti-Affinity could only approximate.
+
+**Common Pitfall:** relying purely on Pod Anti-Affinity to achieve even distribution across multiple failure domains simultaneously (zones AND nodes, for instance) — anti-affinity rules become increasingly complex and less precise as the number of domains and desired evenness guarantees grow; Topology Spread Constraints handle this multi-dimensional distribution goal more directly and predictably.
+
+---
+
 ---

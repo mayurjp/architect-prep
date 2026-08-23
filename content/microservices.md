@@ -2271,4 +2271,77 @@ Because no single service-to-service call in isolation necessarily seemed like a
 
 ---
 
+## Beginner — Question 20
+
+**Q20: How does having one Backend for Frontend (BFF) per client type differ from one shared API Gateway serving every client type?**
+
+A shared, single Gateway serving every client type (a web app, a mobile app, a third-party partner integration) must accommodate all their differing needs within one codebase — a BFF instead gives each specific client type its own, dedicated backend service, shaped precisely around that client's own particular data and interaction needs, without needing to accommodate every other client type's unrelated requirements in the same codebase.
+
+```text
+ONE shared Gateway: serves the WEB app, the MOBILE app, AND a PARTNER integration --
+  ALL THREE have GENUINELY different needs (the MOBILE app wants a LEANER payload to
+  save BANDWIDTH; the WEB app wants a RICHER, MORE DETAILED response; the PARTNER
+  integration needs a STABLE, VERSIONED contract) -- ONE shared codebase must AWKWARDLY
+  ACCOMMODATE all THREE, often via CONDITIONAL logic BASED on WHICH client is CALLING
+
+Backend for Frontend: a SEPARATE, DEDICATED service PER client type -- "MobileBFF" is
+  SHAPED specifically for the MOBILE app's OWN needs, "WebBFF" for the WEB app's, EACH
+  EVOLVING independently, WITHOUT needing to ACCOMMODATE the OTHER's UNRELATED requirements
+  WITHIN the SAME codebase
+```
+
+Because each client type genuinely has different needs, a BFF specifically tailored to just one of them can be optimized precisely for that client's own requirements — smaller payloads for mobile, richer ones for web — without the awkward compromises a single, shared Gateway trying to serve everyone at once inevitably accumulates, at the cost of maintaining multiple, separate BFF services rather than just one shared one.
+
+**Common Pitfall:** building one shared, general-purpose API Gateway meant to serve every client type equally well, then watching it accumulate increasingly awkward conditional logic (`if (clientType == "mobile") ...`) as different clients' genuinely divergent needs pile up within the same codebase — a BFF per client type avoids this specific accumulation of client-type-conditional logic, at the cost of maintaining separate services instead of one shared one.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is a Service Level Agreement (SLA), as distinct from an SLO (covered earlier), and how does an SLA's external, contractual, often financially-penalized nature differ from an SLO's internal, engineering-focused target?**
+
+An SLO (covered earlier) is an internal engineering target a team sets for itself to guide reliability investment decisions — an SLA is a *contractual* commitment made *externally*, to customers or business partners, often with financial penalties (service credits, refunds) if the commitment isn't met; SLAs are typically set somewhat *looser* than the corresponding internal SLO specifically to give the engineering team a safety margin before a missed internal target actually triggers an external, contractual consequence.
+
+```text
+Internal SLO: "99.95% uptime, MEASURED monthly" -- an ENGINEERING target GUIDING internal
+  decisions (covered EARLIER, tied to an ERROR BUDGET) -- MISSING it triggers an INTERNAL
+  process (SLOWING feature work, PRIORITIZING reliability) -- NO external CONSEQUENCE
+
+External SLA: "99.9% uptime, GUARANTEED contractually" -- typically SET LOOSER than the
+  internal SLO, SPECIFICALLY to provide a SAFETY MARGIN -- MISSING the SLA triggers an
+  EXTERNAL, CONTRACTUAL consequence (a SERVICE CREDIT owed to the CUSTOMER, a FINANCIAL PENALTY)
+```
+
+Because an SLA carries real financial and contractual consequences, teams deliberately set it with headroom below their actual internal SLO target — this way, ordinary, expected fluctuations in reliability that dip the SLO but stay within its own error budget don't accidentally trigger an external SLA breach and its associated financial penalty, giving the team room to manage reliability internally before it becomes an external, contractual problem.
+
+**Common Pitfall:** setting an external SLA equal to (or even higher than) the team's own internal SLO target, leaving no safety margin between "we're managing this internally" and "we've triggered a contractual, financially-penalized breach" — the deliberate gap between SLO and SLA is what gives a team room to absorb ordinary reliability fluctuations without those fluctuations immediately becoming an external, customer-facing contractual problem.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does introducing an abstraction layer over a legacy database — a database-level "Branch by Abstraction" — let a team gradually migrate data to a new store while the old one remains the source of truth?**
+
+Branch by Abstraction (covered earlier at the code level) applies equally well to a database migration: rather than a risky, single "big bang" cutover from an old database to a new one, an abstraction layer (a Repository interface, covered under Clean Architecture) sits in front of both — initially reading/writing only to the legacy database, then progressively writing to *both* stores while still reading from the legacy one (validating the new store's correctness in production without depending on it yet), and finally cutting reads over to the new store only once confidence is fully established.
+
+```text
+Phase 1: Repository reads/writes ONLY to the LEGACY database -- the NEW store doesn't
+  EXIST yet, or is JUST being STOOD UP
+
+Phase 2 (Dual-Write, covered as an ANTI-PATTERN elsewhere WHEN done NAIVELY, but SAFE
+  HERE with careful RECONCILIATION): Repository WRITES to BOTH the legacy AND new stores,
+  but STILL READS from the LEGACY one -- VALIDATES the NEW store's data MATCHES, WITHOUT
+  yet DEPENDING on it for ANY actual READS
+
+Phase 3: Repository SWITCHES reads OVER to the NEW store, ONCE CONFIDENCE is ESTABLISHED
+  that its DATA is CORRECT and COMPLETE -- the LEGACY database can EVENTUALLY be
+  DECOMMISSIONED, having SERVED its PURPOSE throughout the GRADUAL migration
+```
+
+Because every phase of this migration is independently reversible (falling back to reading from the legacy store remains possible at any point before the final cutover), the abstraction layer lets the team validate the new store's correctness incrementally, in production, under real load, without ever committing to an irreversible, high-risk single cutover — directly mirroring Branch by Abstraction's code-level benefit, applied specifically to the harder, more consequential problem of migrating a system's actual data store.
+
+**Common Pitfall:** attempting a direct, one-time cutover from a legacy database to a new one (migrate all data, switch over, hope it works) without an intermediate, abstraction-layer-based validation phase — this concentrates all the migration's risk into one single, high-stakes moment, rather than the gradual, incrementally-validated, and reversible-at-every-step approach Branch by Abstraction provides for exactly this kind of high-risk infrastructure change.
+
+---
+
 ---

@@ -1551,4 +1551,89 @@ Because host networking removes the isolation boundary that ordinarily prevents 
 
 ---
 
+## Beginner — Question 19
+
+**Q19: How does a Docker Volume's lifecycle independence from its container — surviving `docker rm`, unlike a container's own writable layer — mean a volume must be explicitly removed separately to actually delete its data?**
+
+A container's own writable layer (any files written directly inside it, not in a mounted volume) is deleted along with the container when it's removed — a Volume, by contrast, is a separate, independently-managed storage object that persists after its container is removed, specifically so data can outlive any one particular container instance; deleting the data actually requires an explicit `docker volume rm`, a separate step from removing the container itself.
+
+```bash
+docker run -v mydata:/app/data myapp
+docker rm <container-id>          # removes the CONTAINER -- the VOLUME "mydata" STILL EXISTS,
+                                     # UNTOUCHED, with ALL its DATA intact
+docker volume rm mydata           # ONLY THIS explicitly DELETES the VOLUME's actual DATA
+```
+
+```text
+Container's OWN writable layer: deleted AUTOMATICALLY when the CONTAINER itself is removed
+Volume: a SEPARATE, INDEPENDENTLY-managed object -- SURVIVES container removal by DESIGN --
+  requires its OWN, EXPLICIT removal COMMAND to actually DELETE its data
+```
+
+Because this independence is precisely what makes Volumes useful for persisting data across container restarts/replacements (a database's data directory, for instance, needs to survive the container running the database engine being replaced during an upgrade), understanding that a Volume requires its own explicit deletion is essential for correctly cleaning up storage — and equally essential for *not* accidentally deleting data a team actually intended to keep.
+
+**Common Pitfall:** running `docker rm` (or `docker system prune`, covered earlier) expecting it to also clean up associated volumes, then being surprised that old, unused volumes continue accumulating disk space — volumes require their own explicit removal (`docker volume prune` for genuinely unused ones), precisely because their independent lifecycle is a deliberate design choice, not an oversight.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does naming a Multi-Stage Build stage `AS test` and building it as its own separate target (`docker build --target test`) let a single Dockerfile also serve as a test-runner image, without that test tooling ever ending up in the production image?**
+
+A Multi-Stage Build (covered earlier) can define a stage specifically for running tests — installing test dependencies and executing the test suite — as an intermediate stage that's never referenced by the final, production stage's own `COPY --from=` instructions, meaning `docker build` (without an explicit `--target`) produces only the lean, final production image, while `docker build --target test` explicitly builds and runs just the testing stage on demand.
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet restore
+
+FROM build AS test              # a STAGE specifically for RUNNING tests
+RUN dotnet test --logger:trx    # test dependencies/tooling live ONLY in THIS stage
+
+FROM build AS publish
+RUN dotnet publish -c Release -o /app
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final  # the FINAL, PRODUCTION image
+COPY --from=publish /app .       # NEVER references the "test" stage AT ALL
+```
+
+```bash
+docker build --target test .     # builds and RUNS just the TEST stage -- for CI verification
+docker build .                    # builds ONLY through the FINAL stage -- test TOOLING never included
+```
+
+Because the `test` stage is never referenced by the final stage's `COPY --from=`, its test dependencies and tooling simply never make it into the production image at all — while CI can still explicitly target that stage to run the test suite as part of the build process, using the exact same Dockerfile that also produces the lean production image.
+
+**Common Pitfall:** maintaining two entirely separate Dockerfiles — one for running tests, one for the actual production build — rather than a single Multi-Stage Dockerfile with a dedicated test target; this duplicates the shared setup steps (restoring dependencies, copying source) across two files that can drift out of sync, when a single Dockerfile with a `test` stage achieves both purposes from one source of truth.
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is Docker's `--security-opt=no-new-privileges`, and how does it prevent a process inside a container from gaining additional privileges beyond what it already started with, even via a setuid binary?**
+
+A setuid binary (a program that runs with the *file owner's* privileges rather than the invoking user's own) is a classic Linux mechanism for legitimate privilege escalation (like `passwd` needing to modify a system file as root) — but it's also a common vector an attacker who's gained limited code execution inside a container might exploit to escalate to greater privileges; `--security-opt=no-new-privileges` disables this entire mechanism for the container, ensuring a process can never gain more privileges than it started with, regardless of what setuid binaries might exist inside the container's filesystem.
+
+```bash
+docker run --security-opt=no-new-privileges myapp
+```
+
+```text
+WITHOUT no-new-privileges: a PROCESS inside the CONTAINER, if it manages to EXECUTE a
+  setuid BINARY, can ESCALATE to that BINARY's OWNER's privileges (POTENTIALLY root) --
+  even if the PROCESS itself STARTED with LIMITED, non-root PRIVILEGES
+
+WITH no-new-privileges: NO process WITHIN the container can EVER gain MORE privileges than
+  it ALREADY had, REGARDLESS of ANY setuid binaries PRESENT in the CONTAINER's filesystem --
+  a GENUINE, STRUCTURAL limit on the MAXIMUM privilege an ATTACKER exploiting a VULNERABILITY
+  inside the container could EVER actually ACHIEVE
+```
+
+Because this flag structurally forecloses an entire privilege-escalation technique regardless of what specific setuid binaries a container image happens to contain (even ones the container's own author might not be fully aware of, buried in a base image or dependency), it provides genuine defense-in-depth against an attacker who's achieved initial, limited code execution inside a container attempting to escalate further — a low-cost, broadly-applicable hardening flag for containers that don't specifically need setuid-based privilege escalation to function correctly.
+
+**Common Pitfall:** running containers without `no-new-privileges` by default, assuming a non-root `USER` directive (covered elsewhere) alone is sufficient hardening — a non-root starting user still leaves the setuid-based escalation path open unless `no-new-privileges` is also explicitly set; the two hardening measures are complementary, not redundant with each other.
+
+---
+
 ---

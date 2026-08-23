@@ -2062,4 +2062,86 @@ Because this trade-off exists purely as a function of physics (the speed of ligh
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is a Shared-Nothing Architecture, and how does ensuring no two nodes share memory or disk let a system scale horizontally without any single, shared resource becoming a bottleneck?**
+
+In a Shared-Nothing Architecture, every node is fully independent — its own CPU, its own memory, its own disk — with no node relying on any resource another node also directly accesses; this eliminates an entire category of scaling bottleneck (a shared disk array, a shared memory bus) that would otherwise cap how far the system could scale regardless of how many additional nodes you add.
+
+```text
+Shared-DISK architecture: MULTIPLE nodes all read/write the SAME underlying disk ARRAY --
+  ADDING more NODES eventually SATURATES that SHARED disk's OWN throughput CAPACITY --
+  a HARD CEILING that ADDING more nodes CANNOT overcome, since THEY ALL contend for the
+  SAME underlying, SHARED resource
+
+Shared-NOTHING architecture: EACH node has its OWN, INDEPENDENT disk/memory -- ADDING a
+  NEW node adds GENUINELY NEW, INDEPENDENT capacity -- NO shared resource EVER becomes
+  the BOTTLENECK, since NOTHING is ACTUALLY shared BETWEEN nodes AT ALL
+```
+
+Because a Shared-Nothing design has no single point where every node's demand converges onto one finite, shared resource, it can scale horizontally in a genuinely unbounded way (limited only by how the *application logic* itself partitions and coordinates work across nodes, not by any shared hardware ceiling) — this is precisely the architectural foundation underlying most horizontally-scalable NoSQL databases (covered elsewhere) and distributed systems generally.
+
+**Common Pitfall:** designing a "horizontally scalable" system that still relies on one shared resource underneath (a single shared database server every application node connects to, a shared network file system) — adding more application nodes doesn't actually remove the bottleneck if they all still ultimately contend for that one shared, non-scaled resource; genuine horizontal scalability requires eliminating shared bottlenecks at every layer, not just the application tier.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does a bounded queue's rejection policy — explicitly rejecting new work once full, rather than growing unboundedly — let a system fail fast and predictably rather than degrading slowly under overload?**
+
+An unbounded queue absorbs load indefinitely, growing larger and larger as producers outpace consumers — this feels protective in the moment, but it defers the actual problem, eventually causing memory exhaustion, and by the time work is finally processed, it may be so delayed as to be worthless; a *bounded* queue with an explicit rejection policy instead refuses new work immediately once full, giving the caller an immediate, actionable signal ("the system is overloaded, back off") rather than silently accepting work it can't actually keep up with.
+
+```csharp
+var channel = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(1000)
+{
+    FullMode = BoundedChannelFullMode.Wait // or DropWrite/DropOldest, covered elsewhere for Channel<T>
+});
+// once the QUEUE reaches 1,000 items, FURTHER writes either WAIT (backpressure) or are
+// EXPLICITLY REJECTED/DROPPED -- the SYSTEM tells the CALLER "I'm at CAPACITY" IMMEDIATELY,
+// rather than SILENTLY accumulating an EVER-GROWING, EVENTUALLY-unmanageable BACKLOG
+```
+
+```text
+Unbounded queue under sustained OVERLOAD: grows INDEFINITELY -- EVENTUALLY exhausts
+  memory -- and EVEN BEFORE that, items sitting DEEP in an ENORMOUS backlog are SO STALE
+  by the TIME they're finally PROCESSED that the WORK may be COMPLETELY WORTHLESS by then
+
+Bounded queue with REJECTION: once FULL, NEW work is IMMEDIATELY rejected -- the CALLER
+  gets an INSTANT, ACTIONABLE signal ("BACK OFF, I'm OVERLOADED") -- the SYSTEM fails FAST
+  and PREDICTABLY, RATHER than DEGRADING slowly and UNPREDICTABLY toward EVENTUAL COLLAPSE
+```
+
+Because an unbounded queue merely defers an overload problem rather than solving it (eventually manifesting as memory exhaustion or a backlog of hopelessly stale work), a bounded queue's explicit rejection policy trades a harder, more immediately visible failure signal for a fundamentally more honest and manageable one — callers receiving an immediate rejection can apply their own backpressure/retry logic, rather than a system silently accumulating an ever-growing, eventually catastrophic backlog.
+
+**Common Pitfall:** using an unbounded queue "to never lose any work," without recognizing this simply delays and obscures an overload problem rather than solving it — an unbounded queue under sustained overload eventually causes memory exhaustion (a much worse failure than an early, explicit rejection would have been) or produces a backlog so stale that the eventually-processed work is no longer useful anyway.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How do Vector Clocks let a distributed system distinguish "A happened before B" from "A and B were genuinely concurrent," each node maintaining its own logical clock incremented per event?**
+
+A Vector Clock is a set of counters, one per node in the system, incremented by a node whenever it experiences a local event and attached to every message it sends — comparing two Vector Clocks (rather than relying on unreliable wall-clock timestamps across different machines) precisely determines whether one event's clock is a strict superset of another's (meaning it genuinely happened after, having "seen" everything the other had), or whether neither dominates the other (meaning the two events were genuinely concurrent, with neither aware of the other when it occurred).
+
+```text
+Node A's clock: {A: 2, B: 0, C: 0}  (A has experienced 2 LOCAL events, has NOT yet SEEN
+                                       anything FROM B or C)
+Node B's clock: {A: 0, B: 1, C: 0}  (B has experienced 1 LOCAL event, INDEPENDENTLY,
+                                       WITHOUT having SEEN anything FROM A YET)
+
+COMPARING these TWO clocks: NEITHER is a STRICT SUPERSET of the OTHER -- A's clock has a
+  HIGHER "A" count, but B's clock has a HIGHER "B" count -- NEITHER event "happened
+  BEFORE" the OTHER -- they were GENUINELY, PROVABLY CONCURRENT
+
+Node C's clock: {A: 2, B: 1, C: 1}  -- THIS clock IS a STRICT superset of BOTH A's AND
+  B's -- meaning Node C's event GENUINELY happened AFTER BOTH A's and B's OWN events,
+  having ALREADY "SEEN" (incorporated KNOWLEDGE of) BOTH of them BEFORE ITS OWN event occurred
+```
+
+Because Vector Clocks capture genuine causal relationships (has this node "seen" that other event or not) rather than relying on wall-clock timestamps that different machines' clocks can never perfectly agree on, they let a distributed system correctly distinguish a true happens-before relationship from genuine, provable concurrency — precisely the information needed to correctly detect a real conflict (two genuinely concurrent, independent writes to the same data) rather than incorrectly treating one write as simply "later" than the other based purely on unreliable timestamp comparison.
+
+**Common Pitfall:** relying on wall-clock timestamps alone to determine which of two conflicting writes across different nodes happened "first" (the Last-Write-Wins approach, covered earlier) — clock drift between physically separate machines means timestamp comparison can be genuinely wrong about causal ordering; Vector Clocks provide a causally-accurate alternative specifically for systems where correctly distinguishing true ordering from genuine concurrency actually matters.
+
+---
+
 ---

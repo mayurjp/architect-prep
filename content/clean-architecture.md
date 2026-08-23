@@ -1938,4 +1938,95 @@ Because this cross-cutting concern (covered generally under MediatR Pipeline Beh
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is a hand-rolled `ToEntity()`/`ToDto()` mapper extension method convention, as a lightweight alternative to a full AutoMapper setup (covered earlier), and how does writing explicit mapping methods avoid AutoMapper's reflection-based configuration for a small number of simple mappings?**
+
+Rather than configuring AutoMapper's profile-based, convention-driven mapping engine (covered earlier) for just a handful of straightforward, rarely-changing DTO/Entity conversions, a simple extension method written by hand does the same job explicitly and directly — with the exact mapping logic fully visible in ordinary, debuggable C# code, rather than relying on AutoMapper's reflection-based, configuration-driven behavior.
+
+```csharp
+public static class ProductMappingExtensions
+{
+    public static ProductDto ToDto(this Product product) =>
+        new ProductDto(product.Id, product.Name, product.Price); // EXPLICIT, VISIBLE, ORDINARY code
+
+    public static Product ToEntity(this CreateProductDto dto) =>
+        new Product(dto.Name, dto.Price);
+}
+
+var dto = product.ToDto(); // reads NATURALLY, like an ORDINARY method call -- NO AutoMapper
+                             // configuration/profile SETUP needed AT ALL for THIS simple case
+```
+
+Because this mapping logic is just ordinary, explicit C# code, it's trivially debuggable (setting a breakpoint inside the extension method works exactly like debugging any other method) and requires no separate configuration/profile setup — for a project with only a handful of simple, one-to-one mappings, this hand-rolled approach can be genuinely simpler and more transparent than configuring a full mapping library, which earns its own setup cost specifically once the number and complexity of mappings grows large enough to benefit from automation.
+
+**Common Pitfall:** introducing AutoMapper (or an equivalent mapping library) for a project with only a small handful of simple, rarely-changing mappings — the library's configuration/profile setup can add more ceremony than the small number of straightforward, hand-writable mapping methods it would replace; the trade-off genuinely favors automation only once the number and complexity of mappings grows large enough to justify it.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: How does accepting a Specification object (covered earlier under Design Patterns) as a parameter to a Repository's query method let the Repository stay generic while still supporting arbitrarily complex, reusable query logic?**
+
+Rather than a Repository interface accumulating an ever-growing list of narrowly-specific query methods (`GetActiveProductsInCategoryAsync`, `GetDiscountedProductsAsync`, `GetOutOfStockProductsAsync`), it can expose one single, generic method accepting a `Specification<T>` object (covered earlier) — the Repository stays simple and generic, while arbitrarily complex, composable query logic lives in reusable Specification classes defined wherever they're actually needed.
+
+```csharp
+public interface IRepository<T> { Task<List<T>> FindAsync(ISpecification<T> spec); } // ONE generic method
+
+public class ActiveProductsSpecification : ISpecification<Product>
+{
+    public Expression<Func<Product, bool>> Criteria => p => p.IsActive && p.Stock > 0;
+}
+
+// USAGE -- the Repository ITSELF never needed a SPECIFIC "GetActiveProducts" method AT ALL
+var activeProducts = await _repository.FindAsync(new ActiveProductsSpecification());
+```
+
+```text
+WITHOUT Specifications: the Repository INTERFACE accumulates ONE narrowly-specific method
+  PER distinct query NEED -- GROWS unboundedly as NEW query VARIATIONS are NEEDED over TIME
+
+WITH Specifications: the Repository stays GENERIC (ONE "FindAsync(spec)" method) --
+  query VARIATIONS live as SEPARATE, REUSABLE Specification CLASSES, COMPOSABLE (AND/OR/NOT,
+  covered EARLIER) and TESTABLE INDEPENDENTLY of the Repository ITSELF
+```
+
+Because the actual query logic is encapsulated in standalone Specification classes rather than baked directly into an ever-growing Repository interface, new query requirements can be added by simply defining a new Specification class — without ever needing to modify the Repository interface itself, and with each Specification independently unit-testable (verifying its `Criteria` expression behaves correctly) without needing a real repository or database at all.
+
+**Common Pitfall:** letting a Repository interface accumulate an ever-growing number of narrowly-specific query methods, one per distinct business query need, rather than adopting the Specification pattern's single, generic query method — this makes the Repository interface progressively larger and harder to maintain, and duplicates similar filtering logic across multiple, slightly-different specific methods that a composable Specification could have expressed once, reusably.
+
+---
+
+## Advanced — Question 19
+
+**Q19: How does a Domain Event Dispatcher living in the Infrastructure layer hook into an EF Core `SaveChangesAsync` interceptor (covered under EF Core) to automatically publish Domain Events only after a transaction actually succeeds?**
+
+A Domain Event's "raised but not yet dispatched" lifecycle (covered earlier) means an Aggregate can queue up events during its own business logic, but those events shouldn't actually be published until the surrounding transaction has genuinely committed — a `SaveChangesInterceptor` (covered under EF Core) is the concrete mechanism tying these together: it hooks into the point *immediately after* `SaveChangesAsync()` successfully persists all changes, and only then collects and dispatches every Aggregate's queued Domain Events.
+
+```csharp
+public class DomainEventDispatchingInterceptor : SaveChangesInterceptor
+{
+    public override async ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result, CancellationToken ct)
+    {
+        var context = eventData.Context!;
+        var aggregatesWithEvents = context.ChangeTracker.Entries<AggregateRoot>()
+            .Select(e => e.Entity).Where(a => a.DomainEvents.Any());
+
+        foreach (var aggregate in aggregatesWithEvents)
+        {
+            foreach (var domainEvent in aggregate.DomainEvents)
+                await _mediator.Publish(domainEvent); // ONLY dispatched HERE -- AFTER the transaction ALREADY succeeded
+            aggregate.ClearDomainEvents();
+        }
+        return await base.SavedChangesAsync(eventData, result, ct);
+    }
+}
+```
+
+Because this interceptor only runs *after* `SaveChangesAsync()` has already succeeded (not before, and never if it fails/rolls back), it structurally guarantees Domain Events are only ever published for changes that genuinely, durably persisted — preventing exactly the bug scenario covered earlier where a side effect might otherwise fire based on a change that ultimately never actually committed.
+
+**Common Pitfall:** dispatching Domain Events directly from within an Aggregate's own business-logic method (immediately when a business rule triggers the event), rather than deferring dispatch until after the surrounding transaction actually commits — this risks publishing an event (and triggering whatever side effects its handlers perform) for a change that the transaction might still roll back afterward, precisely the inconsistency a `SaveChanges`-interceptor-based deferred-dispatch mechanism is designed to prevent.
+
+---
+
 ---
