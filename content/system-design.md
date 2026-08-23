@@ -1989,4 +1989,77 @@ Because true exactly-once delivery is provably difficult (and in a fully general
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is the scaling characteristic of a static-site/CDN-only architecture, and how does moving as much content as possible to static, CDN-servable form sidestep an entire class of scaling problem?**
+
+A static file served directly from a CDN edge node requires no application server, no database query, and no per-request computation at all — a CDN can serve the same static file to an essentially unlimited number of concurrent requesters, since each request is handled independently by whichever edge location is nearest, with no shared, stateful bottleneck (an application server's finite thread pool, a database's finite connection pool) anywhere in the path.
+
+```text
+A DYNAMIC page: EVERY request hits an APPLICATION SERVER, which QUERIES a DATABASE, RUNS
+  business LOGIC, and RENDERS a response -- THIS entire PATH has FINITE capacity (a LIMITED
+  number of APPLICATION server INSTANCES, a LIMITED database connection POOL) -- SCALING it
+  requires ADDING more of EACH of these FINITE resources
+
+A STATIC file served via a CDN: EVERY request is served DIRECTLY from an EDGE location's
+  own CACHE -- NO application server, NO database, INVOLVED AT ALL -- CDNs are BUILT with
+  MASSIVE, GEOGRAPHICALLY-distributed serving CAPACITY specifically for THIS exact PATTERN
+```
+
+Because a portion of many real applications' content genuinely doesn't need to be dynamically generated per-request (marketing pages, documentation, compiled JS/CSS bundles, even a product catalog that changes infrequently enough to be pre-rendered), deliberately moving as much of that content as possible to static, CDN-servable form removes it entirely from the scaling concerns that apply to the genuinely dynamic remainder of the system — a targeted, high-leverage architectural choice rather than a universal solution for content that genuinely must be computed per-request.
+
+**Common Pitfall:** treating every page/response as inherently dynamic and routing it all through the application server, even for content that changes rarely enough to be pre-rendered and served statically — this needlessly subjects genuinely static-friendly content to the same scaling constraints (application server capacity, database load) that only the truly dynamic portions of the system actually require.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is N-Tier Architecture (Presentation/Business/Data tiers) as the classical predecessor to Microservices, and how does its physical separation into separately-deployable tiers differ from a monolith's single-deployment-unit model, while still falling short of microservices' per-service independence?**
+
+N-Tier Architecture physically separates a Presentation tier, a Business Logic tier, and a Data tier into distinct deployment units (often on separate servers) — a genuine improvement over a monolith's single, undifferentiated deployment unit, since each tier can be scaled or updated somewhat independently — but unlike microservices, the tiers are still organized by *technical layer* rather than by *business capability*, meaning a change to one specific business feature typically still requires touching (and redeploying) the Business Logic tier as a whole, rather than one small, independently-deployable service.
+
+```text
+Monolith: Presentation + Business Logic + Data access ALL bundled into ONE single
+  deployment UNIT -- EVERY change, REGARDLESS of scope, requires REDEPLOYING the ENTIRE thing
+
+N-Tier: Presentation, Business Logic, and Data are SEPARATE deployment UNITS -- can SCALE
+  or UPDATE somewhat INDEPENDENTLY -- but the Business Logic TIER is STILL one MONOLITHIC
+  unit CONTAINING ALL business capabilities TOGETHER -- a change to ONE specific FEATURE
+  still requires REDEPLOYING the ENTIRE Business Logic tier
+
+Microservices: EACH service is organized around a SPECIFIC business CAPABILITY (Orders,
+  Inventory, Payments) -- EACH independently DEPLOYABLE -- a change to ONE capability
+  requires REDEPLOYING only THAT ONE service, NOT an entire SHARED tier
+```
+
+Because N-Tier's separation follows *technical* layering (presentation versus business logic versus data) rather than *business capability* boundaries, it improves on a monolith's complete lack of separation while still bundling every business feature together within the Business Logic tier — microservices go a step further, organizing deployment boundaries around business capabilities instead, which is what actually enables the fully independent deployment (and independent team ownership) microservices are specifically known for.
+
+**Common Pitfall:** describing an N-Tier architecture as already "microservices" simply because it involves multiple separately-deployed tiers — the defining characteristic of microservices is decomposition by *business capability*, enabling independent deployment *per feature area*; N-Tier's technical-layer-based separation, while a genuine improvement over a monolith, doesn't provide this same per-feature independence within its Business Logic tier.
+
+---
+
+## Advanced — Question 19
+
+**Q19: How does PACELC (covered partially earlier) apply specifically to a system's choice between synchronous multi-region replication (strong consistency, higher latency) and asynchronous replication (lower latency, eventual consistency) — embodying PACELC's "even without a partition, latency versus consistency" trade-off?**
+
+CAP Theorem (covered earlier) only describes the trade-off during an actual network partition — PACELC extends this by pointing out that *even during entirely normal operation, with no partition at all*, a distributed system still faces a genuine latency-versus-consistency trade-off: synchronous replication across regions guarantees every replica has the absolute latest data (strong consistency) but must wait for every distant region to acknowledge before completing a write (higher latency); asynchronous replication acknowledges a write immediately (lower latency) but accepts that a replica might briefly serve slightly stale data.
+
+```text
+Synchronous MULTI-region replication: a WRITE isn't considered COMPLETE until EVERY
+  (or a MAJORITY of) DISTANT regions have ACKNOWLEDGED it -- GUARANTEES every REGION sees
+  CONSISTENT data, but the WRITE's LATENCY is BOUNDED by the SLOWEST region's ROUND-TRIP time
+  (potentially HUNDREDS of milliseconds for GENUINELY distant regions) -- EVEN with ZERO
+  network PARTITION happening AT ALL
+
+Asynchronous MULTI-region replication: a WRITE is ACKNOWLEDGED IMMEDIATELY, LOCALLY --
+  REPLICATION to OTHER regions happens IN THE BACKGROUND, AFTERWARD -- LOW latency, but a
+  READ against a DISTANT region MIGHT briefly see STALE data, UNTIL replication CATCHES UP
+```
+
+Because this trade-off exists purely as a function of physics (the speed of light imposes a genuine lower bound on cross-region round-trip time, covered elsewhere) rather than any failure condition, PACELC's "Else" clause (the trade-off that exists even absent a partition) is precisely what this synchronous-versus-asynchronous replication choice embodies — a system architect must make this trade-off deliberately, as an ordinary, everyday operational decision, not merely as contingency planning for a rare partition event.
+
+**Common Pitfall:** reasoning about a distributed system's consistency-versus-latency trade-offs purely through CAP Theorem's partition-focused lens, treating the choice as something that only matters "during an outage" — PACELC's insight is that this same fundamental trade-off exists in entirely ordinary, everyday operation (synchronous versus asynchronous cross-region replication), making it a design decision every multi-region system must confront regardless of whether a partition ever actually occurs.
+
+---
+
 ---

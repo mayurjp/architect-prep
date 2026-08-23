@@ -2183,4 +2183,92 @@ Because a Saga's own compensation logic is itself just another distributed opera
 
 ---
 
+## Beginner — Question 19
+
+**Q19: What is a microservice's event-level API Contract Versioning, as distinct from REST's URL/header versioning (covered under REST), and how does an event's schema needing to evolve over time matter specifically for microservices' loose-coupling promise?**
+
+A REST API's versioning (URL segment, media type, covered under REST) governs a synchronous request/response contract — an event published to a message broker (covered under Messaging) has its own, separate versioning concern: many independent consumer services may have subscribed to a given event type, each built against whatever schema existed when they were written, and a producer changing that schema risks silently breaking every consumer that hasn't been updated to match.
+
+```text
+An "OrderPlaced" event, version 1: { orderId, customerId, total }
+
+The PRODUCER team LATER adds a NEW, genuinely NEEDED field: { orderId, customerId, total,
+  discountCode } -- is THIS a SAFE, backward-compatible CHANGE, or a BREAKING one?
+
+A CONSUMER service written AGAINST the ORIGINAL schema, doing STRICT schema validation
+  (rejecting UNKNOWN fields) would BREAK the MOMENT it receives an event WITH the new
+  "discountCode" field it was NEVER designed to EXPECT -- EVEN THOUGH the CHANGE was
+  ADDITIVE, NOT a REMOVAL or a RENAME
+```
+
+Because an event, once published, may be consumed by services the producer team has no direct visibility into (unlike a synchronous REST call, where the caller and callee at least have a direct, observable relationship), event schema evolution requires the same deliberate discipline covered under Messaging's Schema Registry — additive-only changes, careful handling of removed fields, and a shared understanding across teams of what constitutes a safe versus breaking change to a published event contract.
+
+**Common Pitfall:** treating an event's schema as freely, informally mutable simply because "it's internal, not a public API" — an internal event contract consumed by multiple independent services carries essentially the same backward-compatibility obligations a public API would, since breaking it silently breaks every subscribing service the producer team may not even be aware exists.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: How does a Saga spanning days or weeks (rather than the typically seconds-to-minutes scenarios covered elsewhere) change its implementation requirements, specifically around needing persisted, resumable state rather than purely in-memory tracking?**
+
+A short-lived Saga can often track its current step entirely in memory, within the lifetime of a single request or process — a genuinely long-running Saga (a multi-day approval workflow, a subscription renewal process spanning a billing cycle) cannot rely on any single process staying alive that entire time; its current state (which step it's on, what data it's accumulated so far) must be explicitly persisted to durable storage, and the Saga's logic must be able to resume correctly from that persisted state even if the process that started it has long since restarted or been replaced.
+
+```csharp
+// a LONG-RUNNING Saga's state is EXPLICITLY persisted, NOT held purely IN MEMORY
+public class SubscriptionRenewalSagaState
+{
+    public Guid SagaId { get; set; }
+    public string CurrentStep { get; set; } = "AwaitingPaymentConfirmation"; // PERSISTED, not in-memory
+    public DateTime StartedAt { get; set; }
+    // ... whatever ACCUMULATED data this SPECIFIC saga instance needs to REMEMBER across STEPS
+}
+
+// a SEPARATE, DURABLE TRIGGER (a scheduled JOB, an incoming EVENT) LOADS this persisted state
+// and RESUMES the saga from WHEREVER it LEFT OFF, POTENTIALLY DAYS later, on an ENTIRELY
+// DIFFERENT process instance than the ONE that ORIGINALLY started it
+```
+
+```text
+SHORT-LIVED Saga (seconds/minutes): CAN reasonably track its CURRENT step purely IN MEMORY,
+  within ONE request's/process's LIFETIME -- the PROCESS staying ALIVE for the SAGA's
+  ENTIRE (short) duration is a REASONABLE assumption
+
+LONG-RUNNING Saga (days/weeks): CANNOT assume ANY single process stays ALIVE that LONG --
+  its STATE must be EXPLICITLY persisted to DURABLE storage, and its LOGIC must be able to
+  RESUME correctly from THAT persisted state, POTENTIALLY on a COMPLETELY DIFFERENT process
+  instance than WHATEVER originally STARTED it
+```
+
+Because a process (or even an entire deployment) can restart many times over the course of a multi-day Saga, its implementation fundamentally needs a durable, externally-persisted state machine — often implemented via a dedicated Saga/Process Manager framework (like NServiceBus's Saga support, or MassTransit's state machine) specifically designed for this "persist state between steps, resume correctly whenever the next trigger arrives" requirement, rather than the simpler in-memory orchestration adequate for short-lived Sagas.
+
+**Common Pitfall:** implementing a long-running business process's coordination logic purely in memory (within one long-lived process or a background service expected to keep running continuously) — any restart, deployment, or crash during that process's actual, multi-day lifespan would lose all in-memory progress entirely; genuinely long-running Sagas require explicit, durable state persistence and correct resumption logic, not an assumption that any one process instance will simply stay alive for the entire duration.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is the "Microservices Death Star" anti-pattern, and how does the absence of any deliberate dependency-direction discipline let this happen even in a system that started with clean service boundaries?**
+
+A "Death Star" describes a service dependency diagram that's grown so densely interconnected — every service calling several others, with cycles and cross-cutting dependencies everywhere — that it visually resembles a tangled web radiating in every direction, rather than a clean, layered, or otherwise comprehensible structure; this typically emerges gradually, as individual, locally-reasonable-seeming service-to-service calls accumulate over time without anyone actively enforcing an overall dependency direction (analogous to the Acyclic Dependencies Principle, covered under Design Principles, but applied at the microservice-architecture level).
+
+```text
+A system that STARTED with 10 CLEANLY-bounded services, EACH with a FEW, SENSIBLE
+  dependencies -- OVER TIME, as NEW features are ADDED, developers TAKE the path of LEAST
+  resistance: "Service J ALREADY has the data I need, I'll just CALL it DIRECTLY" --
+  REPEATED across HUNDREDS of such INDIVIDUALLY-reasonable decisions, by MANY different
+  teams, WITHOUT any ENFORCED overall dependency-DIRECTION discipline
+
+RESULT: a dependency GRAPH where Service A calls B, C, D -- B ALSO calls A (a CYCLE!), D,
+  and E -- E calls BACK to A and C -- EVERY service seems to DEPEND on, and be DEPENDED
+  upon BY, MANY others, with NO discernible LAYERING or DIRECTION AT ALL -- functionally,
+  a DISTRIBUTED "Big Ball of Mud" (covered under Design Principles), just SPREAD ACROSS
+  network BOUNDARIES instead of WITHIN one CODEBASE
+```
+
+Because no single service-to-service call in isolation necessarily seemed like a bad decision, the Death Star (like the Big Ball of Mud it directly parallels) is a systemic failure of *ongoing* architectural governance — clean initial service boundaries alone provide no lasting protection without some active, continuously-enforced discipline (dependency-direction reviews, architectural fitness functions checking for cycles, explicit ownership of which services are allowed to depend on which) constraining how the dependency graph is allowed to evolve over time.
+
+**Common Pitfall:** assuming that having drawn clean, sensible service boundaries at a system's initial design is sufficient protection against this anti-pattern indefinitely — without ongoing, actively-enforced governance over how new cross-service dependencies are added over time, even a system that started genuinely well-architected can gradually accumulate the same tangled, ungovernable dependency structure the Death Star describes.
+
+---
+
 ---

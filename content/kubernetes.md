@@ -1664,4 +1664,97 @@ Because the Operator encodes deep, application-specific operational expertise di
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What is the difference between `kubectl apply` and `kubectl create`, and how does `apply`'s declarative, idempotent semantics differ from `create`'s imperative, fails-if-it-already-exists behavior?**
+
+`kubectl create` is imperative — it creates a resource exactly once, and fails with an error if a resource with that name already exists — `kubectl apply` is declarative: it compares the supplied manifest against the resource's current live state and applies whatever changes are needed, safely creating it if absent or updating it if already present, making it safe to run the exact same command repeatedly.
+
+```bash
+kubectl create -f deployment.yaml   # WORKS the FIRST time -- FAILS with an error if RUN AGAIN
+                                       # ("Error: deployments.apps 'myapp' ALREADY exists")
+
+kubectl apply -f deployment.yaml    # SAFE to run REPEATEDLY -- CREATES it the first TIME,
+                                       # UPDATES it to MATCH the manifest on EVERY subsequent run
+```
+
+```text
+kubectl create: IMPERATIVE -- "CREATE this EXACT resource, RIGHT NOW" -- FAILS if it's
+  ALREADY there -- NOT safe to RE-RUN
+
+kubectl apply: DECLARATIVE -- "make the LIVE state MATCH what this MANIFEST describes" --
+  IDEMPOTENT -- SAFE to run the SAME command as MANY times as needed, PRODUCING the SAME
+  end RESULT every TIME
+```
+
+Because CI/CD pipelines and GitOps controllers (covered elsewhere) need to reliably reapply the same configuration repeatedly (on every deployment, on every reconciliation loop) without needing to first check whether a resource already exists, `apply`'s idempotent semantics are the standard, recommended way to manage Kubernetes resources in an automated pipeline — `create` remains useful mainly for quick, one-off, interactive resource creation.
+
+**Common Pitfall:** using `kubectl create` inside an automated deployment pipeline expected to run repeatedly — the second (and every subsequent) run fails with an "already exists" error, since `create` has no concept of reconciling against already-existing state; `kubectl apply` is the correct, idempotent choice for any pipeline that needs to safely re-run the same deployment command multiple times.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: How does combining a Kubernetes Deployment with `kubectl rollout status` — waiting for a rollout to actually complete, rather than just issuing the apply command — let a CI/CD pipeline correctly detect whether a deployment genuinely succeeded?**
+
+`kubectl apply` returns immediately once the API server accepts the new Deployment spec — it says nothing about whether the actual rollout (creating new Pods, waiting for them to become Ready, terminating old ones) subsequently succeeds or fails; `kubectl rollout status` blocks and waits, reporting success only once the rollout has genuinely completed, or failure if it stalls/fails, giving a pipeline an accurate, complete-or-failed signal to actually act on.
+
+```bash
+kubectl apply -f deployment.yaml         # returns IMMEDIATELY -- the API accepted the SPEC,
+                                            # but says NOTHING about whether the ROLLOUT ITSELF succeeds
+kubectl rollout status deployment/myapp --timeout=300s
+# BLOCKS until the rollout ACTUALLY completes (new Pods READY, old ones TERMINATED) --
+# returns a NON-ZERO exit code if it FAILS or TIMES OUT -- the PIPELINE can act on THIS
+```
+
+```text
+WITHOUT rollout status: a PIPELINE step "kubectl apply" REPORTS success the MOMENT the API
+  ACCEPTS the spec -- even if the NEW Pods subsequently CRASH-LOOP and NEVER become Ready,
+  the PIPELINE has ALREADY moved ON, believing the DEPLOYMENT succeeded -- a SILENT deployment
+  FAILURE (covered under DevOps)
+
+WITH rollout status: the PIPELINE WAITS for the ACTUAL rollout outcome -- a CRASH-LOOPING
+  new version causes rollout status to EVENTUALLY TIME OUT and FAIL -- the PIPELINE correctly
+  detects the FAILURE and can trigger an AUTOMATIC rollback, rather than falsely REPORTING success
+```
+
+Because `kubectl apply`'s own success only reflects "the API server accepted this spec," not "the rollout actually succeeded," relying on it alone reproduces exactly the Silent Deployment Failure gap covered under DevOps — `kubectl rollout status` is the concrete Kubernetes-level mechanism closing that gap, giving the pipeline a genuine, accurate signal about whether the new version is actually running successfully.
+
+**Common Pitfall:** treating a successful `kubectl apply` as proof a deployment succeeded, without following it with `kubectl rollout status` to actually confirm the rollout completed — this is precisely the Silent Deployment Failure gap (covered under DevOps) at the Kubernetes level; a pipeline should always wait for and check the rollout's actual outcome before considering a deployment genuinely successful.
+
+---
+
+## Advanced — Question 18
+
+**Q18: What are Kubernetes Pod Security Standards (replacing the deprecated PodSecurityPolicy), and how do their three tiers — Privileged, Baseline, Restricted — let a namespace enforce a graduated level of security hardening on the Pods running within it?**
+
+Pod Security Standards define three built-in security profiles a namespace can enforce: Privileged (no restrictions at all, for trusted system-level workloads), Baseline (blocks known privilege-escalation vectors while remaining broadly permissive for typical workloads), and Restricted (enforces current, comprehensive Pod hardening best practices — no root user, no privilege escalation, a locked-down security context) — a namespace applies one of these as a label, and the cluster's built-in admission control enforces it automatically for every Pod created there.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production-workloads
+  labels:
+    pod-security.kubernetes.io/enforce: restricted   # ENFORCES the strictest tier for EVERY Pod HERE
+```
+
+```text
+Privileged: NO restrictions -- appropriate ONLY for TRUSTED, system-level components (a CNI
+  plugin, a monitoring DAEMONSET needing HOST-level access)
+
+Baseline: blocks KNOWN, COMMON privilege-escalation vectors (running as PRIVILEGED, HOST
+  namespace access) -- a REASONABLE default for MOST ordinary application WORKLOADS
+
+Restricted: the STRICTEST tier -- ENFORCES current POD-hardening best PRACTICES
+  COMPREHENSIVELY (non-root USER required, NO privilege escalation, a LOCKED-DOWN security
+  CONTEXT) -- appropriate for GENUINELY security-sensitive WORKLOADS/namespaces
+```
+
+Because these standards are enforced declaratively via a simple namespace label (rather than requiring a separate, more complex admission-controller policy object the way the older, now-deprecated PodSecurityPolicy did), applying an appropriate tier per namespace is now a lightweight, built-in mechanism — letting a cluster operator apply graduated hardening levels across different namespaces (a strict `restricted` tier for production application namespaces, a more permissive tier for infrastructure namespaces needing genuinely elevated access) without needing a separate, complex policy engine for the common case.
+
+**Common Pitfall:** leaving every namespace at the default, unenforced (effectively Privileged) security posture, relying purely on developer discipline to avoid writing Pods with unnecessary privileges — Pod Security Standards let this be enforced structurally and automatically at the namespace level instead, catching an accidentally over-privileged Pod spec at admission time rather than relying entirely on manual code review to catch it.
+
+---
+
 ---

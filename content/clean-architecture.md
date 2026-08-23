@@ -1826,4 +1826,116 @@ Because both repositories in this example share the *same* underlying `DbContext
 
 ---
 
+## Beginner — Question 18
+
+**Q18: Why must a Value Object (covered earlier under Clean Architecture) override both `Equals` and `GetHashCode` together for its equality-by-value semantics to actually work correctly in a hash-based collection?**
+
+Overriding only `Equals` without also overriding `GetHashCode` breaks a fundamental .NET contract: two objects considered equal via `Equals` must also produce the *same* hash code — a hash-based collection (`Dictionary<TKey, TValue>`, `HashSet<T>`) relies on this contract internally, first computing a hash to locate the right "bucket," then using `Equals` only to confirm a match *within* that bucket; violating the contract means two logically-equal Value Objects can end up in *different* buckets entirely, making the collection unable to find a match even though `Equals` would have returned `true`.
+
+```csharp
+public class Money
+{
+    public decimal Amount { get; }
+    public string Currency { get; }
+
+    public override bool Equals(object? obj) =>
+        obj is Money other && Amount == other.Amount && Currency == other.Currency;
+
+    // FORGETTING this override -- Money inherits the DEFAULT, REFERENCE-based GetHashCode --
+    // public override int GetHashCode() => HashCode.Combine(Amount, Currency);
+}
+
+var set = new HashSet<Money>();
+set.Add(new Money(10, "USD"));
+bool found = set.Contains(new Money(10, "USD")); // returns FALSE! -- Equals WOULD say TRUE,
+    // but the DEFAULT (reference-based) GetHashCode() puts THESE two DIFFERENT instances
+    // into DIFFERENT hash BUCKETS -- Contains() never even CALLS Equals() to COMPARE them
+```
+
+Because a hash-based collection uses the hash code purely as an optimization to narrow down *which* bucket to search before ever calling `Equals`, two objects that are logically equal but land in different buckets (due to mismatched hash codes) will never actually be compared via `Equals` at all — silently breaking lookups, `Contains()` checks, and deduplication for a Value Object that only overrode one of the two required methods.
+
+**Common Pitfall:** overriding `Equals` on a Value Object for value-based equality while forgetting to override `GetHashCode` to match — this specific mistake produces subtly broken behavior *only* inside hash-based collections (ordinary `==` comparisons and `List<T>.Contains()`, which use `Equals` directly without hashing, would still work correctly), making it an easy bug to miss until the Value Object happens to be used as a Dictionary key or inside a HashSet.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is a Clean Architecture Application Exception hierarchy, as distinct from a Domain Exception (covered earlier), and how does distinguishing an expected, recoverable application-level failure from a genuine Domain rule violation let the Presentation layer map each to an appropriate HTTP status code?**
+
+A Domain Exception (covered earlier) represents a genuine business rule violation (attempting to cancel an already-shipped order) — an Application Exception instead represents an expected, recoverable failure at the orchestration level (a requested entity simply wasn't found, a Use Case's preconditions weren't met) that isn't really a "business rule" violation so much as an ordinary, anticipated outcome the Presentation layer needs to map to a specific, appropriate response.
+
+```csharp
+// APPLICATION exception -- an ORDINARY, EXPECTED outcome at the ORCHESTRATION level
+public class NotFoundException : ApplicationException
+{
+    public NotFoundException(string entityName, object key)
+        : base($"{entityName} with key '{key}' was not found.") { }
+}
+
+// DOMAIN exception (covered earlier) -- an ACTUAL business RULE violation
+public class InvalidOrderStateException : DomainException
+{
+    public InvalidOrderStateException(string message) : base(message) { }
+}
+
+// Presentation layer -- maps EACH exception TYPE to a DIFFERENT, APPROPRIATE HTTP status
+catch (NotFoundException ex) { return NotFound(ex.Message); }              // 404
+catch (InvalidOrderStateException ex) { return Conflict(ex.Message); }      // 409 -- a BUSINESS rule conflict
+catch (DomainException ex) { return BadRequest(ex.Message); }                // 400 -- a GENERAL domain violation
+```
+
+Because these two exception categories represent genuinely different *kinds* of failure (an orchestration-level "this doesn't exist" versus a business-rule-level "this action isn't allowed given the current state"), maintaining them as separate hierarchies lets the Presentation layer's exception-handling logic map each to a semantically correct HTTP status code — rather than every failure collapsing into one generic exception type that the Presentation layer would then need fragile, string-based logic to distinguish between.
+
+**Common Pitfall:** throwing a single, generic `Exception` (or one undifferentiated custom exception type) for both "entity not found" and "business rule violated" scenarios — the Presentation layer then has no reliable, type-based way to map each failure to its semantically correct HTTP status code, often resulting in every failure incorrectly returning the same generic status (a blanket `500`, or an inappropriately generic `400`) regardless of what actually went wrong.
+
+---
+
+## Advanced — Question 18
+
+**Q18: How does wrapping a Use Case Handler's execution in a MediatR Pipeline Behavior that automatically begins/commits a Unit of Work transaction (both covered earlier) keep individual Use Case handlers completely free of transaction-management boilerplate?**
+
+Rather than every individual Use Case Handler manually calling `BeginTransaction()`/`CommitAsync()`/`RollbackAsync()` around its own logic, a single `TransactionBehavior` (a MediatR Pipeline Behavior, covered earlier) wraps *every* Command's execution uniformly — beginning a transaction before the handler runs, committing it if the handler succeeds, and rolling it back automatically if an exception propagates, with individual handlers never touching transaction-management code at all.
+
+```csharp
+public class TransactionBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+{
+    private readonly IUnitOfWork _unitOfWork; // the Application-layer abstraction, covered earlier
+
+    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken ct)
+    {
+        await using var transaction = await _unitOfWork.BeginTransactionAsync();
+        try
+        {
+            var response = await next(); // the ACTUAL Use Case Handler runs HERE -- KNOWS NOTHING about transactions
+            await _unitOfWork.SaveChangesAsync();
+            await transaction.CommitAsync();
+            return response;
+        }
+        catch
+        {
+            await transaction.RollbackAsync(); // AUTOMATIC rollback -- the HANDLER never wrote THIS logic itself
+            throw;
+        }
+    }
+}
+
+// The Use Case Handler ITSELF -- ZERO transaction-management CODE, at ALL
+public class PlaceOrderHandler : IRequestHandler<PlaceOrderCommand, OrderResult>
+{
+    public async Task<OrderResult> Handle(PlaceOrderCommand command, CancellationToken ct)
+    {
+        // JUST business logic -- BeginTransaction/Commit/Rollback are HANDLED entirely by the BEHAVIOR
+        var order = Order.Create(command.CustomerId, command.Items);
+        await _orderRepository.AddAsync(order);
+        return new OrderResult(order.Id);
+    }
+}
+```
+
+Because this cross-cutting concern (covered generally under MediatR Pipeline Behaviors, applied here specifically to transaction management) applies uniformly to every Command flowing through the pipeline, individual Use Case Handlers stay focused purely on business orchestration — the repetitive, error-prone transaction boilerplate (remembering to commit on success, remembering to roll back on every possible failure path) is written exactly once, centrally, rather than duplicated (and potentially inconsistently implemented) across every single handler.
+
+**Common Pitfall:** manually writing transaction-management code (`BeginTransaction`/`Commit`/`Rollback`) inside every individual Use Case Handler rather than centralizing it in a shared Pipeline Behavior — beyond the repeated boilerplate, this risks inconsistency (one handler forgetting to roll back on a specific failure path) across handlers, exactly the kind of repeated, error-prone cross-cutting logic a Pipeline Behavior is specifically designed to centralize and apply uniformly.
+
+---
+
 ---

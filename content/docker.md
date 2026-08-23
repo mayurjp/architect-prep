@@ -1471,4 +1471,84 @@ Because signature verification happens client-side, independently of whatever th
 
 ---
 
+## Beginner — Question 18
+
+**Q18: What are `docker image prune`/`docker system prune`, and how do unused, dangling images/layers accumulate over time on a build server, eventually exhausting disk space if never cleaned up?**
+
+Every image build leaves behind intermediate layers, and every rebuild of an already-tagged image leaves the *previous* version's layers dangling (untagged, but not automatically deleted) — over many builds on a long-running CI/build server, these accumulate indefinitely unless explicitly pruned, gradually consuming disk space until the server eventually runs out entirely.
+
+```bash
+docker image prune          # removes DANGLING (untagged) images
+docker image prune -a       # removes ALL unused images, not JUST dangling ones
+docker system prune -a --volumes  # removes UNUSED images, CONTAINERS, networks, AND volumes
+```
+
+```text
+A CI server building images HUNDREDS of times a DAY, NEVER pruning: each REBUILD leaves the
+  PREVIOUS version's now-UNTAGGED layers SITTING on disk -- OVER weeks/months, this
+  ACCUMULATES into GIGABYTES (or MORE) of COMPLETELY UNUSED, WASTED disk SPACE -- EVENTUALLY
+  the SERVER runs OUT of disk space ENTIRELY, FAILING every SUBSEQUENT build
+```
+
+Because Docker doesn't automatically garbage-collect unused images/layers on its own, a build server (or any long-running Docker host performing frequent builds) needs a deliberate, scheduled pruning routine — without one, disk exhaustion is a matter of "when," not "if," on any sufficiently active build pipeline.
+
+**Common Pitfall:** running Docker builds continuously on a CI server without any scheduled pruning routine, assuming disk usage will somehow stay manageable on its own — unused images and layers accumulate indefinitely without explicit cleanup, and disk exhaustion eventually causes builds to start failing, often at an inconvenient, unpredictable moment rather than through any obvious, gradual warning sign.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is a Docker `HEALTHCHECK`'s `--start-period` option, and how does giving a container a grace period before health-check failures count against it avoid a slow-starting application being prematurely marked unhealthy?**
+
+Without `--start-period`, a `HEALTHCHECK` begins counting failures from the very first check, immediately after the container starts — for an application with a genuinely slow startup (loading a large cache, running database migrations), this can mark it "unhealthy" before it's had a fair chance to actually finish starting; `--start-period` gives it an initial grace window during which failing health checks don't count toward the unhealthy threshold at all.
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost/health || exit 1
+```
+
+```text
+WITHOUT --start-period: an application taking 45 SECONDS to FULLY start (loading a LARGE
+  cache) would FAIL its health check REPEATEDLY during THAT window -- POTENTIALLY marked
+  "unhealthy" BEFORE it ever gets a FAIR CHANCE to actually FINISH starting UP
+
+WITH --start-period=60s: FAILURES during the FIRST 60 seconds DON'T count toward the
+  "unhealthy" threshold AT ALL -- the CONTAINER gets a GENUINE grace period to actually
+  FINISH its (KNOWN-to-be-slow) startup PROCESS, before HEALTH CHECKING is taken SERIOUSLY
+```
+
+Because different applications have genuinely different startup-time profiles (a simple stateless API starts in seconds, a data-heavy service with a large in-memory cache might take a minute or more), `--start-period` lets the health check configuration account for a specific application's own known startup characteristics, rather than applying a one-size-fits-all timing assumption that would unfairly penalize slower-starting (but otherwise perfectly healthy) applications.
+
+**Common Pitfall:** configuring a `HEALTHCHECK` without a `--start-period` appropriate to the application's actual startup time — a genuinely healthy application that simply takes longer than expected to start can be marked unhealthy (and potentially restarted by an orchestrator) purely due to overly aggressive health-check timing, not any actual problem with the application itself.
+
+---
+
+## Advanced — Question 19
+
+**Q19: What is Docker's `--network=host` mode, and how does bypassing Docker's own network namespace isolation trade away container network isolation for eliminating NAT/port-mapping overhead?**
+
+By default, a container gets its own isolated network namespace, with Docker performing NAT-based port mapping (`-p 8080:80`) to route traffic from the host into the container — `--network=host` instead has the container share the host's own network namespace directly, with no isolation and no NAT translation at all, meaning the container's ports are the host's ports directly, with zero mapping overhead but also zero network-level isolation from the host.
+
+```bash
+docker run --network=host myapp  # container SHARES the HOST's network stack DIRECTLY --
+                                    # NO port mapping NEEDED (and NONE possible) -- the
+                                    # container's "localhost:80" IS the HOST's "localhost:80"
+```
+
+```text
+Default (bridge) networking: container has its OWN, ISOLATED network namespace -- Docker
+  performs NAT-based PORT MAPPING to route HOST traffic INTO the container -- a SMALL,
+  but NON-ZERO, per-packet NAT translation COST
+
+--network=host: NO isolation AT ALL -- the container's NETWORK STACK genuinely IS the
+  HOST's OWN -- ELIMINATES NAT overhead ENTIRELY, but the CONTAINER can NOW bind to (and
+  SEE) EVERY network interface/port the HOST itself CAN, with NO isolation BOUNDARY
+```
+
+Because host networking removes the isolation boundary that ordinarily prevents a container from directly seeing or binding to the host's own network interfaces, this trade-off is appropriate only for specific, latency-sensitive scenarios where NAT overhead genuinely matters and the security implications of losing network isolation have been deliberately, explicitly accepted — not a default choice for typical containerized workloads.
+
+**Common Pitfall:** using `--network=host` broadly "for a small performance win" without weighing the genuine security trade-off — a container running with host networking loses network-level isolation entirely, meaning a compromised container has direct, unrestricted access to the host's own network interfaces and any other services bound to them, a meaningfully larger blast radius than a properly isolated, bridge-networked container would have.
+
+---
+
 ---
