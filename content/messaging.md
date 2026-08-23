@@ -1734,4 +1734,89 @@ Because ordering is scoped specifically to each Message Group rather than the en
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What is a Message Broker's Auto-Delete queue option, and how does a queue automatically removing itself once its last consumer disconnects avoid accumulating orphaned, temporary queues?**
+
+An `auto-delete` queue is automatically removed by the broker the moment its last connected consumer disconnects — rather than persisting indefinitely as an empty, unused queue that someone would otherwise need to remember to clean up manually, appropriate for temporary, short-lived queues created specifically to support one particular client's own request-response interaction.
+
+```csharp
+channel.QueueDeclare(queue: "", exclusive: true, autoDelete: true); // a TEMPORARY, UNIQUELY-NAMED
+    // queue, AUTOMATICALLY REMOVED the MOMENT this SPECIFIC consumer DISCONNECTS
+```
+
+```text
+WITHOUT auto-delete: a TEMPORARY queue, created FOR one SPECIFIC client's OWN
+  request-response INTERACTION, LINGERS indefinitely AFTER that CLIENT disconnects --
+  ACCUMULATING, over TIME, into MANY orphaned, UNUSED queues NOBODY remembers to CLEAN UP
+
+WITH auto-delete: the QUEUE disappears AUTOMATICALLY the MOMENT its LAST consumer
+  disconnects -- NO manual CLEANUP needed, NO accumulation of ORPHANED, UNUSED queues OVER TIME
+```
+
+Because a temporary, per-client-interaction queue (commonly used for a request-response pattern, where a client creates a queue just to receive its own specific reply) has no legitimate reason to persist once that client is done with it, `auto-delete` provides automatic, correct cleanup exactly matching the queue's genuinely temporary, single-purpose lifetime — avoiding a slow, easy-to-overlook accumulation of dead queues that manual cleanup discipline would otherwise need to catch.
+
+**Common Pitfall:** creating temporary, per-client, request-response-style queues without `auto-delete`, relying on a separate, manual cleanup process (or simply forgetting to clean them up at all) — this allows orphaned queues to accumulate indefinitely over the system's operational lifetime, consuming broker resources for queues nobody is actually using anymore.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is a Message Broker's Exclusive queue option, and how does restricting a queue to exactly one consumer connection, rather than competing consumers (covered earlier), support a use case needing guaranteed, single-consumer processing?**
+
+An `exclusive` queue can only ever be consumed by the *one specific connection* that declared it — any other connection attempting to consume from it is rejected outright — a fundamentally different guarantee than Competing Consumers (covered earlier), which deliberately allows *multiple* consumers to share a queue's workload; Exclusive queues are appropriate specifically when a single, particular consumer instance genuinely needs sole, uncontested access.
+
+```csharp
+channel.QueueDeclare(queue: "session-abc123", exclusive: true); // ONLY this SPECIFIC
+    // connection can EVER consume from THIS queue -- ANY OTHER connection ATTEMPTING
+    // to consume from "session-abc123" is REJECTED OUTRIGHT
+```
+
+```text
+Competing Consumers (covered EARLIER): MULTIPLE consumer INSTANCES deliberately SHARE
+  ONE queue's workload, EACH processing a SUBSET of its MESSAGES, for HORIZONTAL scaling
+
+Exclusive queue: EXACTLY ONE connection can EVER consume from IT -- appropriate for a
+  GENUINELY single-consumer NEED (a PER-SESSION reply queue, a SINGLETON background
+  worker that MUST NEVER have a SECOND, COMPETING instance ACCIDENTALLY processing the
+  SAME queue SIMULTANEOUSLY)
+```
+
+Because this option structurally prevents any second consumer from ever attaching to the queue at all (rather than merely being a convention the application layer chooses to follow), it provides a genuine, broker-enforced guarantee for scenarios where accidentally running two competing consumers against the same queue would be a correctness bug, not merely a performance consideration.
+
+**Common Pitfall:** relying on application-level discipline ("we'll just make sure only one instance ever consumes from this queue") rather than the broker's own `exclusive` flag for a genuinely single-consumer requirement — a broker-enforced exclusivity guarantee prevents an accidental second consumer connection entirely, rather than depending on every deployment/scaling configuration correctly avoiding it through convention alone.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does Kafka's Log Compaction (covered earlier) use a Tombstone record — a message with a null value — to let a compacted topic actually delete a key's data entirely, rather than just retaining its latest, non-null value forever?**
+
+Ordinary Log Compaction (covered earlier) retains only the *latest* value for each key, discarding older, superseded values — but this alone never actually *removes* a key entirely, since the latest value (whatever it is) is always kept indefinitely; publishing a Tombstone (a message for that key with a `null` value) signals compaction to treat this as a deletion — after a configured retention period, the compaction process removes the key's data entirely, including the tombstone marker itself.
+
+```csharp
+producer.Produce("user-preferences", new Message<string, string>
+{
+    Key = "user-42",
+    Value = null // a TOMBSTONE -- signals "DELETE this KEY entirely" -- NOT just "the LATEST value happens to be NULL"
+});
+```
+
+```text
+Ordinary compacted VALUE ("user-42" -> "dark-theme"): RETAINED indefinitely, as the
+  LATEST known value for THAT key -- COMPACTION discards OLDER, SUPERSEDED values, but
+  KEY "user-42" itself REMAINS, FOREVER, with WHATEVER its LATEST value HAPPENS to be
+
+Tombstone ("user-42" -> null): signals COMPACTION to treat THIS key as DELETED -- after
+  a CONFIGURED retention WINDOW (giving CONSUMERS time to ACTUALLY see and PROCESS the
+  deletion SIGNAL), the COMPACTION process REMOVES the key's DATA entirely, INCLUDING the
+  TOMBSTONE marker ITSELF -- the KEY genuinely DISAPPEARS from the COMPACTED topic
+```
+
+Because ordinary compaction alone has no mechanism to represent "this key should be entirely removed" (it only knows how to discard *superseded* values, never the absence of a key altogether), Tombstones provide the explicit signal needed to actually delete data from a compacted topic — directly analogous to how a "soft delete" flag differs from actually removing a database row, just implemented specifically for Kafka's log-compaction model.
+
+**Common Pitfall:** assuming Log Compaction alone provides a way to delete data for a specific key, without publishing an explicit Tombstone (a null-value message) for that key — ordinary compaction only ever discards *superseded* values, never removes a key's presence entirely; genuine deletion in a compacted topic requires this explicit, deliberate Tombstone signal.
+
+---
+
 ---

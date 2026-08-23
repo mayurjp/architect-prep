@@ -1902,4 +1902,84 @@ Because gRPC's transport layer is genuinely the same underlying HTTP/2 infrastru
 
 ---
 
+## Beginner — Question 20
+
+**Q20: How does enabling `AddGrpcReflection()` let a tool like `grpcurl` discover a service's methods at runtime, without needing the `.proto` file available locally?**
+
+Server Reflection (covered earlier at a conceptual level) is enabled in ASP.NET Core specifically via `AddGrpcReflection()` — once registered, the gRPC server itself exposes a standard reflection service describing every RPC method, message type, and field it supports, letting a generic client tool query this information directly from the running server, rather than requiring that tool to have a local copy of the exact `.proto` file the server was built from.
+
+```csharp
+builder.Services.AddGrpc();
+builder.Services.AddGrpcReflection(); // ENABLES the reflection SERVICE
+// ...
+app.MapGrpcReflectionService(); // (Development ENVIRONMENTS typically ONLY, for SECURITY reasons)
+```
+
+```bash
+grpcurl -plaintext localhost:5000 list          # lists EVERY service the SERVER exposes
+grpcurl -plaintext localhost:5000 describe MyService.GetProduct  # DESCRIBES a SPECIFIC method's
+                                                                    # request/RESPONSE shape --
+                                                                    # ALL WITHOUT grpcurl EVER
+                                                                    # needing the .proto FILE locally
+```
+
+Because the server itself becomes the authoritative source of its own API description at runtime, a generic debugging/exploration tool can interact with *any* reflection-enabled gRPC service without needing prior access to that specific service's `.proto` definitions — genuinely useful for debugging or exploring a service interactively, though typically disabled in production for the same reason detailed API documentation generally isn't exposed publicly.
+
+**Common Pitfall:** enabling `AddGrpcReflection()` in a production environment without considering that it exposes a complete, queryable description of the service's entire API surface to anyone who can reach it — reflection is a valuable development/debugging convenience, but most teams deliberately restrict it to non-production environments, mirroring the same reasoning behind not exposing detailed Swagger/OpenAPI documentation publicly in production either.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does a client explicitly cancelling a long-running server-streaming call, via `ResponseStream.MoveNext()` combined with a `CancellationToken`, let it stop receiving further messages without waiting for the server to naturally finish streaming?**
+
+Passing a `CancellationToken` to a server-streaming call's iteration lets the client abandon the stream at any point — cancelling the token causes the next `MoveNext()` call to throw an `OperationCanceledException` (or, in an `await foreach`, simply stop iterating), and the underlying gRPC connection signals the server to stop sending further messages, rather than the client needing to wait for the server to naturally reach the end of what could be an extremely long, or even infinite, stream.
+
+```csharp
+using var cts = new CancellationTokenSource();
+var call = client.StreamPrices(new PriceRequest(), cancellationToken: cts.Token);
+
+var readTask = Task.Run(async () =>
+{
+    await foreach (var price in call.ResponseStream.ReadAllAsync(cts.Token))
+    {
+        if (price.Symbol == "STOP") { cts.Cancel(); break; } // CLIENT decides to STOP EARLY
+    }
+});
+
+// LATER, from ANYWHERE else in the application:
+cts.Cancel(); // SIGNALS the SERVER to STOP streaming FURTHER messages -- the CLIENT doesn't
+                // need to WAIT for the (POTENTIALLY infinite) stream to NATURALLY finish AT ALL
+```
+
+Because cancellation propagates all the way through to the underlying HTTP/2 stream (signaling the server-side stream should stop), this cleanly terminates what could otherwise be a genuinely unbounded or extremely long-lived server-streaming call — essential for any client that needs to stop consuming a stream based on its own logic (a user closing a UI view, a client no longer needing live updates) rather than passively waiting for the server's own, potentially indefinite, decision about when to stop.
+
+**Common Pitfall:** consuming a server-streaming RPC without ever passing (or triggering) a `CancellationToken`, relying entirely on the server to eventually decide to stop streaming — for a genuinely long-lived or infinite stream (live price updates, a continuous event feed), this leaves the client with no way to cleanly stop consuming it based on its own needs, potentially holding the underlying connection and its resources open indefinitely even after the client no longer cares about further messages.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does delegating load-balancing decisions to a Service Mesh's sidecar proxy (covered under Microservices), rather than the gRPC client library's own `pick_first`/`round_robin` (covered earlier), let a polyglot environment share one consistent load-balancing implementation across every language's gRPC client?**
+
+Client-side load balancing implemented directly in each language's own gRPC library (covered earlier) means every language's client independently implements its own load-balancing logic — potentially with subtly different behavior, bugs, or feature support between them; delegating this responsibility to a Service Mesh's sidecar proxy (covered under Microservices) instead means every gRPC call — regardless of which language's client made it — is transparently intercepted and load-balanced by the *same*, single, language-agnostic proxy implementation running alongside each service instance.
+
+```text
+WITHOUT a service mesh: a Go SERVICE's gRPC client uses GO's OWN load-balancing
+  IMPLEMENTATION -- a JAVA service's client uses JAVA's OWN, SEPARATE implementation --
+  a PYTHON service's client uses YET ANOTHER, INDEPENDENT implementation -- THREE
+  DIFFERENT load-balancing CODEBASES, POTENTIALLY behaving SUBTLY differently from EACH other
+
+WITH a service mesh SIDECAR: EVERY service's gRPC traffic (REGARDLESS of WHICH language
+  made the CALL) is TRANSPARENTLY intercepted by the SAME Envoy (or EQUIVALENT) sidecar
+  PROXY running ALONGSIDE it -- ONE single, LANGUAGE-AGNOSTIC load-balancing
+  IMPLEMENTATION handles EVERY service's TRAFFIC, UNIFORMLY, REGARDLESS of its OWN language
+```
+
+Because the sidecar proxy operates at the network level, entirely transparent to the application code making the gRPC call, a genuinely polyglot microservices environment (services written in several different languages) gets consistent, uniformly-behaving load balancing across all of them — without needing to verify that every language's own gRPC client library implements load balancing identically, or maintain separate configuration/tuning for each one independently.
+
+**Common Pitfall:** relying on each language's own gRPC client library to implement consistent, sophisticated load-balancing behavior across a genuinely polyglot microservices environment — different language implementations can have subtly different feature support or behavior, creating inconsistency that's hard to reason about; a Service Mesh's sidecar-based approach centralizes this concern into one shared, uniform implementation regardless of which language originated a given call.
+
+---
+
 ---
