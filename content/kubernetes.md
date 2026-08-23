@@ -1942,4 +1942,99 @@ Because Kubernetes' admission control pipeline runs all mutating webhooks to com
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What does `kubectl exec` do, and how does opening an interactive shell inside a running container's namespace let you inspect its filesystem or running processes directly, from the inside?**
+
+`kubectl exec` runs a command (often an interactive shell) *inside* an already-running container's own Linux namespaces, giving you a view of exactly what that container sees — its filesystem, its environment variables, its running processes — as opposed to `kubectl logs` (which only shows the container's stdout/stderr output) or `kubectl describe` (which shows Kubernetes' own metadata about the Pod).
+
+```bash
+kubectl exec -it my-pod-7d9f8c -- /bin/bash
+# now INSIDE the container's own namespace:
+root@my-pod-7d9f8c:/app# ls -la
+root@my-pod-7d9f8c:/app# env | grep CONNECTION_STRING
+root@my-pod-7d9f8c:/app# ps aux
+```
+
+```text
+kubectl logs: shows ONLY what the CONTAINER printed to stdout/stderr
+
+kubectl describe pod: shows KUBERNETES's OWN metadata/events ABOUT the Pod
+
+kubectl exec: runs a COMMAND directly INSIDE the container's OWN namespace --
+  lets you ACTUALLY inspect files, env vars, and RUNNING processes firsthand
+```
+
+Because logs only capture what an application chose to print and `describe` only shows Kubernetes' own scheduling/event view, `kubectl exec` is often the fastest way to directly confirm something a log line doesn't cover — whether a config file was actually mounted correctly, whether an environment variable has the expected value, or whether a specific file genuinely exists at the path the application expects.
+
+**Common Pitfall:** relying on `kubectl exec` as a routine debugging habit for a distroless or minimal-image container (covered under Docker) that has no shell at all — `exec -it ... -- /bin/bash` simply fails with "executable file not found" against such an image, since there's no shell binary present to actually execute; a debugging strategy for these images needs to rely on `kubectl logs`, ephemeral debug containers (`kubectl debug`), or structured logging instead.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is a Kubernetes `ResourceQuota`, and how does it differ from a `LimitRange` (covered earlier) by capping the TOTAL resource consumption across an entire namespace, rather than setting per-Pod defaults?**
+
+`LimitRange` sets default/min/max resource requests and limits applied to *individual* Pods within a namespace — `ResourceQuota` instead caps the *aggregate* total across every Pod (and other resource type, like the number of Services or PersistentVolumeClaims) in that namespace, rejecting a new Pod creation entirely once the namespace-wide total would be exceeded, regardless of how reasonable that one individual Pod's own request looks.
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-a-quota
+  namespace: team-a
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: 20Gi
+    pods: "50"
+```
+
+```text
+LimitRange: governs an INDIVIDUAL Pod's own resource request/limit DEFAULTS
+  -- a SINGLE Pod requesting an EXCESSIVE amount gets REJECTED or CLAMPED
+
+ResourceQuota: governs the NAMESPACE's AGGREGATE total across ALL Pods --
+  even a PERFECTLY reasonable individual Pod request gets REJECTED once the
+  NAMESPACE's cumulative total would EXCEED the configured hard limit
+```
+
+Because a multi-tenant cluster shared across several teams' namespaces needs a way to prevent any single team's namespace from consuming disproportionately more of the cluster's total capacity than it's been allocated, `ResourceQuota` provides that namespace-wide ceiling — complementary to, but structurally different from, `LimitRange`'s per-Pod-focused defaults.
+
+**Common Pitfall:** configuring a `ResourceQuota` on a namespace without also setting a `LimitRange` — once any `ResourceQuota` covering CPU/memory exists in a namespace, Kubernetes requires every Pod created there to explicitly specify its own resource requests/limits (since there's now an aggregate to check against); without a `LimitRange` supplying sensible defaults, Pods lacking explicit values simply fail to schedule, rather than falling back to some reasonable default.
+
+---
+
+## Advanced — Question 21
+
+**Q21: How do `terminationGracePeriodSeconds` and a `preStop` lifecycle hook work together to give a Pod time to shut down cleanly before Kubernetes forcibly kills it?**
+
+When Kubernetes decides to terminate a Pod, it first sends `SIGTERM` to the main container process and starts a countdown of `terminationGracePeriodSeconds` (30 seconds by default) — if a `preStop` hook is configured, it runs *before* that `SIGTERM` is even sent, giving the application an explicit, sequenced opportunity to finish in-flight work or deregister itself, and only once both the hook completes and the grace period elapses does Kubernetes send an unconditional `SIGKILL`.
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 45
+  containers:
+  - name: api
+    lifecycle:
+      preStop:
+        exec:
+          command: ["sh", "-c", "sleep 5 && curl -X POST localhost:8080/shutdown"]
+```
+
+```text
+Termination sequence:
+1. Kubernetes decides to terminate the Pod (scale-down, rolling update, node drain)
+2. preStop hook RUNS FIRST -- here, sleeps 5s (letting the Service's endpoint
+   controller finish REMOVING this Pod from load-balancing) then tells the
+   app to gracefully STOP accepting new work
+3. SIGTERM is sent to the main process -- the app finishes IN-FLIGHT requests
+4. If the process hasn't exited once terminationGracePeriodSeconds (45s) elapses,
+   SIGKILL is sent UNCONDITIONALLY -- no further graceful shutdown is possible
+```
+
+Because a Pod can still receive new traffic for a brief window even after Kubernetes has decided to terminate it (due to eventually-consistent Service endpoint propagation across the cluster), the `preStop` hook's deliberate short delay is a common, practical technique to let in-flight load-balancer state catch up before the application itself starts refusing new connections — directly addressing a race condition that `SIGTERM` handling alone doesn't solve.
+
+**Common Pitfall:** setting `terminationGracePeriodSeconds` generously long without verifying the application's own shutdown logic actually uses that time productively — if the application doesn't handle `SIGTERM` at all (exiting immediately, or not exiting until forcibly killed), a longer grace period only delays how quickly a Pod actually terminates during a rollout or scale-down, without providing any real graceful-shutdown benefit.
+
 ---

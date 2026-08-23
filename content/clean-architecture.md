@@ -2115,4 +2115,92 @@ Because forcing a strictly void Command in practice means every single "create" 
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is the difference between "Application Service" and "Use Case"/"Interactor" as terms different authors use for the same Application-layer concept, and why does the terminology inconsistency itself sometimes cause confusion?**
+
+Different influential sources describe essentially the same idea — a single, narrowly-scoped class in the Application layer orchestrating one specific business operation — under different names: Uncle Bob's original Clean Architecture writing favors "Use Case" or "Interactor," while other DDD-influenced material more often says "Application Service." Both describe a class that receives a request, coordinates Domain objects/Repositories to fulfill it, and returns a result, without containing business rules of its own (those belong on the Domain layer's Entities/Domain Services, covered earlier).
+
+```csharp
+// Called a "Use Case"/"Interactor" in some material, an "Application Service" in others --
+// structurally, both describe the SAME kind of class:
+public class PlaceOrderUseCase   // or: PlaceOrderApplicationService
+{
+    public async Task<Result<Guid>> Handle(PlaceOrderCommand command)
+    {
+        var order = Order.Create(command.CustomerId, command.Items); // Domain logic lives HERE
+        await _orderRepository.AddAsync(order);
+        await _unitOfWork.SaveChangesAsync();
+        return Result.Success(order.Id);
+    }
+}
+```
+
+Because the underlying architectural role is identical regardless of which name a given book, blog post, or codebase uses, a developer moving between codebases or reading material from different authors should recognize "Use Case," "Interactor," and "Application Service" as referring to the same concept — the naming difference reflects differing terminology lineages (Clean Architecture's own vocabulary versus DDD-adjacent vocabulary), not a genuine structural distinction.
+
+**Common Pitfall:** assuming a codebase using "Application Service" instead of "Use Case" is following a meaningfully different architectural approach — in the overwhelming majority of cases, it's the identical Application-layer orchestration role under a different name; genuine structural differences (if any) are far more likely to lie elsewhere than in this specific naming choice.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is the Notification Pattern for domain validation, and how does collecting multiple validation failures into a single result differ from throwing an exception on the very first rule violation encountered?**
+
+Throwing an exception on the first validation failure means a caller only ever learns about *one* problem per attempt — fixing it and resubmitting might simply reveal a second, previously-hidden failure, requiring several frustrating round trips. The Notification Pattern instead accumulates every validation failure found during a single validation pass into one collection, returned together, so a caller (or an end user filling out a form) can see and address every problem at once.
+
+```csharp
+public class ValidationNotification
+{
+    private readonly List<string> _errors = new();
+    public bool IsValid => _errors.Count == 0;
+    public IReadOnlyList<string> Errors => _errors;
+    public void AddError(string message) => _errors.Add(message);
+}
+
+public ValidationNotification Validate(CreateOrderCommand command)
+{
+    var notification = new ValidationNotification();
+    if (command.Items.Count == 0) notification.AddError("Order must contain at least one item.");
+    if (command.CustomerId == Guid.Empty) notification.AddError("CustomerId is required.");
+    if (command.ShippingAddress is null) notification.AddError("Shipping address is required.");
+    return notification; // returns ALL failures found, not just the first one
+}
+```
+
+```text
+Exception-per-first-failure: caller FIXES issue #1, resubmits, discovers
+  issue #2, FIXES it, resubmits AGAIN, discovers issue #3 -- MULTIPLE round trips
+
+Notification Pattern: a SINGLE validation pass returns ALL THREE issues
+  TOGETHER -- the caller fixes EVERYTHING in ONE pass, requiring only ONE
+  resubmission
+```
+
+Because gathering every failure in one pass provides a meaningfully better experience for both human end users (a form showing every validation error at once) and API consumers (avoiding repeated trial-and-error round trips), the Notification Pattern is generally preferred over throw-on-first-failure specifically for input/business-rule validation, even though genuine, unexpected exceptions still have their place for truly exceptional conditions elsewhere in the same codebase.
+
+**Common Pitfall:** using the Notification Pattern for conditions that genuinely should halt execution immediately (a null reference that would crash subsequent validation checks) rather than reserving it specifically for independent, collectible business-rule violations — mixing the two can cause a later validation check to throw an unrelated, confusing exception while still in the middle of accumulating notifications for genuinely independent rule violations.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is a Snapshot in Event Sourcing (covered earlier), and how does periodically persisting an Aggregate's full current state alongside its event stream avoid replaying its ENTIRE history on every single load?**
+
+An Event-Sourced Aggregate's true source of truth is its full sequence of past events — reconstructing its current state normally means replaying every one of those events, in order, from the very beginning. For an Aggregate with a long history (thousands of events accumulated over years), that replay cost grows without bound; a Snapshot periodically captures the Aggregate's fully-reconstructed state at a specific point (event number N), so a subsequent load only needs to load that snapshot plus replay whatever *newer* events occurred after it, not the entire history from event zero.
+
+```text
+WITHOUT snapshots: loading an Aggregate with 50,000 accumulated EVENTS means
+  REPLAYING all 50,000, EVERY single time it's loaded -- cost GROWS UNBOUNDED
+  as the Aggregate's history keeps ACCUMULATING over its lifetime
+
+WITH a snapshot taken at event #49,000: loading the SAME Aggregate loads
+  the SNAPSHOT (representing state AS OF event #49,000) plus REPLAYS only
+  the 1,000 events that occurred AFTER it -- a CONSTANT, bounded cost
+  regardless of how LARGE the Aggregate's TOTAL historical event count grows
+```
+
+Because an Aggregate's replay cost would otherwise grow linearly, unboundedly, with its accumulated event history, Snapshotting is the standard technique Event Sourcing implementations use to keep load time bounded and predictable — typically triggered automatically every N events (every 100, every 1,000), balancing the storage/write cost of taking snapshots against how much replay work each load would otherwise require.
+
+**Common Pitfall:** treating a Snapshot as the Aggregate's actual source of truth, rather than a pure performance optimization derived from it — the full event stream must always remain the authoritative record; a corrupted or lost snapshot should be safely reconstructable by simply replaying the complete event history from the beginning, exactly as if the snapshot had never existed at all.
+
 ---

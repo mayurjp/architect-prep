@@ -2214,4 +2214,70 @@ Because the downstream resource enforces this token-ordering check independently
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is a Dead Letter Queue (DLQ), and how does routing a message that repeatedly fails processing to a separate queue prevent it from blocking or endlessly re-consuming the main queue's throughput?**
+
+Without a DLQ, a "poison" message that consistently fails processing (due to a bug, malformed data, or a permanently unavailable dependency) can get redelivered and retried indefinitely, consuming worker capacity and potentially blocking other, healthy messages behind it — a DLQ gives the system a designated place to set that message aside after a bounded number of failed attempts, letting the main queue's processing continue unblocked while the failed message waits for manual inspection or a separate reprocessing path.
+
+```text
+WITHOUT a DLQ: a POISON message fails processing, gets REDELIVERED, fails
+  AGAIN, gets redelivered AGAIN -- potentially FOREVER, consuming WORKER
+  capacity and (depending on ordering guarantees) BLOCKING healthy messages
+
+WITH a DLQ: after N failed ATTEMPTS, the message is MOVED to a separate Dead
+  Letter Queue -- the MAIN queue's processing CONTINUES unblocked, and the
+  failed message sits SOMEWHERE a human/automated process can INSPECT it later
+```
+
+Because a message ending up in a DLQ is itself a meaningful signal (something is genuinely wrong — a bug, bad data, a dependency outage), monitoring a DLQ's depth and alerting when messages land there is a standard operational practice, turning what would otherwise be a silent, indefinitely-retried failure into a visible, actionable one.
+
+**Common Pitfall:** configuring a DLQ but never actually monitoring or alerting on messages landing in it — a DLQ with no operational visibility just becomes a place where failures quietly accumulate unnoticed, providing none of the actionable benefit a DLQ is meant to offer over simply losing or endlessly retrying the message.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is the Leaky Bucket rate-limiting algorithm, and how does its constant, steady output rate differ from the Token Bucket algorithm's (covered earlier) explicit allowance for short bursts?**
+
+Leaky Bucket models incoming requests as water poured into a bucket with a hole that leaks at a *constant* rate — requests are processed (or forwarded) at that fixed rate regardless of how bursty their arrival was, and if the bucket (a queue) fills up faster than it leaks, additional incoming requests are simply rejected; Token Bucket, by contrast, explicitly accumulates unused capacity as tokens, allowing a burst of requests to be processed immediately as long as enough tokens have built up.
+
+```text
+Token Bucket (covered earlier): TOKENS accumulate during IDLE periods, up
+  to a CAP -- a BURST of requests can be processed IMMEDIATELY, consuming
+  accumulated tokens, as long as ENOUGH tokens are available
+
+Leaky Bucket: requests are PROCESSED at a CONSTANT, steady rate, REGARDLESS
+  of how BURSTY their arrival was -- a SUDDEN burst just FILLS the queue
+  faster, with EXCESS requests REJECTED once the queue itself is FULL,
+  rather than being ALLOWED through in a burst
+```
+
+Because Leaky Bucket's defining characteristic is smoothing bursty input into a perfectly steady output rate, it's the better fit for protecting a downstream system that genuinely can't handle any burst at all (a fixed-capacity, uniformly-paced backend process) — whereas Token Bucket is the better fit when occasional legitimate bursts (a user's brief flurry of actions) should be accommodated rather than uniformly smoothed away.
+
+**Common Pitfall:** choosing Leaky Bucket for a rate limiter protecting an API whose legitimate traffic pattern is genuinely bursty (a client that periodically syncs a batch of changes all at once) — Leaky Bucket's steady-output-rate behavior would throttle exactly this legitimate burst pattern the same way it throttles an actual abusive client, where Token Bucket's burst allowance would have accommodated it correctly.
+
+---
+
+## Advanced — Question 22
+
+**Q22: How does a consensus-based (Raft/Paxos) distributed lock service, like etcd or Chubby, provide a stronger safety guarantee against split-brain than a single-Redis-instance lock (covered earlier), and what does that stronger guarantee actually cost?**
+
+A lock held via a single Redis instance is only as reliable as that one instance and its own failure characteristics — a consensus-based lock service instead requires a *majority* of its own replicated nodes to agree on who currently holds the lock, so no single node's failure, isolation, or stale state can cause two different clients to both believe they hold the same lock simultaneously, a guarantee a single-instance lock structurally cannot provide.
+
+```text
+Single-Redis lock: the LOCK's correctness depends ENTIRELY on that ONE Redis
+  instance -- if IT fails over, or briefly diverges from what a WAITING client
+  believes, TWO clients can end up BOTH believing they hold the SAME lock
+
+Consensus-based lock (Raft/Paxos, e.g. etcd): a MAJORITY of REPLICATED nodes
+  must AGREE on the lock's current HOLDER -- no SINGLE node's failure or
+  ISOLATION can cause a SPLIT-BRAIN, since a MINORITY partition simply CANNOT
+  form a quorum to GRANT a conflicting lock
+```
+
+Because achieving this majority-consensus guarantee requires every lock operation to complete a full consensus round-trip across multiple replicated nodes (rather than a single Redis instance's single round-trip), a consensus-based lock service trades meaningfully higher latency per lock operation for the stronger correctness guarantee — appropriate when the cost of two clients simultaneously believing they hold the same lock is high enough (a leader-election scenario, a critical resource) to justify that latency cost.
+
+**Common Pitfall:** defaulting to a consensus-based lock service for every locking need regardless of the actual correctness stakes — for many use cases (a best-effort deduplication lock, a low-stakes coordination hint) a single-Redis-instance lock's simplicity and lower latency is a perfectly reasonable trade-off, and reaching for etcd/Chubby-level guarantees everywhere adds real operational and latency cost without a correspondingly real correctness need.
+
 ---

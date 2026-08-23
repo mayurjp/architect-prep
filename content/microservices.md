@@ -2419,4 +2419,69 @@ Because each narrowly-scoped endpoint's contract only needs to remain stable for
 
 ---
 
+## Beginner — Question 22
+
+**Q22: What is the "Chatty Communication" anti-pattern between microservices, and how does an excessive number of small, synchronous network calls to accomplish one logical operation degrade performance and reliability compared to a monolith's equivalent in-process calls?**
+
+A monolith calling several methods to assemble one response pays only in-process call overhead — a microservices version of the same logic, if each of those calls became a separate synchronous network request to a different service, now pays real network latency, serialization cost, and an additional failure mode (a network call can fail; an in-process method call essentially can't) for every single one of those calls.
+
+```text
+A monolith computing an order summary: 5 in-process METHOD calls,
+  each taking MICROSECONDS, with NO possibility of a NETWORK failure
+
+The SAME logic split ACROSS microservices, called CHATTILY: 5 separate
+  SYNCHRONOUS network requests, EACH paying real NETWORK latency (milliseconds,
+  not microseconds) AND a genuine possibility of FAILURE/timeout per call --
+  the TOTAL latency is roughly the SUM of all 5 calls' round trips
+```
+
+Because each additional network hop multiplies both latency and failure probability compared to an in-process call, a service boundary drawn so finely that assembling one logical response requires many sequential synchronous calls reproduces, at the network level, exactly the kind of inefficiency the N+1 Query Problem (covered under EF Core) represents at the database level — the fix is usually the same conceptual one: batch related calls together, denormalize/cache what's needed locally, or reconsider whether the boundary was drawn too finely in the first place.
+
+**Common Pitfall:** treating "more microservices, more granular boundaries" as an unconditionally good design goal — splitting a cohesive piece of logic across too many separate services, each requiring its own network call to collaborate, can make the resulting system chattier and slower than the monolith it replaced, undermining exactly the performance and simplicity microservices were meant to help with.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is the harmful "Cascading Fan-Out" anti-pattern in a synchronous microservices call chain, as distinct from the beneficial parallel Fan-Out/Fan-In pattern (covered under system design)?**
+
+The system-design Fan-Out/Fan-In pattern deliberately issues several calls *in parallel* to reduce overall latency — the harmful Cascading Fan-Out anti-pattern instead happens when one service's incoming request triggers a *chain* of further synchronous calls to other services, each of which triggers still more calls to still more services, with the calls happening sequentially/nested rather than in parallel, so the total latency and failure surface compounds with every additional hop in the chain.
+
+```text
+Beneficial Fan-Out/Fan-In: Service A calls B, C, D SIMULTANEOUSLY, in PARALLEL
+  -- OVERALL latency is roughly the SLOWEST single call, not their SUM
+
+Harmful Cascading Fan-Out: Service A calls B, WHICH THEN calls C, WHICH THEN
+  calls D -- a SEQUENTIAL, NESTED chain; OVERALL latency is the SUM of every
+  hop, and a FAILURE anywhere in the chain propagates ALL the way back to A
+```
+
+Because a request traversing a deep, sequential chain of synchronous calls accumulates both latency (additively, not just the slowest link) and failure risk (any single hop failing dooms the entire chain) with every additional service it passes through, this pattern is a common, easy-to-accidentally-introduce source of both poor tail latency and cascading failures (covered elsewhere) in a system that grew its service boundaries without deliberately tracking how deep a single request's own call chain had become.
+
+**Common Pitfall:** discovering a slow endpoint's root cause is a deep synchronous call chain only after the fact, via distributed tracing (covered under system design) — proactively tracking the maximum call-chain depth a given request path can trigger, as part of an architectural review, catches this class of problem before it manifests as a production latency or reliability incident.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is a Microservices "Chassis" (or service scaffolding template), and how does it differ from the "shared library trap" (covered earlier) by providing infrastructure-only reuse without coupling services' actual business logic together?**
+
+A Chassis is a reusable project template or scaffolding library providing a new microservice's standardized cross-cutting infrastructure — logging configuration, health-check endpoints, standard middleware, telemetry setup — deliberately scoped to contain *zero* business/domain logic, unlike the shared library trap's failure mode, where a shared library ends up carrying actual domain concepts that different services then become coupled through.
+
+```text
+The "shared library trap" (covered earlier): a shared library carries ACTUAL
+  domain logic (an Order validation rule, a Customer status enum) -- when
+  ONE service needs that logic to change, EVERY service depending on the
+  shared library is FORCED to coordinate a version bump, REINTRODUCING coupling
+
+A Chassis: provides ONLY infrastructure concerns (structured LOGGING setup,
+  a standard /health endpoint, common MIDDLEWARE registration) -- CONTAINS
+  no domain logic AT ALL, so a change to it never FORCES a cross-service
+  domain-logic coordination the way a shared DOMAIN library change would
+```
+
+Because the Chassis pattern deliberately draws its reuse boundary at "infrastructure plumbing every service needs regardless of its specific domain" rather than "domain logic multiple services happen to share," teams adopting it get consistency (every service logs and reports health the same way) without recreating the exact coupling risk the shared library trap warns against — the distinction hinges entirely on what kind of code actually lives inside the shared artifact, not on whether sharing code across services happens at all.
+
+**Common Pitfall:** letting a Chassis template gradually accumulate genuine domain logic over time (a well-intentioned developer adding a "helper" that happens to encode a business rule) — without deliberate discipline keeping the Chassis strictly infrastructure-only, it can slowly drift into exactly the shared-library-trap coupling it was originally designed to avoid, simply under a different name.
+
 ---

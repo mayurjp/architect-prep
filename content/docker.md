@@ -1724,4 +1724,97 @@ Because the Manifest List's platform-selection logic happens entirely client-sid
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What is the difference between a Dockerfile's `ARG` and `ENV` instructions, given that both can define a named value usable during the build?**
+
+`ARG` defines a value available only *during the build* itself (passed via `--build-arg`, or a default in the Dockerfile) — it does not persist into the running container at all. `ENV` defines a value that persists as an actual environment variable inside the running container, available to the application process at runtime, not just during the build.
+
+```dockerfile
+ARG DOTNET_VERSION=8.0          # only available DURING the build
+FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_VERSION}
+
+ENV ASPNETCORE_ENVIRONMENT=Production   # persists INTO the running container
+```
+
+```text
+ARG: influences WHICH base image gets used, or OTHER build-time decisions --
+  GONE once the image is BUILT; the running container has NO knowledge of it
+
+ENV: baked INTO the image's own metadata -- EVERY container started FROM
+  that image automatically HAS this environment variable SET, at RUNTIME
+```
+
+Because `ARG` values never persist past the build (and are also visible in image build history unless carefully avoided, making them unsuitable for secrets — covered elsewhere via build secrets), they're appropriate only for build-time parameterization like choosing a base image version, while `ENV` is the correct instruction for anything the running application itself needs to read at startup.
+
+**Common Pitfall:** using `ARG` for a value the running application actually needs to read at runtime — since `ARG` values disappear after the build completes, the application would find the environment variable simply unset when it starts, unless the Dockerfile also explicitly promotes it into an `ENV` (`ENV MY_VAR=${MY_ARG}`).
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What are Docker Compose YAML anchors and `x-` extension fields, and how do they let a `docker-compose.yml` avoid repeating the same configuration block across multiple services?**
+
+YAML itself supports anchors (`&name`) and aliases (`*name`) for reusing a block of configuration verbatim in multiple places — Compose additionally recognizes any top-level key prefixed with `x-` as a place to define such a reusable block without Compose itself trying to interpret it as a service definition.
+
+```yaml
+x-common-env: &common-env
+  LOG_LEVEL: info
+  TZ: UTC
+
+services:
+  api:
+    image: myapp/api
+    environment:
+      <<: *common-env
+      SERVICE_NAME: api
+
+  worker:
+    image: myapp/worker
+    environment:
+      <<: *common-env
+      SERVICE_NAME: worker
+```
+
+```text
+WITHOUT anchors: EVERY service repeats the SAME LOG_LEVEL/TZ block, GROWING
+  error-prone as the FILE accumulates MORE services needing the SAME values
+
+WITH an x- anchor: the SHARED block is defined ONCE, and MERGED (`<<: *name`)
+  into EACH service that NEEDS it -- a SINGLE source of TRUTH for the common values
+```
+
+Because a growing `docker-compose.yml` with many services often shares substantial configuration (common environment variables, common logging driver settings, common resource limits), YAML anchors combined with the `x-` convention let that shared configuration be defined once and merged wherever needed, rather than duplicated and risking the copies silently drifting apart over time.
+
+**Common Pitfall:** forgetting that Compose's `x-` prefix convention is purely a *documentation/organization* signal to Compose itself (telling it "don't treat this as a service") — the actual reuse mechanism is plain YAML's own anchor/alias syntax, which works with or without the `x-` prefix; omitting the prefix on a would-be shared block risks Compose attempting to interpret it as an actual (and invalid) service definition.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What does BuildKit's remote cache export/import (`--cache-to`/`--cache-from` targeting a registry) provide, and how does it let a CI pipeline's build cache persist across ephemeral build agents that never share a local filesystem?**
+
+A CI pipeline typically runs each build on a fresh, ephemeral agent with no access to any *previous* build's local Docker layer cache — BuildKit's remote cache export pushes the build's cache layers to a registry (alongside the actual image), and a subsequent build on a completely different agent can pull that same cache back down via `--cache-from`, restoring cache hits it would otherwise have no access to.
+
+```bash
+docker buildx build \
+  --cache-to=type=registry,ref=myregistry.io/myapp:buildcache \
+  --cache-from=type=registry,ref=myregistry.io/myapp:buildcache \
+  -t myregistry.io/myapp:latest --push .
+```
+
+```text
+WITHOUT remote cache: EACH ephemeral CI agent starts with an EMPTY local
+  cache -- EVERY build re-executes EVERY layer from scratch, REGARDLESS of
+  how LITTLE actually changed since the LAST build
+
+WITH remote cache: the PREVIOUS build's cache LAYERS were pushed to the
+  REGISTRY -- a NEW agent pulls them back DOWN via --cache-from, restoring
+  cache HITS for any layer whose INPUTS haven't actually changed
+```
+
+Because CI build agents are frequently ephemeral (a fresh container/VM per build, with no persistent local disk), the local layer cache that makes iterative local development builds fast simply doesn't exist by default in CI — remote cache export/import bridges that gap by using the registry itself as the shared, persistent cache store every agent can reach, regardless of which specific machine ran the previous build.
+
+**Common Pitfall:** pushing the remote cache without also using BuildKit's `mode=max` cache export option — the default `mode=min` only exports cache for the image's *final* layers, missing the intermediate build-stage layers (in a multi-stage build) that often benefit the most from caching; `mode=max` exports cache for every layer of every stage, at the cost of a larger cache image being pushed.
+
 ---
