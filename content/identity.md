@@ -1718,4 +1718,81 @@ Because a JWT's core design advantage (covered earlier) is validating without a 
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What specific denial-of-service risk does Account Lockout — locking an account after N failed login attempts — introduce, that rate limiting (covered earlier) avoids?**
+
+Account Lockout protects against brute-force password guessing by disabling an account after too many failed attempts — but this creates a new attack vector of its own: an attacker who simply *knows* (or guesses) a victim's username can repeatedly submit wrong passwords deliberately, locking the *victim* out of their own legitimate account — a denial-of-service attack requiring no actual password knowledge at all, purely exploiting the lockout mechanism itself.
+
+```text
+ATTACKER, knowing ONLY the victim's USERNAME (not their PASSWORD): deliberately submits
+  5 WRONG passwords in a ROW -- the ACCOUNT LOCKS -- the LEGITIMATE, real user is now
+  UNABLE to log in AT ALL, EVEN with their OWN correct password -- the ATTACKER achieved
+  a GENUINE denial-of-service against the VICTIM, WITHOUT ever needing to KNOW or
+  GUESS the ACTUAL password AT ALL
+```
+
+```text
+Rate limiting (covered EARLIER, by IP/account) INSTEAD: SLOWS DOWN an attacker's OVERALL
+  guessing ATTEMPTS (fewer ATTEMPTS per unit TIME), but does NOT make the ACCOUNT itself
+  COMPLETELY UNUSABLE for the LEGITIMATE user -- the VICTIM can STILL log in SUCCESSFULLY,
+  JUST possibly with a SLIGHT DELAY if THEIR own login attempt HAPPENS to be RATE-limited TOO
+```
+
+Because Account Lockout's binary "locked or not" state can be triggered by *anyone* who knows a username (no password knowledge required at all), it inadvertently creates a targeted denial-of-service vector against specific, known victims — many modern systems mitigate this by combining rate limiting (slowing attempts without fully locking) with progressively increasing delays, or by requiring additional verification (a CAPTCHA, an MFA challenge) rather than an outright, attacker-triggerable account lock.
+
+**Common Pitfall:** implementing a strict, low-threshold Account Lockout policy (locking after just 3-5 failed attempts) without considering that anyone who simply knows a target's username can deliberately trigger it — for a public-facing application where usernames (often email addresses) are relatively easy to know or guess, this creates a genuine, low-effort denial-of-service vector against specific victims; rate limiting combined with progressive delays or additional verification steps is often the more robust alternative.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does the PKCE Code Verifier/Code Challenge pair's exact mechanism prevent an intercepted authorization code from being exchanged by anyone other than the original requester?**
+
+The client generates a random `code_verifier` *before* starting the flow, keeping it secret locally — it sends only a *hashed* version (`code_challenge`) with the initial authorization request — later, when exchanging the received authorization code for a token, the client must present the *original*, un-hashed `code_verifier`, which the Authorization Server hashes itself and compares against the `code_challenge` it received earlier; an attacker who merely intercepts the authorization code (but never had access to the original `code_verifier`) cannot complete this exchange, since they have no way to produce the matching verifier.
+
+```text
+STEP 1: client generates a RANDOM "code_verifier" (kept SECRET, LOCALLY, NEVER sent YET)
+STEP 2: client sends "code_challenge = SHA256(code_verifier)" WITH the AUTHORIZATION request
+STEP 3: authorization SERVER redirects BACK with an AUTHORIZATION CODE
+
+STEP 4 (the TOKEN exchange): client sends BOTH the authorization CODE *and* the ORIGINAL,
+  UN-hashed "code_verifier" -- the SERVER re-computes SHA256(code_verifier) ITSELF, and
+  CONFIRMS it MATCHES the "code_challenge" from STEP 2 -- ONLY THEN issues the ACTUAL token
+
+An ATTACKER INTERCEPTING just the AUTHORIZATION CODE (from step 3): has NO WAY to produce
+  the MATCHING "code_verifier" (it was NEVER transmitted ANYWHERE, EXCEPT in step 4, by
+  the LEGITIMATE client ITSELF) -- their OWN attempt to EXCHANGE the STOLEN code FAILS
+```
+
+Because the `code_verifier` never travels over the network until the final token-exchange step (and even then, only alongside the code it's specifically proving possession for), an attacker who intercepts *only* the authorization code redirect has no way to complete the exchange — they'd also need the original, never-transmitted verifier, which only the client that initiated the flow ever actually possesses.
+
+**Common Pitfall:** implementing an OAuth flow for a public client (a mobile app, an SPA, covered earlier as unable to keep a client secret confidential) without PKCE — without this verifier/challenge mechanism, an intercepted authorization code (via a malicious app registered for the same redirect URI, or a network-level interception) could be exchanged by an attacker directly; PKCE is specifically what closes this gap for exactly the client types that can't rely on a confidential secret instead.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does granting a support team a narrowly-scoped Custom RBAC role — "can reset passwords, cannot modify billing" — embody Least Privilege (covered earlier) specifically for internal administrative access, not just end-user permissions?**
+
+Least Privilege (covered earlier) is often discussed in terms of end-user/API scopes, but applies equally — and just as importantly — to *internal* administrative access: rather than granting a support team a broad, all-encompassing "Admin" role (able to do anything an administrator could, including sensitive operations like modifying billing or deleting accounts), a Custom RBAC role scoped to precisely the operations that team's actual job requires (resetting passwords, viewing account status) limits the damage a compromised support-team credential (or a simple human error) could actually cause.
+
+```text
+BROAD "Admin" role, granted to SUPPORT staff: CAN reset passwords (their ACTUAL job) --
+  but ALSO can MODIFY billing, DELETE accounts, CHANGE security SETTINGS -- FAR beyond
+  what THEIR role actually NEEDS -- a COMPROMISED support-staff CREDENTIAL (phished,
+  reused password, covered EARLIER) grants an ATTACKER the FULL, BROAD admin CAPABILITY
+
+Custom, NARROWLY-scoped role: "CAN reset PASSWORDS. CANNOT modify BILLING, delete
+  ACCOUNTS, or CHANGE security SETTINGS." -- a COMPROMISED support-staff CREDENTIAL now
+  grants an ATTACKER ONLY the narrow, PASSWORD-reset capability -- EVERYTHING else
+  remains PROTECTED, REGARDLESS of THAT ONE credential being COMPROMISED
+```
+
+Because a compromised credential's actual damage potential is bounded by exactly what permissions that credential's role grants, scoping internal administrative roles as narrowly as each team's genuine job function requires directly limits the blast radius of any single compromised internal account — the same Least Privilege reasoning applied to end-user API scopes (covered earlier) applies with equal, if not greater, importance to internal, human-operated administrative access.
+
+**Common Pitfall:** granting internal staff (support, operations) broad, all-encompassing administrative roles purely for convenience — "easier to just give them Admin" — rather than investing in narrowly-scoped Custom RBAC roles matching each team's actual job function; this significantly widens the potential damage from any single compromised internal credential, exactly the risk Least Privilege is meant to minimize.
+
+---
+
 ---

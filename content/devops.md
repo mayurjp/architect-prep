@@ -1731,4 +1731,85 @@ Because risk scales roughly with how much unverified change accumulates before i
 
 ---
 
+## Beginner — Question 20
+
+**Q20: How does checking key business metrics — order volume, error rate — immediately after a deployment catch a regression that a simple health-check endpoint might miss entirely, as a Post-Deployment Verification step distinct from a pre-deployment smoke test (covered earlier)?**
+
+A basic health-check endpoint (covered earlier) typically confirms only "the process is running and can respond to requests" — it says nothing about whether the application's actual *business logic* is functioning correctly; a deployment could pass every health check while a subtle bug silently breaks a core business flow (checkout failing for a specific payment method, for instance) — Post-Deployment Verification instead monitors real business metrics (order completion rate, error rate on key endpoints) immediately after a deployment, catching exactly this category of regression a health check alone would miss.
+
+```text
+Health check ENDPOINT: "GET /health" returns 200 OK -- CONFIRMS the process is RUNNING
+  and can RESPOND -- says NOTHING about WHETHER checkout, SEARCH, or ANY actual BUSINESS
+  flow is WORKING correctly
+
+Post-Deployment Verification: MONITORS "order completion RATE" IMMEDIATELY after a
+  DEPLOYMENT -- a NEW, SUBTLE bug BREAKING checkout for ONE specific PAYMENT method
+  would DRIVE this METRIC down MEASURABLY -- CAUGHT by BUSINESS-metric MONITORING, EVEN
+  though the HEALTH check ENDPOINT would have KEPT reporting "HEALTHY" the ENTIRE time
+```
+
+Because a health check and an actual business metric measure genuinely different things (process liveness versus business-logic correctness), relying solely on the former leaves a real gap for exactly the kind of subtle, business-logic-specific regression that doesn't manifest as an outright crash or unresponsive process — Post-Deployment Verification closes this gap by watching the metrics that actually reflect whether the *business* is functioning correctly, not just whether the *process* is.
+
+**Common Pitfall:** relying solely on a health-check endpoint's pass/fail status to judge deployment success, without also monitoring actual business metrics immediately afterward — a health check verifies the process is alive and responding, but says nothing about whether core business flows are actually working correctly; a regression specific to business logic (not process health) can pass every health check while still causing real, measurable business harm.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does caching a project's downloaded dependencies across separate CI runs — as distinct from Docker's own layer caching, covered earlier — avoid re-downloading them every single time?**
+
+CI platforms typically offer a build-cache mechanism (keyed by a hash of the dependency manifest file, like `package-lock.json` or `packages.lock.json`) that persists the downloaded dependency directory *between separate pipeline runs* — a subsequent run with an unchanged manifest file restores the cached dependencies directly, skipping the network-bound download step entirely, distinct from (though sometimes complementary to) Docker's own layer caching (covered earlier), which operates specifically within image builds.
+
+```yaml
+# GitHub Actions -- caches the NuGet package directory, KEYED by a HASH of the LOCK file
+- uses: actions/cache@v4
+  with:
+    path: ~/.nuget/packages
+    key: nuget-${{ hashFiles('**/packages.lock.json') }}
+    # a SUBSEQUENT run with an UNCHANGED lock file RESTORES this CACHE directly --
+    # SKIPPING the network-bound "dotnet restore" DOWNLOAD step ENTIRELY
+```
+
+```text
+WITHOUT dependency caching: EVERY single CI run RE-DOWNLOADS every dependency FROM
+  SCRATCH -- REPEATED, WASTED network TIME, on EVERY run, REGARDLESS of whether the
+  DEPENDENCIES actually CHANGED at ALL since the LAST run
+
+WITH dependency caching: a run with an UNCHANGED dependency MANIFEST RESTORES the
+  PREVIOUSLY-cached packages DIRECTLY -- the DOWNLOAD step is SKIPPED ENTIRELY -- ONLY
+  a CHANGED manifest (a NEW/updated PACKAGE reference) INVALIDATES the CACHE and TRIGGERS
+  a FRESH download
+```
+
+Because a project's dependency set typically changes far less often than its source code does, caching keyed specifically to the dependency manifest's own hash means the overwhelming majority of CI runs (which don't change dependencies at all) skip the download step entirely — a meaningful, low-effort speedup for CI pipeline duration, distinct from (and often used alongside) Docker's own separate layer-caching mechanism for the actual image-build step.
+
+**Common Pitfall:** running CI pipelines without any dependency-caching mechanism, re-downloading the entire dependency tree from scratch on every single run regardless of whether anything actually changed — this adds unnecessary, repeated network time to every pipeline run; caching keyed to the dependency manifest's hash lets unchanged dependencies be restored instantly instead.
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is a Chaos Engineering experiment's Steady State Hypothesis — defining a measurable, normal baseline before injecting a fault — and how does comparing system behavior during the experiment against this baseline let a team objectively determine whether the system's resilience assumption actually held?**
+
+Before injecting any fault, a properly-designed Chaos Engineering experiment (covered earlier) first defines a "steady state" — a measurable, objective description of normal, healthy system behavior (a specific error rate, a specific latency percentile) — the experiment then injects the fault and continuously compares *actual* behavior against that steady-state baseline, giving an objective, data-driven answer to "did the system's resilience assumption actually hold" rather than a subjective, impressionistic judgment call.
+
+```text
+STEADY STATE HYPOTHESIS (defined BEFORE the experiment): "P99 latency stays UNDER 200ms,
+  AND error rate stays UNDER 0.1%, under NORMAL production TRAFFIC"
+
+EXPERIMENT: inject a fault (KILL one REPLICA of a DOWNSTREAM service) -- CONTINUOUSLY
+  MEASURE the SAME metrics (P99 latency, error RATE) DURING the experiment
+
+RESULT interpretation: IF metrics STAY within the DEFINED steady-STATE bounds THROUGHOUT
+  the experiment -- the RESILIENCE assumption (the SYSTEM tolerates ONE replica LOSS)
+  is CONFIRMED, OBJECTIVELY, by DATA -- IF metrics BREACH the bounds -- the ASSUMPTION
+  is DISPROVEN, REVEALING a GENUINE resilience GAP, BEFORE it EVER causes a REAL incident
+```
+
+Because the steady state is defined precisely and measurably *before* the fault is ever injected, the experiment's outcome becomes an objective, falsifiable test rather than a subjective "did that seem okay" judgment call — this scientific-method-style framing (a hypothesis, a controlled experiment, an objective measurement) is precisely what elevates Chaos Engineering from "randomly breaking things and seeing what happens" into a disciplined, genuinely informative resilience-validation practice.
+
+**Common Pitfall:** running a fault-injection experiment without first defining a precise, measurable steady-state baseline — without this, the experiment's outcome becomes a subjective, hard-to-defend judgment call ("it seemed mostly fine") rather than an objective, data-driven confirmation or refutation of a specific resilience assumption, undermining the scientific rigor Chaos Engineering is meant to provide.
+
+---
+
 ---

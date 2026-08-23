@@ -1644,4 +1644,94 @@ Because each pipeline stage has a precise, well-defined moment it executes at, a
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What is Azure Container Registry's geo-replication feature, and how does replicating an image across multiple regions let a globally-distributed AKS/Container Apps deployment pull images from a nearby replica, reducing pull latency?**
+
+Geo-replication automatically copies every pushed image to multiple, geographically-distributed ACR instances — a Kubernetes cluster or Container App running in a specific region pulls from the *replica nearest to it*, rather than a single, potentially-distant central registry, meaningfully reducing image-pull latency (and time-to-scale-out) for a genuinely global deployment.
+
+```bash
+az acr replication create --registry myregistry --location eastus2
+az acr replication create --registry myregistry --location westeurope
+# the SAME image, PUSHED ONCE, is AUTOMATICALLY replicated to BOTH regions --
+# a CLUSTER running in West Europe PULLS from the NEARBY West Europe REPLICA,
+# NOT a POTENTIALLY-distant registry INSTANCE in a COMPLETELY different region
+```
+
+```text
+WITHOUT geo-replication: EVERY region's cluster PULLS from ONE single, CENTRALIZED
+  registry LOCATION -- a CLUSTER far from THAT location experiences HIGHER pull LATENCY,
+  SLOWING DOWN scale-out EVENTS (new PODS waiting LONGER to actually START running)
+
+WITH geo-replication: EACH region PULLS from its OWN, NEARBY replica -- CONSISTENTLY LOW
+  pull latency, REGARDLESS of WHICH region a GIVEN cluster happens to be DEPLOYED in
+```
+
+Because image pull time directly affects how quickly new Pod replicas can actually start running (a real factor in autoscaling responsiveness during a genuine traffic spike), geo-replication's latency reduction has a concrete, measurable operational benefit for any genuinely global deployment — a small additional storage cost (multiple regional copies) in exchange for consistently fast image pulls everywhere.
+
+**Common Pitfall:** running a globally-distributed AKS/Container Apps deployment against a single, non-replicated ACR instance in one specific region — clusters in distant regions experience meaningfully slower image pulls, directly slowing down scale-out responsiveness during traffic spikes; geo-replication directly addresses this for genuinely multi-region deployments.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does workload identity federation (covered under GCP for a similar concept) let a CI/CD pipeline authenticate to Azure without a stored, long-lived service principal secret at all?**
+
+Rather than storing a service principal's client secret directly in a CI/CD pipeline's configuration (a genuine, persistent secret-management burden and a real credential-leakage risk), Azure's federated credential feature lets a pipeline (GitHub Actions, Azure DevOps) present its *own* platform-issued, short-lived OIDC token, which Azure AD trusts based on a pre-configured federation relationship — exchanging that token for a genuine Azure access token, with no long-lived secret stored anywhere at all.
+
+```bash
+az ad app federated-credential create --id <app-id> --parameters '{
+  "name": "github-actions-federation",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:myorg/myrepo:ref:refs/heads/main",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
+```
+
+```text
+WITHOUT federation: a SERVICE PRINCIPAL's CLIENT SECRET is STORED as a CI/CD SECRET
+  VARIABLE -- a GENUINE, LONG-LIVED credential that must be ROTATED, PROTECTED, and
+  represents a REAL leak RISK if the CI SYSTEM itself is ever COMPROMISED
+
+WITH federation: GitHub Actions ITSELF issues a SHORT-LIVED, PLATFORM-signed OIDC TOKEN
+  for EACH workflow RUN -- Azure AD TRUSTS it (BASED on the pre-CONFIGURED federation
+  relationship) and EXCHANGES it for a GENUINE Azure access TOKEN -- NO long-lived
+  SECRET is EVER stored ANYWHERE in the PIPELINE's OWN configuration AT ALL
+```
+
+Because the trust relationship is established once, declaratively, between Azure AD and the CI platform's own token issuer (rather than via a shared secret that must be securely stored and rotated), this eliminates an entire category of credential-management risk — directly mirroring the same underlying benefit as GCP's Workload Identity Federation (covered earlier) and AWS's equivalent, applied specifically to Azure AD authentication for CI/CD pipelines.
+
+**Common Pitfall:** storing a service principal's client secret as a CI/CD pipeline secret variable, requiring manual rotation and representing a persistent credential-leakage risk if the CI system itself is ever compromised — federated credentials eliminate this stored-secret requirement entirely, exchanging the CI platform's own short-lived, platform-issued token for Azure access instead.
+
+---
+
+## Advanced — Question 20
+
+**Q20: What is Azure Cosmos DB's Autoscale throughput mode, as distinct from manually-provisioned RUs (covered earlier), and how does it automatically scale RU/s within a configured range based on actual, real-time demand?**
+
+Manually-provisioned throughput (covered earlier) requires you to pick a fixed RU/s value upfront, and that fixed capacity is billed continuously whether or not it's actually being used — Autoscale instead lets you specify a *maximum* RU/s, and Cosmos DB automatically scales the actual provisioned throughput up or down within that range based on real-time demand, billing only for whatever throughput was actually consumed during each hour, rather than a fixed, always-on maximum.
+
+```bash
+az cosmosdb sql container create --throughput-type Autoscale --max-throughput 10000
+# AUTOSCALES between 1,000 (10% of max, the AUTOMATIC floor) and 10,000 RU/s, BASED
+# on ACTUAL, REAL-TIME demand -- BILLED based on the HIGHEST RU/s ACTUALLY used
+# WITHIN each HOUR, NOT a FIXED, ALWAYS-ON maximum
+```
+
+```text
+Manually-provisioned (FIXED 10,000 RU/s): BILLED for 10,000 RU/s CONTINUOUSLY, EVEN
+  during QUIET periods when ACTUAL demand is FAR lower -- OVER-provisioned, WASTED cost
+
+Autoscale (MAX 10,000 RU/s): SCALES DOWN automatically DURING quiet PERIODS (toward the
+  10% floor), SCALES UP automatically DURING genuine DEMAND spikes (up TO the CONFIGURED
+  maximum) -- BILLED for WHATEVER was ACTUALLY used, EACH HOUR -- AVOIDS both
+  OVER-provisioning COST and UNDER-provisioning THROTTLING
+```
+
+Because workloads with genuinely variable, unpredictable traffic patterns (a retail application seeing dramatic swings between business hours and overnight) would otherwise force a choice between over-provisioning for peak load (wasting money during quiet periods) or under-provisioning for average load (risking throttling during spikes), Autoscale removes this trade-off entirely — automatically tracking actual demand within the configured range, billed proportionally to real usage.
+
+**Common Pitfall:** manually provisioning a fixed RU/s value sized for peak load "just to be safe," when the actual traffic pattern varies significantly throughout the day/week — this pays for peak-level capacity continuously, even during long quiet periods; Autoscale specifically addresses genuinely variable workloads by scaling (and billing) proportionally to actual, real-time demand instead.
+
+---
+
 ---

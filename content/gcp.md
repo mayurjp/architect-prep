@@ -1597,4 +1597,98 @@ Because Bigtable's entire architecture (physical row-key sorting, wide-column st
 
 ---
 
+## Beginner — Question 20
+
+**Q20: What is GCP's Artifact Registry, the modern successor to Container Registry, and how does it support multiple artifact types — Docker images, npm/Maven packages — in one unified service, rather than a separate product per artifact type?**
+
+Artifact Registry consolidates what used to require separate GCP products (Container Registry for Docker images, and no first-party equivalent at all for language-specific packages) into one unified service supporting Docker images, npm packages, Maven artifacts, Python packages, and more, all managed through the same consistent IAM permissions, regional replication, and vulnerability scanning infrastructure.
+
+```bash
+gcloud artifacts repositories create my-docker-repo --repository-format=docker --location=us-central1
+gcloud artifacts repositories create my-npm-repo --repository-format=npm --location=us-central1
+# BOTH repository TYPES managed through the SAME service, the SAME IAM MODEL, the SAME
+# underlying INFRASTRUCTURE -- RATHER than SEPARATE products PER artifact TYPE
+```
+
+```text
+Container Registry (the OLDER product): Docker IMAGES only -- NO first-party SUPPORT for
+  npm/Maven/PyPI PACKAGES at ALL -- teams needing THOSE would need a COMPLETELY SEPARATE,
+  THIRD-PARTY or SELF-HOSTED solution
+
+Artifact Registry (the MODERN successor): Docker images, npm, MAVEN, PyPI, and MORE --
+  ALL through ONE UNIFIED service -- CONSISTENT IAM, REGIONAL replication, and
+  VULNERABILITY scanning ACROSS every ARTIFACT type, REGARDLESS of WHICH one it IS
+```
+
+Because a typical modern engineering organization needs to store and manage more than just Docker images (internal npm packages, shared Maven libraries), consolidating every artifact type into one service with unified permissions and tooling reduces the operational overhead of managing several entirely separate systems — directly analogous to how a single, well-designed platform naturally accumulates broader capability over a narrower, single-purpose predecessor.
+
+**Common Pitfall:** continuing to use the older Container Registry product for new projects out of familiarity, unaware that Google has deprecated it in favor of Artifact Registry — Artifact Registry is now the recommended, actively-developed service, supporting a broader range of artifact types with a more consistent, unified management experience.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is GCP Cloud Deploy, and how does it provide a managed, declarative continuous-delivery pipeline specifically for progressing a release through multiple environments with built-in approval gates?**
+
+Cloud Deploy defines a delivery pipeline declaratively — a sequence of target environments (dev, staging, production) a release progresses through — with built-in support for manual approval gates between stages, automatically handling the actual deployment mechanics (rendering and applying Kubernetes manifests, for a GKE target) while giving a team explicit visibility and control over exactly which release has reached which environment.
+
+```yaml
+apiVersion: deploy.cloud.google.com/v1
+kind: DeliveryPipeline
+metadata: { name: my-app-pipeline }
+serialPipeline:
+  stages:
+    - targetId: dev
+    - targetId: staging
+    - targetId: production
+      strategy: { standard: { verify: true } } # a MANUAL approval GATE before REACHING production
+```
+
+```text
+A RELEASE is CREATED once -- Cloud Deploy AUTOMATICALLY progresses it THROUGH dev, then
+  STAGING -- REQUIRES an EXPLICIT, MANUAL approval BEFORE promoting it to PRODUCTION --
+  the ENTIRE pipeline's CURRENT state (WHICH release is WHERE) is VISIBLE through ONE,
+  UNIFIED, DECLARATIVE Cloud Deploy CONFIGURATION, RATHER than STITCHING together
+  SEPARATE, AD-HOC scripts/JOBS per ENVIRONMENT
+```
+
+Because the pipeline definition itself is declarative and centrally managed, a team gets a single, authoritative view of exactly which release version has progressed to which environment, with the actual promotion mechanics (and any required approval gates) handled consistently by the platform — reducing the custom, hand-rolled pipeline scripting that would otherwise be needed to achieve the same multi-environment progression and approval workflow.
+
+**Common Pitfall:** hand-rolling a custom, multi-stage deployment pipeline using generic CI/CD scripting (separate jobs per environment, manually coordinating approval steps) when Cloud Deploy already provides this exact capability as a managed, GKE-aware service — this duplicates effort the platform already handles natively, with less consistency and visibility than Cloud Deploy's own centralized pipeline definition provides.
+
+---
+
+## Advanced — Question 20
+
+**Q20: How does Spanner's Interleaved Table (covered earlier) let deleting a parent row automatically and efficiently delete its physically co-located child rows, without a separate cascading delete operation needing to scan for them separately?**
+
+Because an Interleaved Table's child rows are physically stored immediately adjacent to their parent row (covered earlier as the optimization behind fast parent-plus-children reads), deleting a parent row with `ON DELETE CASCADE` doesn't require Spanner to perform a separate lookup/scan to *find* the corresponding child rows at all — they're already sitting right next to the parent in physical storage, making the cascading delete essentially a direct, local operation rather than a separate, index-driven search.
+
+```sql
+CREATE TABLE Orders (OrderId INT64) PRIMARY KEY (OrderId);
+CREATE TABLE OrderItems (OrderId INT64, ItemId INT64, ...)
+  PRIMARY KEY (OrderId, ItemId),
+  INTERLEAVE IN PARENT Orders ON DELETE CASCADE; -- child rows PHYSICALLY co-located WITH the parent
+
+DELETE FROM Orders WHERE OrderId = 5;
+-- Spanner deletes Order 5 AND its INTERLEAVED OrderItems TOGETHER -- the CHILD rows are
+-- ALREADY physically ADJACENT, requiring NO SEPARATE index LOOKUP/scan to LOCATE them FIRST
+```
+
+```text
+An ORDINARY (non-interleaved) foreign-key CASCADE delete: must SEPARATELY QUERY/SCAN
+  (typically VIA an index) to FIND every CHILD row referencing the PARENT being DELETED --
+  an ADDITIONAL lookup STEP, DISTINCT from the PARENT delete ITSELF
+
+Interleaved Table CASCADE delete: the CHILD rows are ALREADY physically ADJACENT to
+  the PARENT -- NO separate LOOKUP is NEEDED to FIND them -- the CASCADE is EFFECTIVELY
+  a LOCAL, CONTIGUOUS storage OPERATION, NOT a SEPARATE, INDEX-driven SEARCH
+```
+
+Because this efficiency comes directly from the same physical co-location that makes Interleaved Tables fast for reads (covered earlier), the cascade-delete benefit is really just the write-side consequence of the identical underlying storage-layout decision — a single design choice (physical co-location) simultaneously optimizing both the common "read a parent and its children together" pattern and the "delete a parent along with its children" pattern.
+
+**Common Pitfall:** assuming Interleaved Tables' physical co-location benefit applies only to read performance, without recognizing it equally accelerates cascading deletes — both benefits stem from the exact same underlying storage-layout decision, and understanding this connection clarifies why Interleaved Tables are specifically recommended for genuine, tightly-coupled parent-child relationships (an order and its line items) rather than more loosely related tables.
+
+---
+
 ---
