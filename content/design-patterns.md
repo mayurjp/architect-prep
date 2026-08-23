@@ -2524,3 +2524,137 @@ Because the decoration chain's construction logic lives in exactly one place (th
 **Common Pitfall:** assuming a DI container's decoration feature is a built-in part of the base framework — `Microsoft.Extensions.DependencyInjection` itself doesn't include automatic decoration support out of the box; it requires an additional library (like Scrutor) or a hand-rolled factory registration achieving the same effect, a detail easy to overlook when following an example that assumes the extension method is simply always available.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is the Balking pattern, and how does an object refusing to execute an action when it's not in an appropriate state — simply returning immediately rather than blocking or throwing — differ from the State pattern's full state-swapping approach?**
+
+The Balking pattern is a simple, narrow guard: an object checks its own current state at the start of a method, and if that state isn't appropriate for the requested action, it "balks" — returning immediately without doing anything (and typically without throwing an exception either), rather than blocking until the state becomes appropriate or performing genuinely different behavior per state the way the State pattern (covered earlier) does.
+
+```csharp
+public class FileSaver
+{
+    private bool _isSaving = false;
+
+    public void Save()
+    {
+        if (_isSaving)
+        {
+            return; // BALKS -- simply does nothing, since a save is ALREADY in progress
+        }
+        _isSaving = true;
+        try { /* perform the actual save */ }
+        finally { _isSaving = false; }
+    }
+}
+```
+
+```text
+Balking: a SIMPLE guard checking "am I in an APPROPRIATE state for this
+  action right NOW?" -- if NOT, just RETURN immediately, doing NOTHING --
+  narrow, LIGHTWEIGHT, no formal state OBJECTS involved
+
+State pattern (covered earlier): swaps an ENTIRE internal "state" OBJECT,
+  with EACH state providing GENUINELY different BEHAVIOR for MULTIPLE
+  different methods -- a much more STRUCTURED, formal mechanism for
+  objects with RICH, multi-method, state-dependent behavior
+```
+
+Because Balking addresses a narrow, specific need — preventing a single action from executing redundantly or inappropriately given the object's current condition — it's a much lighter-weight tool than the full State pattern, appropriate specifically when there's just one simple guard condition to check, rather than an object whose *entire* behavior across many methods genuinely varies by state.
+
+**Common Pitfall:** reaching for the full State pattern's formal state-object machinery for what's actually just a simple, single-condition guard — Balking's plain boolean-check-and-return is simpler, more direct, and perfectly adequate when the actual need is "don't do this if already in progress," without the added ceremony of defining separate state classes for what is genuinely a single binary condition.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: How does combining the Composite pattern (covered earlier) with the Visitor pattern's Double Dispatch (also covered earlier) let a new operation be added over an entire tree structure without modifying any of the Composite's own classes?**
+
+A Composite structure's `Add`/`Remove`/traversal logic (covered earlier) handles the tree's *shape*, but doesn't inherently know how to perform an arbitrary new *operation* (calculating a total, rendering to a specific format, validating) over every node — combining Composite with Visitor lets each node (both leaves and composite branches) accept a Visitor object, which then performs the actual, type-specific operation logic externally, letting an entirely new operation be added by writing a new Visitor class, with zero changes to any of the Composite's own node classes.
+
+```csharp
+public interface IFileSystemVisitor { void Visit(FileLeaf leaf); void Visit(DirectoryComposite dir); }
+
+public class FileLeaf : IFileSystemComponent
+{
+    public void Accept(IFileSystemVisitor visitor) => visitor.Visit(this); // Double Dispatch
+}
+public class DirectoryComposite : IFileSystemComponent
+{
+    private List<IFileSystemComponent> _children = new();
+    public void Accept(IFileSystemVisitor visitor)
+    {
+        visitor.Visit(this);
+        foreach (var child in _children) child.Accept(visitor); // recurse through the COMPOSITE structure
+    }
+}
+
+// A NEW operation ("calculate total size") added WITHOUT touching FileLeaf/DirectoryComposite at all:
+public class SizeCalculatorVisitor : IFileSystemVisitor
+{
+    public long TotalSize;
+    public void Visit(FileLeaf leaf) => TotalSize += leaf.Size;
+    public void Visit(DirectoryComposite dir) { /* no-op, size comes from children */ }
+}
+```
+
+```text
+WITHOUT combining the two patterns: adding a NEW operation (size
+  calculation, validation, rendering) means adding a NEW METHOD directly
+  to BOTH FileLeaf AND DirectoryComposite -- EVERY new operation touches
+  EVERY existing node class, exactly the DRAWBACK Visitor exists to solve
+
+WITH Composite + Visitor combined: a NEW operation is a NEW Visitor CLASS
+  -- the EXISTING FileLeaf/DirectoryComposite classes are NEVER touched
+  again, for ANY future operation -- new BEHAVIOR is added ENTIRELY
+  externally
+```
+
+Because a Composite tree's node classes rarely change (the tree's *shape* is usually stable) while the *operations* performed over that tree tend to grow over time (new reports, new export formats, new validation rules), combining Composite with Visitor cleanly separates these two axes of change — the tree structure stays untouched, while new operations are added purely as new, self-contained Visitor classes.
+
+**Common Pitfall:** applying this combination to a Composite hierarchy whose node *types* themselves change frequently (new kinds of leaves/composites being added often) — Visitor's own well-known limitation (covered earlier) means every existing Visitor implementation must be updated whenever a new node type is introduced, making this combination a poor fit for a hierarchy with a frequently-changing set of node types, despite being an excellent fit for a stable hierarchy with frequently-changing operations.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is the Monostate pattern, and how does it provide an alternative to Singleton (covered extensively) where every instance shares the same underlying state, while still allowing ordinary object-construction syntax?**
+
+Singleton (covered earlier) restricts a class to exactly one *instance*, typically accessed through a static property rather than ordinary `new` — Monostate takes a different approach: it allows unlimited instances to be created via completely ordinary `new` syntax, but every one of those instances shares the exact same underlying state, since that state is stored in `static` fields rather than instance fields, making all instances behave identically despite technically being separate objects.
+
+```csharp
+public class Configuration
+{
+    private static string _connectionString; // STATIC -- shared across EVERY instance
+
+    public string ConnectionString
+    {
+        get => _connectionString;
+        set => _connectionString = value;
+    }
+}
+
+var config1 = new Configuration(); // ORDINARY `new` -- no special factory/property needed
+var config2 = new Configuration(); // a DIFFERENT object reference...
+
+config1.ConnectionString = "Server=A";
+Console.WriteLine(config2.ConnectionString); // "Server=A" -- SAME value, even though config2
+                                                // is a COMPLETELY different object instance
+```
+
+```text
+Singleton: exactly ONE instance EXISTS -- accessed via a STATIC property/
+  method, NOT ordinary `new` -- callers must KNOW they're dealing with a
+  singleton, since normal construction syntax is DELIBERATELY unavailable
+
+Monostate: MANY instances can EXIST, created via ORDINARY `new` syntax --
+  but they ALL share the SAME underlying STATIC state -- callers can use
+  completely NORMAL object-construction code, with NO special AWARENESS
+  that shared state is involved AT ALL
+```
+
+Because Monostate preserves ordinary object-construction syntax (useful when code expecting to `new` up a regular object shouldn't need to be rewritten to call a special singleton-accessor instead), it can be a smoother drop-in replacement for converting an existing, widely-`new`'d class into having Singleton-like shared-state behavior, without requiring every call site to change how it constructs the object — at the cost of state sharing being far less obvious/discoverable than an explicit `Singleton.Instance` reference makes it.
+
+**Common Pitfall:** using Monostate specifically because its shared-state nature is *less visible* than Singleton's explicit `.Instance` accessor, without recognizing that this same subtlety is a genuine design liability — a developer reading `new Configuration()` has no textual signal at all that this object secretly shares state with every other instance, making Monostate's hidden coupling considerably easier to overlook than Singleton's comparatively self-documenting access pattern.
+
+---

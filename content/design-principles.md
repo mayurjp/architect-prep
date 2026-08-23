@@ -2130,4 +2130,92 @@ Because Shotgun Surgery's symptom (touching many files for one change) is the *e
 
 ---
 
+## Beginner — Question 24
+
+**Q24: What is GRASP's "Pure Fabrication" pattern, and how does a class like a Repository or a Mapper — invented purely to achieve low coupling and high cohesion, without representing any real domain concept — exemplify it?**
+
+Most classes in a well-designed system correspond to some recognizable concept from the problem domain (a `Customer`, an `Order`) — a Pure Fabrication is deliberately the opposite: a class *invented* purely for design convenience, with no real-world domain counterpart at all, created specifically because putting its responsibility on a genuine domain class would hurt cohesion or increase coupling.
+
+```csharp
+// "Order" is a genuine DOMAIN concept
+public class Order { public List<OrderLine> Lines; public decimal Total; }
+
+// "OrderRepository" is a PURE FABRICATION -- there's no real-world "Order Repository"
+// concept in the actual business domain; it exists PURELY as a design convenience,
+// keeping persistence logic OUT of the Order class itself
+public class OrderRepository
+{
+    public Order GetById(int id) { /* database access logic */ }
+    public void Save(Order order) { /* database access logic */ }
+}
+```
+
+```text
+WITHOUT Pure Fabrication: persistence LOGIC (SQL queries, ORM calls) gets
+  added DIRECTLY to the Order class itself -- Order now has TWO reasons to
+  change (business rule changes AND persistence-technology changes),
+  hurting COHESION
+
+WITH a Pure Fabrication (OrderRepository): persistence logic lives in its
+  OWN invented class, with NO real-world domain counterpart -- Order stays
+  FOCUSED purely on business behavior, and OrderRepository stays FOCUSED
+  purely on persistence -- BOTH classes are more cohesive as a RESULT
+```
+
+Because not every well-designed class needs to correspond to a tangible, real-world business concept, Pure Fabrication gives a name and formal justification to the common, practical pattern of inventing a class purely to keep two genuinely different concerns (business logic, persistence mechanics) cleanly separated — directly the rationale behind the Repository pattern itself (covered under Clean Architecture), among many other similarly "invented" infrastructure-focused classes.
+
+**Common Pitfall:** insisting every class must map to a recognizable real-world domain concept, viewing a Pure Fabrication class as somehow architecturally impure or a modeling failure — Pure Fabrication is a deliberate, named, well-justified GRASP pattern specifically because some responsibilities are best served by a class that has no domain-concept counterpart at all.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is "Cognitive Load" as an informal but increasingly cited design consideration, and how does minimizing how much a developer must hold in their head at once to safely make a change serve as a unifying rationale behind many named principles?**
+
+Cognitive Load describes the total mental effort required to understand enough of a system to make a change safely — a piece of code with low cognitive load can be understood and modified correctly by looking at a small, self-contained region; one with high cognitive load requires simultaneously tracking many interacting pieces (scattered state, deep call chains, hidden side effects) before a developer can be confident a change is actually safe.
+
+```text
+HIGH cognitive load: to safely CHANGE this one method, a DEVELOPER must
+  ALSO understand: three OTHER classes it mutates SHARED state in, a
+  HIDDEN event subscription elsewhere that REACTS to this method's side
+  effects, and an IMPLICIT ordering dependency on WHEN it's called relative
+  to two OTHER methods
+
+LOW cognitive load: this METHOD's entire behavior can be understood by
+  reading JUST its own body and its DIRECT dependencies' PUBLIC signatures
+  -- no HIDDEN state, no SURPRISING side effects elsewhere, no IMPLICIT
+  ordering requirements
+```
+
+Because SRP, low coupling, Tell-Don't-Ask, avoiding Temporal Coupling, and several other named principles (all covered elsewhere) each independently reduce cognitive load from a different specific angle, framing "does this reduce cognitive load" as a single, unifying lens provides a practical, intuitive test for evaluating a design decision even when it doesn't map cleanly onto any one specific named principle — sometimes the more useful, immediate question is simply "how much would someone need to understand to safely change this," rather than reciting which named principle technically applies.
+
+**Common Pitfall:** treating "reducing cognitive load" as License to over-abstract or over-generalize code preemptively, under the belief that more abstraction always means less to think about — excessive, premature abstraction (directly related to YAGNI, covered earlier) can itself dramatically *increase* cognitive load, by forcing a reader to trace through several layers of indirection to understand what a simpler, more direct piece of code would have made immediately obvious.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is Conway's Law, and how does it explain why a system's actual architecture often ends up reflecting the organization's own communication structure more than any deliberate technical design decision?**
+
+Conway's Law observes that any organization designing a system will produce a design whose structure mirrors that organization's own communication structure — teams that communicate infrequently or through heavyweight coordination tend to produce systems with correspondingly siloed, loosely-integrated components, while a team with tight, frequent internal communication tends to produce a more tightly-integrated design, regardless of what the "ideal" technical architecture might have looked like on a whiteboard.
+
+```text
+An organization with THREE separate teams (Frontend, Backend, Database),
+  each COMMUNICATING primarily through formal tickets/handoffs: tends to
+  PRODUCE a system with three correspondingly RIGID layers, each treating
+  the OTHERS as an EXTERNAL, arm's-length dependency -- MIRRORING the
+  team structure, regardless of whether that's genuinely the BEST technical
+  boundary for THIS specific system
+
+A microservices organization DELIBERATELY structuring teams around
+  business CAPABILITIES (an "Inverse Conway Maneuver"): INTENTIONALLY
+  organizes TEAMS to match the DESIRED service boundaries FIRST, so
+  Conway's Law then WORKS IN THEIR FAVOR, naturally producing a system
+  architecture that MATCHES the intended service decomposition
+```
+
+Because Conway's Law describes a genuinely observed, near-inevitable tendency rather than merely a cautionary anecdote, some organizations deliberately apply an "Inverse Conway Maneuver" — restructuring teams to match a *desired* architecture first, letting the natural Conway's Law effect then reinforce that intended structure, rather than fighting against an organically-formed team structure that would otherwise pull the system's actual architecture in a different, less intentional direction.
+
+**Common Pitfall:** designing an "ideal" technical architecture on paper without considering the organization's actual team and communication structure — Conway's Law suggests that a technically elegant design misaligned with how teams actually communicate will tend to drift toward matching the team structure anyway over time, regardless of the original diagram's intent, making team structure a genuine architectural input, not a separate, unrelated organizational concern.
+
 ---

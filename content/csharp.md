@@ -2138,4 +2138,96 @@ Because avoiding both virtual dispatch and boxing meaningfully matters for a gen
 
 ---
 
+## Beginner — Question 25
+
+**Q25: What does the C# `sizeof` operator do, and why does it require an `unsafe` context for anything other than a small, fixed set of built-in primitive types?**
+
+`sizeof(T)` returns the number of bytes a value of type `T` occupies in memory — for a small, predefined set of built-in primitive types (`int`, `double`, `bool`, and similar), this size is fixed and known at compile time, so the compiler allows `sizeof` without any special context. For any other type (a user-defined `struct`, for instance), the layout can vary in ways the compiler considers unsafe to expose casually, requiring an explicit `unsafe` context to acknowledge you're relying on low-level memory-layout details.
+
+```csharp
+int size1 = sizeof(int);      // 4 -- fine WITHOUT unsafe, built-in primitive
+int size2 = sizeof(double);   // 8 -- fine WITHOUT unsafe, built-in primitive
+
+unsafe
+{
+    int size3 = sizeof(MyStruct); // REQUIRES unsafe -- a user-defined struct's layout
+}
+```
+
+```text
+Built-in primitive types (int, double, bool, char...): size is FIXED and
+  WELL-KNOWN -- sizeof works in ORDINARY, safe code
+
+User-defined struct types: LAYOUT can be affected by padding, field ORDER,
+  and platform-specific ALIGNMENT rules -- sizeof requires unsafe, since
+  you're relying on LOW-LEVEL memory-layout details the compiler doesn't
+  want exposed CASUALLY
+```
+
+Because a struct's exact in-memory size can depend on compiler/runtime-specific padding and alignment decisions that aren't part of the language's guaranteed, portable contract, requiring `unsafe` for `sizeof` on anything beyond built-in primitives is a deliberate signal that the code is depending on these lower-level, potentially less portable details — appropriate for interop or genuinely low-level performance work, not ordinary application logic.
+
+**Common Pitfall:** assuming `sizeof(MyStruct)` will always return the sum of its individual fields' sizes — struct padding/alignment can make the actual size larger than that naive sum, a detail `sizeof`'s `unsafe` requirement exists partly to flag as something requiring careful, deliberate attention rather than casual assumption.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is the difference between a delegate's ordinary `Invoke()` call and its Asynchronous Programming Model (APM) `BeginInvoke()`/`EndInvoke()` methods, and why are the latter effectively obsolete in modern .NET?**
+
+Every C# delegate historically supported the APM pattern automatically — `BeginInvoke()` would run the delegate's target method on a thread-pool thread, returning immediately with an `IAsyncResult`, while `EndInvoke()` later retrieved the result (blocking if it wasn't ready yet). This predates `async`/`await` and `Task`-based asynchrony entirely, and has been almost universally superseded by the far more ergonomic modern async model.
+
+```csharp
+Func<int, int> square = x => x * x;
+
+int direct = square.Invoke(5); // ordinary, SYNCHRONOUS call -- 25
+
+// APM pattern (legacy, largely obsolete):
+IAsyncResult result = square.BeginInvoke(5, null, null); // runs on a THREAD POOL thread
+int asyncResult = square.EndInvoke(result); // BLOCKS until the result is ready
+```
+
+```text
+Invoke(): ORDINARY, synchronous call -- runs on the CALLING thread, blocks
+  until COMPLETE, returns the result DIRECTLY
+
+BeginInvoke()/EndInvoke() (APM): OFFLOADS execution to a THREAD POOL thread,
+  returning IMMEDIATELY with a HANDLE (IAsyncResult) -- EndInvoke() later
+  RETRIEVES the result, BLOCKING if needed -- predates async/await, and its
+  ergonomics (no composability, awkward ERROR handling) are why it's LARGELY
+  been replaced
+```
+
+Because `async`/`await` and `Task`-based asynchrony provide dramatically better composability (awaiting multiple operations together, propagating exceptions naturally, cancellation support) than the APM pattern's callback-and-polling-based model ever did, modern C# code essentially never uses `BeginInvoke`/`EndInvoke` directly — and notably, some newer .NET runtime environments (like ahead-of-time-compiled scenarios) don't even support delegate APM methods at all, since the underlying remoting infrastructure they historically relied on is being phased out.
+
+**Common Pitfall:** encountering `BeginInvoke`/`EndInvoke` in legacy code and assuming it's simply an older syntax for the same thing `Task.Run` provides — while conceptually similar (offloading work to a background thread), APM's actual API (callback-based, `IAsyncResult` polling) is considerably more awkward to compose correctly than `Task`-based code, and migrating legacy APM usage to `async`/`await` is generally worthwhile wherever practical.
+
+---
+
+## Advanced — Question 25
+
+**Q25: What is `Unsafe.SizeOf<T>()`, and how does it let you obtain a generic type's size at runtime without requiring an `unsafe` context or the type being constrained to `unmanaged`?**
+
+The ordinary `sizeof` operator (covered earlier) can't be used directly on an unconstrained generic type parameter `T` at all — `System.Runtime.CompilerServices.Unsafe.SizeOf<T>()` provides a generic-friendly alternative, letting code obtain a type's size for *any* type argument, including reference types (where it returns a pointer's size) and generic structs without an `unmanaged` constraint, all without needing an `unsafe` block in the calling code itself.
+
+```csharp
+using System.Runtime.CompilerServices;
+
+int intSize = Unsafe.SizeOf<int>();        // 4
+int structSize = Unsafe.SizeOf<MyStruct>(); // works even WITHOUT `unmanaged` constraint
+int refSize = Unsafe.SizeOf<string>();      // returns a POINTER's size, not the object's actual heap size
+```
+
+```text
+sizeof(T): does NOT work directly on an UNCONSTRAINED generic type
+  parameter T at all -- and requires `unsafe` for non-primitive types
+
+Unsafe.SizeOf<T>(): works for ANY type argument, GENERIC-friendly, and
+  does NOT require an `unsafe` block in the CALLING code -- the "unsafe"
+  nature is CONTAINED within the Unsafe class's OWN implementation
+```
+
+Because generic, size-aware low-level code (implementing a custom allocator, working with `Span<T>`-based binary serialization generically across many value types) needs to know a type parameter's size without knowing that specific type in advance, `Unsafe.SizeOf<T>()` fills a gap the ordinary `sizeof` operator's generic-parameter limitation leaves open — a narrow but genuinely useful tool for advanced, performance-oriented generic code.
+
+**Common Pitfall:** calling `Unsafe.SizeOf<T>()` on a reference type expecting to learn the size of the actual object on the heap — for a reference type, it returns the size of a *reference* (a pointer, 4 or 8 bytes depending on platform), not the size of the object's actual heap allocation, which requires an entirely different technique to measure.
+
 ---

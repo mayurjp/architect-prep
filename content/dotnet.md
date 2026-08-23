@@ -2122,4 +2122,99 @@ Because a pinned object cannot be moved (and, depending on GC generation, can co
 
 ---
 
+## Beginner — Question 24
+
+**Q24: What is `Console.CancelKeyPress`, and how does subscribing to it let a console application intercept Ctrl+C and perform graceful cleanup instead of terminating immediately?**
+
+By default, pressing Ctrl+C in a running console application terminates the process immediately, with no opportunity for cleanup — subscribing to the `Console.CancelKeyPress` event lets application code intercept that signal, run its own graceful-shutdown logic (flushing buffered data, releasing resources, signaling background work to stop), and optionally cancel the default immediate-termination behavior entirely.
+
+```csharp
+Console.CancelKeyPress += (sender, e) =>
+{
+    Console.WriteLine("Ctrl+C detected -- shutting down gracefully...");
+    e.Cancel = true; // prevents the DEFAULT immediate termination
+    cancellationTokenSource.Cancel(); // signal background work to stop cooperatively
+};
+
+// application's main loop checks the token and exits cleanly once signaled
+```
+
+```text
+WITHOUT handling CancelKeyPress: Ctrl+C TERMINATES the process IMMEDIATELY
+  -- any in-progress WORK, unflushed buffers, or open RESOURCES are simply
+  ABANDONED with no cleanup opportunity at ALL
+
+WITH CancelKeyPress handled: application CODE gets a CHANCE to react --
+  signal background work to STOP cooperatively, flush BUFFERED data, and
+  exit CLEANLY, rather than being ABRUPTLY killed mid-operation
+```
+
+Because a console application performing genuinely important work (writing to a file, coordinating a multi-step operation) benefits from the same graceful-shutdown discipline covered elsewhere for Kubernetes Pods and ASP.NET Core hosts, `CancelKeyPress` provides the equivalent hook for a simple console/CLI tool — letting Ctrl+C trigger an orderly stop rather than an abrupt kill.
+
+**Common Pitfall:** performing long-running or blocking work directly inside the `CancelKeyPress` event handler itself — the handler should signal other code to stop (via a `CancellationTokenSource`, a flag) and return quickly; blocking extensively inside the handler risks the process still being forcibly terminated if the user presses Ctrl+C again impatiently during an unexpectedly long cleanup.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is `AssemblyLoadContext.Unload()`, and how does a Collectible ALC let a plugin's assemblies be fully unloaded from memory at runtime — something the default, non-collectible load context can never do?**
+
+An ordinary `AssemblyLoadContext` (covered earlier for its role isolating plugin assemblies) is *not collectible* by default — once an assembly is loaded into it, that assembly remains in memory for the application's entire lifetime, even if the plugin is no longer needed. Creating the context with `isCollectible: true` instead allows calling `Unload()` on it later, letting the runtime eventually garbage-collect every assembly that context loaded, genuinely freeing that memory — provided no other code still holds a reference to any type or object from those assemblies.
+
+```csharp
+var pluginContext = new AssemblyLoadContext("PluginContext", isCollectible: true);
+var pluginAssembly = pluginContext.LoadFromAssemblyPath(pluginPath);
+
+// ... use the plugin ...
+
+pluginContext.Unload(); // requests unloading -- ACTUAL collection happens on a LATER GC pass,
+                          // ONLY once nothing still references the plugin's types/objects
+```
+
+```text
+Non-collectible ALC (the default): assemblies loaded INTO it remain in
+  memory for the APPLICATION's entire lifetime -- there is NO way to
+  later reclaim that memory, even if the PLUGIN is no longer needed
+
+Collectible ALC (isCollectible: true): supports Unload() -- REQUESTS that
+  the runtime eventually RECLAIM every assembly this context LOADED, once
+  nothing ELSE still references any of its types/objects -- genuinely
+  FREES that memory, unlike the non-collectible default
+```
+
+Because a long-running application that dynamically loads and unloads plugins over its lifetime (a plugin marketplace, a hot-reloadable extension system) would otherwise accumulate ever-growing memory usage from every plugin ever loaded, Collectible ALCs provide the only mechanism in modern .NET for genuinely reclaiming that memory — at the real cost of needing to carefully ensure nothing outside the context (a static event subscription, a cached delegate) still holds a lingering reference preventing collection.
+
+**Common Pitfall:** calling `Unload()` while application code elsewhere still holds a reference to a type, delegate, or object originating from that context (a static event handler subscribed to a plugin type's event, a cached instance stored in a long-lived collection) — any such lingering reference prevents the runtime from ever actually collecting the context's assemblies, silently defeating the entire purpose of making it collectible in the first place.
+
+---
+
+## Advanced — Question 27
+
+**Q27: What is `Unsafe.SkipInit<T>()`, and how does it let code declare a variable as intentionally uninitialized, suppressing the compiler's definite-assignment error for a scenario where initialization genuinely happens through an out-of-band mechanism?**
+
+C#'s definite-assignment analysis normally requires every variable to be assigned before use, producing a compile error otherwise — `Unsafe.SkipInit<T>(out T value)` deliberately satisfies that compiler requirement without actually writing any value, for genuinely performance-sensitive scenarios where a variable's memory will be populated through some other mechanism immediately afterward (a native call writing directly into it, a subsequent `Span<T>`-based bulk copy) and the normal zero-initialization the compiler would otherwise insert is pure, measurable waste.
+
+```csharp
+using System.Runtime.CompilerServices;
+
+Unsafe.SkipInit(out LargeStruct value); // satisfies definite-assignment WITHOUT actually zeroing it
+PopulateFromNativeBuffer(ref value);     // value is IMMEDIATELY, FULLY populated right after
+```
+
+```text
+Ordinary declaration: LargeStruct value = default; -- the RUNTIME actually
+  ZEROES the struct's ENTIRE memory, even though it's about to be COMPLETELY
+  overwritten anyway by PopulateFromNativeBuffer immediately afterward --
+  WASTED work for a large struct
+
+Unsafe.SkipInit: satisfies the COMPILER's definite-assignment requirement
+  WITHOUT that wasted zero-initialization -- appropriate ONLY when the
+  variable is GUARANTEED to be fully populated immediately afterward, by
+  code the developer can PERSONALLY verify actually does so
+```
+
+Because skipping this initialization is only safe when every single byte of the variable is guaranteed to be overwritten before any code could possibly read from it, `Unsafe.SkipInit` is a narrow, advanced tool for genuinely hot paths dealing with large structs where the wasted zero-initialization cost has been specifically measured and found significant — not a general-purpose way to avoid "wasted" initialization throughout ordinary application code.
+
+**Common Pitfall:** using `Unsafe.SkipInit` for a variable where even one field ends up genuinely unpopulated by the subsequent code path (an early-return branch that skips populating some fields, an incomplete native call) — since the skipped zero-initialization means that field's memory contains whatever garbage happened to be there previously, reading it produces genuinely undefined, non-deterministic behavior rather than a predictable default value.
+
 ---

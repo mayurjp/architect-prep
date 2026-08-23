@@ -2281,3 +2281,103 @@ Because each additional layer of inheritance multiplies how many separate class 
 **Common Pitfall:** treating "the Yo-Yo Problem only matters for extremely deep, unusual hierarchies" as a reason to dismiss it — even a moderate hierarchy of three or four levels, each with a partial override calling `base`, can already produce genuinely confusing, hard-to-trace behavior; the problem's severity scales with hierarchy depth, but it begins mattering well before a hierarchy becomes unusually deep.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is the difference between a class's Field and a Property in C#, and why does encapsulating a field behind a property — even a simple auto-property — provide future flexibility a plain public field doesn't?**
+
+A Field is a raw variable directly holding data on an object — a Property is a member that *looks* like a field from the caller's perspective, but is actually backed by `get`/`set` accessor methods, which the compiler can freely change later (adding validation, computing a derived value, adding logging) without ever changing the property's own public-facing syntax that calling code already depends on.
+
+```csharp
+public class Product
+{
+    public decimal Price;              // a plain FIELD -- no interception point at all
+
+    public decimal Cost { get; set; }  // an auto-PROPERTY -- LOOKS identical to a field
+                                         // from calling code, but is COMPILED into actual
+                                         // get_Cost()/set_Cost() methods underneath
+}
+```
+
+```text
+A plain public FIELD: calling code (product.Price = 10) directly writes to
+  MEMORY -- there's NO way to later intercept that assignment (to VALIDATE
+  it, LOG it, compute something) WITHOUT changing the field into something
+  ELSE, which BREAKS binary compatibility for already-compiled callers
+
+A PROPERTY (even an auto-property): calling code (product.Cost = 10) LOOKS
+  identical, but actually calls a set_Cost() METHOD -- that method's BODY
+  can be changed FREELY later (adding validation, for instance) WITHOUT
+  requiring already-compiled callers to be RECOMPILED at all
+```
+
+Because a property's `get`/`set` accessors compile down to ordinary methods (`get_PropertyName()`/`set_PropertyName()`) that can be modified independently of the property's own public signature, exposing a property (even a trivial auto-property) rather than a raw public field preserves the freedom to add behavior later without a breaking change — the underlying reason C# convention strongly favors properties over public fields for virtually all externally-visible class members.
+
+**Common Pitfall:** exposing a public field on a class specifically intended for external consumption (a library's public API, a shared domain model), reasoning "it's simpler, and I can always change it to a property later if I need to" — changing a public field into a property is a binary-breaking change for any already-compiled consumer, unlike changing a property's internal implementation, which consumers using it as a property never notice at all.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is Open Recursion in OOP, and how does a subclass's overridden method still get called even when invoked from within a base class's own method body via virtual dispatch — differently from a base class calling a private helper method?**
+
+When a base class method calls another `virtual` method on `this`, that call is resolved via virtual dispatch at *runtime*, based on the object's *actual* concrete type — meaning if a subclass has overridden that virtual method, the subclass's override runs, even though the calling code physically lives in the base class. A private (or non-virtual) helper method, by contrast, can never be intercepted this way — it always resolves to exactly the method defined in the class that declared it, regardless of the object's actual runtime type.
+
+```csharp
+public class Base
+{
+    public void Process() { Validate(); DoWork(); }       // calls a VIRTUAL method
+    protected virtual void Validate() { Console.WriteLine("Base validation"); }
+}
+
+public class Derived : Base
+{
+    protected override void Validate() { Console.WriteLine("Derived validation"); } // OVERRIDES it
+}
+
+new Derived().Process();
+// Even though Process() is DEFINED in Base, calling Validate() from WITHIN it
+// still resolves to Derived's OVERRIDE -- "Derived validation" is printed
+```
+
+```text
+Virtual method called from within a BASE class's own method: resolved via
+  virtual dispatch, based on the OBJECT's ACTUAL runtime type -- a
+  SUBCLASS's override "reaches back" and INTERCEPTS even calls made from
+  code physically living in the BASE class -- this IS Open Recursion
+
+A private/non-virtual helper called the SAME way: ALWAYS resolves to
+  exactly the method defined WHERE the call is written -- CANNOT be
+  intercepted by a subclass at ALL, regardless of the object's actual type
+```
+
+Because Open Recursion is precisely the mechanism the Template Method pattern (covered earlier) relies on — a base class's method orchestrates a sequence, calling `virtual`/abstract "step" methods that a subclass fills in, with those calls correctly reaching the subclass's own implementation even though the orchestrating code lives entirely in the base class — understanding it explains *why* Template Method's specific mechanism actually works the way it does at the language level.
+
+**Common Pitfall:** assuming that because a virtual method call is *written* inside a base class, it must therefore *execute* the base class's own implementation — Open Recursion means the actual method that runs depends entirely on the object's real, runtime type, not on which class's source code the call happens to be textually written in; this is easy to get backwards when first reasoning about virtual dispatch.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is the difference between "Inheritance for Implementation Reuse" and "Inheritance for Type Hierarchy" as two genuinely different motivations sometimes conflated under the single term "inheritance," and why does using inheritance purely to reuse code tend to produce a fragile design?**
+
+Inheritance for Type Hierarchy models a genuine "is-a" relationship where a subtype should be substitutable for its base type (the Liskov Substitution Principle, covered extensively) — Inheritance for Implementation Reuse instead inherits from a base class purely to reuse its already-written code, with no actual intention that the subclass should be treated polymorphically as an instance of the base type at all; these are fundamentally different motivations that happen to use the identical `: BaseClass` syntax.
+
+```csharp
+// Inheritance for TYPE HIERARCHY -- a genuine "is-a," intended for polymorphic substitution
+public abstract class Shape { public abstract double Area(); }
+public class Circle : Shape { public override double Area() => Math.PI * Radius * Radius; }
+
+// Inheritance for IMPLEMENTATION REUSE ONLY -- "Stack inherits from List purely to reuse
+// its storage/resizing logic," with NO intention that a Stack should be usable
+// polymorphically wherever a List is expected (this is a well-known ANTI-PATTERN)
+public class Stack<T> : List<T> { public void Push(T item) => Add(item); }
+// PROBLEM: Stack<T> now ALSO exposes List's Insert(index, item), RemoveAt(index), etc. --
+// operations that VIOLATE a stack's own intended LIFO discipline entirely
+```
+
+Because Implementation-Reuse inheritance exposes the *entire* base class's public API — including members that make no sense for, or actively violate, the subclass's own intended abstraction — it tends to produce a "leaky" type whose public surface doesn't actually match its intended contract, directly the reason the Composite Reuse Principle (covered earlier) recommends composition specifically for pure code-reuse motivations, reserving inheritance itself for genuine type-hierarchy relationships that need actual polymorphic substitutability.
+
+**Common Pitfall:** inheriting from a concrete class purely because it "already has the method I need," without asking whether the resulting subclass genuinely satisfies an "is-a" relationship with the base type — this conflation is precisely how classes like a hypothetical `Stack : List<T>` end up exposing operations (arbitrary insertion, indexed removal) that actively undermine the very abstraction the subclass was meant to represent.
+
+---
