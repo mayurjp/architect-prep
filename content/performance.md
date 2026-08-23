@@ -1778,3 +1778,101 @@ Because the memory budget is a genuine, hard limit rather than a soft suggestion
 **Common Pitfall:** requesting a `TryStartNoGCRegion` budget without actually measuring or bounding the code's real allocation behavior within that region, then failing to catch the `InvalidOperationException` that results if the budget turns out to be insufficient — this can produce an unhandled crash specifically during the latency-critical operation the feature was meant to protect, the opposite of the intended outcome.
 
 ---
+
+## Beginner — Question 21
+
+**Q21: What does ASP.NET Core's Output Caching middleware (introduced in .NET 7) do, and how does it differ from Response Caching in terms of where the cached response is actually stored and served from?**
+
+Response Caching relies on `Cache-Control` headers to instruct downstream caches (browsers, CDNs, proxies) to store a response themselves — the server still runs the full request pipeline for every subsequent request unless an external cache happens to intercept it. Output Caching instead stores the rendered response *on the server itself*, and can serve a cached copy directly, short-circuiting the pipeline entirely for a matching subsequent request.
+
+```csharp
+builder.Services.AddOutputCache();
+var app = builder.Build();
+app.UseOutputCache();
+
+app.MapGet("/products", GetProducts).CacheOutput(policy => policy.Expire(TimeSpan.FromSeconds(30)));
+```
+
+```text
+Response Caching: SERVER still RUNS the full REQUEST pipeline every TIME;
+  relies on an EXTERNAL cache (browser, CDN) to actually SKIP hitting the
+  server AGAIN -- if NO external cache intervenes, the SERVER does FULL work
+
+Output Caching: the SERVER itself STORES the rendered RESPONSE and can SERVE
+  it directly on a MATCHING subsequent request, SKIPPING the entire REQUEST
+  pipeline (including the ACTION method itself) for a CACHE hit
+```
+
+Because Output Caching's cache lives on the server (in memory by default, or a configurable distributed store), it provides a genuine performance win even when no external cache is present, unlike Response Caching, which is only as effective as whatever downstream cache actually chooses to honor its headers.
+
+**Common Pitfall:** applying Output Caching to an endpoint whose response varies per authenticated user without configuring a `VaryByHeader`/`VaryByValue` policy — without it, the first user's cached response could be served to a completely different, unrelated user, since the cache key wouldn't account for the distinguishing factor (an auth token, a tenant ID) that should have kept their responses separate.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is the difference between .NET's Server GC and Workstation GC modes, and why does choosing the wrong one for an ASP.NET Core application specifically hurt throughput under concurrent load?**
+
+Workstation GC is optimized for a single-threaded, UI-style application with a low, bursty allocation rate — it uses one dedicated GC thread and prioritizes minimizing pause-time impact on that one foreground thread. Server GC is optimized for a highly concurrent server workload — it creates one heap and one dedicated GC thread *per logical CPU core*, allowing collections to run in parallel across cores, trading higher memory usage for dramatically better throughput under concurrent allocation pressure.
+
+```xml
+<!-- .csproj -->
+<PropertyGroup>
+  <ServerGarbageCollection>true</ServerGarbageCollection>  <!-- ASP.NET Core's default -->
+  <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+</PropertyGroup>
+```
+
+```text
+Workstation GC on a busy web server: ONE GC thread handles collection WORK,
+  regardless of HOW MANY CPU cores are available -- under HIGH concurrent
+  allocation (many simultaneous REQUESTS), that SINGLE GC thread becomes
+  a BOTTLENECK, unable to KEEP UP with allocation across ALL the OTHER
+  worker threads running IN PARALLEL
+
+Server GC on the SAME server: ONE heap + GC thread PER CORE -- collection
+  WORK is spread ACROSS all available CORES, scaling collection THROUGHPUT
+  roughly WITH the number of CORES actually available
+```
+
+Because ASP.NET Core defaults to Server GC precisely because a typical web server workload allocates heavily across many concurrent requests running on many cores, explicitly overriding it to Workstation GC (perhaps copied from a desktop-app template, or misconfigured in a low-memory container) can measurably degrade throughput under load — Server GC's higher baseline memory usage is usually the correct trade for a server workload's throughput needs.
+
+**Common Pitfall:** running Server GC inside a memory-constrained container without also configuring `GCHeapHardLimit`/`DOTNET_GCHeapHardLimitPercent` — Server GC's per-core heap allocation strategy can consume noticeably more memory than Workstation GC, and without an explicit limit matched to the container's actual memory ceiling, this can trigger unexpected out-of-memory kills in a tightly-constrained container environment.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What are Hardware Intrinsics (`System.Numerics.Vector<T>` and the more explicit `System.Runtime.Intrinsics` namespace), and how do they let .NET code process multiple data elements in a single CPU instruction via SIMD?**
+
+Ordinary scalar code processes one value per CPU instruction — SIMD (Single Instruction, Multiple Data) hardware lets a single CPU instruction operate on several values simultaneously (packed into one wide register), and .NET's Hardware Intrinsics APIs expose this directly to managed code for genuinely data-parallel, CPU-bound workloads like numeric array processing.
+
+```csharp
+// Scalar: one addition per CPU instruction, iterating the whole array
+for (int i = 0; i < array.Length; i++) array[i] += 10;
+
+// SIMD via Vector<T>: processes SEVERAL array elements in ONE CPU instruction
+var addend = new Vector<int>(10);
+int i = 0;
+for (; i <= array.Length - Vector<int>.Count; i += Vector<int>.Count)
+{
+    var chunk = new Vector<int>(array, i);
+    (chunk + addend).CopyTo(array, i);
+}
+for (; i < array.Length; i++) array[i] += 10; // handle the remaining "tail" elements scalar-wise
+```
+
+```text
+Scalar loop: N elements REQUIRE N separate ADD instructions, ONE at a time
+
+SIMD loop: N elements are PROCESSED in CHUNKS of Vector<int>.Count (e.g., 8
+  on a wide AVX2-capable CPU) -- EACH chunk's ENTIRE addition happens in
+  ONE single CPU instruction, roughly DIVIDING the total INSTRUCTION count
+  by the VECTOR width
+```
+
+Because `Vector<T>` automatically sizes itself to whatever SIMD width the current CPU actually supports (falling back gracefully on hardware without wide vector support), it lets numeric-heavy, data-parallel hot paths (image processing, numerical simulations, hashing) achieve dramatically higher throughput than scalar code, without hand-writing CPU-specific assembly — `System.Runtime.Intrinsics` exists alongside it for cases needing more explicit control over a *specific* instruction set (AVX2, SSE4.2) rather than `Vector<T>`'s portable, auto-sized abstraction.
+
+**Common Pitfall:** applying SIMD vectorization to a hot path that's actually memory-bandwidth-bound rather than compute-bound — if the bottleneck is how fast data can be fetched from memory rather than how fast the CPU can compute on it, processing more elements per instruction doesn't help, since the CPU spends most of its time waiting on memory regardless of how many elements each instruction can crunch once the data actually arrives.
+
+---

@@ -1739,4 +1739,98 @@ Because this feature builds directly on Query Store's already-covered historical
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What does `sp_rename` do, and why is it the correct way to rename a table or column in SQL Server rather than dropping and recreating it?**
+
+`sp_rename` changes the name of an existing database object (a table, column, index, or other object) in place, preserving its data, permissions, indexes, and foreign key relationships — a genuinely different operation from dropping and recreating the object under a new name, which would lose all of that.
+
+```sql
+EXEC sp_rename 'dbo.Customers', 'Clients';                     -- rename a table
+EXEC sp_rename 'dbo.Clients.CustName', 'FullName', 'COLUMN';   -- rename a column
+```
+
+```text
+DROP + CREATE under a new name: LOSES all EXISTING data, INDEXES, foreign KEY
+  relationships, and PERMISSIONS -- everything must be MANUALLY recreated
+
+sp_rename: renames the OBJECT IN PLACE -- data, INDEXES, constraints, and
+  permissions all REMAIN intact, ONLY the NAME itself changes
+```
+
+Because `sp_rename` operates on the existing object rather than replacing it, it's the only safe way to rename a table or column that already contains data or has dependent objects (foreign keys, indexes, views) — dropping and recreating would require manually re-establishing every one of those dependencies from scratch.
+
+**Common Pitfall:** renaming a column or table referenced by name in stored procedures, views, or application code without updating those references — `sp_rename` only changes the object's own name; it does not automatically update every other database object or piece of application code that referred to the old name, which can silently break until those references are found and updated.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What do `SET STATISTICS IO ON` and `SET STATISTICS TIME ON` show, and how do they complement an execution plan (covered earlier) when diagnosing a slow query?**
+
+An execution plan shows *how* a query was executed (which operators, in what order) but not necessarily *how much actual I/O or time* each part consumed — `SET STATISTICS IO ON` reports the exact number of logical/physical page reads per table touched, and `SET STATISTICS TIME ON` reports CPU and elapsed time for parsing/compiling versus actually executing, giving concrete numbers alongside the plan's structural view.
+
+```sql
+SET STATISTICS IO ON;
+SET STATISTICS TIME ON;
+
+SELECT * FROM Orders WHERE CustomerId = 42;
+
+-- Output includes, per table:
+-- Table 'Orders'. Scan count 1, logical reads 8204, physical reads 12...
+-- SQL Server Execution Times: CPU time = 15 ms, elapsed time = 340 ms
+```
+
+```text
+Execution plan ALONE: shows a Clustered Index SCAN was used -- SUGGESTS a
+  missing index, but DOESN'T quantify HOW expensive that scan ACTUALLY was
+
+STATISTICS IO added: "8204 logical reads" -- a CONCRETE number CONFIRMING the
+  scan touched a LARGE number of pages, quantifying JUST how expensive it
+  actually WAS, not just THAT it happened
+```
+
+Because a query can have a superficially "reasonable-looking" execution plan while still doing far more I/O than expected (a large clustered index scan is structurally simple but can touch enormous numbers of pages), pairing the plan's shape with `STATISTICS IO`'s concrete read counts gives a much more complete diagnostic picture than either alone — a common combination when comparing two candidate query rewrites' actual cost, not just their plan shape.
+
+**Common Pitfall:** comparing `STATISTICS IO`/`TIME` output between a cold-cache run and a warm-cache run (covered elsewhere under performance) without accounting for the difference — physical reads (actual disk I/O) drop dramatically once pages are cached in the buffer pool, so comparing a first, cold run against a later, warm run of the same query can produce a misleadingly large apparent improvement that has nothing to do with the query itself.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is SQL Server's Resource Governor, and how does it let a DBA cap the CPU/memory a specific workload can consume, preventing it from starving other concurrent workloads on the same instance?**
+
+By default, every query on a SQL Server instance competes for the same shared pool of CPU and memory — Resource Governor lets a DBA define distinct **resource pools** with configured CPU/memory limits, and **workload groups** (classified by login, application name, or other criteria) that route incoming sessions into the appropriate pool, so one workload's resource-hungry queries can't starve another's.
+
+```sql
+CREATE RESOURCE POOL ReportingPool
+    WITH (MAX_CPU_PERCENT = 30, MAX_MEMORY_PERCENT = 20);
+
+CREATE WORKLOAD GROUP ReportingGroup
+    USING ReportingPool;
+
+CREATE FUNCTION dbo.ClassifierFunction() RETURNS SYSNAME
+AS BEGIN
+    IF APP_NAME() = 'ReportingTool' RETURN 'ReportingGroup';
+    RETURN 'default';
+END;
+
+ALTER RESOURCE GOVERNOR WITH (CLASSIFIER_FUNCTION = dbo.ClassifierFunction);
+ALTER RESOURCE GOVERNOR RECONFIGURE;
+```
+
+```text
+WITHOUT Resource Governor: a HEAVY, ad-hoc reporting QUERY can consume the MAJORITY
+  of available CPU, DEGRADING response times for UNRELATED, latency-sensitive
+  transactional QUERIES sharing the SAME instance
+
+WITH Resource Governor: the REPORTING workload is CLASSIFIED into its OWN pool,
+  CAPPED at 30% CPU / 20% memory -- EVEN a runaway reporting QUERY cannot exceed
+  that CEILING, leaving the REMAINING capacity available FOR other workloads
+```
+
+Because multi-tenant or mixed-workload SQL Server instances (transactional OLTP traffic alongside occasional heavy reporting queries) otherwise have no built-in way to prevent one workload from monopolizing shared resources, Resource Governor provides a concrete, enforced isolation mechanism at the instance level — a genuinely different tool from indexing or query tuning, addressing resource *contention* rather than any single query's own efficiency.
+
+**Common Pitfall:** assuming Resource Governor isolates workloads at the level of separate databases or instances — it operates entirely within a single SQL Server instance, governing how that instance's own shared CPU/memory is divided among classified sessions; workloads that genuinely need full physical isolation (their own dedicated compute) still require separate instances, not just separate resource pools.
+
 ---

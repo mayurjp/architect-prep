@@ -1921,4 +1921,94 @@ Because the proxy is a genuine C# subclass generated at runtime, it's bound by t
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What does `ChangeTracker.HasChanges()` do, and how does checking it before calling `SaveChangesAsync()` let code avoid an unnecessary round trip to the database?**
+
+`SaveChangesAsync()` still opens a database connection and (for most providers) begins a transaction even if it turns out there's nothing to actually save — `HasChanges()` lets application code check, entirely in memory, whether the `ChangeTracker` currently holds any Added/Modified/Deleted entities before paying that cost.
+
+```csharp
+if (context.ChangeTracker.HasChanges())
+{
+    await context.SaveChangesAsync();
+}
+// if nothing was actually modified, SKIPS the DB round trip entirely
+```
+
+```text
+WITHOUT the check: EVERY call site calling SaveChangesAsync() PAYS a database
+  ROUND TRIP, EVEN when NOTHING was actually MODIFIED in THIS particular request
+
+WITH the check: a REQUEST that turned OUT to be READ-only (loaded data, found
+  NOTHING needing an update) SKIPS the ROUND TRIP entirely, SAVING a genuinely
+  UNNECESSARY network hop AND transaction overhead
+```
+
+Because `HasChanges()` runs entirely against in-memory tracked state, it's essentially free compared to the database round trip it can help avoid — a small, easy optimization for code paths where "maybe nothing actually changed" is a genuinely common outcome, such as a conditional-update endpoint that only sometimes finds something worth modifying.
+
+**Common Pitfall:** assuming `SaveChangesAsync()` is already smart enough to skip its own round trip when there's nothing to save — it isn't; without an explicit `HasChanges()` check, every call incurs the full database round trip and (for most providers) transaction overhead regardless of whether any entity was actually modified.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What does `ModelBuilder.HasDefaultSchema()` configure, and how does it let an entire EF Core model target a non-default database schema without repeating `ToTable("X", "schema")` on every single entity?**
+
+By default, EF Core (targeting SQL Server) maps every entity to a table under the `dbo` schema unless told otherwise — `HasDefaultSchema()`, set once in `OnModelCreating`, changes that default for the *entire* model at once, so every entity that doesn't explicitly override its own schema inherits the new default instead.
+
+```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    modelBuilder.HasDefaultSchema("sales"); // every entity defaults to "sales" schema now
+
+    // still overridable per-entity if one genuinely belongs elsewhere:
+    modelBuilder.Entity<AuditLog>().ToTable("AuditLog", "audit");
+}
+```
+
+```sql
+-- WITHOUT HasDefaultSchema: every table lands in dbo, REGARDLESS of logical grouping
+-- WITH HasDefaultSchema("sales"): Orders, Customers, Products all land under sales.*,
+--   EXCEPT AuditLog, which explicitly opted into its OWN, different "audit" schema
+```
+
+Because most real applications logically group their tables under a meaningful schema name (separating a bounded context's own tables from another's, in a shared database), setting the default once avoids the repetitive, error-prone alternative of remembering to pass the same schema string to every single entity's `ToTable()` call individually.
+
+**Common Pitfall:** setting `HasDefaultSchema()` on an existing model without generating a corresponding migration — every already-existing table's expected schema location shifts in EF Core's own model, and the next migration EF Core generates will include a large, unexpected batch of "move table to new schema" operations for every entity that didn't have an explicit override.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is an `IMaterializationInterceptor`, and how does it let you observe or modify an entity the exact moment EF Core constructs it from a database row, before it's returned to the calling query?**
+
+EF Core's materialization step — converting a raw database row into an actual C# entity instance — normally happens invisibly inside query execution; `IMaterializationInterceptor` hooks directly into that step, letting code run custom logic (initializing a non-mapped field, incrementing a materialization counter, decrypting a value) at the precise moment each entity comes into existence, before any of your own application code ever sees it.
+
+```csharp
+public class MaterializationCounterInterceptor : IMaterializationInterceptor
+{
+    public object InitializedInstance(MaterializationInterceptionData data, object instance)
+    {
+        if (instance is IAuditableEntity auditable)
+            auditable.MaterializedAt = DateTime.UtcNow; // set on a NON-MAPPED field, not stored in the DB
+        return instance;
+    }
+}
+
+optionsBuilder.AddInterceptors(new MaterializationCounterInterceptor());
+```
+
+```text
+NORMAL query execution: DB row -> EF Core INTERNALLY builds the entity -> RETURNED
+  to your CODE, with no OPPORTUNITY to intervene DURING that construction step
+
+WITH IMaterializationInterceptor: DB row -> EF Core BUILDS the entity -> your
+  INTERCEPTOR runs, RIGHT at that MOMENT, BEFORE the entity is HANDED back --
+  able to SET a non-mapped field, LOG the event, or even SWAP the returned instance
+```
+
+Because this runs for *every* entity of every type materialized through the context (unless scoped more narrowly), it's the correct extension point for cross-cutting, per-instance initialization logic that genuinely needs to run at construction time rather than afterward — something a `SaveChanges` interceptor (covered earlier, write-side only) or a constructor (which EF Core may bypass for certain scenarios) can't reliably provide.
+
+**Common Pitfall:** using `IMaterializationInterceptor` for logic that would be simpler and more idiomatic as a plain constructor or an `OnModelCreating`-configured value converter (covered earlier) — the interceptor is a powerful, low-level hook meant for genuinely cross-cutting concerns spanning many entity types, not a general-purpose substitute for straightforward, single-entity initialization logic that a constructor already handles perfectly well.
+
 ---

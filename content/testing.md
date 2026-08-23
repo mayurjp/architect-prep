@@ -1966,3 +1966,85 @@ Because a slow leak or gradual resource exhaustion is, by its very nature, undet
 **Common Pitfall:** relying exclusively on short-duration Load/Stress Tests (covered earlier) for performance validation, assuming they provide comprehensive coverage of "how the system behaves under load" — these tests are specifically blind to slow-accumulating problems (memory leaks, gradual resource exhaustion) that only manifest over sustained operation; a Soak Test is the specific tool needed to catch this genuinely different category of failure mode.
 
 ---
+
+## Beginner — Question 21
+
+**Q21: What is the difference between Line Coverage and Branch Coverage as two distinct code-coverage metrics, and why can a codebase report high Line Coverage while still having significant Branch Coverage gaps?**
+
+Line Coverage measures the percentage of source code lines executed by at least one test; Branch Coverage measures the percentage of *decision outcomes* (each `if`/`else`, each `case`, each short-circuit condition) that were exercised in *both* directions — a single test can execute every line of an `if`/`else` block's body while only ever exercising one of the two branches, if the same lines happen to run regardless of which path is taken.
+
+```csharp
+public string Classify(int score)
+{
+    if (score >= 60) return "Pass";   // line executed if ANY test uses score >= 60
+    else return "Fail";                // line executed if ANY test uses score < 60
+}
+
+// A test suite with ONLY Classify(75) achieves 50% Line Coverage (one line/branch hit)
+// A test suite needs BOTH Classify(75) AND Classify(40) to achieve 100% Branch Coverage
+```
+
+Because Line Coverage can look deceptively high while an entire category of decision outcomes (an `else` branch, a `catch` block, a short-circuited `&&` condition) never actually executes during testing, Branch Coverage is the stricter, more informative metric — though as covered elsewhere, even 100% of either metric still doesn't guarantee the *assertions* in those executed lines are actually meaningful.
+
+**Common Pitfall:** treating a high Line Coverage percentage as sufficient evidence of thorough testing without checking Branch Coverage specifically — a codebase riddled with untested error-handling branches, edge-case `else` clauses, or exception paths can still report a misleadingly high Line Coverage number if those specific lines happen to also execute along the tested "happy path."
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is Testcontainers, and how does spinning up a real, disposable Docker container for a dependency (a database, a message broker) let an integration test avoid the trade-offs of both a hand-maintained shared test database and an in-memory provider (covered earlier)?**
+
+Testcontainers is a library that programmatically starts a real instance of a dependency — an actual PostgreSQL, SQL Server, or Kafka container — for the duration of a single test run, then tears it down afterward, giving each test run a genuine, isolated instance of the real technology rather than either a shared, stateful test database or an in-memory substitute that behaves subtly differently from production.
+
+```csharp
+var sqlContainer = new MsSqlBuilder().Build();
+await sqlContainer.StartAsync(); // a REAL SQL Server instance, running in Docker
+
+var connectionString = sqlContainer.GetConnectionString();
+// tests run against a GENUINE SQL Server, with REAL SQL Server-specific behavior
+
+await sqlContainer.DisposeAsync(); // container is torn down, LEAVING no shared state behind
+```
+
+```text
+Shared test database (covered earlier as a source of parallel-run flakiness):
+  REAL technology, but tests INTERFERE with each other's data
+
+In-memory provider (EF Core's InMemory, covered earlier): ISOLATED, but its
+  QUERY translation and constraint behavior genuinely DIFFERS from the real
+  database engine being TARGETED in production
+
+Testcontainers: a REAL, isolated instance PER test run -- genuine database
+  behavior AND per-run isolation, at the cost of REQUIRING Docker and a
+  SLOWER container-startup time PER test run compared to an in-memory fake
+```
+
+Because Testcontainers uses the *actual* database engine rather than an approximation, tests genuinely validate provider-specific SQL translation, constraints, and behavior that an in-memory substitute would silently get wrong — a meaningfully stronger integration-test guarantee, traded against the real cost of requiring Docker in the test environment and a slower per-test (or per-suite) startup than an in-memory fake.
+
+**Common Pitfall:** starting a fresh container per individual test method rather than per test suite/class — container startup, even for a lightweight image, adds real seconds of overhead; sharing one container across a test class's tests (with per-test data cleanup, rather than a fresh container each time) is usually the more practical balance between isolation and total suite runtime.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is Record/Replay Testing (the "VCR pattern") for HTTP-dependent tests, and how does recording a real interaction once, then replaying it deterministically on every subsequent test run, differ from hand-writing a mocked HTTP response?**
+
+Rather than manually constructing a fake HTTP response by hand (guessing at realistic headers, status codes, and body shape), Record/Replay testing captures the *actual* request/response exchange with a real external service once, saves it to a fixture file, and replays that exact recorded exchange on every subsequent test run — without ever hitting the real network again.
+
+```csharp
+// FIRST run (recording mode): the test hits the REAL external API,
+// and the library saves the actual request/response pair to a fixture file
+using var vcr = new VcrRecorder("fixtures/get-weather.json", mode: VcrMode.Record);
+var response = await httpClient.GetAsync("https://api.weather.example/current");
+
+// EVERY subsequent run (replay mode): the SAME fixture file is replayed --
+// no real network call happens, but the response is the GENUINE one captured earlier
+using var vcr = new VcrRecorder("fixtures/get-weather.json", mode: VcrMode.Replay);
+var response = await httpClient.GetAsync("https://api.weather.example/current"); // served from the fixture
+```
+
+Because the recorded fixture captures the *real* external service's actual response shape (every header, every field, every quirk), Record/Replay tests are far less likely to drift from reality than a hand-written mock response that a developer constructed from memory or documentation — while still running fully offline and deterministically once recorded, exactly like a hand-written mock would.
+
+**Common Pitfall:** never re-recording a fixture after the real external API's response shape genuinely changes — a stale recorded fixture can let tests pass indefinitely against a response shape the real service no longer actually returns, silently diverging from reality in exactly the way Record/Replay was meant to avoid; fixtures need a periodic re-recording process, not a one-time capture treated as permanently accurate.
+
+---

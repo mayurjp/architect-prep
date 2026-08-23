@@ -1671,4 +1671,70 @@ Because a GSI is automatically, asynchronously kept in sync with the base table 
 
 ---
 
+## Beginner — Question 21
+
+**Q21: What does BASE (Basically Available, Soft state, Eventual consistency) mean as a design philosophy, and how does it contrast with the ACID guarantees (covered under SQL Server) that relational databases prioritize?**
+
+BASE names the trade-off many NoSQL databases deliberately make: rather than guaranteeing every read sees the absolute latest write (ACID's Consistency), a BASE system prioritizes staying **Basically Available** even during a partition, accepts that its internal state may be **Soft** (temporarily inconsistent across replicas), and trusts that it will reach **Eventual consistency** once updates finish propagating.
+
+```text
+ACID (a typical relational database): every COMMITTED transaction is IMMEDIATELY
+  visible, CONSISTENTLY, to every SUBSEQUENT read -- strong GUARANTEES, at the
+  cost of POTENTIALLY blocking/rejecting operations DURING a network partition
+
+BASE (many NoSQL databases): the SYSTEM stays AVAILABLE even DURING a partition,
+  accepting that DIFFERENT replicas may briefly DISAGREE -- WEAKER guarantees,
+  in EXCHANGE for staying UP and RESPONSIVE under conditions where an ACID
+  system might have to REFUSE the operation entirely
+```
+
+Because BASE is fundamentally the practical embodiment of choosing Availability over Consistency under the CAP Theorem (covered earlier), it isn't a lesser or sloppier design philosophy — it's a deliberate trade-off appropriate for workloads (a social media feed, a shopping cart) where briefly serving slightly stale data is an acceptable cost for never being unavailable, unlike a banking ledger where ACID's stronger guarantees are usually non-negotiable.
+
+**Common Pitfall:** treating BASE as simply "NoSQL databases don't care about correctness" — BASE systems still converge to a correct, consistent state; the difference from ACID is *when* that consistency is guaranteed (eventually, rather than immediately upon every read), not whether it's guaranteed at all.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is the Write-Behind (Write-Back) caching pattern, and how does it differ from Cache-Aside (covered earlier) in terms of which system a write actually hits first?**
+
+Cache-Aside writes go directly to the database, with the cache updated or invalidated afterward — Write-Behind inverts this: a write goes to the cache *first*, is acknowledged to the caller immediately, and the cache asynchronously flushes the change to the underlying database sometime later, in the background.
+
+```text
+Cache-Aside write: APPLICATION writes to the DATABASE directly -> cache is
+  THEN invalidated/updated -- the DATABASE write's OWN latency is ON the
+  critical PATH of every write
+
+Write-Behind write: APPLICATION writes to the CACHE -> caller gets an
+  IMMEDIATE acknowledgment -> the CACHE asynchronously flushes the CHANGE
+  to the DATABASE later, IN THE BACKGROUND, off the CRITICAL path entirely
+```
+
+Because Write-Behind removes the database's own write latency from the caller's critical path entirely, it can dramatically improve write throughput and perceived latency — at the direct cost of a durability window: if the cache crashes before it has flushed a pending write to the database, that write is genuinely lost, unlike Cache-Aside where every acknowledged write is already durably in the database by the time the caller gets a response.
+
+**Common Pitfall:** adopting Write-Behind caching for data where losing a few seconds' worth of unflushed writes during a cache-node crash is genuinely unacceptable (financial transactions, audit-critical records) — the pattern trades durability for write throughput, and that trade only makes sense for data where an occasional lost recent write is a tolerable cost, not for anything requiring a strict durability guarantee on every acknowledged write.
+
+---
+
+## Advanced — Question 21
+
+**Q21: What is DynamoDB's Single Table Design pattern, and why does it deliberately go against the relational instinct of one table per entity type?**
+
+Rather than modeling separate tables per entity type (`Users`, `Orders`, `OrderLines`) the way a relational schema naturally would, Single Table Design deliberately stores multiple, logically distinct entity types together in *one* physical DynamoDB table, using generic, overloaded partition/sort key naming conventions (`PK`/`SK`) so that a single `Query` operation can retrieve an entity and all of its related items in one request — trading relational normalization for DynamoDB's actual cost model, where a `Query` is efficient and a cross-table join simply doesn't exist.
+
+```text
+PK              | SK              | ...attributes...
+CUSTOMER#42     | METADATA        | Name, Email
+CUSTOMER#42     | ORDER#901       | OrderDate, Total
+CUSTOMER#42     | ORDER#902       | OrderDate, Total
+
+A SINGLE Query with PK = "CUSTOMER#42" retrieves the CUSTOMER's own METADATA
+  item AND every one of its ORDER items, in ONE request -- NO join, NO
+  separate round trip PER related entity type
+```
+
+Because DynamoDB has no native `JOIN` operation and charges per read/write capacity unit consumed, a design requiring multiple separate `Query`/`GetItem` calls across several tables to assemble one logical "customer with their orders" view is both slower and more expensive than a single table design's one-request retrieval — the pattern optimizes specifically for DynamoDB's actual pricing and performance model, at the cost of a schema that looks unfamiliar and much less normalized to anyone coming from a relational background.
+
+**Common Pitfall:** applying Single Table Design reflexively to every DynamoDB use case, including ones with genuinely varied, unpredictable, ad-hoc query patterns — the pattern earns its complexity specifically when access patterns are well-known and stable upfront (a prerequisite for designing the overloaded key structure correctly); a workload with frequently-changing or exploratory query needs may be better served by a more conventional, if less DynamoDB-idiomatic, table-per-entity-type design.
+
 ---
