@@ -1808,3 +1808,111 @@ Because this pattern — running analytics directly against fresh operational da
 **Common Pitfall:** assuming Synapse Link's analytical store queries consume the same Request Unit budget as the operational container — they're deliberately isolated, specifically so that even a heavy, complex analytical query running through Synapse cannot degrade the operational container's transactional throughput; conflating the two budgets leads to an inaccurate capacity-planning estimate for the operational workload.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is Azure Blob Storage's Lifecycle Management policy, and how does it automatically transition blobs between access tiers or delete them based on age, without manual intervention?**
+
+Rather than a script or scheduled job manually checking blob ages and moving/deleting them, a Lifecycle Management policy lets you declare rules directly on a Storage Account — "move blobs to Cool tier after 30 days of no access, Archive after 90 days, delete after 365 days" — and Azure automatically evaluates and applies those rules on an ongoing basis, entirely without custom code.
+
+```json
+{
+  "rules": [{
+    "name": "archiveOldLogs",
+    "type": "Lifecycle",
+    "definition": {
+      "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["logs/"] },
+      "actions": {
+        "baseBlob": {
+          "tierToCool":    { "daysAfterModificationGreaterThan": 30 },
+          "tierToArchive": { "daysAfterModificationGreaterThan": 90 },
+          "delete":        { "daysAfterModificationGreaterThan": 365 }
+        }
+      }
+    }
+  }]
+}
+```
+
+```text
+WITHOUT Lifecycle Management: a CUSTOM scheduled job/script must PERIODICALLY
+  scan blob ages and MANUALLY move/delete them -- extra CODE to write,
+  deploy, and MAINTAIN
+
+WITH Lifecycle Management: a DECLARATIVE policy, configured ONCE, lets
+  Azure ITSELF continuously apply the SAME tiering/deletion rules --
+  ZERO custom code, and the rules apply CONSISTENTLY going forward
+```
+
+Because storage costs scale directly with both volume and access tier (Hot costing more than Cool, which costs more than Archive, covered earlier), Lifecycle Management lets an organization automatically capture cost savings for data whose access pattern naturally cools over time (recent logs accessed frequently, older logs rarely if ever) without any developer needing to remember to manually manage that transition.
+
+**Common Pitfall:** setting Lifecycle Management rules based purely on age without considering Archive tier's meaningfully higher retrieval latency (hours, not milliseconds) — data that might occasionally need fast, urgent retrieval (compliance audits, incident investigation) should not be moved to Archive tier purely based on age alone, without confirming that latency trade-off is genuinely acceptable for that specific data.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is Azure Service Bus's Auto-Forwarding feature, and how does chaining a queue or subscription to automatically forward its messages to another queue/topic let you compose separate processing stages without writing custom relay code?**
+
+Auto-Forwarding configures a queue or subscription to automatically send every message it receives onward to a different destination queue or topic, entirely within the Service Bus namespace itself — letting you compose a multi-stage message pipeline (a subscription filtering for a specific message type, then auto-forwarding matching messages to a dedicated downstream queue) without writing any custom relay/forwarding code.
+
+```csharp
+// Configuring auto-forward on a Subscription (conceptual, via management SDK)
+var subscriptionOptions = new CreateSubscriptionOptions("UserUpdates", "HighPriorityFilter")
+{
+    ForwardTo = "HighPriorityProcessingQueue" // messages matching this subscription's filter
+                                                // are AUTOMATICALLY forwarded here
+};
+```
+
+```text
+WITHOUT Auto-Forwarding: a CUSTOM consumer must RECEIVE each message from
+  the SOURCE subscription and EXPLICITLY re-send it to the destination --
+  extra CODE, an extra HOP of custom logic, and a POTENTIAL point of failure
+
+WITH Auto-Forwarding: Service Bus ITSELF handles the FORWARDING, entirely
+  server-side -- NO custom relay code needed, and the FORWARDING happens
+  reliably as PART of the broker's own internal message handling
+```
+
+Because Auto-Forwarding lets a filtered subscription's matching messages flow directly into a dedicated downstream queue without any custom intermediary code, it's a useful building block for composing a multi-stage processing topology (route by message type via Topic/Subscription filters, covered earlier, then forward each filtered subset to its own dedicated processing queue) entirely through configuration.
+
+**Common Pitfall:** chaining many auto-forwarding hops together without considering the added latency and the practical limit Service Bus imposes on forwarding chain depth — while convenient for a small number of stages, an excessively long forwarding chain becomes harder to reason about and diagnose than an equivalent, more explicit application-level routing decision.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is Azure Cosmos DB's custom merge procedure for cross-region conflict resolution, and how does a user-defined merge function let concurrent updates to different fields of the same item combine automatically, rather than one write completely overwriting the other?**
+
+The default Last-Write-Wins conflict resolution (covered earlier for Cosmos DB's Multi-Region Writes) simply discards the "losing" write entirely, even if it modified a completely different field than the "winning" write — a custom merge procedure instead lets you register a stored procedure that Cosmos DB invokes automatically when a conflict is detected, receiving both conflicting versions of the item and returning a genuinely merged result combining both writes' distinct changes.
+
+```javascript
+// A registered merge procedure (JavaScript, runs server-side in Cosmos DB)
+function resolveConflict(incomingItem, existingItem) {
+    // merge FIELD-BY-FIELD rather than discarding one version entirely
+    return {
+        ...existingItem,
+        ...incomingItem,
+        tags: [...new Set([...(existingItem.tags || []), ...(incomingItem.tags || [])])] // union, not overwrite
+    };
+}
+```
+
+```text
+Last-Write-Wins: Region A updates "price," Region B CONCURRENTLY updates
+  "description" on the SAME item -- LWW picks ONE version ENTIRELY,
+  DISCARDING the other region's change COMPLETELY, even though the two
+  writes touched DIFFERENT, non-conflicting fields
+
+Custom merge procedure: the SAME two concurrent writes are PASSED to the
+  merge function, which INTELLIGENTLY combines them -- the RESULT reflects
+  BOTH the price update AND the description update, since neither
+  write's CHANGE needs to be discarded at all
+```
+
+Because many real-world "conflicts" are actually just concurrent updates to genuinely different, non-overlapping fields of the same item, a custom merge procedure can often combine them without any actual data loss — providing meaningfully better outcomes than Last-Write-Wins' blunt, all-or-nothing approach for exactly the class of conflicts where an intelligent, field-aware merge is actually possible.
+
+**Common Pitfall:** writing a custom merge procedure that assumes conflicts only ever involve non-overlapping fields — a genuine conflict where *both* regions modified the *same* field still requires an explicit tie-breaking decision within the merge function itself (which region's value for that specific field should win); a merge procedure needs to handle this case deliberately, not just the easier non-overlapping scenario.
+
+---

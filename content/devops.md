@@ -1903,3 +1903,87 @@ Because these four signals together cover both the *symptom* a user directly exp
 **Common Pitfall:** monitoring only the "happy path" average latency without separately tracking error-path latency and the error rate itself — a service returning errors quickly can show a deceptively good average latency number while actually failing a significant fraction of its traffic; the Golden Signals framework specifically calls out tracking Errors as its own distinct signal precisely to avoid this blind spot.
 
 ---
+
+## Beginner — Question 22
+
+**Q22: What is a Deployment Manifest (or Release Manifest), and how does explicitly recording exactly which artifact versions were deployed together as one release let a team answer "what exactly is running in production right now" precisely?**
+
+A Deployment Manifest is a small, versioned record — generated at release time — listing the exact version/commit SHA of every component (each microservice, each library, each configuration set) that was deployed together as part of one specific release, giving a team an authoritative, queryable answer to "what exact combination of versions is currently running" rather than having to piece that answer together from scattered deployment logs across multiple systems.
+
+```json
+{
+  "releaseId": "2026.08.23-1",
+  "deployedAt": "2026-08-23T14:30:00Z",
+  "services": {
+    "order-service": "v2.14.1 (a1b2c3d)",
+    "payment-service": "v1.9.0 (e4f5g6h)",
+    "notification-service": "v3.2.2 (i7j8k9l)"
+  }
+}
+```
+
+```text
+WITHOUT a Deployment Manifest: answering "what's ACTUALLY running in
+  production" means checking EACH individual service's OWN deployment
+  history SEPARATELY, and hoping they were all deployed TOGETHER
+  consistently
+
+WITH a Deployment Manifest: ONE record, generated AT release time, lists
+  the EXACT version combination for the ENTIRE release -- a SINGLE,
+  authoritative SOURCE answering the question DIRECTLY
+```
+
+Because incident investigation frequently starts with "exactly what was running when this happened," having an explicit, versioned Deployment Manifest for every release gives incident responders a precise, immediately queryable answer — rather than reconstructing that answer after the fact from potentially inconsistent, scattered per-service deployment logs, which becomes especially valuable the more independently-deployable services a system has.
+
+**Common Pitfall:** relying on each service's own deployment pipeline log as the sole record of "what's currently deployed," without a consolidated, cross-service manifest — reconstructing exactly which combination of versions was live at a specific past moment, across many independently-deployed services, becomes a genuinely difficult forensic exercise without one authoritative, release-level record.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: What is Environment Parity as a DevOps principle (from the Twelve-Factor App methodology), and how does divergence between development, staging, and production environments cause a bug to appear in only one of them?**
+
+Environment Parity is the practice of keeping development, staging, and production environments as similar as possible — same operating system, same dependency versions, same configuration structure (differing only in the actual configuration *values*, like connection strings) — specifically because divergence between environments is a classic source of "works on my machine" or "only fails in production" bugs that have nothing to do with the application code itself, and everything to do with subtle environmental differences.
+
+```text
+LOW Environment Parity: developer's LOCAL machine runs a DIFFERENT database
+  version than PRODUCTION; staging uses IN-MEMORY caching while production
+  uses REDIS -- a bug caused by a SUBTLE behavioral difference between
+  these DIFFERENT dependencies is INVISIBLE until it reaches PRODUCTION
+
+HIGH Environment Parity: EVERY environment runs the SAME database version,
+  the SAME caching technology, the SAME OS -- a bug reproducible in ONE
+  environment is RELIABLY reproducible in ALL of them, since the underlying
+  INFRASTRUCTURE is genuinely IDENTICAL
+```
+
+Because a bug caused by an environmental difference (a database version quirk, a missing system dependency, a different caching backend's subtly different behavior) is invisible in any environment that doesn't share that specific difference, low Environment Parity directly undermines the entire value of testing in staging before production — a passing staging test provides much weaker confidence about production behavior the more the two environments actually diverge underneath the application code itself.
+
+**Common Pitfall:** achieving parity for application-level configuration (environment variables, connection strings) while ignoring parity for the underlying infrastructure itself (OS version, installed system libraries, container base images) — the environmental differences most likely to cause a genuinely mysterious "only happens in production" bug are often at this deeper infrastructure level, not in application-level configuration values.
+
+---
+
+## Advanced — Question 22
+
+**Q22: What is a "Toil Budget" in Site Reliability Engineering, and how does explicitly tracking and capping time spent on manual, repetitive operational work — alongside the Error Budget (covered earlier) — push a team toward automating recurring operational tasks?**
+
+Toil is manual, repetitive, automatable operational work that provides no long-term value on its own (manually restarting a stuck service, manually running a routine cleanup script) — a Toil Budget explicitly caps how much of a team's total time is allowed to go toward this kind of work (Google's own SRE guidance famously suggests no more than 50%), and once that budget is exceeded, it becomes an explicit, prioritized signal that automating the recurring task is now more valuable than continuing to absorb it manually.
+
+```text
+WITHOUT a Toil Budget: manual, REPETITIVE operational tasks quietly
+  ACCUMULATE over time, consuming an ever-GROWING fraction of the team's
+  actual capacity, with NO explicit trigger prompting anyone to STOP and
+  automate them
+
+WITH a Toil Budget (e.g., capped at 50% of total time): once TOIL exceeds
+  the budget, it becomes an EXPLICIT, measurable SIGNAL -- exactly like an
+  exhausted Error Budget (covered earlier) triggers a SHIFT toward
+  reliability work, an exhausted TOIL Budget triggers a SHIFT toward
+  automating the SPECIFIC recurring tasks consuming that time
+```
+
+Because toil that isn't explicitly measured tends to silently accumulate and crowd out genuinely valuable engineering work (feature development, architectural improvement, actual reliability investment), giving it the same explicit, quantified budget treatment as an Error Budget provides a concrete, data-driven trigger for prioritizing automation — rather than relying on a vague, hard-to-act-on sense that "we seem to be doing a lot of repetitive manual work lately."
+
+**Common Pitfall:** tracking toil informally or anecdotally ("it feels like we spend a lot of time on manual deploys") rather than measuring it concretely (hours per week spent on specifically-identified repetitive tasks) — without a genuine measurement, there's no objective threshold to trigger the "now automate this" decision, and toil can quietly consume a growing share of a team's capacity indefinitely, with no data-driven signal to prompt intervention.
+
+---
