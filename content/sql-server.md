@@ -2008,3 +2008,289 @@ Because this optimization specifically targets the CPU overhead of row-by-row pr
 **Common Pitfall:** assuming Batch Mode on Rowstore makes a dedicated Columnstore index unnecessary for genuinely large-scale analytical workloads — Batch Mode execution alone doesn't provide Columnstore's own storage-level benefits (compression, column-oriented I/O reduction, covered earlier); for a table whose *primary* purpose is large-scale analytical querying, a genuine Columnstore index still typically provides substantially better overall performance than Rowstore storage with Batch Mode execution alone.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is the difference between a Stored Procedure and a User-Defined Function (Scalar vs. Table-Valued) in SQL Server?**
+
+A Stored Procedure is a precompiled batch of T-SQL that can perform any combination of DDL/DML, return zero or more result sets, accept input/output parameters, and be invoked with `EXEC`. A User-Defined Function (UDF) comes in two flavors — a Scalar Function returns a single value and can be used inline inside a `SELECT`, `WHERE`, or computed column, while a Table-Valued Function (TVF) returns a table and can be used anywhere a table or view is used, such as in a `FROM` clause or `CROSS APPLY`.
+
+```sql
+-- Scalar function: usable inline, but often forces row-by-row evaluation
+CREATE FUNCTION dbo.GetFullName(@First NVARCHAR(50), @Last NVARCHAR(50))
+RETURNS NVARCHAR(101)
+AS
+BEGIN
+    RETURN @First + N' ' + @Last;
+END;
+
+-- Inline Table-Valued Function: expanded into the calling query like a view
+CREATE FUNCTION dbo.GetActiveOrders(@CustomerID INT)
+RETURNS TABLE
+AS
+RETURN (
+    SELECT OrderID, OrderDate, Total
+    FROM Orders
+    WHERE CustomerID = @CustomerID AND Status = 'Active'
+);
+
+-- Usage
+SELECT c.CustomerID, o.OrderID, dbo.GetFullName(c.FirstName, c.LastName) AS FullName
+FROM Customers c
+CROSS APPLY dbo.GetActiveOrders(c.CustomerID) o;
+```
+
+The critical performance distinction is that a **Scalar Function** and a **Multi-Statement TVF** (one whose body contains a `BEGIN...END` block with its own logic) are executed once per row, largely outside the optimizer's ability to estimate their cost accurately — historically this meant zero parallelism and a fixed, often wildly wrong, row-count estimate of "1," leading to disastrous execution plans on large tables. An **Inline TVF**, by contrast, is essentially a parameterized view: SQL Server substitutes its definition directly into the calling query and optimizes it as a single unit, giving it performance comparable to a hand-written join.
+
+A Stored Procedure cannot be referenced inside a `SELECT` list or `FROM` clause the way a function can, but it can execute dynamic SQL, manage transactions explicitly (`BEGIN TRAN`/`COMMIT`), and return multiple result sets — none of which any UDF is allowed to do.
+
+**Common Pitfall:** reaching for a Scalar or Multi-Statement TVF for reusability inside a query and then being surprised the query runs orders of magnitude slower than the equivalent inline logic — the fix is almost always to rewrite it as an Inline TVF or a plain `JOIN`/`CROSS APPLY` against a view.
+
+**Practical guidance:** prefer Inline TVFs or views for reusable query logic referenced inside other queries; use Stored Procedures for anything transactional, multi-statement, or DDL-driven; avoid Scalar and Multi-Statement TVFs in row-heavy hot paths.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What are SQL Server's backup types (Full, Differential, Transaction Log), and how do they relate to the database's Recovery Model (Simple, Full, Bulk-Logged)?**
+
+A **Full backup** captures the entire database at a point in time. A **Differential backup** captures only the data pages that changed since the last Full backup, making it smaller and faster than another Full but still requiring that Full as its base. A **Transaction Log backup** captures the log records generated since the last log backup, enabling point-in-time restore — but it is only available under certain Recovery Models.
+
+The **Recovery Model** determines how the transaction log is managed and which backup strategies are possible:
+
+```text
+Simple:       log is truncated automatically after each checkpoint;
+              NO log backups possible; can only restore to the
+              time of the last Full/Differential backup.
+
+Full:         log is retained until explicitly backed up; supports
+              log backups and true POINT-IN-TIME restore, down to
+              a specific transaction or timestamp.
+
+Bulk-Logged:  like Full, but minimally logs certain bulk operations
+              (BULK INSERT, index rebuilds) for performance; point-in-
+              time restore is NOT guaranteed for the interval covering
+              a bulk-logged operation.
+```
+
+A typical production strategy under the Full recovery model is: Full backup weekly, Differential backup nightly, Transaction Log backup every 15 minutes — restoring means applying the last Full, the last Differential since it, then every log backup since that Differential, in order.
+
+```sql
+BACKUP DATABASE Sales TO DISK = 'D:\Backups\Sales_Full.bak';
+BACKUP DATABASE Sales TO DISK = 'D:\Backups\Sales_Diff.bak' WITH DIFFERENTIAL;
+BACKUP LOG Sales TO DISK = 'D:\Backups\Sales_Log.trn';
+
+RESTORE DATABASE Sales FROM DISK = 'D:\Backups\Sales_Full.bak' WITH NORECOVERY;
+RESTORE DATABASE Sales FROM DISK = 'D:\Backups\Sales_Diff.bak' WITH NORECOVERY;
+RESTORE LOG Sales FROM DISK = 'D:\Backups\Sales_Log.trn' WITH RECOVERY;
+```
+
+**Common Pitfall:** leaving a database in the Full recovery model but never taking log backups — the transaction log then grows unbounded (it can only be truncated by a log backup), eventually filling the disk, exactly the scenario covered in an earlier deletion-crash question. Another common mistake is assuming Simple recovery model is "safer" because it's simpler — it actually means an unrecoverable gap between backups equal to the entire interval since the last Full/Differential.
+
+**Practical guidance:** use Simple for dev/test or read-mostly databases where losing recent changes is acceptable; use Full recovery with regular log backups for any production OLTP system requiring point-in-time recovery and minimal data loss (low RPO).
+
+---
+
+## Beginner — Question 26
+
+**Q26: What are SQL Server Agent Jobs, and how are they typically used for automated index and statistics maintenance?**
+
+SQL Server Agent is a Windows service that runs scheduled, automated tasks called **Jobs**, each composed of one or more **Steps** (T-SQL, PowerShell, SSIS packages, OS commands) and a **Schedule** (a specific time, a recurring interval, or triggered on Agent startup). It is the standard mechanism for anything that needs to run unattended and on a schedule: backups, ETL, index/statistics maintenance, and custom monitoring alerts.
+
+The most common maintenance job pattern rebuilds or reorganizes fragmented indexes and refreshes stale statistics, since both degrade query performance over time as data changes:
+
+```sql
+-- A maintenance step's core logic, executed nightly via an Agent Job
+SELECT s.avg_fragmentation_in_percent, i.name, i.object_id, i.index_id
+INTO #Frag
+FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, 'LIMITED') s
+JOIN sys.indexes i ON s.object_id = i.object_id AND s.index_id = i.index_id
+WHERE s.avg_fragmentation_in_percent > 5 AND i.name IS NOT NULL;
+
+-- Typical thresholds: REORGANIZE 5-30%, REBUILD > 30%
+-- (a real job wraps this in a cursor/loop generating ALTER INDEX statements)
+
+UPDATE STATISTICS dbo.Orders WITH FULLSCAN;
+```
+
+Rather than hand-rolling this logic, most environments use Ola Hallengren's widely-adopted open-source maintenance solution (`IndexOptimize`, `DatabaseBackup`, `CommandExecute` stored procedures) wired into Agent Jobs, or SSMS's built-in **Maintenance Plans**, a GUI-driven wrapper over similar logic — Maintenance Plans are easier to set up but less flexible and harder to source-control than a scripted solution.
+
+Agent also supports **Alerts**, which can fire a Job automatically in response to a specific error number, severity level, or performance condition (e.g., auto-notify or auto-remediate on a "database out of space" error), and **Operators**, which define who gets emailed on job failure.
+
+**Common Pitfall:** scheduling a full index rebuild job during business hours on a large table — an offline rebuild takes an exclusive lock for its duration, and even an `ONLINE = ON` rebuild (Enterprise Edition) still adds meaningful I/O and log-generation overhead; always schedule heavy maintenance during a genuine low-traffic window and prefer `REORGANIZE` (which is always online) for moderate fragmentation.
+
+**Practical guidance:** never rely on manual, one-off maintenance — automate index/statistics upkeep and backup verification as Agent Jobs from day one, and monitor job history (`msdb.dbo.sysjobhistory`) as part of routine health checks.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What are SQL Server's Window Functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`/`LEAD`), and how does the `OVER (PARTITION BY ... ORDER BY ...)` clause let them compute a value across a set of related rows without collapsing them into a single group like `GROUP BY` does?**
+
+A window function computes a value across a "window" of rows related to the current row — defined by the `OVER` clause's `PARTITION BY` (which rows belong together) and `ORDER BY` (what order to process them in) — while still returning one row per input row, unlike `GROUP BY` which aggregates multiple rows into one.
+
+```sql
+SELECT
+    CustomerID,
+    OrderDate,
+    Total,
+    ROW_NUMBER() OVER (PARTITION BY CustomerID ORDER BY OrderDate DESC) AS RowNum,
+    RANK()       OVER (PARTITION BY CustomerID ORDER BY Total DESC)     AS TotalRank,
+    DENSE_RANK() OVER (PARTITION BY CustomerID ORDER BY Total DESC)     AS TotalDenseRank,
+    LAG(Total, 1)  OVER (PARTITION BY CustomerID ORDER BY OrderDate) AS PrevOrderTotal,
+    LEAD(Total, 1) OVER (PARTITION BY CustomerID ORDER BY OrderDate) AS NextOrderTotal
+FROM Orders;
+```
+
+`ROW_NUMBER()` assigns a strictly unique, sequential number within each partition with no ties — this makes it the standard tool for "get the most recent order per customer" via a CTE filtering `WHERE RowNum = 1`. `RANK()` and `DENSE_RANK()` both assign the same rank to tied rows, but `RANK()` leaves a gap afterward (1, 2, 2, 4) reflecting how many rows tied, while `DENSE_RANK()` does not (1, 2, 2, 3). `LAG`/`LEAD` read a value from a prior or following row within the same ordered partition — invaluable for computing period-over-period deltas (e.g., this order's total minus the previous order's total) entirely in SQL, without a self-join.
+
+**Edge case:** without a `PARTITION BY` clause, the window spans the entire result set as one partition — useful for a running total or "rank across all customers" but easy to write by accident when you meant a per-group calculation, silently producing globally-scoped rather than per-group numbers.
+
+**Common Pitfall:** using window functions in the `WHERE` clause directly — they are logically evaluated after `WHERE`/`GROUP BY`/`HAVING`, so `WHERE ROW_NUMBER() OVER (...) = 1` raises an error; the fix is wrapping the query in a CTE or subquery and filtering in the outer query.
+
+**Practical guidance:** window functions replace what used to require self-joins or correlated subqueries for top-N-per-group and running-total problems, and the execution plan typically handles them far more efficiently than the equivalent hand-rolled join.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is SQL Server Full-Text Search, and why does it outperform a `LIKE '%keyword%'` predicate for searching large volumes of free-text content?**
+
+Full-Text Search is a separate indexing engine built into SQL Server that maintains an inverted index — mapping individual words to the rows containing them — over designated text columns, enabling fast, linguistically-aware searches (`CONTAINS`, `FREETEXT`) that understand word boundaries, inflectional forms (run/running/ran), and proximity, none of which a plain `LIKE` predicate can do.
+
+```sql
+CREATE FULLTEXT CATALOG ArticleCatalog AS DEFAULT;
+
+CREATE FULLTEXT INDEX ON Articles(Body LANGUAGE 1033)
+KEY INDEX PK_Articles_ArticleID
+ON ArticleCatalog
+WITH CHANGE_TRACKING AUTO;
+
+-- Fast: uses the inverted index, understands word forms
+SELECT ArticleID, Title
+FROM Articles
+WHERE CONTAINS(Body, '"database performance" OR tuning');
+
+-- Slow at scale: LIKE '%...%' cannot use a B-tree index at all
+SELECT ArticleID, Title
+FROM Articles
+WHERE Body LIKE '%database performance%';
+```
+
+A leading wildcard (`%keyword%`) makes any regular B-tree index on that column useless, because the index is sorted by leading characters and a leading `%` means the optimizer cannot seek to a starting point — the engine falls back to scanning every row and evaluating the pattern against each one, an O(n) cost that gets dramatically worse as the table grows. Full-Text Search instead pre-tokenizes the content at index-build/update time, so a search becomes an index lookup against the word rather than a scan of the raw text.
+
+`CONTAINS` supports precise boolean and proximity syntax (`NEAR`, weighted terms via `ISABOUT`); `FREETEXT` is a looser, relevance-ranked match closer to a search-engine query, useful for user-typed search boxes rather than exact phrase matching.
+
+**Common Pitfall:** assuming Full-Text Search updates its index synchronously with every `INSERT`/`UPDATE` like a normal index — by default it uses `CHANGE_TRACKING AUTO`, which processes changes asynchronously in the background, so a just-inserted row may briefly not appear in full-text search results.
+
+**Practical guidance:** use `LIKE` freely for short, indexed, non-wildcard-prefixed lookups (`LIKE 'Smith%'` can still seek); switch to Full-Text Search once you need free-text search over large text/document columns — trying to scale `LIKE '%...%'` on a growing table is a common, entirely avoidable performance cliff.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is SQL Server's native JSON support (`OPENJSON`, `JSON_VALUE`, `FOR JSON`), and how does it let JSON text be queried and produced using ordinary T-SQL, without a dedicated JSON column type?**
+
+Unlike some other database engines, SQL Server has no native `JSON` data type — JSON is stored as plain `NVARCHAR(MAX)` text, and a set of built-in functions parse, query, and generate that text. `JSON_VALUE` extracts a single scalar value by path; `OPENJSON` shreds a JSON array/object into a relational rowset usable in a `FROM` clause; `FOR JSON` does the reverse, serializing relational query results into JSON text.
+
+```sql
+DECLARE @json NVARCHAR(MAX) = N'
+{
+  "orderId": 1001,
+  "customer": { "name": "Alice", "id": 42 },
+  "items": [
+    { "sku": "A1", "qty": 2 },
+    { "sku": "B7", "qty": 1 }
+  ]
+}';
+
+-- JSON_VALUE: extract one scalar
+SELECT JSON_VALUE(@json, '$.customer.name') AS CustomerName;
+
+-- OPENJSON: shred the "items" array into rows
+SELECT item.sku, item.qty
+FROM OPENJSON(@json, '$.items')
+WITH (sku VARCHAR(10) '$.sku', qty INT '$.qty') AS item;
+
+-- FOR JSON: produce JSON from a relational query
+SELECT OrderID, CustomerName, OrderDate
+FROM Orders
+FOR JSON PATH, ROOT('orders');
+```
+
+`OPENJSON` used with an explicit `WITH` clause (as above) returns strongly-typed columns and is the efficient form; used without `WITH`, it returns a generic key/value/type rowset requiring manual pivoting, which is more flexible but slower and messier for known schemas. `ISJSON()` validates whether a string is well-formed JSON before attempting to parse it, useful as a `CHECK` constraint on a text column intended to hold JSON.
+
+**Edge case:** `JSON_VALUE` only returns scalar values — attempting to extract an object or array with it returns `NULL` (or errors, depending on settings); use `JSON_QUERY` instead when the target path points at an object/array you want to keep as JSON text.
+
+**Common Pitfall:** treating a JSON column as a substitute for proper relational modeling — because there's no native JSON index, filtering on a value buried in JSON text (`WHERE JSON_VALUE(...) = ...`) forces a scan unless you add a computed column over that path and index the computed column separately.
+
+**Practical guidance:** JSON functions are ideal for ingesting semi-structured payloads (API responses, config blobs) or shaping query results for an API response directly in SQL — not a replacement for normalized columns on data you regularly filter or join on.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is `tempdb`, and how do PAGELATCH contention and multiple data files address one of its most common scalability bottlenecks?**
+
+`tempdb` is a system database shared by every connection to the SQL Server instance, used for temporary tables (`#temp`), table variables, sort/hash spill space for large query operations, the version store backing RCSI and snapshot isolation, and internal worktables. Unlike user databases, `tempdb` is recreated from scratch on every SQL Server service restart, so it's tuned for high-throughput, disposable use rather than durability.
+
+Under high concurrency, many sessions creating and dropping temporary objects simultaneously contend for the same in-memory allocation structures — specifically the **PFS (Page Free Space)**, **GAM (Global Allocation Map)**, and **SGAM** pages that track which pages are free — because by default `tempdb` has only a single data file, so every session's allocation request serializes against the same handful of hot pages. This shows up in `sys.dm_os_wait_stats` as `PAGELATCH_UP`/`PAGELATCH_EX` waits concentrated on `tempdb`'s allocation pages, distinct from `PAGEIOLATCH` waits which indicate physical disk I/O rather than in-memory contention.
+
+```sql
+-- Diagnose: high PAGELATCH waits specifically on tempdb allocation pages
+SELECT wait_type, waiting_tasks_count, wait_time_ms
+FROM sys.dm_os_wait_stats
+WHERE wait_type LIKE 'PAGELATCH%'
+ORDER BY wait_time_ms DESC;
+
+-- Mitigate: add multiple, EQUALLY-SIZED tempdb data files
+ALTER DATABASE tempdb ADD FILE (
+    NAME = tempdev2, FILENAME = 'D:\TempDB\tempdb2.ndf', SIZE = 512MB, FILEGROWTH = 512MB
+);
+-- Repeat to reach one file per up-to-8 logical CPU cores (common guidance),
+-- then re-evaluate under load rather than blindly maximizing file count.
+```
+
+Adding multiple data files lets SQL Server's proportional-fill allocation algorithm spread new page allocations round-robin across files, spreading PFS/GAM contention across multiple sets of allocation pages instead of funneling every session through one. Modern SQL Server versions (2016+) also enable trace flags 1117/1118-equivalent behavior (uniform extent allocation, proportional autogrow) by default, reducing — but not eliminating — the need for manual tuning.
+
+**Common Pitfall:** adding many tempdb files but leaving them unequally sized or with different autogrowth settings — proportional fill favors the file with the most free space, so an uneven file defeats the purpose and funnels allocations right back to one file.
+
+**Practical guidance:** size all `tempdb` files identically, pre-size them generously to avoid autogrowth stalls during peak load, and place `tempdb` on the fastest available storage since it's shared infrastructure every session depends on.
+
+---
+
+## Advanced — Question 25
+
+**Q25: What is Table Partitioning in SQL Server, and how do a Partition Function and Partition Scheme let a single very large table be physically split across multiple storage units while remaining logically one table?**
+
+Table Partitioning divides a single table's rows across multiple internal partitions based on the value of a chosen **partition column**, while every query, index, and constraint still addresses the table as a single logical object — application code and most T-SQL are unaware partitioning exists. It's implemented via two objects: a **Partition Function**, which defines the boundary values splitting the data into ranges, and a **Partition Scheme**, which maps each of those ranges onto a physical filegroup.
+
+```sql
+-- 1. Partition function: defines boundaries (here, by year)
+CREATE PARTITION FUNCTION PF_OrderYear (DATETIME)
+AS RANGE RIGHT FOR VALUES ('2023-01-01', '2024-01-01', '2025-01-01');
+
+-- 2. Partition scheme: maps each range to a filegroup
+CREATE PARTITION SCHEME PS_OrderYear
+AS PARTITION PF_OrderYear
+TO (FG_Pre2023, FG_2023, FG_2024, FG_2025Plus);
+
+-- 3. Create the table ON the scheme, keyed by the partitioning column
+CREATE TABLE Orders (
+    OrderID INT IDENTITY,
+    OrderDate DATETIME NOT NULL,
+    CustomerID INT,
+    Total MONEY,
+    CONSTRAINT PK_Orders PRIMARY KEY (OrderID, OrderDate)
+) ON PS_OrderYear(OrderDate);
+```
+
+The primary payoff is **partition elimination**: a query filtering `WHERE OrderDate >= '2024-06-01'` lets the optimizer skip scanning partitions outside that range entirely, dramatically reducing I/O on a table with billions of rows. Equally important operationally is **partition switching** — `ALTER TABLE ... SWITCH PARTITION` reassigns an entire partition's data to (or from) another table as a near-instantaneous metadata-only operation, since no data actually moves; this is the standard technique for loading or purging huge date ranges (e.g., archiving "2023 data") without the massive log-generation and locking a row-by-row `DELETE` would cause — directly solving the transaction-log-explosion problem covered in an earlier scenario question.
+
+**Edge case:** `SWITCH` requires the source and target partitions/tables to have matching schema, constraints, and — critically — the target partition must already be verifiably empty, or the switch fails outright.
+
+**Common Pitfall:** partitioning a table expecting an automatic performance win for *all* queries — a query that doesn't filter on the partitioning column gets no elimination benefit and must still scan every partition, so partitioning helps specific access patterns (date-range queries, bulk load/archive), not general query speed.
+
+**Practical guidance:** reach for partitioning once a table's rows exceed the point where index maintenance, backups, or purge operations become individually painful at the whole-table level — it's an operational and I/O-elimination tool first, a raw query-speed tool only for partition-aligned predicates.
+
+---

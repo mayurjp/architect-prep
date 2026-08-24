@@ -2013,3 +2013,236 @@ Because this failure mode depends entirely on a specific, non-compliant intermed
 **Common Pitfall:** debugging a mysterious, proxy-topology-specific hang by focusing exclusively on the client and origin server's own code, without considering that an intermediary proxy in the actual production request path might be silently mishandling the `100 Continue` interim response — a client library's configurable option to simply disable `Expect: 100-continue` behavior (sending the body immediately, without waiting) is a common, pragmatic workaround once this specific incompatibility is identified.
 
 ---
+
+## Beginner — Question 25
+
+**Q25: What is a WebSocket connection, and how is it fundamentally different from a regular HTTP request/response cycle?**
+
+A regular HTTP request/response cycle is inherently *half-duplex and client-initiated*: the client sends a request, the server sends back exactly one response, and the exchange is done — if the server later has new data, it has no way to push it to the client without the client asking again (via polling, covered elsewhere). A WebSocket connection, established via the `Upgrade` handshake (covered earlier), is instead *full-duplex and persistent*: once upgraded, either side — client or server — can send messages to the other at any time, independently, over the same long-lived connection, with no request/response pairing required at all.
+
+```text
+HTTP request/response (half-duplex, one-shot):
+  Client -> Server: GET /price          Server -> Client: {"price": 100}
+  (connection typically closes or goes idle -- if the price changes a
+   moment later, the SERVER has NO way to tell the client; the client
+   must ask AGAIN, later, to find out)
+
+WebSocket (full-duplex, persistent):
+  Client <-------- open connection, stays OPEN indefinitely --------> Server
+  Client -> Server: {"subscribe": "price"}
+  Server -> Client: {"price": 100}
+  ... (no new request from the client) ...
+  Server -> Client: {"price": 101}   <- SERVER pushes this UNPROMPTED,
+                                          the MOMENT the price changes
+  Client -> Server: {"unsubscribe": "price"}
+```
+
+Because the connection stays open and either party can write to it whenever it wants, WebSockets are suited to scenarios needing genuinely real-time, bidirectional updates — live chat, collaborative editing cursors, stock tickers, multiplayer game state — where the server frequently has new data to push and repeatedly re-establishing a fresh HTTP connection (or polling on a timer) would add latency and wasted overhead.
+
+**Common Pitfall:** reaching for WebSockets for every feature that merely *displays* server-side data, even when updates are infrequent or the client doesn't need sub-second freshness — a WebSocket connection carries ongoing server-side resource cost (an open socket, held memory per connection) for the lifetime of the session, so a simpler HTTP request (possibly on a periodic timer, or paired with long polling) is often the more appropriate, lower-overhead choice unless genuinely real-time, frequent, bidirectional communication is actually required.
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is a Webhook, and how does it differ from a client repeatedly polling an API to check for updates?**
+
+A Webhook inverts who initiates the HTTP request: instead of a client repeatedly asking a server "has anything changed yet?" (polling), the client registers a URL of its own — an endpoint it controls — and the *server* makes an outbound HTTP request (typically a `POST`) to that URL the moment a relevant event actually happens, pushing the notification to the client rather than waiting to be asked.
+
+```text
+Polling (client repeatedly asks):
+  Client -> Server: GET /orders/status   (every 5 seconds, FOREVER)
+  Server -> Client: {"status": "pending"}
+  Client -> Server: GET /orders/status   (still pending... ask again)
+  Server -> Client: {"status": "pending"}
+  ... (order finally ships, but the client won't KNOW until its NEXT poll) ...
+  Client -> Server: GET /orders/status
+  Server -> Client: {"status": "shipped"}   <- finally noticed, LATE
+
+Webhook (server pushes the moment it happens):
+  Client registers ONCE: "call https://client.example.com/webhooks/orders
+                            whenever an order's status changes"
+  ... (order ships) ...
+  Server -> Client: POST https://client.example.com/webhooks/orders
+                    {"orderId": 42, "status": "shipped"}
+  -- delivered IMMEDIATELY, with NO wasted requests asking "anything yet?"
+```
+
+Because polling wastes the vast majority of its requests on "no, nothing changed yet" responses (and introduces up to a full polling-interval's worth of latency before a change is even noticed), webhooks are far more efficient for event-driven integrations between two independently-operated systems — a payment provider notifying a merchant's backend the moment a charge succeeds, a CI system notifying a chat app the moment a build finishes — since the receiving side does no work at all until there's genuinely something to report.
+
+**Common Pitfall:** treating a webhook as if it were as reliable and synchronous as a direct function call, forgetting it's still just an ordinary outbound HTTP request from the sender's perspective — it can fail, arrive late, arrive more than once, or never arrive at all if the receiver's endpoint is unreachable; the reliability challenges this introduces (retries, ordering, idempotency, covered in depth under Advanced) are the price paid for webhooks' efficiency advantage over polling.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: How do you implement WebSocket-based real-time communication in ASP.NET Core using SignalR, and what problem does SignalR actually solve on top of raw WebSockets?**
+
+Raw WebSockets (covered earlier) only provide the low-level, bidirectional message-passing primitive — a real application built directly on raw WebSockets still has to solve transport fallback (some corporate proxies/older clients block WebSocket upgrades entirely), connection lifecycle management, tracking which connections belong to which logical "groups" (e.g., all users in a given chat room), and serializing method calls into messages, all itself. SignalR is ASP.NET Core's abstraction over exactly this: it automatically negotiates the best available transport (WebSockets, falling back to Server-Sent Events, falling back further to long polling, if WebSockets aren't usable), and organizes real-time logic around **Hubs** — server-side classes exposing methods clients can invoke remotely, with built-in connection/group management.
+
+```csharp
+public class ChatHub : Hub
+{
+    public async Task SendMessage(string user, string message)
+    {
+        // Broadcasts to EVERY connected client
+        await Clients.All.SendAsync("ReceiveMessage", user, message);
+    }
+
+    public async Task JoinRoom(string roomName)
+    {
+        await Groups.AddToGroupAsync(Context.ConnectionId, roomName);
+        // Now scoped to just THIS group, not every connected client
+        await Clients.Group(roomName).SendAsync("UserJoined", Context.ConnectionId);
+    }
+}
+
+// Program.cs
+builder.Services.AddSignalR();
+app.MapHub<ChatHub>("/hubs/chat");
+```
+
+SignalR's `Groups` API handles the bookkeeping of tracking which connection IDs belong to which logical group so `Clients.Group("room1")` can fan a message out to exactly the right subset of open connections, without the application itself maintaining that mapping manually — and because the client-side SignalR library automatically falls back to a non-WebSocket transport when needed, the same server-side Hub code works transparently across clients on networks that block raw WebSocket upgrades.
+
+**Common Pitfall:** assuming a single SignalR server instance's in-memory connection/group tracking is sufficient once the application is scaled out to multiple server instances behind a load balancer — a message broadcast by Hub code on one instance only reaches clients connected to *that* instance by default; scaling SignalR out requires a backplane (Redis, Azure SignalR Service) so a message raised on any instance is relayed to clients connected to every instance, a scenario covered further under Scenario.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: How do you design a webhook receiver endpoint securely, so it can trust that an incoming request genuinely came from the expected sender and hasn't been replayed?**
+
+An HTTP endpoint accepting webhooks is, from the outside, just an ordinary public URL — without additional verification, anyone who discovers or guesses it could send forged requests impersonating the real sender. The standard defense is a **signature header**: the sender computes an HMAC-SHA256 hash of the request body using a secret key shared only with the receiver, and sends that hash alongside the payload — the receiver recomputes the same hash independently and compares it, confirming the payload wasn't forged or tampered with in transit. A **timestamp**, also signed as part of the HMAC input, defends against replay: the receiver rejects any request whose timestamp is too far in the past, even if the signature itself is technically valid.
+
+```csharp
+[HttpPost("webhooks/payments")]
+public async Task<IActionResult> ReceiveWebhook()
+{
+    var body = await new StreamReader(Request.Body).ReadToEndAsync();
+    var timestamp = Request.Headers["X-Signature-Timestamp"].ToString();
+    var receivedSignature = Request.Headers["X-Signature"].ToString();
+
+    // Reject stale requests (replay protection) -- 5 minute tolerance
+    var sentAt = DateTimeOffset.FromUnixTimeSeconds(long.Parse(timestamp));
+    if (Math.Abs((DateTimeOffset.UtcNow - sentAt).TotalMinutes) > 5)
+        return Unauthorized("Stale timestamp");
+
+    // Recompute the HMAC over "timestamp.body", exactly as the SENDER did
+    var signedPayload = $"{timestamp}.{body}";
+    using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(_webhookSecret));
+    var computedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes(signedPayload));
+    var computedSignature = Convert.ToHexString(computedHash).ToLower();
+
+    // Constant-time comparison -- avoids leaking timing information
+    if (!CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(computedSignature),
+            Encoding.UTF8.GetBytes(receivedSignature)))
+        return Unauthorized("Invalid signature");
+
+    // Only NOW, having verified authenticity AND freshness, process the payload
+    return Ok();
+}
+```
+
+Signing the timestamp *together with* the body (rather than the body alone) is what makes replay protection meaningful — an attacker who captures a genuinely valid, correctly-signed request from the wire cannot simply resend it later and have it accepted, since its timestamp will eventually fall outside the receiver's freshness window, and the attacker cannot forge a new, later timestamp without knowing the shared secret needed to recompute a matching signature.
+
+**Common Pitfall:** comparing the computed and received signatures using a plain string/byte equality check (`==` or `.Equals`) instead of a constant-time comparison — a naive comparison that returns as soon as it finds a mismatched byte leaks timing information an attacker can exploit to guess the correct signature one byte at a time; `CryptographicOperations.FixedTimeEquals` (or an equivalent constant-time comparison) closes off this specific timing side-channel.
+
+---
+
+## Advanced — Question 25
+
+**Q25: How do WebSocket ping/pong frames and keep-alives work, and how do servers detect and clean up a WebSocket connection that has died silently (e.g., the client's network dropped) without a clean close handshake?**
+
+TCP itself doesn't reliably notice a dead peer quickly — a connection whose other end vanished (laptop lid closed, Wi-Fi dropped, NAT entry expired) can appear open indefinitely from the surviving side's perspective, with no data ever arriving to signal otherwise. WebSocket's protocol defines dedicated **ping** and **pong** control frames specifically to detect this: one side periodically sends a `ping` frame, and a healthy, still-connected peer's WebSocket implementation is required to respond with a `pong` frame automatically — if no `pong` arrives within a configured timeout, the sender concludes the connection is dead and closes/cleans it up, even though no clean close handshake ever happened.
+
+```text
+Server sends: PING frame  (small control frame, negligible overhead)
+Healthy client's WebSocket stack: automatically responds with PONG
+  -- Server receives PONG within timeout -> connection confirmed ALIVE
+
+Server sends: PING frame
+Client's network silently DIED (no TCP FIN, no WebSocket close frame --
+  just... nothing, ever again)
+Server: waits for PONG... times out after N seconds with NO response
+  -> Server concludes the connection is DEAD, releases its resources
+     (removes it from any in-memory connection/group tracking, frees the
+      socket) EVEN THOUGH no clean close handshake ever occurred
+```
+
+Because a silently-dead connection otherwise lingers in server memory indefinitely (still counted as "connected," still targeted by broadcasts that will simply never be delivered), ping/pong-based keep-alives are essential for correctly maintaining an accurate picture of which connections are genuinely still reachable — SignalR (covered earlier), for example, implements this internally via its own configurable `KeepAliveInterval` and `ClientTimeoutInterval`, automatically disconnecting and cleaning up a Hub connection that stops responding to keep-alive pings.
+
+**Common Pitfall:** relying solely on the application's own message traffic to infer a connection is alive, without dedicated ping/pong keep-alives — a connection that's genuinely dead but happens not to be actively exchanging application messages at that moment (an idle chat connection between messages) can go undetected far longer than necessary, wasting server resources on phantom connections and potentially causing broadcasts/group messages to be "sent" to recipients who will never actually receive them until the next keep-alive cycle finally notices and cleans it up.
+
+---
+
+## Advanced — Question 26
+
+**Q26: What are the core reliability challenges of webhooks as an integration pattern, and how do you design a system around them?**
+
+Because a webhook is fundamentally just an outbound HTTP request from the sender to a client-controlled endpoint, it inherits every failure mode of a regular network call, compounded by the fact that neither side fully controls the other's availability. The main challenges: (1) **at-least-once delivery** — a sender that doesn't receive a timely success response typically retries, meaning the receiver may see the same event delivered more than once; (2) **no ordering guarantee** — retries, transient failures, and concurrent delivery attempts mean events can arrive out of the order they actually occurred in; (3) **idempotency is the receiver's responsibility** — since duplicates are expected, the receiver must be able to safely process the same event twice without double-applying its side effects; (4) **retry-with-backoff belongs on the sender** — naive immediate retries can overwhelm a receiver that's struggling, so sends should back off exponentially between attempts; (5) a **dead-letter queue** is needed for events that exhaust all retry attempts, so they aren't silently lost.
+
+```text
+Sender's delivery attempt timeline for one event:
+  Attempt 1 (t=0s):    receiver times out / errors -> retry scheduled
+  Attempt 2 (t=30s):   receiver still failing -> retry scheduled, backoff increases
+  Attempt 3 (t=2min):  receiver still failing -> retry scheduled, backoff increases further
+  ...
+  Attempt N (t=6hr):   still failing -> attempts EXHAUSTED
+                        -> event moved to a DEAD-LETTER QUEUE for manual
+                           inspection/replay, rather than being silently dropped
+
+Receiver's idempotency handling (mirrors the payment idempotency-key
+pattern covered earlier, applied to INBOUND webhook events instead):
+  Every webhook payload includes a unique event ID (e.g. "evt_8f2a...").
+  Receiver checks: "have I already processed evt_8f2a...?"
+    - Already processed -> return 200 OK immediately, skip re-applying
+                            the side effect (don't ship the order twice,
+                            don't re-credit the account twice)
+    - Not yet processed  -> apply the side effect, RECORD the event ID
+                            as processed, THEN return 200 OK
+```
+
+Because the sender and receiver are independently-operated systems with no shared transaction, there's no way to guarantee exactly-once delivery end-to-end — the practical, universally-adopted design instead accepts at-least-once delivery as a given and pushes deduplication responsibility onto the receiver (via an idempotency/event-ID check) rather than trying to eliminate duplicates at the source, which is generally not achievable over an unreliable network.
+
+**Common Pitfall:** building a webhook receiver that assumes events will always arrive in the order they occurred and only once each — a receiver that, say, blindly overwrites a "current status" field with whatever a webhook says without checking for an out-of-order or duplicate delivery can end up with in a stale or double-applied state; robust receivers instead key off each event's own timestamp/sequence data (to detect and discard out-of-order deliveries) and its unique event ID (to detect and skip duplicates).
+
+---
+
+## Scenario — Question 5
+
+**Q5: Your webhook receiver endpoint must respond within a tight timeout (the sending provider considers anything over 5 seconds a failure) but your actual business logic — validating the payload, updating several database tables, sending a confirmation email — takes 8-10 seconds. The provider's timeout logic then retries the "failed" delivery, and your slow processing runs a second time, creating duplicate side effects (the confirmation email gets sent twice). How do you fix this?**
+
+The core mistake is doing all the real work synchronously, inside the request that the sender is timing. The fix is to decouple **acknowledging receipt** from **actually processing the event**:
+
+1. **Acknowledge immediately.** As soon as the webhook request arrives, do the bare minimum needed to safely accept it — verify the signature (covered earlier), check the event ID against an idempotency store, persist the raw payload to a queue or an "inbox" table — then return `200 OK` right away, well within the 5-second window. None of the slow work (database updates across several tables, sending the email) happens in this request path at all.
+2. **Enqueue for async processing.** The persisted event is handed off to a background worker (a queue like a message bus, or a simple polling job reading the "inbox" table) that performs the actual multi-step processing outside the constraints of the HTTP request/response timing entirely — it can safely take 8-10 seconds, or longer, without the sender ever knowing or caring.
+3. **Ensure idempotency at the enqueue step**, not just in the background worker — the idempotency check (has this event ID been seen before?) must happen during the fast, synchronous acknowledgment step, *before* enqueueing, so that even if the provider's retry arrives (because, say, the first `200 OK` itself got lost in transit rather than being late), the duplicate is recognized and dropped immediately rather than being enqueued and processed a second time.
+
+```text
+BEFORE (broken):
+  Webhook arrives -> [verify -> update DB x3 -> send email] -> 200 OK
+                      \_____________ 8-10 seconds ____________/
+                      Provider's 5s timeout fires partway through ->
+                      marks delivery FAILED -> RETRIES -> DUPLICATE run
+
+AFTER (fixed):
+  Webhook arrives -> verify signature -> check idempotency store ->
+                      persist to queue -> 200 OK
+                      \___ well under 1 second ___/
+  (separately, asynchronously:)
+  Background worker -> dequeue -> update DB x3 -> send email
+                        \_______ 8-10 seconds, NO ONE is timing this _______/
+```
+
+This same "acknowledge fast, process slow" split resolves the general tension between a sender's strict timeout expectations and a receiver's genuinely slow business logic, without ever needing to make the actual processing artificially faster.
+
+#### Follow-up: A related but different scenario — your SignalR-based chat application works perfectly when you test it locally, but in production, sitting behind a load balancer and reverse proxy, clients experience frequent, seemingly random disconnections. What's likely happening, and how do you fix it?
+
+Two separate infrastructure issues commonly cause this, and both need addressing:
+
+**1. No sticky sessions / no backplane across scaled-out instances.** If the production deployment runs multiple server instances behind a load balancer, and the load balancer isn't configured for sticky sessions (routing a given client's requests consistently to the same backend instance), a client's WebSocket connection can be negotiated against one instance but subsequent traffic misrouted to another instance that knows nothing about that connection — appearing as a random disconnect. The fix is either enabling sticky sessions (session affinity) on the load balancer, or — the more robust, scale-out-friendly fix — introducing a SignalR **backplane** (Redis, Azure SignalR Service, covered earlier) so every instance shares connection/group state and a message sent from any instance reaches clients connected to any other instance, removing the dependency on sticky routing entirely.
+
+**2. Proxy idle timeout shorter than SignalR's keep-alive interval.** Many reverse proxies and load balancers apply their own idle-connection timeout (closing a connection that's had no traffic for, say, 60 seconds) — if this is shorter than SignalR's configured `KeepAliveInterval`/ping frequency (covered under ping/pong keep-alives, earlier), the proxy silently kills the connection out from under the application before SignalR's own keep-alive traffic would have kept it alive. The fix is aligning the proxy's idle timeout to comfortably exceed SignalR's keep-alive interval, ensuring keep-alive ping traffic reaches the proxy frequently enough to be recognized as "still active" and never gets treated as idle.
+
+---

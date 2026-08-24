@@ -194,5 +194,19 @@
     "description": "Protocol Buffers, HTTP/2, Bi-directional streaming, vs REST.",
     "order": 28,
     "color": "#14B8A6"
+  },
+  {
+    "id": "angular",
+    "title": "Angular",
+    "description": "Components, RxJS, Dependency Injection, Change Detection, Routing, and State Management.",
+    "order": 29,
+    "color": "#DD0031"
+  },
+  {
+    "id": "coding-agents",
+    "title": "AI Coding Agents",
+    "description": "Claude Code, GitHub Copilot, and Codex — agentic workflows, context management, and AI-assisted engineering practice.",
+    "order": 30,
+    "color": "#2563EB"
   }
 ]
