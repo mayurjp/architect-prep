@@ -297,3 +297,147 @@ Pointing at *specific real files* as canonical examples is disproportionately ef
 **General debugging discipline:** treat a looping agent the same way you'd treat a human stuck on a bug — ask "what information would resolve this uncertainty," and check whether that information is actually available to it (in context, in an instructions file, or via a tool) before assuming the model itself is at fault. Most unresolved loops trace back to a context or tooling gap, not a reasoning failure.
 
 ---
+
+## Beginner — Question 4
+
+**Q4: What is Claude Cowork, and how does its purpose differ from Claude Code?**
+
+Claude Cowork is Anthropic's product for agentic **teamwork**, built on Claude but aimed at a different unit of work than Claude Code. Where Claude Code is fundamentally a single developer's tool — one person, one terminal (or IDE), driving one agent through one codebase task — Cowork is oriented around collaborative work that spans multiple people and/or multiple coordinated agents working toward a shared outcome, closer to how a small team divides and tracks work together than how one engineer drives a CLI session.
+
+**The distinction that matters:** Claude Code's unit of interaction is a developer-and-agent pair working a coding task to completion, with git/CI as the surrounding safety net (see Q-Intermediate-4). Cowork's unit of interaction is broader — it's built around the idea that useful outcomes often require several contributors (human teammates, and/or several agents each responsible for a slice of the work) coordinating, handing off partial results, and staying visible to each other, rather than one person babysitting one linear agent transcript. That makes it a natural fit for work that's inherently collaborative or multi-threaded — not exclusively coding — versus Claude Code's focus on the specific mechanics of reading, editing, and verifying code in a repository.
+
+**Why the distinction is worth knowing precisely (rather than treating both as "the same thing with a different name"):** in an interview or an adoption discussion, conflating them leads to picking the wrong tool for the job — reaching for a single-session CLI agent when the actual task is "coordinate several people/agents on a shared deliverable," or reaching for a team-collaboration surface when the actual task is "make this one focused, verifiable code change." Both are agentic and both are built on Claude, but the unit of work and the coordination model differ.
+
+**Practical guidance:** think of Claude Code as answering "how do I get an agent to autonomously do *this* coding task well," and Cowork as answering "how do multiple people and/or agents collaborate effectively on work that doesn't fit neatly into one person's session." The underlying agentic-loop mechanics (Q-Advanced-1) are shared architecture, not a difference between the two.
+
+---
+
+## Beginner — Question 5
+
+**Q5: What are Google's main entry points for agentic coding (e.g. Gemini CLI, Gemini Code Assist), and what's a notable architectural differentiator often associated with Gemini?**
+
+Google's coding-assistance surfaces built on Gemini follow the same broad split seen elsewhere in the industry: IDE-integrated assistance (an assistant embedded in editors like VS Code or JetBrains IDEs, offering completions, chat, and increasingly agentic actions such as multi-file edits) and a terminal/CLI-oriented agent (a command-line tool that takes a natural-language task, uses tools to read/search/edit a codebase and run commands, and iterates — conceptually the same agentic-loop shape described in Q-Beginner-1 and Q-Advanced-1) as well as integration points across Google Cloud's developer tooling.
+
+**A notable differentiator: context window size.** Gemini models have generally been associated with unusually large context windows relative to many contemporaries — enough to fit a large number of files, or a sizable portion of a mid-sized codebase, directly into a single request rather than relying purely on search/retrieval to select relevant snippets (see Q-Intermediate-2 for why context limits normally force agents toward retrieval). A large context window doesn't eliminate the need for good tool use and scoping — reasoning quality can still degrade as context fills with less-relevant material — but it does shift the practical trade-off: more of a codebase's structure and cross-file relationships can be visible to the model at once without the agent needing to explicitly re-fetch it, which can help with tasks that genuinely require broad, whole-repository awareness (e.g. tracing a change's blast radius across many callers).
+
+**Practical guidance:** don't treat "bigger context window" as a substitute for good scoping and tool design (Q-Intermediate-2, Q-Intermediate-3) — it's one useful lever among several, most valuable for tasks that are inherently broad (large-scale refactors, whole-repo audits) rather than narrow, well-localized fixes where a smaller, well-targeted context works just as well and more cheaply. As with any vendor-specific capability, avoid citing exact token counts or benchmark numbers you're not confident are current — the durable point for an interview is *why* context window size matters architecturally, not the specific number at any given moment.
+
+---
+
+## Beginner — Question 6
+
+**Q6: "ChatGPT can write code" — how does using ChatGPT as a coding assistant differ from using a genuinely agentic coding tool?**
+
+ChatGPT's core interaction model, in its plain chat form, is the same one-shot pattern described in Q-Beginner-1: you describe what you want, the model returns code (or an explanation) as text in the conversation, and it stops there. It has no default ability to read your actual repository, write files onto your disk, or run your build/test suite — anything it produces is a suggestion you must copy, paste, and verify yourself. That makes it useful for drafting a function, explaining an error message, or exploring an approach, but it isn't participating in a feedback loop with your real project the way an agent is.
+
+OpenAI's more agentic offerings — notably Codex and Codex CLI — are architecturally different from that chat experience, even though they're built by the same company and can share underlying models: they're wired up with tools (file read/write, shell execution) and a harness that lets them act on a real codebase, observe results (test output, diffs), and iterate, matching the agentic-loop shape in Q-Advanced-1 and the same general category as Claude Code, Copilot's agent mode, and Gemini CLI.
+
+**The distinction to keep straight:** "ChatGPT" as most people use it day-to-day is a chat-based assistant, not an agent — it doesn't have filesystem or shell access by default. Whether a given OpenAI product *is* agentic depends on which specific surface you're using, not on which company or model family it belongs to. The same is true in reverse — a model that's very capable in chat form isn't automatically "an agent" just because the underlying model is strong; agency comes from the harness and tools wrapped around it, not from the model alone.
+
+**Practical guidance:** when comparing tools for a real workflow decision, ask "does this surface have file/shell access and an iteration loop, or does it only return text I have to apply myself?" — that question, not brand name, is what determines whether you're looking at a one-shot assistant or an agent.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What genuinely differentiates a chat-based coding assistant from a CLI-first or IDE-integrated agent — beyond "which model is smarter"?**
+
+The meaningful differences are architectural, not about raw model capability, and they map directly onto the tool-use loop described in Q-Advanced-1:
+
+1. **Filesystem and shell access.** A chat-based assistant (the default ChatGPT experience, a plain chat window with Claude or Gemini) can only produce text; it has no tool wired up that lets it touch your actual files or run a command. A CLI-first or IDE-integrated agent (Claude Code, Copilot's agent mode, Codex CLI, Gemini CLI) has explicit tools for exactly that, executed by a harness against your real environment.
+2. **The iteration loop.** A chat assistant's output is final the moment it's generated — it has no way to discover that its suggested code doesn't compile unless you tell it. An agent closes that loop itself: it can run the build/tests, read the failure, and revise, entirely without a human relaying the result back in (see Q-Intermediate-1).
+3. **Autonomy level and session shape.** A chat exchange is inherently turn-by-turn and short-lived — useful for a focused question or a snippet. An agent is designed for longer, multi-step sessions that can span many files and many tool calls toward one goal, bounded by a permission model (Q-Intermediate-5) rather than by "one message in, one message out."
+4. **State and grounding.** An agent that reads your actual repository is reasoning from ground truth — the real file contents, the real test output. A chat assistant is reasoning from whatever you described or pasted in, which can be incomplete, stale, or subtly wrong, with no mechanism for the model to notice the mismatch.
+
+**Why this matters more than model comparisons:** a stronger underlying model dropped into a chat interface is still bounded by that interface's lack of tools and feedback — it can reason better about the code you show it, but it still can't verify anything against your real system. Conversely, a merely competent model wired into a well-designed agentic harness can outperform a stronger model in chat form on tasks that require verification, multi-file consistency, or iteration, simply because it can check its own work.
+
+**Practical guidance:** when picking a tool for a task, first ask which category fits the *task's shape* — a quick explanation or an isolated snippet is well served by chat; a multi-file change that needs to actually compile and pass tests is not — before comparing specific products within the category that fits.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What are multi-agent/orchestration patterns (e.g. a lead agent delegating to sub-agents), and why does decomposing a task across agents help versus running one large monolithic session?**
+
+Several ecosystems — Claude Cowork's collaborative model, Claude Code's sub-agent feature, and similar delegation patterns elsewhere — are converging on the same basic pattern: instead of one agent doing an entire task start to finish in a single, ever-growing context, a **lead/orchestrator agent** breaks the task into narrower sub-tasks and delegates each to a **sub-agent**, receiving back only that sub-agent's final result rather than its full exploration transcript.
+
+**Why this helps, mechanically:**
+- **Context stays focused.** A sub-agent investigating "why is this test flaky" might read a dozen files and try several hypotheses — all of that exploratory noise stays in the sub-agent's own context and never pollutes the orchestrator's, which only sees the conclusion (see Q-Advanced-2). This directly counters the context-window and context-rot pressure described in Q-Intermediate-2.
+- **Parallelism.** Independent sub-tasks (e.g. "update the API client" and "update the corresponding tests" for genuinely unrelated modules) can run concurrently rather than serially, shortening wall-clock time for work that doesn't have a hard dependency order.
+- **Specialization and isolation of failure.** A sub-agent can be given a narrower toolset, a more specific instruction set, or even a different model suited to its sub-task, and a sub-agent going down an unproductive path burns its own budget rather than derailing the orchestrator's entire session.
+- **Reviewability.** Each sub-agent's output is a discrete, checkable unit — closer to reviewing a series of small PRs than one sprawling diff, echoing the same reasoning behind small commits in Q-Intermediate-4.
+
+**Example (conceptual delegation config):**
+```json
+{
+  "orchestrator_task": "Migrate the billing module from the legacy ORM to the new one",
+  "sub_agents": [
+    { "task": "Update all billing repository classes to the new ORM's query API", "scope": "src/billing/repositories/**" },
+    { "task": "Update the corresponding repository tests to match", "scope": "tests/billing/**" },
+    { "task": "Audit remaining direct SQL calls in the billing module for migration gaps", "scope": "src/billing/**" }
+  ]
+}
+```
+
+**Pitfall:** decomposition adds coordination overhead — the orchestrator has to define sub-tasks with clear, non-overlapping scope, or two sub-agents can make conflicting edits to the same file with neither aware of the other. It's most valuable when sub-tasks are genuinely separable; forcing decomposition onto a task that's inherently one continuous line of reasoning (e.g. debugging a single tightly-coupled failure) usually just adds handoff overhead without the benefits above.
+
+---
+
+## Advanced — Question 5
+
+**Q5: Large context windows (e.g. as commonly associated with Gemini) are sometimes framed as an alternative to retrieval-based context management (Q-Intermediate-2). What are the real trade-offs between "put more in context" and "retrieve only what's relevant"?**
+
+Both approaches address the same underlying constraint — a codebase is almost always larger than what a model can usefully reason over at once — but they trade off differently, and neither eliminates the constraint entirely.
+
+**"Put more in context" (favored by very large context windows):**
+- *Advantage:* the model can see cross-file relationships and structure directly, without depending on a search step correctly guessing which files matter. For tasks that are inherently broad — auditing a whole subsystem, tracing every caller of a widely-used function before a breaking change — this avoids the risk of a retrieval step silently missing a relevant file.
+- *Cost:* even within a large window, unrelated material still competes for the model's attention, and there's evidence that reasoning quality can degrade as context fills with lower-relevance content (context rot, mentioned in Q-Intermediate-2) — a bigger window raises the ceiling but doesn't remove this effect. It's also more expensive and slower per request, since more tokens must be processed regardless of how much of them are actually useful to the specific task.
+
+**"Retrieve only what's relevant" (search/grep/embedding-based retrieval):**
+- *Advantage:* keeps the working context small and dense with relevant material, which tends to produce more reliable reasoning and lower cost per step, and scales to codebases far larger than any context window regardless of size.
+- *Cost:* correctness depends entirely on the retrieval step actually surfacing what's relevant — a keyword search that misses a relevantly-named-but-differently-worded file, or an embedding index that's stale relative to recent changes, silently starves the model of information it needed, with no signal that anything was missed.
+
+**The honest synthesis:** these aren't mutually exclusive strategies — a large context window raises how much an agent *can* hold at once (useful for broad tasks, and forgiving of an imperfect retrieval step), while good retrieval and scoping remain valuable regardless of window size, because keeping context dense and relevant improves reasoning quality independent of the ceiling. Treat context window size as one input to capability, not a replacement for the tool-use and scoping discipline described in Q-Intermediate-2 and Q-Intermediate-3.
+
+**Practical guidance:** avoid framing this as "which vendor's context window is bigger" in an interview answer — the durable, testable knowledge is *why* context size and retrieval quality both matter and how they interact, since specific window sizes change with every model release.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What vendor lock-in and portability risks arise when a team's workflows become tied to one specific AI coding agent product, and how can that risk be kept manageable?**
+
+As teams mature their use of an agentic coding tool, they naturally accumulate artifacts tuned to that specific product: an instructions file written in that tool's expected format and location, custom tool/permission configurations, CI steps that invoke that tool's CLI directly, and team habits (prompt phrasing, workflow conventions) built around its particular quirks. None of this is wrong to build — it's exactly the kind of investment that makes an agent effective (Q-Beginner-3, Q-Intermediate-3) — but it does create switching costs if the team later wants or needs to change tools, whether due to cost, capability gaps, procurement changes, or simply wanting to adopt a second tool for different task shapes (see the Scenario question below).
+
+**Where lock-in typically concentrates:**
+- **Instructions/config file format and location.** Different tools look for project context in different files and formats (e.g. a `CLAUDE.md`-style file vs. a different tool's own conventions) — content written generically is portable; content written to exploit one tool's specific parsing quirks is not.
+- **CI integration.** A pipeline step that shells out to one vendor's CLI with vendor-specific flags is a hard dependency; the underlying *task* (run an agent to generate a PR, review a diff) is usually vendor-agnostic in principle.
+- **Custom tool/permission configuration.** Bespoke tool definitions or sandbox setups built for one harness's API don't transfer directly to another.
+- **Team habits and tacit knowledge.** Prompt phrasing and workflow conventions that work well with one tool's specific behavior represent an investment that partially resets when switching.
+
+**Keeping the risk manageable:**
+1. **Write instructions files as project documentation first, tool config second.** Content phrased as durable onboarding knowledge ("tests run via `make test`," "money is always integer cents") is useful to a human, a different agent, or a new hire regardless of which tool reads it — versus content written as tool-specific prompt-engineering tricks, which is fragile the moment the tool changes.
+2. **Keep CI integration thin and swappable.** Treat the agent invocation as one replaceable step producing a standard artifact (a diff, a PR) rather than deeply coupling pipeline logic to one vendor's specific output format.
+3. **Avoid single-vendor irreversible commitments where the underlying task is genuinely vendor-neutral** — e.g. don't build critical review gates that only function with one tool's proprietary output schema if a portable format (a plain diff, a standard PR) would do the same job.
+4. **Periodically validate portability deliberately** — e.g. an occasional pilot of the same representative task on a second tool — rather than discovering the true switching cost only during a forced migration.
+
+**Practical guidance:** the goal isn't avoiding investment in a chosen tool (that investment is what makes it effective) — it's keeping the *reusable* parts (project knowledge, conventions, task definitions) separated from the *tool-specific* parts (exact invocation syntax, proprietary config schemas), so a future switch costs re-pointing the tool-specific glue rather than re-deriving the project knowledge from scratch.
+
+---
+
+## Scenario — Question 4
+
+**Q4: A team has standardized on one AI coding tool (e.g. GitHub Copilot in VS Code) for day-to-day development and is evaluating whether to also adopt a second, more agentic CLI tool (e.g. Claude Code) for a specific class of work — large multi-file refactors, or autonomous PR generation for well-scoped backlog items. What factors should actually drive that decision?**
+
+The temptation is to decide based on which tool is generating the most attention at the moment; the more durable approach is to evaluate against the team's actual task shapes and constraints.
+
+1. **Task shape.** In-the-flow, single-file suggestions while actively writing code are exactly what an IDE-embedded assistant like Copilot is built for — low friction, tight integration, minimal context-switching. Large, multi-file, multi-step changes (a broad refactor touching dozens of files, generating a full PR autonomously from a ticket description) fit the longer, more autonomous session model of a CLI-first agent (Q-Beginner-2). Adopting a second tool makes sense when a real, recurring category of work doesn't fit the first tool's strength — not as a blanket replacement.
+2. **Existing workflow integration.** Does the second tool fit the team's actual git/CI/review workflow (Q-Intermediate-4) without requiring parallel, redundant process? A CLI agent that produces a normal branch, commits, and a reviewable PR integrates cleanly alongside an IDE assistant; one that requires a fundamentally different review process adds friction that has to be justified by the value it delivers.
+3. **Permission/safety model fit.** A tool being used for larger, more autonomous changes needs a permission model (Q-Intermediate-5) the team is actually comfortable with for that blast radius — sandboxing, confirmation gates on destructive actions — evaluated deliberately rather than accepted on default settings.
+4. **Cost model.** Agentic sessions that read and write substantially more context per task typically cost more per task than inline suggestions; that's a reasonable trade for the class of work where it saves meaningfully more human time than it costs, and a bad trade where it's used for work an inline assistant already handled well.
+5. **Context window and codebase needs.** If the target work genuinely requires broad, whole-repository awareness (Q-Advanced-5), factor in whether the candidate tool's context handling and retrieval approach fit the codebase's real size and structure.
+6. **Portability.** Weigh the lock-in considerations from Q-Advanced-6 — a second tool adopted for a narrow, well-defined class of work is lower-risk than one that becomes load-bearing for the entire workflow.
+
+**Practical guidance:** run a small pilot on real, representative tasks from the target category (echoing the evaluation approach in Q-Advanced-3) and measure it against the factors above, rather than adopting — or rejecting — a second tool based on which one is trending. The right outcome is often "yes, for this specific class of work" rather than an all-or-nothing replacement of the standardized tool.
+
+---

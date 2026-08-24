@@ -208,5 +208,12 @@
     "description": "Claude Code, GitHub Copilot, and Codex — agentic workflows, context management, and AI-assisted engineering practice.",
     "order": 30,
     "color": "#2563EB"
+  },
+  {
+    "id": "javascript",
+    "title": "JavaScript",
+    "description": "Closures, prototypes, the event loop, async/await, ES module semantics, and core language mechanics.",
+    "order": 31,
+    "color": "#F7DF1E"
   }
 ]
