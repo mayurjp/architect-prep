@@ -1864,3 +1864,107 @@ Because this data is maintained internally by Spanner itself and queryable with 
 **Common Pitfall:** assuming `query_stats_top_minute`'s data persists indefinitely at fine granularity — Spanner retains this per-minute data only for a limited rolling window; longer-term historical analysis requires either exporting this data periodically to a longer-term store, or relying on a coarser-grained aggregation table Spanner also provides for extended retention.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is GCP's Deployment Manager, and why has the broader ecosystem shifted toward Terraform even for GCP-only infrastructure despite Deployment Manager being GCP's own first-party Infrastructure-as-Code tool?**
+
+Deployment Manager is GCP's own native, first-party Infrastructure-as-Code service, letting you declare GCP resources in YAML/Python templates and have GCP itself provision them — despite being the "official" GCP-specific tool, most organizations (even those running exclusively on GCP) have gravitated toward Terraform instead, largely because Terraform's multi-cloud support, larger community/ecosystem, and more mature tooling outweigh the narrower benefit of a single-cloud-native tool tightly integrated with just one provider.
+
+```yaml
+# Deployment Manager (GCP-native)
+resources:
+- name: my-vm
+  type: compute.v1.instance
+  properties:
+    zone: us-central1-a
+    machineType: zones/us-central1-a/machineTypes/e2-medium
+```
+```hcl
+# Terraform (multi-cloud, GCP provider)
+resource "google_compute_instance" "my_vm" {
+  zone         = "us-central1-a"
+  machine_type = "e2-medium"
+}
+```
+
+```text
+Deployment Manager: GCP-NATIVE, tightly INTEGRATED, but LIMITED to GCP
+  resources only -- a SMALLER community, fewer THIRD-PARTY modules, and
+  no PATH to managing non-GCP infrastructure with the SAME tool
+
+Terraform: MULTI-cloud (AWS, Azure, GCP, and MANY others via the SAME
+  tool/workflow), a MUCH larger community and MODULE ecosystem, and
+  broader INDUSTRY adoption -- even GCP-ONLY organizations often prefer
+  it for these ADVANTAGES, despite it being a THIRD-PARTY tool rather
+  than GCP's own NATIVE offering
+```
+
+Because most organizations value a consistent, tool-agnostic Infrastructure-as-Code workflow (useful even if only ever targeting one cloud today, in case that changes later) and benefit from Terraform's much larger ecosystem of pre-built modules and community knowledge, Terraform has become the de facto standard for GCP infrastructure in practice — Deployment Manager remains available and functional, but is a comparatively minority choice even among GCP-committed teams.
+
+**Common Pitfall:** choosing Deployment Manager specifically because it's "the official GCP tool," assuming official-ness implies broader community support or better tooling — in practice, Terraform's community size, documentation, and third-party module ecosystem for GCP resources significantly exceed Deployment Manager's, despite Deployment Manager being GCP's own native offering.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: How do GCP Persistent Disk Snapshots' incremental, differential nature reduce both storage cost and snapshot creation time compared to a full copy taken every time?**
+
+Rather than each snapshot being a complete, independent full copy of a disk's entire contents, GCP Persistent Disk Snapshots are incremental — after the first full snapshot, every *subsequent* snapshot only stores the specific data blocks that actually *changed* since the previous snapshot, while still presenting each snapshot as if it were a complete, independently-restorable point-in-time copy.
+
+```text
+First snapshot (Snapshot A): stores the ENTIRE disk's contents -- a FULL,
+  complete copy, since NO prior snapshot exists YET to diff against
+
+Second snapshot (Snapshot B), taken LATER: stores ONLY the BLOCKS that
+  CHANGED since Snapshot A -- but can STILL be restored as a COMPLETE,
+  independent disk, since GCP transparently COMBINES the unchanged blocks
+  (referenced from Snapshot A) with the CHANGED ones (stored in Snapshot B)
+```
+
+```text
+Full-copy-every-time approach: EACH snapshot consumes STORAGE proportional
+  to the ENTIRE disk size, REGARDLESS of how LITTLE actually changed --
+  and TAKES proportionally LONGER to CREATE each time
+
+Incremental snapshots: EACH subsequent snapshot consumes storage
+  proportional ONLY to what genuinely CHANGED -- dramatically REDUCING
+  both the STORAGE cost of frequent snapshots and the TIME each ONE
+  takes to CREATE
+```
+
+Because most disks change only a small fraction of their total data between consecutive snapshot intervals, incremental snapshotting makes frequent, regular backups (hourly, even) practical from both a cost and time perspective — a full-copy-every-time approach would make frequent snapshotting prohibitively expensive and slow for a large disk, even though most of its content hasn't actually changed between backups.
+
+**Common Pitfall:** assuming deleting an "intermediate" snapshot in a chain is safe simply because later snapshots exist — GCP handles the underlying block-reference management automatically and safely (later snapshots don't actually become invalid when an earlier one is deleted, since GCP manages the block-level dependencies transparently), but understanding that snapshots reference each other's unchanged blocks internally explains why the storage savings work the way they do, rather than assuming each snapshot is a fully independent, unrelated copy.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is a Cloud Spanner Interleaved Index, as distinct from an Interleaved Table (covered earlier), and how does co-locating an index's entries with its base table's rows speed up a query filtering and fetching data across the same parent-child relationship?**
+
+An ordinary secondary index stores its entries entirely separately from the base table's own physical data — an Interleaved Index instead physically co-locates its index entries alongside the specific parent row they relate to (extending the same physical co-location idea Interleaved Tables, covered earlier, apply to entire child tables), letting a query that filters via the index and also needs related parent-row data avoid a separate, non-co-located lookup.
+
+```sql
+CREATE INDEX OrdersByCustomerAndDate
+ON Orders(CustomerId, OrderDate)
+INTERLEAVE IN Customers; -- co-locates this index's entries WITH each Customer's own rows
+```
+
+```text
+Ordinary (non-interleaved) secondary index: index ENTRIES live in their
+  OWN, separately-stored structure -- a query using the index to FIND
+  matching orders, THEN needing customer DATA too, requires a SEPARATE
+  round trip/lookup to the (PHYSICALLY distant) Customers table
+
+Interleaved Index: the INDEX's own entries are PHYSICALLY co-located WITH
+  their corresponding Customer's rows -- a query filtering via the INDEX
+  and needing customer data TOO can retrieve BOTH from the SAME physical
+  location, avoiding a SEPARATE, non-co-located lookup entirely
+```
+
+Because this physical co-location mirrors the exact same underlying benefit Interleaved Tables provide for base data, an Interleaved Index extends that benefit specifically to secondary-index-driven queries — appropriate for the same kind of genuinely tightly-coupled parent-child relationship (an order and its own customer) where queries frequently need both the indexed data and its related parent's data together.
+
+**Common Pitfall:** applying Interleaved Indexes broadly to every secondary index without confirming the query pattern actually benefits from parent-row co-location — for an index whose queries never actually need related parent-table data alongside the indexed results, an ordinary, non-interleaved secondary index is simpler and provides no meaningfully different performance characteristic, making the added interleaving complexity unnecessary.
+
+---
