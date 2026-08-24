@@ -215,5 +215,40 @@
     "description": "Closures, prototypes, the event loop, async/await, ES module semantics, and core language mechanics.",
     "order": 31,
     "color": "#F7DF1E"
+  },
+  {
+    "id": "concurrency-csharp",
+    "title": "Concurrency in C#",
+    "description": "Task vs Thread, async/await internals, locks, concurrent collections, deadlocks, and the thread pool.",
+    "order": 32,
+    "color": "#7C3AED"
+  },
+  {
+    "id": "observability",
+    "title": "Observability & Distributed Tracing",
+    "description": "OpenTelemetry, structured logging, metrics, distributed tracing, and correlating requests across services.",
+    "order": 33,
+    "color": "#0891B2"
+  },
+  {
+    "id": "resiliency-patterns",
+    "title": "Resiliency Patterns",
+    "description": "Polly, circuit breakers, retries, bulkheads, timeouts, and Sagas for distributed transactions.",
+    "order": 34,
+    "color": "#EA580C"
+  },
+  {
+    "id": "ddd",
+    "title": "Domain-Driven Design",
+    "description": "Bounded contexts, aggregates, entities vs value objects, domain events, and ubiquitous language.",
+    "order": 35,
+    "color": "#1D4ED8"
+  },
+  {
+    "id": "architect-practice",
+    "title": "Architect Practice",
+    "description": "ADRs, technical debt trade-offs, build-vs-buy, monolith-vs-microservices framing, and stakeholder decisions.",
+    "order": 36,
+    "color": "#78716C"
   }
 ]
