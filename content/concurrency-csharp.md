@@ -748,3 +748,251 @@ Now, `GetOrAdd`'s factory only constructs a **cheap** `Lazy<Product>` wrapper (n
 **Pitfall to watch for:** if the factory can throw, `Lazy<T>` by default caches the exception too (subsequent `.Value` accesses rethrow the same cached exception forever) — use `LazyThreadSafetyMode` combined with re-creating the cache entry on failure (or `Lazy<T>`'s newer retry-on-exception support) if a failed load should be retried rather than permanently poisoning that cache key.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: "Concurrency" and "parallelism" are often used interchangeably, but they mean different things. What's the distinction, and why is `async`/`await` in C# primarily a concurrency tool rather than a parallelism tool?**
+
+**Concurrency** means multiple pieces of work are *in progress* over the same period of time, but not necessarily executing at the exact same instant — a single core can be concurrent by rapidly switching between tasks (interleaving), doing a slice of one, then a slice of another, giving the illusion of simultaneity. **Parallelism** means multiple pieces of work are executing *literally at the same time*, on genuinely separate CPU cores. Parallelism requires multiple cores; concurrency does not — it's fundamentally about *structure* (can these things be interleaved/managed together), not about *how many cores are burning*.
+
+A helpful mental model: a single chef who takes an order, puts a pot on to boil, and while it boils starts chopping vegetables for a different dish, is being **concurrent** — one chef, multiple tasks in flight, interleaved based on what's currently waiting versus ready. Two chefs each cooking their own dish simultaneously is **parallelism**.
+
+```csharp
+// Concurrency: a single logical thread of control juggles two in-flight I/O operations by
+// interleaving — no two lines of *your* code ever literally run at the same instant here.
+async Task RunAsync()
+{
+    var t1 = client.GetStringAsync(url1); // started, not blocked on
+    var t2 = client.GetStringAsync(url2); // started while t1 is still in flight
+    await Task.WhenAll(t1, t2);           // both awaited concurrently, not necessarily in parallel
+}
+```
+
+**Why `async`/`await` is a concurrency tool, not a parallelism tool:** as covered in Q2, `await`ing an I/O operation doesn't consume a thread at all while it's pending — there's no second core "working" on it; the OS is handling the I/O, and your one logical flow of control is simply free to do other things or wait efficiently. Even the example above, with two HTTP calls "concurrently" in flight, involves zero extra CPU work happening in parallel — no core is busy computing anything for either request while they're pending. Real parallelism (`Parallel.For`, `Task.Run` spreading CPU-bound work) is about exploiting multiple cores for CPU-bound work; `async`/`await` is about not wasting a thread while waiting on something external. They're complementary, not synonyms, and conflating them leads to the common mistake of expecting `async` alone to make CPU-heavy code faster (it won't — see Q2's follow-up).
+
+**Common pitfall:** describing `await Task.WhenAll(...)` as "running things in parallel." It's more precise to say the operations are running *concurrently* — they overlap in time, but for I/O-bound work no core is doing simultaneous computation; true parallelism only enters the picture for CPU-bound work spread across threads.
+
+---
+
+## Beginner — Question 6
+
+**Q6: What does it actually mean for a piece of code, or a class, to be "thread-safe"? How is that different from code that merely happens to work when you test it single-threaded?**
+
+"Thread-safe" has a precise meaning: a type or a piece of code is thread-safe if it behaves correctly — produces consistent, non-corrupted results and never throws unexpected exceptions — when called from **multiple threads simultaneously, with no additional synchronization imposed by the caller**. The guarantee has to hold under arbitrary interleavings, including the worst-case timing, not just the interleavings that happen to occur during your local testing.
+
+```csharp
+public class Counter
+{
+    private int _value;
+    public void Increment() => _value++; // NOT thread-safe: read-modify-write, not atomic
+    public int Value => _value;
+}
+```
+
+Run `Increment()` from a single thread in a unit test, a thousand times in a loop, and it will produce exactly the expected result every time — the test passes, and it looks correct. That's precisely the trap: single-threaded correctness proves nothing about thread safety, because the race condition in `_value++` (read, add, write — three separate steps) only manifests when two threads interleave those three steps against each other, which single-threaded execution can never do. A class can pass every test you write and still be fundamentally unsafe for concurrent use.
+
+**What "thread-safe" requires in practice:** either the type internally synchronizes all access to its mutable state (e.g., `ConcurrentDictionary` takes out its own internal locks so callers don't have to), or the type is immutable (nothing can race over state that never changes after construction — immutable types are trivially thread-safe), or it's explicitly documented as *not* thread-safe, placing the burden of external synchronization (`lock`, `SemaphoreSlim`) on the caller.
+
+**The pitfall this question is really getting at:** most .NET BCL collection types (`List<T>`, `Dictionary<TKey,TValue>`, `HashSet<T>`) are deliberately **not** thread-safe by design (synchronization has a cost, and single-threaded use is the overwhelmingly common case) — using them from multiple threads without your own `lock` around every access is a latent bug that local, single-threaded, or low-concurrency testing will not surface. Documentation for a type or method should always be checked explicitly for a thread-safety statement rather than assumed; "it worked in my tests" is not evidence of thread safety, only evidence that your tests didn't exercise a genuinely concurrent interleaving.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is `IAsyncEnumerable<T>` and `await foreach`, and when is streaming results this way the right choice over just returning `Task<List<T>>`?**
+
+`IAsyncEnumerable<T>` is the asynchronous counterpart to `IEnumerable<T>`: instead of producing items synchronously one at a time via `MoveNext()`, it produces them **asynchronously** one at a time via `MoveNextAsync()`, letting a producer method `yield return` items as they become available, potentially awaiting I/O between each one — and letting a consumer start processing the first item before the rest exist yet.
+
+```csharp
+public async IAsyncEnumerable<Order> GetOrdersAsync(
+    [EnumeratorCancellation] CancellationToken ct = default)
+{
+    await using var reader = await _db.OpenStreamingReaderAsync("SELECT * FROM Orders", ct);
+    while (await reader.ReadNextAsync(ct))
+    {
+        yield return reader.MapToOrder(); // one row surfaces to the consumer at a time
+    }
+}
+
+// Consumer:
+await foreach (var order in GetOrdersAsync(cancellationToken))
+{
+    Process(order); // starts as soon as the FIRST row arrives, not after all rows are loaded
+}
+```
+
+**Contrast with `Task<List<T>>`:**
+
+```csharp
+public async Task<List<Order>> GetOrdersAsListAsync()
+{
+    var all = new List<Order>();
+    await using var reader = await _db.OpenStreamingReaderAsync("SELECT * FROM Orders");
+    while (await reader.ReadNextAsync()) all.Add(reader.MapToOrder());
+    return all; // caller waits for EVERY row before getting anything
+}
+```
+
+This version must fully materialize the entire result set in memory before returning — the caller sees nothing until the last row has been read. For a large or unbounded result set, that's both a latency problem (nothing happens until everything is ready) and a memory problem (the whole set is held at once).
+
+**When `IAsyncEnumerable<T>`/`await foreach` is the right tool:** large or streaming result sets (paging through a huge DB query, reading a large file line by line, consuming a live event/message feed) where the consumer can usefully start processing before production finishes, or where materializing the full set at once would use excessive memory. It also composes naturally with `CancellationToken` (via `[EnumeratorCancellation]`) to stop mid-stream cheaply.
+
+**When `Task<List<T>>` is still preferable:** small, bounded result sets where the caller needs the whole collection anyway before doing anything useful (e.g., needs a `Count` or wants to sort it) — the added machinery of async iteration isn't worth it, and a plain list is simpler to reason about and consume.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is `Lazy<T>`, and how do its `LazyThreadSafetyMode` options work? How does it solve the double-initialization race generally, beyond the `ConcurrentDictionary.GetOrAdd` case?**
+
+`Lazy<T>` defers creation of a value until it's first accessed via `.Value`, and — depending on the mode selected — coordinates concurrent access so that expensive or side-effecting initialization logic doesn't run more than once even when multiple threads race to access `.Value` for the first time simultaneously.
+
+```csharp
+private static readonly Lazy<ExpensiveResource> _resource =
+    new(() => new ExpensiveResource(), LazyThreadSafetyMode.ExecutionAndPublication);
+
+public ExpensiveResource GetResource() => _resource.Value; // safe from any number of threads
+```
+
+**The three `LazyThreadSafetyMode` values:**
+- **`ExecutionAndPublication`** (the default when using the parameterless-safety constructor): a lock ensures only one thread ever executes the factory, and every other concurrent caller blocks until that execution finishes, then all callers receive the same single result. This is the strongest, safest, and most commonly correct choice — it's exactly what generalizes the `GetOrAdd`-double-execution fix from the earlier Scenario: the expensive work runs exactly once, full stop.
+- **`PublicationOnly`**: multiple threads are *allowed* to race and execute the factory concurrently (no execution lock), but only the first result to finish gets "published" — stored and returned to everyone, including the threads whose own factory execution is discarded. This trades "the factory might run more than once" for "no execution-time lock contention" — appropriate when the factory is cheap enough that occasional duplicate execution is acceptable, or when the factory itself must not be run under a held lock (e.g., it does its own locking that could deadlock against `Lazy`'s internal lock).
+- **`None`**: no thread safety at all — if accessed by multiple threads without external synchronization, behavior is undefined (could double-initialize, could corrupt the cached value). Use only when you can guarantee single-threaded access, for the small performance win of skipping synchronization entirely.
+
+**Beyond caching:** this same `ExecutionAndPublication` pattern is the general-purpose fix for *any* double-checked, "compute once no matter how many threads race to be first" scenario — a shared configuration object built from an expensive parse, a singleton connection factory, a memoized computation — not just the dictionary-cache case. Wrapping the value type in `Lazy<T>` is almost always simpler and less error-prone than hand-rolling double-checked locking with `volatile` and manual `lock` blocks.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What's the difference between `Task.WhenAny` and `Task.WhenAll`? Give a concrete use case for each.**
+
+`Task.WhenAll(tasks)` returns a `Task` that completes only once **every** task in the set has completed (whether successfully or faulted) — you get all results together, or the exception(s) as described in Q4. `Task.WhenAny(tasks)` returns a `Task<Task>` that completes as soon as **the first** task in the set completes, regardless of the others — the result is a reference to *which* task finished first, and the rest keep running in the background unless you explicitly cancel them.
+
+```csharp
+// WhenAll: need every result before proceeding — e.g., assembling a dashboard from several
+// independent data sources, all of which are required.
+var usersTask = _userService.GetUsersAsync();
+var ordersTask = _orderService.GetOrdersAsync();
+var statsTask = _statsService.GetStatsAsync();
+await Task.WhenAll(usersTask, ordersTask, statsTask);
+var dashboard = new Dashboard(usersTask.Result, ordersTask.Result, statsTask.Result);
+```
+
+```csharp
+// WhenAny: react to whichever finishes first — the classic timeout pattern, racing the real
+// operation against a Task.Delay that represents "give up after N seconds."
+async Task<string> FetchWithTimeoutAsync(HttpClient client, string url, TimeSpan timeout)
+{
+    var fetchTask = client.GetStringAsync(url);
+    var timeoutTask = Task.Delay(timeout);
+
+    var winner = await Task.WhenAny(fetchTask, timeoutTask);
+    if (winner == timeoutTask)
+        throw new TimeoutException($"Request to {url} exceeded {timeout}.");
+
+    return await fetchTask; // re-await to observe the result/rethrow any fault, not just presence
+}
+```
+
+Note the pattern above: `Task.WhenAny` itself never inspects or rethrows the winning task's exception — it just tells you *which* task finished. You must still `await` (or check `.Result`/`.Exception`) on that specific task afterward to actually get its result or observe a fault.
+
+**Other `WhenAny` use cases:** racing the same request against multiple redundant endpoints and taking whichever responds first; implementing a "first successful attempt wins" retry-with-fallback pattern; processing a batch of tasks as each one finishes rather than waiting for the whole batch (looping `WhenAny`, removing the winner from the list, and repeating).
+
+**Pitfall:** `Task.WhenAny` does not cancel the losing tasks automatically — in the timeout example, the original `fetchTask` keeps running in the background even after you've given up and thrown `TimeoutException`. If that matters (avoiding wasted work, or a resource leak), pass a linked `CancellationToken` into the real operation and cancel it explicitly when the timeout wins.
+
+---
+
+## Advanced — Question 7
+
+**Q7: Go deeper on thread-pool starvation than the "don't block on async" rule — what is the actual growth mechanics of the .NET thread pool, and why does that make blocking pool threads especially dangerous at scale?**
+
+The CLR thread pool does not spin up a large number of threads eagerly. It starts with a small number of "minimum" threads (roughly the core count by default) and only grows beyond that when it judges the queue of pending work isn't being drained fast enough — via a **hill-climbing algorithm** that periodically samples throughput and adjusts the target thread count up or down to try to maximize work completed per unit time. Critically, when the pool decides it needs *more* threads than currently exist beyond the minimum, it does **not** create them instantly — new-thread injection is deliberately throttled, historically adding roughly one new thread approximately every 500ms (the exact figure and algorithm have evolved across .NET versions, but the throttle is a constant across all of them) once the pool detects sustained starvation. This throttling exists specifically to avoid the pool overreacting to brief spikes by mass-creating expensive OS threads that would just as quickly go idle again.
+
+**Why this makes blocking pool threads dangerous at scale, beyond the earlier `Task.Run` scenario:** if a burst of work suddenly needs, say, 200 threads simultaneously blocked on synchronous I/O (as in the 50-downstream-fan-out scenario, multiplied across several concurrent requests), the pool cannot conjure 200 threads quickly — at roughly one new thread every half-second, closing a 200-thread deficit takes on the order of a minute or more, during which **every** unrelated piece of queued work in the entire process — health checks, timers, other endpoints' request handling, background jobs — sits queued behind the starved pool, because the thread pool is a single shared, process-wide resource. This is what makes thread-pool starvation so much worse than an isolated slow endpoint: it doesn't fail gracefully or in isolation, it degrades the whole process's responsiveness simultaneously, and the growth mechanism that's supposed to self-heal is architecturally too slow to absorb sudden synchronous-blocking demand spikes.
+
+**Practical guidance:** never rely on the pool's ability to "just grow" to absorb blocking calls under load — treat any synchronous, blocking call on a pool thread (`.Result`, `.Wait()`, a slow synchronous DB driver, `Thread.Sleep`) in server code as something to eliminate, not something to tolerate because the pool can supposedly compensate. `ThreadPool.SetMinThreads` can raise the *floor* below which the throttle doesn't apply, which is sometimes used as a stopgap under known bursty load, but it's a blunt workaround — the durable fix is always removing the blocking call itself (`await` instead of `.Result`), not pre-provisioning more threads to be blocked.
+
+---
+
+## Advanced — Question 8
+
+**Q8: How do `[ThreadStatic]` and `AsyncLocal<T>` differ, and why does thread-local state break across an `await` while `AsyncLocal<T>` doesn't?**
+
+`[ThreadStatic]` marks a static field so that each **OS thread** gets its own independent copy — reads and writes on one thread never see another thread's value. It's a purely thread-scoped storage mechanism, tied to the physical thread, with no concept of a logical operation that might span multiple threads over time.
+
+```csharp
+[ThreadStatic]
+private static string _requestId; // one slot per THREAD, not per logical operation
+
+async Task ProcessAsync()
+{
+    _requestId = "req-123";
+    await SomeAsyncWork();          // execution may resume on a DIFFERENT pool thread here
+    Console.WriteLine(_requestId);  // may print null! — the new thread has its own, unset slot
+}
+```
+
+**Why this breaks across `await`:** as covered in the state-machine question, resuming after an `await` frequently happens on a *different* thread-pool thread than the one that started the method — the thread pool reuses whichever thread is free, with no guarantee of continuity. `[ThreadStatic]` state is keyed to the physical thread, so the continuation, running on a different thread, sees that thread's own (likely unset) copy — the value set before the `await` is invisible after it, silently, with no error.
+
+**`AsyncLocal<T>`** solves exactly this by flowing with the **logical call context** rather than the physical thread — the runtime propagates `AsyncLocal<T>` values through `ExecutionContext`, which is explicitly captured and restored across `await` points (and across `Task.Run`, thread-pool queuing, and other async hops) as part of the async infrastructure itself.
+
+```csharp
+private static readonly AsyncLocal<string> _requestId = new();
+
+async Task ProcessAsync()
+{
+    _requestId.Value = "req-123";
+    await SomeAsyncWork();               // may resume on a different thread...
+    Console.WriteLine(_requestId.Value); // ...but this still correctly prints "req-123"
+}
+```
+
+This is precisely the mechanism ASP.NET Core's `HttpContext` accessor, distributed-tracing correlation IDs (`Activity.Current`), and `System.Diagnostics` logging scopes rely on to stay correct across `await`s without you manually threading a parameter through every call.
+
+**Practical guidance:** never use `[ThreadStatic]` for anything meant to represent a logical operation, request, or async flow's ambient state — it will intermittently and silently lose that state the moment any `await` resumes on a different thread, which is exactly the kind of bug that's invisible in quick manual testing and shows up unpredictably under real async load. `AsyncLocal<T>` is the correct primitive whenever ambient context needs to survive across `await` boundaries.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is "false sharing," and why is it a distinct, sneakier performance problem from a race condition?**
+
+False sharing is a CPU cache-level performance pitfall, not a correctness bug: it happens when two threads write to two *different*, logically unrelated variables that happen to be laid out close enough in memory to land on the **same CPU cache line** (typically 64 bytes on modern x86/x64). There's no actual shared data and no race condition — each thread's write is to its own variable, and the program computes correct results. The problem is purely about hardware cache-coherency overhead: when one core writes to any part of a cache line, the cache-coherency protocol (e.g., MESI) invalidates that entire line in every other core's cache, forcing them to re-fetch it from a slower shared cache or memory before their own write can proceed — even though the other core's variable, sitting elsewhere in that same 64-byte line, was never touched by the first core at all.
+
+```csharp
+public class Counters
+{
+    public long CounterA; // adjacent fields likely share a 64-byte cache line
+    public long CounterB;
+}
+
+// Thread 1 hammers CounterA, Thread 2 hammers CounterB — no shared data, no race condition,
+// yet both threads' writes are invisibly serialized by cache-line invalidation traffic.
+```
+
+Because `CounterA` and `CounterB` are adjacent `long`s (8 bytes each), they very likely sit in the same cache line, so heavy concurrent writes to each — despite touching entirely separate memory logically — cause constant cross-core cache invalidation, which can slow the combined throughput down dramatically (often several-fold) compared to the same fields laid out far enough apart to land on different cache lines.
+
+**Why this is distinct from, and sneakier than, a race condition:** a race condition is a *correctness* bug — the program can compute a wrong answer, and tools (thread sanitizers, careful code review for unsynchronized shared state, the disciplined approach from the Scenario tier) can reason about it from the code alone. False sharing produces **completely correct results** every time — nothing to catch in a code review, no exception, no wrong output — it only shows up as unexplained, hard-to-diagnose *performance* degradation under concurrent load, typically found via profiling (hardware performance counters showing high cache-miss/invalidation rates) rather than by reading the code.
+
+**The fix:** pad or separate independently-hot fields so they land on different cache lines — e.g., via explicit padding fields, `[StructLayout]` with spacing, or splitting a struct so each thread's hot field gets its own cache line (.NET also ships `System.Runtime.CompilerServices.PaddingHelpers`-style patterns and a low-level cache-line-sized `Padding` helper is a common hand-rolled fix). This matters most in tight, high-throughput hot loops with per-thread counters or per-core statistics — ordinary application code rarely needs to think about it, but high-performance server/library code sometimes must.
+
+---
+
+## Scenario — Question 5
+
+**Q5: A high-throughput service intermittently returns wrong computed results — not crashes, just occasionally incorrect values — but only in production under real load. It has never once reproduced locally, in load-test replay, or while stepping through with a debugger attached. How do you diagnose this, and why is the "just try to reproduce it in the debugger" instinct the wrong first move?**
+
+**Why it never reproduces under a debugger:** this symptom pattern — wrong-but-not-crashing, load-dependent, debugger-immune — is the signature of a **race condition**, sometimes nicknamed a "heisenbug" because attempting to observe it changes it. Breakpoints, single-stepping, and even the debugger's own overhead radically alter the timing of thread interleaving; a race that depends on two threads hitting a specific unsynchronized read/write in a narrow window of microseconds essentially never survives the vastly slower, serialized-by-observation timing a debugger imposes. The same is often true of light local testing or synthetic load replay that doesn't reproduce production's actual concurrency level, thread-pool saturation, or GC pause timing — all of which affect how likely a given race window is to actually be hit.
+
+**Why stepping through in a debugger is the wrong first move:** it's not just unproductive, it's actively self-defeating — you're using a tool whose very operation suppresses the exact condition (tight, unpredictable interleaving under real concurrency) that causes the bug. Time spent trying to "catch it in the act" this way is largely wasted, and worse, a few unsuccessful attempts can wrongly convince a team the bug is something else (bad data, a downstream service issue) rather than concurrency-related.
+
+**The disciplined approach — code review for unsynchronized shared mutable state, first:** given the strong tell (intermittent, wrong-not-crashing, only-under-load, debugger-immune), the productive path is a targeted audit of the code on the hot path for exactly this shape of bug:
+1. Identify every piece of state (fields, static state, captured closures, cached singletons) that's written to and read from multiple concurrent request/worker threads.
+2. For each one, verify it's either immutable, properly synchronized (`lock`, `Interlocked`, a concurrent collection), or genuinely thread-confined — not merely "usually fine."
+3. Pay particular attention to compound operations that look atomic but aren't (`counter++`, `if (dict.ContainsKey) dict[k] = ...` as two steps, a cached computed value being read-then-conditionally-recomputed) — these are exactly the class of bug from the Beginner/Intermediate/Scenario tiers above, and they are the overwhelmingly common root cause of "occasionally wrong, never crashes, load-only" symptoms.
+4. Once a suspect is found, reason about it statically (does this genuinely need to be correct under concurrent access, and is it?) rather than trying to empirically trigger it — the fix (lock, `Interlocked`, immutability, a proper concurrent collection) is usually obvious once the unsynchronized access is spotted, and can be verified by sustained high-concurrency load/stress testing afterward (which, unlike a debugger, preserves real timing and has a much better chance of surfacing the race if the fix didn't actually close it).
+
+**Supporting tactics beyond manual review:** stress-test with many concurrent threads hammering the suspected code path with no debugger attached and tight timing (this preserves the race window instead of eliminating it); consider tools built for this class of bug (thread/concurrency analyzers, or deliberately inserting `Thread.Sleep`/`Task.Yield` at suspected race points during testing to widen the interleaving window and make the bug reproduce *more* often, not less). But the first, cheapest, and highest-yield step is always static: read the code for shared mutable state with no synchronization, because that symptom profile is close to diagnostic on its own.
+
+---

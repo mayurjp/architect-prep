@@ -1057,3 +1057,352 @@ By routing every path through a single object "constructor" function that always
 **Practical guidance:** this class of bug is invisible in code review unless you specifically know to look for it — it never throws, never produces wrong output, and passes every unit test; it only shows up as a CPU/latency regression under production-scale traffic. `node --trace-deopt` and `--trace-opt`, or the Chrome DevTools Performance tab's "not optimized" annotations, are the practical tools for catching it. The broader lesson: prefer factory functions, classes, or `Object.freeze`d shapes with consistent construction over ad hoc object literals built differently across a codebase, especially in code paths handling high request volume.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is the difference between `null` and `undefined`? Where does each naturally occur, and what pitfalls does the distinction cause?**
+
+`undefined` is JavaScript's default "no value yet" marker — it's what the language itself produces automatically: a declared-but-unassigned variable (`let x;`), a missing function argument, a read of a non-existent object property, or a function that falls off the end without a `return`. `null` is different in kind: it's a value you (or an API) assign **deliberately** to represent "intentionally empty" — there is no automatic language mechanism that produces `null` on its own.
+
+```javascript
+let a;                     // undefined — declared, never assigned
+function f(x) { return x; }
+f();                       // undefined — missing argument
+const obj = {};
+obj.missing;                // undefined — no such property
+
+let b = null;               // null — an explicit "no value" you chose to set
+```
+
+Both are falsy, and both compare loosely equal to each other: `null == undefined` is `true`, while `null === undefined` is `false` (different types). `typeof undefined === 'undefined'`, but `typeof null === 'object'` (a long-standing historical quirk, covered next). Optional chaining (`?.`) and missing-property lookups always produce `undefined`, never `null`. Default function parameters (`function f(x = 5)`) only trigger on `undefined`, not on `null` — passing `null` explicitly bypasses the default.
+
+**Pitfalls:** `JSON.stringify` drops object properties whose value is `undefined` entirely (and converts `undefined` array elements to `null`), which silently loses data on a round trip — this becomes important later when discussing `structuredClone`. APIs are inconsistent about which one they use to mean "not found" — a common, useful idiom is `if (value == null)` (loose equality) to catch both `null` and `undefined` in one check without also matching `0` or `''`.
+
+**Guidance:** use `null` for a value your own code explicitly sets to mean "empty on purpose" (e.g., "no user is logged in": `currentUser = null`), and let `undefined` remain the language's own "not initialized" signal — avoid manually assigning `undefined` to variables or properties, since it's indistinguishable from "never set" and defeats tools like `in` or `hasOwnProperty` checks that rely on that distinction.
+
+---
+
+## Beginner — Question 9
+
+**Q9: What are the well-known quirks of the `typeof` operator — such as `typeof null === 'object'` — and why do they exist historically?**
+
+`typeof` returns a string naming a value's type: `'undefined'`, `'boolean'`, `'number'`, `'string'`, `'bigint'`, `'symbol'`, `'function'`, or `'object'`. Two results surprise most people.
+
+**`typeof null === 'object'`:** this is a bug baked into JavaScript's original 1995 implementation and never fixed because too much existing code now depends on it (fixing it would break the web). Internally, early JS represented values as a type tag plus a value; the tag for objects was `0`, and `null` was represented as the machine null pointer (all zero bits) — so it accidentally carried the same type tag as objects, and `typeof` has reported `'object'` for it ever since.
+
+**`typeof functionValue === 'function'`:** functions are technically objects (they're callable, and have their own properties like `.length`, `.name`, and a prototype), but `typeof` special-cases anything with an internal `[[Call]]` capability and reports `'function'` instead of `'object'`, since distinguishing "callable" is usually far more useful than lumping it in with plain objects.
+
+```javascript
+typeof null;             // 'object'  — the historical bug
+typeof [];                // 'object'  — arrays are NOT their own typeof result
+typeof function(){};      // 'function'
+typeof undeclaredVar;     // 'undefined' — does NOT throw, unlike `undeclaredVar` alone
+```
+
+That last line is itself a deliberate, useful quirk: `typeof` is defined to never throw a `ReferenceError` even for a completely undeclared identifier — historically this made it a safe way to feature-detect globals (`typeof window !== 'undefined'`) before a variable's existence could be assumed.
+
+**Pitfalls:** code that does `typeof x === 'object'` to mean "is this a plain object" silently also matches `null`, causing crashes when the code then does `x.someProp` — always add `&& x !== null`. Arrays report `'object'` too, so `typeof` cannot distinguish an array from a plain object; use `Array.isArray(x)` instead.
+
+**Guidance:** reach for `typeof` for primitives, functions, and safe existence checks on possibly-undeclared globals; reach for `Array.isArray()` for arrays and `=== null` for null checks — never trust `typeof` alone to fully characterize an "object" value.
+
+---
+
+## Beginner — Question 10
+
+**Q10: How does short-circuit evaluation work with `&&` and `||`, and how does the nullish coalescing operator `??` differ — especially for falsy-but-valid values like `0` or `''`?**
+
+`&&` evaluates left to right and returns the **first falsy operand** it finds, short-circuiting (never evaluating the rest); if every operand is truthy, it returns the **last** one. `||` does the opposite: it returns the **first truthy operand**, short-circuiting the rest, or the last operand if all are falsy. "Short-circuit" means the right-hand side is never even evaluated once the outcome is already decided — this is why `condition && doSomething()` is a common idiom for conditional execution, and why `x?.y && x.y.z` patterns avoid calling functions with side effects unnecessarily.
+
+`||` is also commonly used to supply a default: `const name = input || 'Anonymous'`. The bug is that `||` treats **every** falsy value the same way — `0`, `''`, `NaN`, `false`, `null`, and `undefined` all trigger the fallback, even when the falsy value was a perfectly legitimate input.
+
+```javascript
+const settings = { volume: 0 };
+
+const v1 = settings.volume || 10;   // 10 — WRONG: 0 is a valid, intentional volume
+const v2 = settings.volume ?? 10;   // 0  — correct: ?? only falls through on null/undefined
+```
+
+`??` (nullish coalescing) only treats `null` and `undefined` as "absent" — every other falsy value (`0`, `''`, `false`, `NaN`) is returned as-is, because the operator's whole purpose is to distinguish "no value was provided" from "a falsy value was deliberately provided."
+
+**Pitfall:** `??` cannot be mixed directly with `&&` or `||` in the same expression without parentheses — `a || b ?? c` throws a `SyntaxError`, because the operator precedence between them is ambiguous by design; you must write `(a || b) ?? c` or `a || (b ?? c)` to disambiguate.
+
+**Guidance:** use `??` whenever you're supplying a default for something that might be legitimately `0`, `''`, or `false` (form fields, counts, flags); keep `||` for cases where you genuinely want to treat every falsy value as "use the fallback."
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is the `Symbol` primitive type? Why is it useful for defining unique, non-colliding property keys, and how does `Symbol.iterator` fit in?**
+
+`Symbol()` creates a new primitive value that is guaranteed unique — even two symbols created with the identical description string are never equal (`Symbol('id') !== Symbol('id')`). Symbols can be used as object property keys alongside strings, which makes them useful for adding metadata to an object **without any risk of colliding** with a string key that user code, another library, or a future spec addition might also use.
+
+```javascript
+const ID = Symbol('id');
+const user = { name: 'Ann', [ID]: 42 };
+
+user[ID];                       // 42 — accessed only via the exact symbol reference
+Object.keys(user);              // ['name'] — symbol keys are hidden from normal enumeration
+JSON.stringify(user);           // '{"name":"Ann"}' — symbols silently dropped, like undefined
+```
+
+Symbol-keyed properties don't show up in `for...in`, `Object.keys`, or `JSON.stringify`, but they **are** copied by `Object.assign`/spread (`{...user}`) since those do copy own enumerable symbol properties — only enumeration and serialization APIs skip them.
+
+The second major use is implementing the **iteration protocol**. `Symbol.iterator` is a "well-known symbol" — a shared symbol the language itself looks for. Any object that defines a method at the key `Symbol.iterator` returning an iterator (an object with `.next()`) becomes iterable with `for...of` and the spread operator:
+
+```javascript
+class Range {
+  constructor(start, end) { this.start = start; this.end = end; }
+  [Symbol.iterator]() {
+    let current = this.start, end = this.end;
+    return { next: () => current <= end
+      ? { value: current++, done: false }
+      : { value: undefined, done: true } };
+  }
+}
+[...new Range(1, 3)];   // [1, 2, 3]
+```
+
+`Symbol.for(key)` provides a global registry — calling it twice with the same string returns the **same** symbol, useful when symbols need to be shared across modules or realms without importing a specific reference.
+
+**Pitfalls:** `new Symbol()` throws `TypeError: Symbol is not a constructor` — always call it as a plain function. Symbols are invisible to JSON, so never use symbol keys for data that needs to survive serialization.
+
+**Guidance:** use symbols for library-internal metadata keys that must never collide with consumer-defined properties, and for implementing well-known protocols like `Symbol.iterator`; keep public, JSON-serializable API shapes on plain string keys.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What are tagged template literals? Explain the function signature that "tags" a template, and give a real-world use case.**
+
+A tagged template is a template literal immediately preceded by a function reference (the "tag"): `tag\`text ${expr}\``. Instead of the literal being interpolated into a plain string immediately, JavaScript calls the tag function itself, handing it the pieces **separately** so the tag can decide how to combine them: the first argument is an array of the literal's static string segments (with a `.raw` property holding the un-escaped source text), followed by one argument per interpolated expression.
+
+```javascript
+function tag(strings, ...values) {
+  console.log(strings);   // ['Hello, ', '! You have ', ' items.']
+  console.log(values);    // ['Ann', 3]
+}
+tag`Hello, ${'Ann'}! You have ${3} items.`;
+// strings.length is always values.length + 1
+```
+
+Because the tag receives raw text and values as separate data rather than an already-concatenated string, it can transform or escape each interpolated value before combining them — this is exactly what real libraries use it for:
+
+- **styled-components** uses a tag (`styled.div\`...\``) to receive CSS text plus interpolated prop-based values, and builds a style object/class from them rather than treating it as plain string concatenation.
+- **Safe SQL/HTML templating** — a tag can automatically escape every interpolated value while leaving the literal (trusted) text untouched:
+
+```javascript
+function safeHtml(strings, ...values) {
+  return strings.reduce((out, str, i) =>
+    out + str + (i < values.length ? escapeHtml(String(values[i])) : ''), '');
+}
+const name = '<script>evil()</script>';
+safeHtml`<p>Hello, ${name}</p>`;   // interpolated value is escaped; literal markup is not
+```
+
+This is meaningfully safer than plain string concatenation or an un-tagged template literal, because the escaping is applied automatically and consistently to every interpolation site — a developer can't forget to call an escape function on one branch.
+
+**Pitfalls:** the safety only exists if the tag function actually escapes — a naive pass-through tag provides no protection at all. Confusing `strings.raw` (unprocessed, e.g. `\n` stays literal backslash-n) with the cooked `strings` array (escape sequences already processed) causes subtle bugs in tags that need the literal source, like `String.raw`.
+
+**Guidance:** reach for tagged templates whenever you need to intercept literal text and interpolated values as structured data rather than an immediate string — styling systems, i18n formatting, and safe query/markup building are the classic cases.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is a `Proxy`, and how does it let you intercept fundamental operations on an object? Walk through a concrete, practical example.**
+
+`new Proxy(target, handler)` returns a wrapper object that behaves like `target` for every operation, except where `handler` defines a **trap** — a function intercepting one fundamental operation. Common traps: `get` (property read), `set` (property write), `has` (`in` operator), `deleteProperty`, `ownKeys`. Each trap receives the target, the key involved (and the new value, for `set`), and can run custom logic before deciding whether — and how — to forward the operation to the real target, typically via the matching `Reflect` method.
+
+A practical example: a minimal reactive-state primitive, resembling the mechanism behind frameworks like Vue 3's reactivity system, where mutating a plain object automatically notifies listeners:
+
+```javascript
+function reactive(target, onChange) {
+  return new Proxy(target, {
+    get(obj, key) {
+      return Reflect.get(obj, key);
+    },
+    set(obj, key, value) {
+      const old = obj[key];
+      const result = Reflect.set(obj, key, value);
+      if (old !== value) onChange(key, value, old);
+      return result;
+    },
+  });
+}
+
+const state = reactive({ count: 0 }, (key, val) => console.log(`${key} changed to ${val}`));
+state.count = 1;   // logs: "count changed to 1"
+```
+
+A simpler, equally common example is a validation proxy that throws on an invalid assignment before it ever reaches the target:
+
+```javascript
+const validated = new Proxy({}, {
+  set(obj, key, value) {
+    if (key === 'age' && (typeof value !== 'number' || value < 0)) {
+      throw new TypeError('age must be a non-negative number');
+    }
+    return Reflect.set(obj, key, value);
+  },
+});
+validated.age = -1;   // throws immediately, before the bad value is ever stored
+```
+
+**Pitfalls:** every trapped operation adds an extra layer of indirection, which is measurable overhead in hot loops — proxies aren't a "free" wrapper for every object. Built-ins with internal slots (`Map`, `Set`, `Date`) don't work correctly if you proxy them directly and forget to bind their methods back to the real target, since their native methods check for an internal slot the proxy itself doesn't have. A proxy is never `===` its target, so identity checks and some `instanceof` patterns can behave unexpectedly if code mixes wrapped and raw references.
+
+**Guidance:** use `Proxy` for genuinely cross-cutting concerns — reactivity, validation, logging/tracing, access control — not as a default wrapper for ordinary objects, given the per-access cost and the sharp edges around wrapping built-ins.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: How does optional chaining (`?.`) combine with nullish coalescing (`??`) for safe deep property access, and how does `?.` behave when calling a possibly-missing method (`obj.method?.()`)?**
+
+`obj?.prop` reads `prop` only if `obj` is not `null`/`undefined`; if it is, the whole expression short-circuits to `undefined` immediately, without throwing. This chains arbitrarily deep — `a?.b?.c?.d` — and works for computed access too (`obj?.[key]`). Combined with `??`, it's the standard pattern for safe deep access with a default:
+
+```javascript
+const city = user?.address?.city ?? 'Unknown';
+```
+
+If `user` or `user.address` is missing, the chain short-circuits to `undefined`, and `??` supplies `'Unknown'`.
+
+`obj.method?.()` guards the **call**, not just the property read: it invokes `method` only if `obj.method` is not `null`/`undefined`; if it's missing, the entire call expression evaluates to `undefined` without throwing `TypeError: obj.method is not a function`. Combined with a leading `?.`, `obj?.method?.()` protects against both `obj` itself and `obj.method` being absent:
+
+```javascript
+function process(data, onComplete) {
+  const result = data?.items?.map(transform) ?? [];
+  onComplete?.(result);   // calls onComplete only if it was actually provided
+  return result;
+}
+process({ items: [1, 2, 3] });   // no crash even though onComplete is undefined
+```
+
+**Pitfalls:** `?.` only guards against `null`/`undefined` — `obj.method?.()` still throws a normal `TypeError` if `obj.method` exists but isn't actually callable (e.g., it's a string). Once a chain hits a nullish value, the **entire rest of the chain** short-circuits silently to `undefined` — this can mask a real bug further down the chain (a typo'd property name, an API contract violation) by quietly returning `undefined` instead of throwing where the actual mistake is, so sprinkling `?.` everywhere can trade "loud early failure" for "silent wrong behavior" later. `?.` also cannot appear on the left-hand side of an assignment — `obj?.prop = 1` is a `SyntaxError`, since there'd be no sensible meaning if `obj` were nullish.
+
+**Guidance:** use `?.`/`??` for data that is genuinely optional by contract (API responses with optional fields, optional callback parameters) — not as a blanket replacement for validating required inputs, where a real error is more useful than a silently missing result.
+
+---
+
+## Advanced — Question 7
+
+**Q7: Contrast how ES module `import` statements are resolved and executed versus CommonJS `require()` calls. Why does this difference enable static analysis like tree-shaking?**
+
+ES modules are **declarative and static**. Every `import`/`export` must appear at the top level of a module (never inside a conditional or function body) and use a mostly-static specifier string, so the engine (or a bundler) can fully parse a module's dependency graph **before running any module body**. Loading an ESM graph happens in distinct phases: first **parsing** every reachable module and recording its imports/exports; then **instantiation**, where the engine links each import to the exact binding it refers to in the exporting module, without executing code; only then does **evaluation** run, executing each module's body exactly once, in dependency order (a module's dependencies evaluate before the module itself). Because the whole graph — and precisely which named exports each importer actually uses — is knowable from static text alone, a bundler can prove that some exports are never referenced anywhere and safely delete them: this is tree-shaking, and it fundamentally depends on imports/exports being static, not runtime values.
+
+CommonJS `require()` is just a regular **synchronous function call**, evaluated wherever it textually executes — inside an `if`, inside a loop, with a computed path built from a variable. `module.exports` is a plain, mutable object populated procedurally as the module body runs. Since the dependency graph is only discovered by actually executing `require()` calls as control flow reaches them, a static analyzer can't fully know what's used without effectively running the code — so CJS tooling can only approximate tree-shaking with heuristics, never guarantee it.
+
+```javascript
+// ESM — live binding: importer sees updates to the exported name itself
+export let counter = 0;
+export function inc() { counter++; }
+
+// importer.mjs
+import { counter, inc } from './counter.mjs';
+inc();
+console.log(counter); // 1 — live binding, not a snapshot
+```
+
+CommonJS exports are captured as a reference to whatever `module.exports.x` pointed to at require time — mutating an object seen through it is visible, but reassigning the exported name inside the source module afterward is not reflected back to something that destructured it early.
+
+**Pitfalls:** circular imports behave differently in each system — ESM's live-binding, phased linking generally tolerates cycles as long as usage is deferred past initial evaluation, while CJS's `require()` mid-cycle can return a **partially populated** `exports` object, silently handing back `undefined` for exports not yet assigned at that point in execution.
+
+**Guidance:** prefer ESM for new code — it's the browser-native standard and unlocks real tree-shaking; CommonJS remains common across the existing Node/npm ecosystem and still needs an interop layer when the two are mixed.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What are the pitfalls of using `JSON.parse(JSON.stringify(obj))` as a "deep clone," and how does `structuredClone` improve on it? What limitation remains even with `structuredClone`?**
+
+A JSON round-trip only preserves what JSON itself can represent — plain objects, arrays, strings, numbers, booleans, and `null`. Everything else is silently mangled:
+
+- **Functions** are dropped entirely — omitted from objects, turned into `null` inside arrays.
+- **`Date` objects become strings** — `JSON.stringify` calls `Date.prototype.toJSON()`, producing an ISO string, and `JSON.parse` never converts strings back into `Date` instances, so the clone's field is a plain string that no longer has `.getTime()`/`.getMonth()` etc.
+- **`undefined`** properties are dropped (array elements become `null`); `NaN`/`Infinity` become `null`.
+- **`Map`/`Set`** serialize to `{}` — all their data is lost.
+- **Circular references throw** `TypeError: Converting circular structure to JSON` outright.
+- **`RegExp`** collapses to `{}`, losing the pattern and flags.
+
+```javascript
+const cfg = { since: new Date(), tags: new Set(['a']), log: () => {} };
+const bad = JSON.parse(JSON.stringify(cfg));
+bad.since;   // a string, not a Date
+bad.tags;    // {} — Set contents gone
+bad.log;     // undefined — function dropped
+```
+
+`structuredClone(obj)` — a built-in global in modern browsers and Node 18+ — implements the HTML **structured clone algorithm** instead, and correctly handles `Date`, `RegExp`, `Map`, `Set`, `ArrayBuffer`/typed arrays, and circular references (the clone preserves the cycle rather than throwing):
+
+```javascript
+const good = structuredClone(cfg /* minus the function, see below */);
+good.since instanceof Date;   // true
+```
+
+**The remaining limitation:** `structuredClone` still cannot clone **functions** — passing an object containing one throws `DataCloneError: could not be cloned`. It also doesn't preserve a class instance's prototype chain: the clone comes back as a plain object with the same own data properties, not an instance of the original class, so any methods defined on the prototype are gone from the clone even though no error was thrown.
+
+**Guidance:** use `structuredClone` for genuinely data-only deep clones (config, state snapshots, message-passing payloads). For anything containing functions or class instances whose methods matter, either clone only the data portion and reconstruct/reattach behavior manually, or avoid cloning the function-bearing parts at all and share them by reference — functions are typically stateless, so sharing a reference is usually correct anyway.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is the Temporal Dead Zone (TDZ) for `let`/`const`? Trace through a code example explaining precisely why accessing the variable before its declaration line throws a `ReferenceError`, rather than returning `undefined` the way a hoisted `var` would.**
+
+Both `var` and `let`/`const` declarations are **hoisted** — their bindings are registered in scope at compile time, before any code in that scope runs — but they differ in *initialization*. A `var` binding is hoisted **and immediately initialized to `undefined`**, so reading it before its assignment line just yields `undefined`. A `let`/`const` binding is hoisted but left **uninitialized** — the binding exists in scope, but the engine tracks it as not-yet-initialized from the top of the scope until the actual declaration statement runs. That span, from the top of the scope to the declaration line, is the **Temporal Dead Zone**. Any read *or* write of the binding while it's in that state throws `ReferenceError: Cannot access 'x' before initialization` — a distinct error from `ReferenceError: x is not defined`, which means no binding exists at all.
+
+```javascript
+console.log(typeof v);   // 'undefined' — var is hoisted AND initialized to undefined
+var v = 1;
+
+console.log(typeof l);   // ReferenceError — l is a binding in scope, but still in the TDZ
+let l = 1;
+```
+
+Step by step: when the enclosing scope is entered, the engine's compile phase has already registered both `v` and `l` as bindings — `v` is set to `undefined` right away, while `l` is marked uninitialized. The first `console.log` reads `v` and gets `undefined` — fine. The second `console.log` tries to read `l`; the binding for `l` does exist in this scope (that's precisely why the error message says "before initialization," not "is not defined" — proving hoisting happened), but it hasn't reached its initializer yet, so the access throws immediately, before `console.log` ever runs. Notably, `typeof` — normally a "safe probe" that never throws even for undeclared names — loses that safety here and throws too, because `l` is a real (if uninitialized) binding, not an absent one.
+
+**Why designed this way:** relying on a `var`-style "hoisted to `undefined`" read before the intended assignment was already considered a bug magnet; TDZ turns that same mistake into an immediate, loud `ReferenceError` instead of letting code silently proceed with `undefined`.
+
+**Pitfalls:** TDZ is scoped per-block, so an inner `let` with the same name as an outer variable creates its own TDZ for that inner block until its own declaration line, even though an outer variable of the same name is already initialized — shadowing can make this surprising. `const` in `for` loops, function default parameter expressions, and `class` declarations are all TDZ'd the same way.
+
+**Guidance:** declare `let`/`const` at the top of the block where they're used to eliminate TDZ risk entirely, and treat any TDZ `ReferenceError` encountered in practice as a genuine ordering bug to fix — never as something to route around by switching back to `var`.
+
+---
+
+## Scenario — Question 5
+
+**Q5: A service "deep clones" a configuration object with `JSON.parse(JSON.stringify(config))` before handing a per-request copy to the rest of the pipeline. After this shipped, requests started failing validation intermittently, and a `lastRotated` timestamp field started showing up as a plain string instead of a `Date` in the logs. Diagnose the root cause and fix it.**
+
+```javascript
+const config = {
+  name: 'primary',
+  lastRotated: new Date('2026-01-01'),
+  limits: { maxRequests: 100 },
+  validate(payload) { return payload.size <= config.limits.maxRequests; },
+};
+
+function handleRequest(payload) {
+  const cloned = JSON.parse(JSON.stringify(config)); // "deep clone" per request
+  if (cloned.validate(payload)) {                     // TypeError: cloned.validate is not a function
+    process(payload, cloned);
+  }
+}
+```
+
+**Root cause:** `JSON.stringify`/`JSON.parse` only round-trips JSON-representable data, and this config has two fields that aren't. First, `Date.prototype.toJSON()` runs during `stringify`, turning `lastRotated` into an ISO **string**; `JSON.parse` has no way to know that string was meant to be a `Date`, so it stays a string on the other side — any downstream code doing `cloned.lastRotated.getTime()` or `instanceof Date` now behaves wrong, which is exactly the "string instead of Date in logs" symptom. Second, `validate` is a **function**, and `JSON.stringify` silently omits function-valued properties entirely — `cloned.validate` is simply `undefined` after the round trip. Calling `cloned.validate(payload)` then throws `TypeError: cloned.validate is not a function`. The failures look "intermittent" because only request paths that actually invoke `cloned.validate(...)` hit the crash (or, if some caller wraps it in `cloned.validate?.(...)`, the call silently no-ops and validation is skipped entirely rather than crashing — a quieter, more dangerous variant of the same bug).
+
+**Diagnosis:** reproduce the clone in isolation and inspect it directly — `typeof cloned.validate` (`'undefined'`) and `cloned.lastRotated instanceof Date` (`false`) both immediately confirm the round-trip is lossy.
+
+**Fix:** swap in `structuredClone`, which correctly clones `Date` (and nested objects, `Map`/`Set`, circular references). But `structuredClone` still can't clone functions at all — calling it on the config as-is throws `DataCloneError`. The correct fix separates data from behavior: clone only the cloneable data, then reattach the function by reference (functions are stateless here, so sharing the same reference across clones is correct, not a shortcut):
+
+```javascript
+function cloneConfig(config) {
+  const { validate, ...data } = config;
+  const cloned = structuredClone(data); // Date, nested objects, etc. cloned correctly
+  cloned.validate = validate;           // reattached by reference — functions don't need cloning
+  return cloned;
+}
+```
+
+**Broader guidance:** treat `JSON.parse(JSON.stringify(...))` as an anti-pattern for anything beyond plain JSON-safe data — flag it in review wherever the source object might carry `Date`, `Map`/`Set`, circular references, or functions. Prefer `structuredClone` for the data portion, and explicitly extract-and-reattach any functions, since no built-in clone primitive in JavaScript is able to duplicate a function.
+
+---

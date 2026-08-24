@@ -204,6 +204,76 @@ ng update                          # automates dependency + codemod-based migrat
 
 ---
 
+## Beginner — Question 7
+
+**Q7: How does Angular's testing story work — `TestBed`, component fixtures, and why DI makes components testable by design?**
+
+Angular ships its own testing utilities (`@angular/core/testing`), built around the idea that because components get their dependencies through DI rather than constructing them internally, a test can swap in fakes for every collaborator without touching the component's code at all.
+
+**`TestBed`** builds a small, isolated Angular module/environment for a single test, letting you declare which components/directives/pipes participate and which providers (real or fake) satisfy their dependencies.
+
+```typescript
+describe('UserCardComponent', () => {
+  let fixture: ComponentFixture<UserCardComponent>;
+  let component: UserCardComponent;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [UserCardComponent], // standalone components are imported, not declared
+      providers: [{ provide: UserService, useValue: { getUser: () => of({ name: 'Ana' }) } }]
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(UserCardComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges(); // triggers ngOnInit + initial render
+  });
+
+  it('renders the user name', () => {
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('h3')?.textContent).toContain('Ana');
+  });
+});
+```
+
+**Mechanism:** `TestBed.createComponent` returns a `ComponentFixture`, a test-only wrapper giving you `componentInstance` (the class instance, for calling methods/reading properties directly) and `nativeElement`/`debugElement` (for asserting on the rendered DOM). Crucially, Angular does **not** run change detection automatically in tests — you must call `fixture.detectChanges()` explicitly, which is what makes tests deterministic: you control exactly when the template re-renders relative to your assertions, unlike the live app where Zone.js or signals trigger it implicitly.
+
+**Why DI is what makes this practical:** because `UserCardComponent` never does `new UserService()` internally, a test can register a fake `{ getUser: () => of(fakeData) }` against the `UserService` token and the component is none the wiser — no real HTTP call, no test-order dependency, no slow or flaky network I/O in a unit test. A component that bypassed DI to construct its own dependencies would force every test to also exercise those real dependencies.
+
+**Common pitfall:** forgetting `fixture.detectChanges()` and then asserting on DOM content that was never rendered — a very common source of "why is this test failing, the code looks right" confusion for developers new to Angular testing. Also, over-mocking to the point a test no longer resembles real usage — the CLI's default `ng generate component` produces a runnable `.spec.ts` file precisely to establish this pattern from day one.
+
+---
+
+## Beginner — Question 8
+
+**Q8: Why does Angular wrap native HTML form elements instead of just using plain `<input>`/`<form>` tags, and what does `@angular/forms` add?**
+
+Plain HTML forms give you almost nothing beyond raw DOM values: a native `<input>` has no built-in concept of "has this been touched by the user," "is this value currently valid against a rule I defined," or "has this value changed from what was originally loaded" — all information a real UI routinely needs (e.g., only show a validation error after the user has interacted with the field, not immediately on page load; disable "Save" until something actually changed).
+
+`@angular/forms` (via `FormsModule` for template-driven, or `ReactiveFormsModule`/standalone `Validators`/`FormControl` for reactive forms — see Intermediate Q5) wraps each form control in an Angular-managed object that tracks this state automatically and exposes it as both plain properties and reactive `Observable` streams.
+
+```typescript
+email = new FormControl('', [Validators.required, Validators.email]);
+```
+
+Each `FormControl` (and `FormGroup`) exposes:
+- **`value`** — the current value.
+- **`valid` / `invalid` / `errors`** — whether the configured validators currently pass, and which failed (`{ required: true }`, `{ email: true }`).
+- **`pristine` / `dirty`** — has the value ever been changed from its initial value.
+- **`untouched` / `touched`** — has the control ever lost focus (blurred) at least once.
+- **`valueChanges` / `statusChanges`** — Observables emitting on every value/validity change, usable for reactive behavior like autosave or cross-field validation.
+
+```html
+<input [formControl]="email" />
+<div *ngIf="email.invalid && email.touched">Enter a valid email.</div>
+```
+That `touched` check is exactly the "don't show an error before the user has interacted" pattern raw HTML gives you no way to express without hand-rolling your own tracking with `(blur)`/`(input)` event handlers and manual boolean flags per field.
+
+**Mechanism:** Angular directives (`ngModel`, `formControlName`, `formControl`) sit between the native DOM element and this `FormControl` object, syncing the DOM value into the control on input events and pushing the control's value back onto the DOM property — the control object, not the DOM node, becomes the real source of truth for state and validity.
+
+**Common pitfall:** treating `@angular/forms` as unnecessary overhead for "just a simple form" and hand-rolling validation with plain `(input)` handlers and component booleans — this quickly reinvents (poorly) the dirty/touched/valid tracking Angular already provides for free, and doesn't compose with Angular's built-in error-display conventions or reactive validation patterns.
+
+---
+
 ## Intermediate — Question 1
 
 **Q1: What are RxJS Observables, and how do they differ from Promises?**
@@ -496,6 +566,161 @@ export class FilterByPipe implements PipeTransform {
 
 ---
 
+## Intermediate — Question 9
+
+**Q9: What are HTTP interceptors, and how do you use one to attach an auth token to every outgoing request or handle errors globally?**
+
+An interceptor is a function (or, historically, a class implementing `HttpInterceptor`) that sits in the pipeline between every call made through `HttpClient` and the actual network request, letting you inspect or rewrite the outgoing `HttpRequest` and the incoming response/error for **every** request in the app from one place, rather than repeating logic in each service method.
+
+```typescript
+export const authInterceptor: HttpInterceptorFn = (req, next) => {
+  const token = inject(AuthService).token;
+  const authedReq = token
+    ? req.clone({ setHeaders: { Authorization: `Bearer ${token}` } })
+    : req;
+  return next(authedReq);
+};
+
+export const errorInterceptor: HttpInterceptorFn = (req, next) => {
+  const router = inject(Router);
+  return next(req).pipe(
+    catchError((err: HttpErrorResponse) => {
+      if (err.status === 401) router.navigate(['/login']);
+      return throwError(() => err);
+    })
+  );
+};
+```
+Registered once at bootstrap, in order (order matters — they run like a chain of middleware):
+```typescript
+bootstrapApplication(AppComponent, {
+  providers: [provideHttpClient(withInterceptors([authInterceptor, errorInterceptor]))]
+});
+```
+
+**Mechanism:** `HttpRequest` objects are immutable, so an interceptor never mutates `req` directly — `req.clone({...})` produces a new request with the desired changes (added headers, a rewritten URL, a modified body) while leaving the original untouched, which keeps the pipeline predictable when multiple interceptors run in sequence. Calling `next(modifiedReq)` passes control to the next interceptor (or the actual HTTP backend if it's last), and the returned Observable can itself be piped through `catchError`/`retry`/`tap` to intercept the *response* side too — logging every response, retrying on transient failures, or redirecting to `/login` on a 401 exactly once instead of duplicating that check after every `subscribe()`.
+
+**Common pitfall:** forgetting that `req.clone()` is required — since `HttpRequest` is immutable, `req.headers.set(...)` silently does nothing to the request actually sent (or throws, depending on version), a classic source of "my auth header isn't being sent" confusion. Also, adding auth headers unconditionally to *every* request, including ones to third-party domains, which can leak a bearer token to a service that shouldn't receive it — a real interceptor should typically check `req.url` against your own API's origin first.
+
+**Practical guidance:** interceptors are the standard place for cross-cutting HTTP concerns — auth headers, request/response logging, global error handling, loading-spinner tracking (incrementing/decrementing a counter around every request) — anything that would otherwise mean repeating boilerplate in every service method.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: Beyond the basics, how do route guards work as functional guards, and how would you use `canDeactivate` to prevent navigating away from an unsaved form?**
+
+Modern Angular guards are plain functions (`CanActivateFn`, `CanDeactivateFn`, `CanMatchFn`, etc.) resolved via `inject()`, run by the Router before it commits to a navigation — returning `true` allows it, `false` (or a rejected outcome) blocks it, and returning a `UrlTree` redirects instead.
+
+**`CanActivate`** decides whether a route can be *entered* — the common auth-gate use case (Intermediate Q4). **`CanDeactivate`** decides whether the user is allowed to *leave* the currently active route, which is exactly the "you have unsaved changes" scenario:
+
+```typescript
+export interface CanComponentDeactivate {
+  canDeactivate(): boolean | Observable<boolean>;
+}
+
+export const unsavedChangesGuard: CanDeactivateFn<CanComponentDeactivate> = (component) => {
+  if (!component.canDeactivate()) {
+    return confirm('You have unsaved changes. Leave anyway?');
+  }
+  return true;
+};
+```
+```typescript
+// on the route:
+{ path: 'edit/:id', component: EditFormComponent, canDeactivate: [unsavedChangesGuard] }
+
+// on the component:
+export class EditFormComponent implements CanComponentDeactivate {
+  form = new FormGroup({ ... });
+  canDeactivate() {
+    return !this.form.dirty; // safe to leave only if nothing changed
+  }
+}
+```
+
+**Mechanism:** the Router calls `canDeactivate` (passing the *currently activated* component instance as its first argument, unlike `canActivate`, which runs before the target route's component exists) whenever a navigation would tear down that route — including a browser back/forward action or a hard reload attempt via `beforeunload`, though the latter needs a separate native `window.onbeforeunload` handler since the Router guard can't intercept a tab close. If the guard returns `false`, the navigation is cancelled entirely and the user stays on the current route with the URL unchanged.
+
+**Common pitfall:** using a blocking `confirm()` dialog (as above, for simplicity) in production code — it's synchronous, can't be styled, and is generally considered poor UX; a real implementation typically returns an `Observable<boolean>` that opens an app-styled confirmation modal and resolves once the user responds, which the guard can await naturally since `CanDeactivateFn` supports returning an Observable or Promise, not just a synchronous boolean.
+
+**Practical guidance:** keep the "is it safe to leave" logic (`form.dirty`, or a more precise deep-equality check against the original loaded value) on the component itself via the shared interface, and keep the guard function itself thin — its job is orchestrating the confirmation UI and the router decision, not owning form-state logic.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is `NgZone.runOutsideAngular`, and when is it a legitimate performance optimization?**
+
+Under Zone.js-based change detection (Advanced Q1), *any* patched async event — a click, a timer, a DOM event — triggers a full change-detection pass. That's usually exactly what you want, but for something firing at very high frequency where most firings don't actually need a UI update — a `mousemove` listener for a drag interaction, or every incoming message on a chatty WebSocket — running full change detection on every single firing is wasted work that can visibly hurt performance (dozens of change-detection passes per second for events that only occasionally change what's rendered).
+
+`NgZone.runOutsideAngular()` runs a callback *outside* Angular's zone, so Zone.js doesn't intercept the async APIs used inside it — no automatic change detection is triggered by anything that happens in there:
+
+```typescript
+export class DragHandleComponent {
+  private ngZone = inject(NgZone);
+  private elRef = inject(ElementRef);
+
+  ngAfterViewInit() {
+    this.ngZone.runOutsideAngular(() => {
+      this.elRef.nativeElement.addEventListener('mousemove', (e: MouseEvent) => {
+        this.updatePositionInternal(e.clientX, e.clientY); // pure computation, no CD triggered
+        if (this.shouldSyncToUi(e)) {
+          this.ngZone.run(() => this.syncVisiblePosition()); // re-enter the zone only when a real UI update is needed
+        }
+      });
+    });
+  }
+}
+```
+
+**Mechanism:** code registered inside `runOutsideAngular`'s callback still runs normally — the DOM listener still fires on every `mousemove` — but Zone.js's patched `addEventListener` doesn't notify Angular afterward, so no change-detection pass happens automatically. You explicitly call `this.ngZone.run(callback)` to re-enter the Angular zone only at the moments a UI-visible update is actually warranted, which triggers exactly one change-detection pass for that update instead of one per raw event.
+
+**Common pitfall:** using `runOutsideAngular` reflexively for anything performance-sensitive without measuring first — it adds real complexity (manually tracking when to re-enter the zone, risk of a component reading stale state if you forget to call `ngZone.run` when an update *is* needed) and is really only worth it for genuinely high-frequency sources; wrapping an occasional click handler in it is pure overhead for no benefit. It's also unnecessary if the component is signal-driven and zoneless, since signals notify Angular precisely rather than relying on Zone.js's blanket interception in the first place.
+
+**Practical guidance:** reach for this only after profiling shows a specific high-frequency event source is causing excessive change-detection churn — `mousemove`/`scroll`/`resize` listeners, WebSocket/animation-frame callbacks, or third-party libraries (like a charting library) that fire callbacks very rapidly are the classic candidates.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: How does dynamic component loading work with `ViewContainerRef`/`createComponent`, and how does it differ from static template composition?**
+
+Most Angular UI composition is static: a template references `<app-user-card [user]="u" />` directly, so the compiler knows at build time exactly which components can appear where. **Dynamic component loading** creates a component instance imperatively, at runtime, by component type rather than by template reference — needed when the component to render isn't known until runtime, like a modal/dialog service that can host arbitrary content, or a plugin-style UI that loads feature components based on configuration or user permissions.
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class ModalService {
+  open<T>(component: Type<T>, viewContainerRef: ViewContainerRef): ComponentRef<T> {
+    viewContainerRef.clear();
+    const componentRef = viewContainerRef.createComponent(component);
+    return componentRef; // .instance gives typed access to the created component's @Input()s/methods
+  }
+}
+```
+```typescript
+// host component with an anchor point:
+@Component({
+  template: `<ng-container #anchor></ng-container>`,
+})
+export class ModalHostComponent {
+  @ViewChild('anchor', { read: ViewContainerRef }) anchor!: ViewContainerRef;
+
+  showConfirmDialog() {
+    const ref = this.modalService.open(ConfirmDialogComponent, this.anchor);
+    ref.instance.message = 'Are you sure?';       // set @Input()s directly on the instance
+    ref.instance.confirmed.subscribe(() => { ... }); // subscribe to @Output()s directly
+  }
+}
+```
+
+**Mechanism:** `ViewContainerRef` represents a location in the view tree where components can be inserted programmatically; `createComponent(ComponentType)` instantiates it (running the full component lifecycle — DI resolution, `ngOnInit`, rendering) and inserts its view at that location, returning a `ComponentRef` that gives direct, typed access to `instance` (to set inputs/read outputs, since there's no template binding syntax available for a component created this way) and a `destroy()` method for manual teardown. Unlike static composition, the created component isn't declared anywhere in a template, so Angular's structural directives (`*ngIf`, `@for`) and template-level bindings don't apply — you drive its lifecycle entirely through the `ComponentRef` API.
+
+**Common pitfall:** forgetting to call `componentRef.destroy()` (or `viewContainerRef.clear()`, which destroys everything it currently holds) when the dynamically created component is no longer needed — since it wasn't created via a structural directive, nothing tears it down automatically the way `*ngIf="false"` would, and this is a common source of leaked component instances (and any subscriptions/timers they set up) in hand-rolled modal or overlay systems.
+
+**Practical guidance:** for anything reasonably well-known ahead of time, prefer static templates with `*ngIf`/`@if`/`@switch` — they're simpler, type-checked, and Angular manages their lifecycle for you. Reach for dynamic component creation specifically when the component type genuinely isn't known until runtime; for common cases like modals/dialogs/toasts, Angular CDK's `Overlay` and `Dialog` APIs build on exactly this mechanism and handle the lifecycle/positioning/backdrop concerns for you rather than requiring you to hand-roll it.
+
+---
+
 ## Advanced — Question 1
 
 **Q1: How does Angular's change detection actually work — Zone.js, and the difference between Default and OnPush strategies?**
@@ -696,6 +921,87 @@ Reading a signal's value is calling it as a function (`count()`); this is what l
 
 ---
 
+## Advanced — Question 6
+
+**Q6: What problem does server-side rendering (Angular Universal / Angular SSR) solve, and what is hydration — including the "hydration mismatch" pitfall?**
+
+By default, an Angular app is a nearly-empty HTML shell (`<app-root></app-root>`) plus a JavaScript bundle — the browser has to download, parse, and execute that JS before anything meaningful appears on screen. That has two costs: a slower **first contentful paint** (the user stares at a blank page during the download/bootstrap), and poor **SEO**, since crawlers that don't fully execute JavaScript (or execute it inconsistently) see an essentially empty page.
+
+**Server-side rendering (SSR)**, via Angular SSR (the modern, built-in successor to the separate Angular Universal package), runs the Angular app once on the server per request, producing fully-rendered HTML with real content already in it, which is sent to the browser immediately — the user sees the actual page before any client-side JavaScript has run at all.
+
+```typescript
+// app.config.server.ts — enables server rendering for the app
+export const config: ApplicationConfig = {
+  providers: [provideServerRendering()],
+};
+```
+
+**Hydration** is what happens next: the same JavaScript bundle still loads and bootstraps Angular on the client, but instead of throwing away the server-rendered DOM and rebuilding it from scratch (which causes a visible flicker/reflow, historically called "destructive hydration"), modern Angular hydration (`provideClientHydration()`) **reuses the existing server-rendered DOM nodes**, attaching event listeners and component state to them in place, and only patches nodes where client-rendered output would actually differ.
+
+```typescript
+providers: [provideClientHydration(withEventReplay())]
+```
+`withEventReplay()` additionally captures user interactions (like a click) that happen *before* hydration finishes, replaying them once the app is interactive — closing the gap where a page looks ready but isn't yet responsive.
+
+**The hydration mismatch pitfall:** hydration assumes the DOM the client would have rendered is *structurally identical* to what the server actually sent. If a component renders differently depending on something only available in the browser — reading `window`/`localStorage` directly in a template-affecting way, using `Math.random()` or `Date.now()` in a way that changes output, or rendering conditionally based on viewport size — the client's re-render disagrees with the server's HTML, and Angular either logs a hydration mismatch warning and falls back to destructive re-rendering for that subtree (losing the performance benefit) or, in worse cases, produces visibly broken output.
+
+**Common pitfall / practical guidance:** guard any browser-only API access behind `isPlatformBrowser(this.platformId)` checks (SSR runs in Node, where `window`/`document` don't fully exist) and avoid non-deterministic values in anything that affects rendered markup — treat "would the server and client produce the exact same HTML for this data" as the litmus test for SSR/hydration-safe code.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What are micro-frontends in an Angular context, how does Module Federation help compose them, and what trade-offs come with that approach versus a single monolithic Angular app?**
+
+A **micro-frontend** architecture splits a large frontend into multiple independently built, independently deployed applications/modules that are composed together at runtime into what the end user perceives as one cohesive app — the frontend analogue of microservices, typically adopted when multiple teams need to ship features on independent release schedules without coordinating a single monolithic frontend's build and deploy pipeline.
+
+**Module Federation** (a Webpack/esbuild-ecosystem capability, integrated into Angular via `@angular-architects/module-federation` or native support in newer tooling) is one common mechanism for this: one Angular app (the "shell" or "host") can load and mount a component or route from an entirely separate, independently deployed Angular application (a "remote") at runtime, over the network, without either app being compiled together.
+
+```typescript
+// host's route config — lazy-loads a remote application's exposed module at runtime
+{
+  path: 'billing',
+  loadChildren: () =>
+    loadRemoteModule({
+      type: 'module',
+      remoteEntry: 'https://billing.example.com/remoteEntry.js',
+      exposedModule: './Routes',
+    }).then(m => m.BILLING_ROUTES),
+}
+```
+
+**Why teams adopt this:** independent deploy cadence (the billing team ships without coordinating a shell release), technology/version isolation between teams, and the ability to scale a large engineering org across separately owned codebases — the same organizational motivation behind backend microservices.
+
+**The classic trade-off — shared dependency versioning:** if the shell is on Angular 18 and a remote was built against Angular 17, or each ships its own copy of a large shared library (RxJS, a design-system package), you either duplicate that dependency in every bundle (bloating total download size, since the browser can't dedupe code shipped separately by unrelated builds) or you carefully configure "shared" singleton dependencies across host and remotes — which reintroduces exactly the kind of version-coordination problem micro-frontends were meant to avoid, just moved to the dependency-version layer instead of the deploy-schedule layer. Runtime composition also means a bug in a remote's `remoteEntry.js` (a bad deploy, a CDN outage) can break a route in an otherwise-healthy shell app, and debugging spans multiple independently-versioned codebases rather than one.
+
+**Practical guidance:** micro-frontends earn their complexity when the organizational problem (multiple teams, independent release cadence, ownership boundaries) is real and painful — for a single team or a small-to-medium app, a monolithic Angular app with lazy-loaded feature routes (Intermediate Q4) gets most of the same code-splitting/performance benefit with none of the runtime-composition and dependency-version overhead, and is the right default absent a specific organizational driver for splitting deploys.
+
+---
+
+## Advanced — Question 8
+
+**Q8: How does Angular's modern build/bundling pipeline work (esbuild/Vite), and why does bundle size matter enough to actively budget it?**
+
+Angular's CLI build pipeline has moved from a purely Webpack-based system to one built on **esbuild** (for the underlying bundling/transpilation, which is written in Go and dramatically faster than Webpack's JavaScript-based toolchain) with **Vite** powering the dev server (`ng serve`) for near-instant rebuilds during development via native ES modules and on-demand compilation rather than bundling the entire app up front. This is largely transparent to app code — it's a build-tool swap, not an API change — but it materially speeds up both `ng build` and iterative `ng serve` rebuild times on large codebases.
+
+**Why bundle size is actively budgeted, not just an afterthought:** every kilobyte shipped to the browser has to be downloaded, parsed, and executed before the app is interactive — on a slow connection or a lower-end device, a bloated main bundle directly costs first-load performance, which is also exactly what lazy loading (Intermediate Q4) and Server-Side Rendering (Advanced Q6) exist to mitigate. The Angular CLI lets you set enforced size limits directly in `angular.json`:
+
+```json
+"budgets": [
+  { "type": "initial", "maximumWarning": "500kb", "maximumError": "1mb" },
+  { "type": "anyComponentStyle", "maximumWarning": "4kb", "maximumError": "8kb" }
+]
+```
+A build that exceeds `maximumError` **fails** — turning "the bundle quietly got bigger over six months of feature work" into a build-time failure the moment a single change pushes it over the line, rather than something only noticed later via user complaints or a performance audit.
+
+**Mechanism — tree-shaking and differential concerns:** modern builds tree-shake aggressively (removing code nothing actually references, which is why `providedIn: 'root'` services that are never injected don't ship at all) and rely on ES module static analysis to determine what's genuinely reachable. Older Angular versions supported "differential loading" — shipping two bundles, a modern one for browsers supporting ES2015+ and a legacy ES5 fallback — but this has been deprecated as the baseline browser support Angular targets has moved forward, since essentially all currently-supported browsers now support modern JS natively, making the legacy bundle mostly unnecessary weight to maintain.
+
+**Common pitfall:** importing an entire library for one function (`import _ from 'lodash'` instead of `import debounce from 'lodash/debounce'`), or eagerly importing a rarely-used feature module in the root bundle instead of behind `loadChildren`/`loadComponent` — both defeat tree-shaking/lazy-loading and are exactly the kind of regression a bundle budget is meant to catch in CI before it reaches production.
+
+**Practical guidance:** set budgets early (even generous ones) rather than after the bundle has already grown unchecked — a budget that's never enforced provides no protection, and ratcheting an already-bloated bundle back down later is far more disruptive than catching regressions incrementally as they happen.
+
+---
+
 ## Scenario — Question 1
 
 **Q1: A `ProductListComponent` renders a few hundred `ProductRowComponent` children. Every time the user types in an unrelated search box elsewhere on the page, the whole product list visibly stutters, even though the products themselves haven't changed. How do you fix it, and why does it happen in the first place?**
@@ -802,5 +1108,44 @@ This is deliberately open-ended — "why isn't my UI updating" is one of the mos
 **Cause 4 — a `*ngIf`/`@if` truthy-check masking it.** Less likely given the described symptom, but worth ruling out: if the template only reads `user` through a locally cached snapshot (`{{ cachedUser.displayName }}` set once in `ngOnInit` rather than bound live to the service), no amount of underlying state change will show up until that local snapshot is explicitly reassigned.
 
 **How to debug systematically:** first confirm *whether change detection ran at all* — temporarily add `{{ (checkCount = checkCount + 1) }}`-style logging or a `console.log` in `ngDoCheck`; if it never fires after the save, that points at Cause 1 or 2 (a CD-triggering problem). If it *does* fire but the bound value is still stale, that points at Cause 3 or 4 (a data-flow problem, not a CD problem) — inspect exactly which Observable/property the template binds to versus which one the save logic actually updates.
+
+---
+
+## Scenario — Question 5
+
+**Q5: An Angular app's initial load time has crept up steadily over many feature releases, and users are now complaining. Profiling shows a large main bundle, and a big chunk of it is several admin-only features that most users never touch but that are bundled in unconditionally. Diagnose the problem and propose a fix, including how to prevent this regressing again.**
+
+**Diagnosis:** this is the textbook symptom of features being wired up as eagerly-loaded routes/imports instead of lazy-loaded ones. Every time a new admin feature was added, if its route/component was imported directly in the root routing config (or its module eagerly declared/imported), its entire code — component logic, its own dependencies, any large third-party libraries it pulls in (a charting library for an admin dashboard, say) — gets bundled into the **initial** (`main`) JS chunk that every single user downloads on first load, whether or not they're an admin and whether or not they ever navigate there. Over many feature releases, this accumulates invisibly: no single feature addition looks alarming in isolation, but the aggregate initial bundle grows every release until first-load time is visibly bad. Confirm with `ng build --configuration production --stats-json` fed into a bundle analyzer (e.g. `webpack-bundle-analyzer` or Angular's own build stats), which visually shows exactly which modules are contributing bytes to the initial chunk versus already-lazy chunks.
+
+**The fix — convert admin features to lazy-loaded routes:**
+
+```typescript
+// BEFORE: eagerly imported, ships in the main bundle for every user
+import { AdminDashboardComponent } from './admin/admin-dashboard.component';
+export const routes: Routes = [
+  { path: 'admin', component: AdminDashboardComponent },
+];
+
+// AFTER: only downloaded when a user actually navigates to /admin
+export const routes: Routes = [
+  {
+    path: 'admin',
+    loadComponent: () => import('./admin/admin-dashboard.component').then(m => m.AdminDashboardComponent),
+    canMatch: [adminRoleGuard], // bonus: also gate it so non-admins never even trigger the chunk fetch
+  },
+];
+```
+For a feature that's more than one component, `loadChildren` pointing at a child `Routes` array achieves the same split for the whole feature area at once. This moves the admin feature's code (and any admin-only third-party dependencies) into a separate chunk that esbuild/the Angular CLI only fetches on navigation to `/admin` — the vast majority of users who never go there never download it, and first-load time drops proportionally to how much was moved out of the main bundle.
+
+**Preventing regression — bundle budgets in CI:** the fix addresses today's bloat, but nothing stops the next well-intentioned feature from being wired up eagerly again by mistake. Enforce a hard `angular.json` budget so a build that pushes the initial bundle over a threshold **fails CI** rather than merging silently:
+
+```json
+"budgets": [
+  { "type": "initial", "maximumWarning": "500kb", "maximumError": "750kb" }
+]
+```
+Set the initial threshold near the current, already-reduced size (with some headroom, not the old bloated figure) so any future PR that accidentally reintroduces an eager import to the main bundle fails the build with a clear, actionable error — pointing at itself — rather than being caught only much later by another round of user complaints and profiling.
+
+**Practical guidance:** treat "does this belong in the initial bundle" as a question asked at the time a route is added, not retroactively — anything gated behind a role, a feature flag, or a rarely-visited section of the app is close to a default candidate for `loadComponent`/`loadChildren`, and a CI-enforced budget is what makes that discipline durable across a team and over time rather than dependent on someone remembering during code review.
 
 ---

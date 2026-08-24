@@ -509,3 +509,308 @@ public async Task<IActionResult> CreateOrder(
 **Rollout note:** this requires a client-side change (generating and persistently reusing the key across a retry, not per HTTP attempt) as well as the server-side store — a common gap is implementing the server check correctly but leaving the client generating a fresh GUID on every retry, which silently defeats the whole mechanism.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What specifically makes a fault "transient" as opposed to a permanent failure, and why does that distinction matter before you decide to retry?**
+
+A **transient fault** is a failure whose underlying cause is expected to resolve itself within a short window without any change to the request — a dropped packet, a load balancer momentarily routing to an instance that's still starting up, a brief spike in downstream latency that trips a timeout, a database failing over to a replica. Retrying the exact same request a moment later has a real chance of succeeding because *nothing about the request was wrong* — the environment was just briefly unfavorable.
+
+A **permanent (non-transient) failure** is one where the request itself is the problem, or the failure reflects a durable state that won't change on its own: a `404 Not Found` because the resource genuinely doesn't exist, a `400 Bad Request` because the payload fails validation, a `401/403` because the caller isn't authorized, or a `409 Conflict` because of a genuine business-rule violation. Retrying an identical request against a permanent failure produces the identical failure every time — the request was never going to succeed, no matter how many times you send it.
+
+**Why the distinction matters practically:** retrying a permanent failure is not just wasted effort, it can be actively harmful. It burns retry budget and call volume that should be reserved for faults that might actually resolve (contributing to the retry-amplification problem covered in Advanced Q3), it delays surfacing a real, actionable error to the caller or the user (a validation error should come back immediately, not after 3 retries and a few seconds of backoff), and in some systems it can trigger rate limiting or account lockouts (repeatedly retrying a `401` against an auth endpoint looks like a brute-force attempt).
+
+```csharp
+var pipeline = new ResiliencePipelineBuilder()
+    .AddRetry(new RetryStrategyOptions
+    {
+        // Only retry things that look transient — never blanket-catch every exception/status.
+        ShouldHandle = new PredicateBuilder()
+            .Handle<HttpRequestException>()
+            .Handle<TimeoutRejectedException>()
+            .HandleResult<HttpResponseMessage>(r =>
+                r.StatusCode == HttpStatusCode.RequestTimeout ||
+                r.StatusCode == HttpStatusCode.TooManyRequests ||
+                (int)r.StatusCode >= 500),
+        MaxRetryAttempts = 3
+    })
+    .Build();
+```
+
+**Common pitfall:** classifying by exception type alone instead of by what actually happened — a `500 Internal Server Error` might be transient (a momentary null-reference from a race condition) or might be permanent (a bug that fires on every request with this payload); when in doubt, a few bounded retries are usually cheap insurance, but 4xx client errors (except 408/429) should essentially never be retried unmodified.
+
+**Practical guidance:** build the transient/permanent classification explicitly into your retry policy's `ShouldHandle` predicate rather than relying on a blanket catch-all — this is the single most important configuration decision in any retry policy, more impactful than tuning the backoff curve itself.
+
+---
+
+## Beginner — Question 6
+
+**Q6: What is the Health Check pattern, and how does it let infrastructure automatically route around an unhealthy instance?**
+
+A health check is an endpoint or mechanism that reports whether a running instance of a service is currently able to do useful work, so that infrastructure components — a load balancer, a Kubernetes readiness/liveness probe, a service mesh — can make automated routing and lifecycle decisions without a human watching dashboards. It is a foundational building block underneath most of the other patterns in this file: a circuit breaker protects one client's calls to one dependency, but a health check protects the *whole fleet* by removing a bad instance from rotation entirely.
+
+**Two flavors that matter:**
+- **Liveness** — "is this process alive and not deadlocked?" A failed liveness check typically triggers a restart (e.g., Kubernetes kills and recreates the pod).
+- **Readiness** — "is this instance currently able to serve traffic correctly?" A failed readiness check doesn't kill the instance, it just pulls it out of the load balancer's rotation until it reports healthy again — useful during startup (dependencies not yet warmed up), or during a temporary degraded state (e.g., its database connection pool is exhausted).
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddCheck("self", () => HealthCheckResult.Healthy())
+    .AddSqlServer(connectionString, name: "sql-db", tags: new[] { "ready" })
+    .AddUrlGroup(new Uri("https://payments.internal/health"), name: "payments-dependency", tags: new[] { "ready" });
+
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false }); // liveness: process-only
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c.Tags.Contains("ready") }); // readiness: dependencies too
+```
+
+**Why this is a resiliency pattern, not just monitoring:** without health checks, a load balancer keeps sending a fraction of traffic to an instance that's actually unable to serve it correctly (a bad deploy, a corrupted local cache, a lost database connection), and every one of those requests fails from the *caller's* perspective even though other instances in the fleet are perfectly healthy. Health checks make the failure self-correcting at the infrastructure layer — an unhealthy instance stops receiving new traffic within one probe interval, with no code change or manual intervention needed.
+
+**Common pitfall:** making the readiness check too shallow (`return 200 always`) so it doesn't actually reflect dependency health, or too aggressive (checking every downstream dependency transitively, so one flaky non-critical dependency takes a healthy instance out of rotation unnecessarily). A good readiness check verifies the specific dependencies that instance genuinely can't function without, and stays fast (well under the probe's timeout) so the check itself doesn't become a source of false negatives under load.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is request hedging, and what's the trade-off it makes to reduce tail latency?**
+
+Hedging sends a duplicate copy of a request to a second replica if the first hasn't responded within some threshold, then races the two — whichever responds first wins, and the other is discarded (or cancelled if the protocol supports it). Unlike retry, hedging doesn't wait for a failure at all; it acts *proactively* on a slow-but-not-yet-failed response, aiming to control p99/p999 tail latency rather than to recover from outright failures.
+
+**Why plain retry-on-timeout doesn't solve the tail-latency problem well enough:** if you only retry after a full timeout expires, you've already paid the full timeout's worth of latency before the retry even starts — for a service where most requests are fast but a small fraction stall (a common real-world pattern caused by GC pauses, noisy-neighbor CPU contention, or a slow disk on one particular node), that "wait the full timeout, then retry" approach means the slow tail is still slow, just eventually successful. Hedging instead says "if this hasn't come back in, say, the p95 latency, assume it might be one of the unlucky slow ones and start a second attempt now, in parallel" — the client gets whichever replica happens to respond first.
+
+```csharp
+public async Task<T> HedgedCallAsync<T>(Func<CancellationToken, Task<T>> call, TimeSpan hedgeDelay)
+{
+    using var cts = new CancellationTokenSource();
+    var first = call(cts.Token);
+    var hedgeTask = Task.Delay(hedgeDelay).ContinueWith(_ => call(cts.Token), TaskContinuationOptions.OnlyOnRanToCompletion).Unwrap();
+
+    var winner = await Task.WhenAny(first, hedgeTask);
+    cts.Cancel(); // cancel whichever call didn't win, if the protocol supports cancellation
+    return await winner;
+}
+```
+
+**The trade-off, explicitly:** hedging trades extra load for reduced tail latency — every hedged request that actually triggers a duplicate call means roughly 2x the work done for that one logical request, against potentially the same backend fleet whose slowness is what triggered the hedge in the first place. This only pays off when (a) the hedge delay is tuned so hedging is rare (triggered only for the genuinely slow tail, not routinely), and (b) the backend has enough spare capacity that doubling a small fraction of requests doesn't itself become a load problem — hedging on an already-saturated backend can make things worse, not better.
+
+**Practical guidance:** set the hedge threshold near a high percentile (p90–p95) of normal latency, not the average — hedging too eagerly multiplies load for little tail-latency benefit; cap how many hedges can be in flight at once. It's most valuable for internal, idempotent, low-cost reads (e.g., fetching from a replicated read store) rather than expensive writes.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is the dual-write problem, and how does the Outbox pattern solve it without a distributed transaction?**
+
+The **dual-write problem** arises whenever a single logical operation needs to both update a database *and* publish an event/message about that update (e.g., "save the order" and "publish `OrderCreated` to the message bus"), and those two systems don't share a transaction. Whichever order you do them in, there's a window where one succeeds and the other fails: commit the database write, then crash before publishing — the event is lost and downstream consumers never hear about an order that genuinely exists. Publish the event first, then fail to commit the database write — consumers react to an order that doesn't actually exist. Neither ordering is safe, and there's no way to make a relational database and a message broker commit atomically together without a distributed transaction coordinator (which, per Advanced Q1's discussion of 2PC, doesn't scale well or is often unavailable across the specific technologies involved).
+
+**The Outbox pattern solves it by turning the dual write into a single local write.** Instead of publishing to the message broker directly, the event is written as a row into an `Outbox` table in the **same local database transaction** as the business write — this is now a single-database transaction, fully ACID, no distributed coordination needed. A separate, independent relay process then reads unpublished outbox rows and publishes them to the broker, marking them published once the broker acknowledges.
+
+```csharp
+public async Task CreateOrderAsync(Order order)
+{
+    using var tx = await _dbContext.Database.BeginTransactionAsync();
+    _dbContext.Orders.Add(order);
+    _dbContext.OutboxMessages.Add(new OutboxMessage
+    {
+        Type = "OrderCreated",
+        Payload = JsonSerializer.Serialize(new { order.Id, order.CustomerId }),
+        CreatedAtUtc = DateTime.UtcNow
+    }); // same transaction — both commit together, or neither does
+    await _dbContext.SaveChangesAsync();
+    await tx.CommitAsync();
+}
+
+// Separate background relay (polling, or a CDC feed off the outbox table):
+// SELECT * FROM OutboxMessages WHERE PublishedAtUtc IS NULL ORDER BY CreatedAtUtc
+// -> publish each to the broker -> mark PublishedAtUtc on success
+```
+
+**Why this guarantees at-least-once, not exactly-once:** the relay can crash after publishing but before marking the row published, causing a re-publish on restart — so consumers of these events must be idempotent (Advanced Q2), same as any other at-least-once delivery system. What the outbox guarantees is that the event is *never silently lost* relative to the database write — it will eventually be published as long as the row exists, closing the exact gap that makes naive dual-writing unsafe.
+
+**Practical guidance:** use CDC (change-data-capture, e.g., Debezium reading the transaction log) instead of polling for the relay where available — lower latency, no polling overhead — but a simple polling relay is a perfectly reasonable starting point for moderate volume.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: When should a system choose graceful degradation over failing fast when a dependency is unavailable, and when is fail-fast the right call instead?**
+
+These are two different philosophies for the same moment — a dependency you need is down or unreachable — and picking the wrong one for a given operation is a design mistake, not just a tuning knob.
+
+**Graceful degradation** means the system keeps serving a reduced, imperfect, but still useful response instead of failing outright — this is essentially the Fallback pattern (Intermediate Q4) applied as a deliberate product/UX decision rather than just an error-handling detail. Example: a product page's "customers also bought" recommendations service is down — the page still renders fully, just without that section, or with a cached/stale version from an hour ago labeled as such. The user doesn't need real-time-fresh recommendations to complete their real goal (viewing/buying the product); a slightly-stale or missing "nice to have" is strictly better than a broken page.
+
+**Fail-fast** means the system refuses to proceed and surfaces an explicit error immediately rather than guessing or substituting a default, because *correctness matters more than availability* for that specific operation. Example: the payment authorization service is unreachable during checkout — you must not "gracefully degrade" by assuming the payment would have succeeded and completing the order anyway; that's not a UX nicety, it's a financial and correctness risk. The right behavior is to fail the checkout clearly, with a message the user can act on ("payment couldn't be processed, please try again"), not silently proceed on a guess.
+
+```csharp
+// Graceful degradation — a "nice to have" enrichment
+async Task<ProductPage> BuildProductPageAsync(int id)
+{
+    var product = await _productService.GetAsync(id); // must succeed — core data
+    List<Recommendation> recs;
+    try { recs = await _recommendationService.GetAsync(id); }
+    catch (Exception) { recs = _cache.GetLastKnownRecommendations(id) ?? new(); } // degrade, don't fail the page
+    return new ProductPage(product, recs);
+}
+
+// Fail-fast — correctness-critical
+async Task<OrderResult> CheckoutAsync(Order order)
+{
+    var authResult = await _paymentService.AuthorizeAsync(order.Payment); // no fallback — must be real
+    if (!authResult.Success) return OrderResult.Failed(authResult.Reason);
+    // ...
+}
+```
+
+**The deciding question to ask per call site:** "if I substitute a default/cached/simplified answer here instead of the real one, could that be wrong in a way that harms the user or the business (money, safety, data integrity), or is it merely less optimal (staleness, reduced personalization)?" The former demands fail-fast; the latter is a strong candidate for graceful degradation.
+
+**Common pitfall:** applying one philosophy uniformly across an entire service instead of deciding per dependency/operation — "always retry and fall back to cache" is as much a bug when applied to payment authorization as "always fail the whole request on any error" is when applied to an optional recommendations widget.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What is the "thundering herd" problem as it relates to cache expiry, and what are the standard mitigations?**
+
+Thundering herd (in this context, also called a "cache stampede") happens when a popular cache key expires and many concurrent requests all miss the cache for that key at the same instant — instead of one request repopulating the cache and everyone else benefiting from it, *every* concurrent request independently sees a cache miss and goes straight to the backing store (database, expensive computation, downstream API) at once. A backing store sized to handle occasional cache-miss traffic gets hit with the full concurrent request volume all at once, which can be enough on its own to cause an outage — the exact scenario in Scenario Q5.
+
+**Why this is worse than steady-state cache-miss traffic:** normally, cache misses are spread out over time as different keys expire at different moments. A stampede concentrates an entire population of concurrent requests for the *same* key into effectively the same instant, because they all expired together and all noticed at once — the backing store sees a spike that looks nothing like its normal cache-miss load profile.
+
+**Mitigations:**
+
+1. **Request coalescing / single-flight** — ensure only one request per key is allowed to actually query the backing store at a time; concurrent requests for the same missing key wait on that one in-flight fetch and share its result once it completes, instead of each issuing their own redundant query.
+
+```csharp
+private static readonly ConcurrentDictionary<string, Lazy<Task<Product>>> _inFlight = new();
+
+async Task<Product> GetProductAsync(int id)
+{
+    var key = $"product:{id}";
+    var cached = await _cache.GetAsync<Product>(key);
+    if (cached is not null) return cached;
+
+    var lazy = _inFlight.GetOrAdd(key, _ => new Lazy<Task<Product>>(async () =>
+    {
+        var product = await _db.Products.FindAsync(id); // only the winner reaches the DB
+        await _cache.SetAsync(key, product, TimeSpan.FromMinutes(10));
+        return product;
+    }));
+    try { return await lazy.Value; }
+    finally { _inFlight.TryRemove(key, out _); }
+}
+```
+
+2. **Staggered / jittered TTLs** — instead of setting every cache entry's TTL to the exact same duration (which causes mass-simultaneous expiry for entries written around the same time, e.g. after a cache warm-up or deploy), add random jitter to each TTL (`baseTtl ± random(0, jitterWindow)`) so expirations spread out over time instead of clustering.
+3. **Probabilistic early expiration** ("XFetch") — have a small, increasing probability of proactively refreshing a soon-to-expire key *before* it actually expires, computed from how close it is to expiry, so refreshes happen ahead of the deadline and spread across the population instead of all waiting until the hard expiry moment.
+
+**Practical guidance:** request coalescing addresses the concurrent-miss problem directly and is the most important single fix; jittered TTLs address the root cause (synchronized expiry) and prevent recurrence; use both together for a genuinely popular key rather than relying on either alone.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What is back-pressure, and how does it differ from simply degrading or crashing under load?**
+
+Back-pressure is a system explicitly signaling "slow down" to its callers when it's approaching or at capacity, instead of either (a) silently accepting all offered work and degrading uniformly (getting slower and slower for everyone as queues grow unbounded) or (b) accepting work until it runs out of resources and crashes outright. It's the resiliency mechanism that makes rate limiting (Advanced Q4) actionable rather than just punitive — a `429` with no further information tells a caller "you were rejected," but back-pressure done well tells the caller *how much* to slow down and *for how long*, so the system as a whole converges toward a sustainable throughput instead of oscillating between overload and idle.
+
+**Common back-pressure mechanisms:**
+- **Bounded queues with explicit rejection** — a queue (in-process channel, message broker queue, connection pool) has a hard depth limit; once full, new work is rejected immediately (fail fast) rather than queued indefinitely, which would just convert overload into unbounded latency growth instead of solving it.
+- **`429 Too Many Requests` with `Retry-After`** — rather than a bare rejection, the response tells the caller exactly how long to wait before trying again, letting well-behaved clients space out their retries in a way that's calibrated to *this* server's actual recovery time rather than guessing.
+- **Credit/window-based flow control** — the receiver grants the sender an explicit "you may send N more units of work" credit (seen in TCP's own flow control, and in protocols like HTTP/2 and gRPC streaming) so the sender is structurally prevented from overwhelming the receiver, rather than relying on the receiver reactively rejecting excess.
+
+```csharp
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("orders", opt =>
+    {
+        opt.PermitLimit = 50;
+        opt.Window = TimeSpan.FromSeconds(1);
+        opt.QueueLimit = 0; // no unbounded queueing — reject immediately once at capacity
+    });
+    options.OnRejected = async (context, token) =>
+    {
+        context.HttpContext.Response.Headers.RetryAfter = "2"; // tell the caller exactly how long to back off
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+    };
+});
+```
+
+**Why this is distinct from "just degrade gracefully":** graceful degradation (Intermediate Q8) is about *what a caller does when it can't get a full answer* — the caller adapts. Back-pressure is about *the server actively managing its own admission* so it never gets so overloaded that it has to degrade or crash in the first place — it's a producer-side discipline, not a consumer-side coping strategy, though the two work well together (a back-pressured client can gracefully degrade while it waits).
+
+**Common pitfall:** implementing unbounded queues "to avoid dropping requests," which feels safer but actually removes the signal entirely — every request eventually gets served, just after unbounded latency growth, which is often worse for callers (especially ones with their own timeouts) than a fast, explicit rejection they can react to.
+
+---
+
+## Advanced — Question 8
+
+**Q8: Why is chaos engineering necessary to actually validate that your resiliency patterns work, and what does a basic fault-injection experiment look like?**
+
+Every pattern in this file — retry, circuit breaker, bulkhead, fallback, timeout — is code that only executes on a failure path. Normal functional and integration tests almost exclusively exercise the happy path (the dependency responds correctly), so a circuit breaker's trip/half-open/close logic, a bulkhead's isolation under real concurrent saturation, or a fallback's behavior when the primary genuinely times out can sit completely unexercised in production for months — until the day a real outage happens, at which point you discover for the first time whether the resiliency code actually works, under the worst possible conditions to be debugging it.
+
+**Chaos engineering is the discipline of deliberately injecting failure into a system, in a controlled experiment, specifically to verify that its resiliency mechanisms behave as designed** — rather than hoping they do because the code looks right. It reframes failure testing from "something we avoid" to "something we deliberately cause, safely, so we're not finding out for the first time during a real incident."
+
+**Principles of a well-run experiment:**
+1. **Form a hypothesis first** — e.g., "if PaymentService's latency increases to 5s, our circuit breaker should trip within 10 seconds and OrderService should keep serving order-history requests normally" — a specific, falsifiable claim about system behavior, not just "let's see what breaks."
+2. **Start small and controlled** — inject the fault against a small percentage of traffic or a single non-critical instance first, with a clear rollback/abort mechanism, not against 100% of production on the first run.
+3. **Measure the actual blast radius** against the hypothesis — did the circuit breaker trip when expected? Did unrelated endpoints stay healthy (validating the bulkhead)? Did alerts fire?
+4. **Run it somewhere safe first** — staging, or production with a tightly scoped blast radius and an immediate kill switch — before trusting it against full production traffic.
+
+```csharp
+// A simple fault-injection middleware for a controlled experiment —
+// deliberately adds latency or failures to a fraction of requests to one dependency.
+app.Use(async (context, next) =>
+{
+    if (_chaosConfig.IsEnabled("payments-latency-experiment") &&
+        Random.Shared.NextDouble() < _chaosConfig.InjectionRate) // e.g. 5% of requests
+    {
+        await Task.Delay(_chaosConfig.InjectedLatency); // simulate PaymentService being slow
+    }
+    await next();
+});
+```
+
+Real-world tooling (Chaos Monkey/Chaos Mesh, Azure Chaos Studio, Gremlin) automates this at the infrastructure level — killing pods, adding network latency, throttling CPU — rather than only at the application-code level shown above.
+
+**Common pitfall:** running chaos experiments only in staging, where traffic patterns, scale, and configuration often differ enough from production that the experiment doesn't actually validate what matters — or running experiments without a clear abort mechanism, turning a controlled test into an actual incident.
+
+**Practical guidance:** treat chaos experiments as a recurring practice (e.g., quarterly "game days") targeting each resiliency mechanism in this file at least once, not a one-time exercise — code and configuration drift over time (someone removes a circuit breaker "temporarily" during a migration and it never comes back), and only repeated verification catches that drift before a real outage does.
+
+---
+
+## Scenario — Question 5
+
+**Q5: A popular product page's cache entry expires during a traffic spike. In the same second, roughly 5,000 concurrent requests all miss the cache for that key and go straight to the database, causing a brief outage. Once the page recovers and the cache repopulates, the team is worried the exact same thing will happen again the next time this key expires. Diagnose and fix, both for the immediate incident and to prevent recurrence.**
+
+**Diagnosis — a textbook thundering herd / cache stampede, the exact mechanism in Advanced Q6.** The cache entry for this product had a single expiry moment; because the page is popular and traffic was already elevated (a spike), thousands of requests happened to be in flight at exactly the moment it expired. Every one of them independently checked the cache, got a miss, and went to the database to fetch and repopulate — there was no coordination preventing 5,000 redundant, identical database queries from firing at once for data that only needed to be fetched *once*. The database, sized for its normal cache-miss trickle, was never going to survive 5,000 simultaneous identical queries arriving in the same second, regardless of how well-indexed or otherwise healthy it was.
+
+**The immediate fix — request coalescing (single-flight) around the cache-repopulation path:** ensure that when a cache miss occurs for a given key, only one request actually queries the database; every other concurrent request for that same key waits on the first request's in-flight result instead of issuing its own redundant query.
+
+```csharp
+private static readonly ConcurrentDictionary<string, Lazy<Task<Product>>> _inFlight = new();
+
+async Task<Product> GetProductAsync(int productId)
+{
+    var key = $"product:{productId}";
+    var cached = await _cache.GetAsync<Product>(key);
+    if (cached is not null) return cached;
+
+    // Only the FIRST concurrent caller for this key reaches the database;
+    // the other 4,999 await the same Lazy<Task> and get the same result once it completes.
+    var lazy = _inFlight.GetOrAdd(key, _ => new Lazy<Task<Product>>(async () =>
+    {
+        var product = await _db.Products.FindAsync(productId);
+        await _cache.SetAsync(key, product, TimeSpan.FromMinutes(15) + JitteredTtl());
+        return product;
+    }));
+    try { return await lazy.Value; }
+    finally { _inFlight.TryRemove(key, out _); }
+}
+
+TimeSpan JitteredTtl() => TimeSpan.FromSeconds(Random.Shared.Next(0, 120)); // spread future expiry
+```
+
+In a multi-instance deployment (multiple app servers, not just multiple concurrent requests on one instance), the in-process `ConcurrentDictionary` lock above only coalesces *within one instance* — a distributed lock (e.g., a short-lived Redis `SETNX`-style lock keyed on the cache key) is needed to coalesce across instances too, since each instance would otherwise still independently elect its own "winner" and the database could still see one query per instance.
+
+**Preventing recurrence — jittered TTLs:** the fix above already adds jitter to the new TTL so this specific key won't expire at a perfectly round interval again, but the same jitter should be applied to *all* cache writes for popular keys, not just this one — otherwise a different popular key can hit the identical failure mode the next time its own synchronized expiry lines up with a traffic spike.
+
+**Why both fixes together, not just one:** jittered TTLs reduce the *odds* of synchronized expiry causing a stampede, but don't eliminate the risk entirely (a spike can still coincide with any expiry, jittered or not) — request coalescing eliminates the actual damage mechanism (thousands of redundant simultaneous queries) regardless of why the cache miss happened, making it the more fundamental fix, with jittered TTLs as defense in depth.
+
+---

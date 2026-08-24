@@ -750,3 +750,401 @@ If genuinely identical, rarely-changing Value Objects exist across both (e.g., `
 **Practical guidance:** the tell that a "shared" concept should actually be split is exactly what happened here — two teams needing to coordinate on changes that don't semantically overlap. Default to separate Bounded Contexts with ID-based correlation; only fall back to a Shared Kernel for a genuinely small, stable, identically-meaning piece of the model, and treat that as an explicit, costly decision both teams sign up for — not an assumption nobody questioned.
 
 ---
+
+## Beginner — Question 5
+
+**Q5: What is an Invariant in DDD, and why do Aggregates exist specifically to enforce them?**
+
+An invariant is a business rule that must be true at all times — not just "usually true" or "true after validation runs," but true at every moment the system considers the data consistent. "An order's total must equal the sum of its lines," "an account balance can never go negative," "a submitted order must have at least one line" are all invariants: statements the domain expert would consider *broken data* if violated, not merely unusual data.
+
+**Why invariants need a designated enforcer:** an invariant that spans more than one field, or more than one object, can only be reliably protected if there's exactly one code path every change must pass through. If validation is scattered — one check in a controller, another in a service, a third assumed but never actually written — it's only a matter of time before some code path skips one of them, because nothing structural forces every path to agree.
+
+```csharp
+public class Order
+{
+    public OrderStatus Status { get; private set; }
+    private readonly List<OrderLine> _lines = new();
+    public IReadOnlyList<OrderLine> Lines => _lines;
+
+    // The invariant "a submitted order must have at least one line" is enforced
+    // in exactly one place — there is no other way to change Status.
+    public void Submit()
+    {
+        if (!_lines.Any())
+            throw new DomainException("Cannot submit an order with no lines.");
+        Status = OrderStatus.Submitted;
+    }
+}
+```
+
+This is exactly why Aggregates exist (see Intermediate Q1): an Aggregate Root is the single choke point every mutation of the objects inside it must go through, which makes it the natural home for enforcing invariants that span multiple fields or multiple child objects. Without an aggregate root funneling every write through one method, `_lines.Add(...)` and `Status = OrderStatus.Submitted` could each be set independently from outside, and the invariant linking them would only hold by accident.
+
+**Common pitfall:** treating invariant enforcement as something that happens in a validation layer *after* an object is already in an invalid state (e.g., a `Validate()` method called before saving) rather than making the invalid state impossible to construct in the first place. A constructor or method that simply refuses to produce an inconsistent object is stronger than a validator that checks for inconsistency after the fact and hopes every caller remembers to call it.
+
+**Practical guidance:** when identifying invariants during modeling, ask "what would the domain expert call *broken* if I saw it in the database?" — that phrasing tends to separate real invariants (must always hold) from mere formatting or presentation rules (which don't need aggregate-level protection). Every invariant you find is a strong signal for where an aggregate boundary should sit.
+
+---
+
+## Beginner — Question 6
+
+**Q6: What is a Factory in DDD, and when does object creation deserve its own dedicated component instead of a plain constructor?**
+
+A Factory encapsulates the logic for creating a complex object or aggregate — especially when construction itself has invariants to satisfy, requires choosing between several valid initial states, or needs information from more than one source to produce a valid object. The goal is the same as tactical DDD generally: keep invalid states unrepresentable, this time specifically at the moment of birth rather than during later mutation.
+
+**When a plain constructor is enough:** if creating the object is a single, obvious step with no meaningful decision-making, a constructor (or a simple static factory method on the entity itself) is sufficient — reaching for a separate Factory class every time is over-engineering.
+
+**When a dedicated Factory earns its place:**
+
+```csharp
+// Creating an Order isn't just "new Order()" — it has to be seeded from a Cart,
+// validate the cart isn't empty, snapshot prices, and assign a fresh identity.
+public class OrderFactory
+{
+    public Order CreateFromCart(Cart cart, CustomerId customerId)
+    {
+        if (!cart.Items.Any())
+            throw new DomainException("Cannot create an order from an empty cart.");
+
+        var order = new Order(OrderId.NewId(), customerId);
+
+        foreach (var item in cart.Items)
+        {
+            // Price is snapshotted at creation time, not looked up later —
+            // this is exactly the kind of construction-time invariant a
+            // factory exists to get right, consistently, every time.
+            order.AddLine(item.ProductId, item.Quantity, item.PriceAtAddTime);
+        }
+
+        return order;
+    }
+}
+```
+
+Without the factory, this logic (empty-cart check, price-snapshotting, line-by-line reconstruction) would either be duplicated at every call site that creates an `Order` from a `Cart`, or would leak into a controller/application service that has no business knowing these domain rules.
+
+**Factories for aggregate reconstruction:** the same pattern shows up on the read side of persistence — reconstituting an aggregate from stored data (e.g., mapping database rows back into an `Order` with its `OrderLine`s) is also "complex creation with invariants" and often goes through a factory method rather than a public constructor that any code could call with arbitrary, possibly-invalid arguments.
+
+**Common pitfall:** confusing a DDD Factory with the Gang-of-Four Factory Method/Abstract Factory patterns from `design-patterns.md` — they're related in spirit (both hide creation complexity behind a method) but DDD's version is specifically about protecting *domain invariants* at creation time, not about decoupling from a concrete type for polymorphism's sake.
+
+**Practical guidance:** put simple creation on the entity itself as a static factory method (`Order.CreateDraft(customerId)`) when it only needs the entity's own inputs; reach for a separate Factory class when creation needs to coordinate multiple sources (a `Cart`, a pricing snapshot, a customer's tier) or produce different aggregate shapes depending on context.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: What is the Specification pattern, and how does it let a business rule be reused as both a query predicate and a validation check?**
+
+A Specification encapsulates a single, named business rule — "is this order overdue," "is this customer eligible for free shipping" — as an object with a method that evaluates whether a given candidate satisfies it. Instead of scattering the same boolean condition across a LINQ query in one place and an `if` statement in another (and letting the two drift out of sync), the rule is written once, given a name from the Ubiquitous Language, and reused everywhere it's needed.
+
+```csharp
+public interface ISpecification<T>
+{
+    Expression<Func<T, bool>> ToExpression();
+    bool IsSatisfiedBy(T candidate) => ToExpression().Compile()(candidate);
+}
+
+public class OverdueOrderSpecification : ISpecification<Order>
+{
+    private readonly DateTime _now;
+    public OverdueOrderSpecification(DateTime now) => _now = now;
+
+    public Expression<Func<Order, bool>> ToExpression() =>
+        order => order.Status == OrderStatus.Submitted
+                 && order.SubmittedAt < _now.AddDays(-3);
+}
+```
+
+Because the rule is expressed as an `Expression<Func<T, bool>>`, it can be composed and translated in two different ways from the same source: passed to EF Core (`_dbContext.Orders.Where(spec.ToExpression())`) to become part of a SQL `WHERE` clause for a query, or compiled and evaluated in-memory (`spec.IsSatisfiedBy(order)`) inside a domain method that needs to check the same rule against an aggregate already loaded in memory. Either way, "overdue" is defined exactly once.
+
+Specifications also compose: `AND`, `OR`, and `NOT` combinators let you build `new OverdueOrderSpecification(now).And(new HighValueOrderSpecification(threshold))` instead of duplicating the combined condition wherever it's needed.
+
+**Common pitfall:** using Specifications for every trivial one-line condition adds indirection without earning it — the pattern pays off specifically when a rule (a) has a name the business actually uses, (b) needs to be evaluated in more than one place, or (c) needs to be composed with other rules. A single `if (order.Status == OrderStatus.Draft)` check used exactly once doesn't need a `DraftOrderSpecification` class.
+
+**Practical guidance:** Specifications are a natural fit for repository query methods (`_repository.FindAsync(new OverdueOrderSpecification(DateTime.UtcNow))` instead of a repository method per query shape) and for validation rules an aggregate needs to check against itself (e.g., inside `Submit()`) — in both cases the win is the same rule, named once in the Ubiquitous Language, never re-derived or re-typed.
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What's the difference between an Application Service and a Domain Service, and how does that map onto a CQRS command handler?**
+
+An **Application Service** orchestrates a single use case: it receives a request, loads whatever aggregates the use case needs (via repositories), calls behavior methods on them, and persists the result — but it contains no business rule of its own. A **Domain Service** (Advanced Q3) holds actual domain logic that doesn't naturally belong to any single aggregate, expressed in the Ubiquitous Language, with no knowledge of infrastructure (no `DbContext`, no HTTP, no logging).
+
+```csharp
+// Application Service (here, a CQRS command handler) — orchestration only, no business rule
+public class SubmitOrderCommandHandler : IRequestHandler<SubmitOrderCommand, Unit>
+{
+    private readonly IOrderRepository _orders;
+
+    public async Task<Unit> Handle(SubmitOrderCommand cmd, CancellationToken ct)
+    {
+        var order = await _orders.GetByIdAsync(cmd.OrderId);   // load
+        order.Submit();                                         // delegate to the aggregate — no rule lives here
+        await _orders.SaveChangesAsync(ct);                     // persist
+        return Unit.Value;
+    }
+}
+
+// Domain rule lives on the aggregate itself, not the handler
+public class Order
+{
+    public void Submit()
+    {
+        if (!Lines.Any())
+            throw new DomainException("Cannot submit an order with no lines.");
+        Status = OrderStatus.Submitted;
+    }
+}
+```
+
+Notice the handler never contains the "must have at least one line" check — if it did, that rule would only be enforced when *this specific handler* runs, and any other code path that mutates `Order.Status` could bypass it. The rule belongs on `Order` precisely because `Order` is the aggregate that must always be internally consistent, handler or no handler.
+
+**Mapping onto CQRS precisely:** a command handler *is* an Application Service in a CQRS-shaped codebase — one command, one use case, one orchestration method. When the use case genuinely needs cross-aggregate coordination (Advanced Q3's funds-transfer example), the handler calls a Domain Service, which itself still contains no infrastructure concerns; the handler is the only layer allowed to talk to repositories, `DbContext`, or external services (see `clean-architecture.md`'s coverage of the MediatR pipeline for how the handler fits the broader request-processing chain).
+
+**Common pitfall:** letting business rules creep into the handler "just this once" because it's convenient — a credit-limit check written inline in `SubmitOrderCommandHandler` instead of on `Order` or a Domain Service means the rule only fires when that command runs, not when the aggregate is mutated some other way (a background job, a different handler, a test fixture calling `Order` directly).
+
+**Practical guidance:** a good litmus test — if you can explain what a piece of code does using only infrastructure verbs ("load," "save," "call," "return"), it's an Application Service concern; if explaining it requires domain vocabulary ("can't submit," "must transfer," "is overdue"), it belongs on the aggregate or a Domain Service.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: What is Event Storming, and how does it help a team discover Bounded Contexts and Domain Events collaboratively?**
+
+Event Storming is a workshop-style modeling technique (created by Alberto Brandolini) that gets developers and domain experts into the same room — physically or on a virtual whiteboard — to build a model of a business process together, using nothing more sophisticated than sticky notes, before a line of code is written. It's the practical "how" behind the strategic-design advice repeated throughout this file ("identify Bounded Contexts through Event Storming with domain experts").
+
+**How a session runs, roughly:**
+1. **Domain Events first.** Participants write every significant business event, in past tense, on orange stickies — `OrderPlaced`, `PaymentReceived`, `ShipmentDispatched`, `PolicyLapsed` — and arrange them in a rough timeline. This deliberately starts from *what happens*, not from data models or UI screens, which keeps the conversation in business language from the very first sticky.
+2. **Commands and actors.** Blue stickies (commands — `PlaceOrder`, `ReceivePayment`) and yellow stickies (actors/roles who trigger them) get attached to the events they cause, surfacing who does what and when.
+3. **Aggregates emerge.** As the timeline fills in, participants notice clusters of commands and events that clearly belong to the same "thing" being changed — that cluster is a candidate Aggregate (a `PurchaseOrder` aggregate handling `PlaceOrder` → `OrderPlaced`, `CancelOrder` → `OrderCancelled`).
+4. **Bounded Contexts emerge from the seams.** Zooming out, the timeline reveals places where vocabulary shifts, ownership shifts, or a natural "pivotal event" hands off from one part of the business to another (e.g., `OrderPlaced` is where `Ordering`'s concern ends and `Shipping`'s concern begins) — those seams are candidate Bounded Context boundaries, the same boundaries discussed in Intermediate Q4 and Advanced Q5.
+
+**Why it works better than a developer modeling alone:** a developer inventing domain events from a requirements doc is still translating secondhand, and gaps only surface once code is written and a domain expert eventually notices something's wrong. Event Storming puts the domain expert's own words directly onto the model in real time — disagreements about what an event should be called, or whether two things are really the same process, surface as a conversation in the room, not as a bug six months later.
+
+**Common pitfall:** treating Event Storming as a one-time kickoff exercise whose output becomes a fixed spec. The timeline is a snapshot of current understanding, not a contract — as the team learns more (often *because* they started building), the model should be revisited, not treated as frozen.
+
+**Practical guidance:** run Event Storming before committing to service or aggregate boundaries, not after — it's far cheaper to move a sticky note than to split a microservice or re-shape a database schema once the "wrong" boundary is already in production (Scenario Q1's Database/Validation/Notification split is exactly the kind of mistake an Event Storming session tends to surface early).
+
+---
+
+## Intermediate — Question 9
+
+**Q9: Why must consistency between separate Aggregates be eventual rather than enforced by a single ACID transaction, and how do Domain Events provide that coordination?**
+
+An Aggregate boundary is, by definition, also a transactional consistency boundary (Intermediate Q1): the guideline "one transaction touches at most one aggregate" isn't a performance optimization bolted on afterward — it's the direct consequence of what an aggregate *is*. If two aggregates could only ever be kept consistent by wrapping both in one ACID transaction, they wouldn't really be two aggregates; they'd be one aggregate that was incorrectly split (the "too small" failure from Advanced Q2).
+
+**Why this matters in practice:** consider "when an order is placed, decrement inventory." `Order` and `InventoryItem` are separate aggregates (each has its own true invariants — `Order`'s is "can't submit with no lines," `InventoryItem`'s is "stock can't go negative"). Wrapping both in one transaction means every order placement takes a lock on the inventory row too, so two orders for different products can't even be processed concurrently without unrelated contention — the exact lock-contention failure mode from Scenario Q2, just recreated across aggregates instead of within one bloated one.
+
+**The eventual-consistency alternative, coordinated via a Domain Event:**
+
+```csharp
+public class Order
+{
+    public void Submit()
+    {
+        if (!Lines.Any()) throw new DomainException("Cannot submit an order with no lines.");
+        Status = OrderStatus.Submitted;
+        _domainEvents.Add(new OrderPlaced(Id, Lines.Select(l => (l.ProductId, l.Quantity)).ToList()));
+    }
+}
+
+// Separate transaction, separate aggregate, triggered after OrderPlaced commits
+public class DecrementInventoryOnOrderPlaced : INotificationHandler<OrderPlaced>
+{
+    private readonly IInventoryRepository _inventory;
+
+    public async Task Handle(OrderPlaced e, CancellationToken ct)
+    {
+        foreach (var (productId, qty) in e.Lines)
+        {
+            var item = await _inventory.GetByIdAsync(productId);
+            item.Decrement(qty);              // InventoryItem's own invariant enforced here, in its own transaction
+        }
+        await _inventory.SaveChangesAsync(ct);
+    }
+}
+```
+
+`Order.Submit()` commits on its own; `InventoryItem.Decrement()` commits separately, moments later, when the event handler runs. Between those two commits there's a brief window where the order exists as placed but inventory hasn't yet reflected it — that window is the cost of eventual consistency, and the business has to be able to tolerate it (or compensate for it, e.g. an oversell-detection process) for this design to be acceptable.
+
+**Common pitfall:** assuming eventual consistency means "eventually, maybe" — in practice it requires the same reliability guarantees as the rest of the domain-event pipeline (Intermediate Q3): events dispatched only after the originating transaction commits, with an outbox pattern or equivalent ensuring the event is never silently lost if the process crashes between commit and dispatch.
+
+**Practical guidance:** the question to ask when tempted to span two aggregates in one transaction is "does the business actually require this to be atomic, or would a brief, bounded delay be acceptable and even normal?" Most cross-aggregate relationships tolerate the latter; reserve same-transaction atomicity for the rare case where the business genuinely cannot allow any intermediate state to exist, which is usually a sign the two "aggregates" should be reconsidered as one.
+
+---
+
+## Advanced — Question 6
+
+**Q6: Martin Fowler describes three patterns for organizing business logic — Transaction Script, Active Record, and Domain Model. What distinguishes them, and when is DDD's rich Domain Model not worth its complexity cost?**
+
+**Transaction Script:** organizes business logic as a single procedure per use case/transaction — a top-to-bottom sequence of steps (validate, compute, write to the database) with little or no reuse of behavior between procedures. Data and behavior are entirely separate; the "script" reads and writes rows directly.
+
+```csharp
+// Transaction Script — one procedure, does everything, minimal object structure
+public class PlaceOrderScript
+{
+    public void Execute(int customerId, List<(int productId, int qty)> items)
+    {
+        var customer = _db.QuerySingle<CustomerRow>("SELECT * FROM Customers WHERE Id = @id", customerId);
+        if (customer.CreditHold) throw new InvalidOperationException("Customer on credit hold.");
+        decimal total = 0;
+        foreach (var (productId, qty) in items)
+        {
+            var price = _db.QuerySingle<decimal>("SELECT Price FROM Products WHERE Id = @id", productId);
+            total += price * qty;
+            _db.Execute("INSERT INTO OrderLines ...", productId, qty, price);
+        }
+        _db.Execute("INSERT INTO Orders (CustomerId, Total) VALUES (@c, @t)", customerId, total);
+    }
+}
+```
+
+**Active Record:** wraps each database row in an object with data *and* behavior, but the behavior is largely persistence-shaped (`Save()`, `Delete()`, validation tied to a single table) rather than modeling rich domain concepts or invariants spanning multiple related objects. It's a step up from Transaction Script's total data/behavior separation, but the object's shape still mirrors the schema.
+
+**Domain Model (DDD's rich model):** objects organized around domain concepts and behavior, independent of how they're persisted, with invariants actively protected (this file's `Order.Submit()` throughout). Worth it when business rules are numerous, change often, interact with each other, and genuinely benefit from being expressed once as reusable, protected behavior rather than re-derived per use case.
+
+**When the rich Domain Model is *not* worth it:** a CRUD-heavy or low-complexity subdomain — a settings page, a reference-data lookup table, an admin tool for editing static content — has few or no real invariants. Building an aggregate, a domain event, and a dedicated repository for "update the site's maintenance-mode banner text" adds ceremony (extra types, extra layers, extra indirection to trace through) that buys nothing, because there's no meaningful business rule to protect. A Transaction Script or Active Record approach is not a lesser choice here — it's the *correct* one, and DDD itself says so explicitly via the Generic/Supporting-subdomain classification (Advanced Q7).
+
+**Common pitfall:** applying the same tactical pattern uniformly across an entire codebase regardless of subdomain, either "everything is rich domain model" (over-engineering the boring 80%) or "everything is Active Record" (under-protecting the complex 20% where it matters, which is how invariants silently erode into scattered validation — Beginner Q4's anemic-model failure).
+
+**Practical guidance:** decide per subdomain, not per project — use the Core-vs-Supporting-vs-Generic classification (Advanced Q7) as the deciding input: Core domain logic with real, interacting invariants earns a rich Domain Model; a Generic subdomain is usually fine, even better, as a Transaction Script or Active Record, or bought off the shelf entirely.
+
+---
+
+## Advanced — Question 7
+
+**Q7: What's the difference between a Core Domain, a Supporting Subdomain, and a Generic Subdomain, and why should that classification drive where a team invests its best modeling effort?**
+
+DDD's strategic patterns classify every part of a business's overall problem space into one of three subdomain types, and the classification is meant to directly steer engineering investment — not every part of the system deserves the same care.
+
+**Core Domain:** the part of the business that provides real competitive differentiation — the reason the business wins or loses against competitors. This is where genuine complexity lives, where the business actually wants to invest, and where DDD's full tactical toolkit (rich aggregates, domain events, careful invariant protection, close and ongoing collaboration with domain experts) earns its cost. For an insurance company, this is underwriting risk assessment and policy pricing logic — not, say, employee timesheets.
+
+**Supporting Subdomain:** necessary for the business to function, has some real logic worth getting right, but isn't where the business differentiates. Notification formatting rules, a moderately complex approval workflow — worth a competent implementation, but not worth the same relentless modeling investment as the Core Domain. Often a good candidate for a simpler tactical approach (Active Record, a leaner service) even though it isn't trivial.
+
+**Generic Subdomain:** a solved problem — authentication, payment processing, address validation, PDF generation — where the business gains nothing from building it in-house and every reason to buy or adopt an existing solution (an off-the-shelf identity provider, a payment gateway, a well-known library). Building this from scratch is pure opportunity cost: engineering hours spent solving a problem the business doesn't compete on.
+
+```text
+Core Domain           → Underwriting risk engine     → in-house, rich domain model, best engineers, closest domain-expert collaboration
+Supporting Subdomain    → Policy document generation    → in-house but simpler, Active Record/Transaction Script is fine
+Generic Subdomain       → Authentication, payments       → buy (Auth0/Okta, Stripe) — don't build
+```
+
+**Why this should drive investment, concretely:** a team with limited time and its best engineers has to choose where that scarce capacity goes. Spending equal modeling rigor on the Core Domain and on "send a password-reset email" isn't fairness — it's misallocation. Worse, over-investing in a Generic Subdomain (building a bespoke authentication system) creates ongoing maintenance burden for a problem that provides zero competitive advantage no matter how well it's solved, while under-investing in the Core Domain (treating underwriting logic as a quick CRUD screen) is where real business risk and lost differentiation actually accumulate.
+
+**Common pitfall:** classifying subdomains once at project kickoff and never revisiting — a Supporting Subdomain can become Core if the business pivots around it (a logistics company that starts differentiating on delivery-time prediction has just promoted what used to be a supporting "ETA calculation" feature into its Core Domain), and the modeling investment should shift accordingly.
+
+**Practical guidance:** this classification is a conversation to have explicitly with business stakeholders, not a technical judgment call made in isolation — "where do we actually compete" is a business question, and getting the classification wrong (over-engineering a Generic Subdomain, or, more dangerously, under-engineering the Core Domain) is a strategic mistake, not a coding-style one.
+
+---
+
+## Advanced — Question 8
+
+**Q8: How does CQRS relate to DDD specifically — where do aggregates fit on the write side, and what changes on the read side?**
+
+CQRS (Command Query Responsibility Segregation) and DDD are independent patterns that happen to fit together unusually well, and understanding precisely *where* they connect (rather than treating them as a package deal) avoids both over-coupling them and missing the real synergy.
+
+**Write side — commands operate on aggregates, exactly as described throughout this file:** a command handler (Intermediate Q7's Application Service) loads one aggregate root by ID through its repository, calls a behavior method that enforces the aggregate's invariants, and persists the result as one transaction. DDD supplies *what* the write side protects (invariants, via aggregates); CQRS supplies the *shape* of how a write request flows through the system (a command, a handler, nothing else touching the aggregate on that path). Neither pattern requires the other — you can have aggregates without CQRS (a traditional layered app calling `order.Submit()` from a controller) and CQRS without rich aggregates (commands that operate on anemic/Active Record objects) — but combining them means the write side has both a clear invariant-protection boundary (the aggregate) and a clear single-purpose entry point per use case (the command handler).
+
+```csharp
+// Write side: command -> handler -> aggregate -> repository. Full DDD tactical stack applies.
+public record SubmitOrderCommand(OrderId OrderId) : IRequest;
+
+public class SubmitOrderCommandHandler : IRequestHandler<SubmitOrderCommand>
+{
+    public async Task Handle(SubmitOrderCommand cmd, CancellationToken ct)
+    {
+        var order = await _orders.GetByIdAsync(cmd.OrderId);
+        order.Submit();                          // aggregate enforces its own invariants
+        await _orders.SaveChangesAsync(ct);
+    }
+}
+
+// Read side: query -> dedicated read model. No aggregate, no domain model at all.
+public record GetOrderSummaryQuery(OrderId OrderId) : IRequest<OrderSummaryDto>;
+
+public class GetOrderSummaryHandler : IRequestHandler<GetOrderSummaryQuery, OrderSummaryDto>
+{
+    public Task<OrderSummaryDto> Handle(GetOrderSummaryQuery q, CancellationToken ct) =>
+        _dbContext.Orders
+            .Where(o => o.Id == q.OrderId)
+            .Select(o => new OrderSummaryDto(o.Id, o.CustomerName, o.Total, o.Status))   // flat projection, joins allowed
+            .SingleAsync(ct);
+}
+```
+
+**Read side — the aggregate is deliberately bypassed:** this is the connection point Intermediate Q2 already flags — reads that don't need to enforce an invariant or trigger domain behavior shouldn't be forced through an aggregate-scoped repository at all. A read model can freely join across what would be several different aggregates (`Order` plus `Customer` plus `Product` names, all in one flat DTO) because a query has no consistency-boundary concern — it's just retrieving a snapshot for display, not deciding whether a mutation is valid.
+
+**Why this matters for the eventual-consistency discussion in Intermediate Q9:** in a CQRS system with denormalized read models (updated asynchronously by the same domain events that coordinate cross-aggregate consistency), the read model itself is one more eventually-consistent consumer of domain events — a query might briefly show slightly stale data relative to the write side's latest committed state, which is the same trade-off already accepted for cross-aggregate consistency, just extended to the read projection too.
+
+**Practical guidance:** for the MediatR pipeline mechanics, request/notification wiring, and pipeline behaviors, see `clean-architecture.md` — this answer's scope is specifically the DDD-side question of *what* belongs on each side of the split: aggregates and invariants on the write side, flat projections with no domain model at all on the read side.
+
+---
+
+## Scenario — Question 5
+
+**Q5: A `Subscription` aggregate started simple — plan, status, renewal date. Over a year, the Billing team added invoicing fields, the Notifications team added reminder-preference and delivery-history fields, and the Analytics team added engagement-scoring and cohort-tagging fields, all onto the same `Subscription` class. Now every team steps on each other's changes: a Notifications deploy that touches `Subscription`'s schema risks breaking Billing's invoice generation, and the class has grown to 40+ properties nobody fully understands. Diagnose the problem and redesign it.**
+
+This is the same misdiagnosis as Scenario Q4's `Customer`, wearing a different aggregate's clothes: three teams assumed there was one `Subscription` concept because there's one word for it, when in fact each team has a genuinely different Bounded Context's view of a subscription, with different fields, different invariants, and different rates of change — bolted onto a single class because nobody stopped to ask whether they were the same concept.
+
+**Diagnosis — check each team's fields against real invariants:**
+- Billing's invoicing fields (amount due, payment method, invoice history) have invariants that matter to Billing alone — "an invoice can't be generated for a cancelled subscription," "the amount must match the plan's current price tier."
+- Notifications' reminder-preference and delivery-history fields have their own concern entirely — "don't send more than one renewal reminder per week" — and change on a completely different schedule (a new reminder channel ships without Billing caring at all).
+- Analytics' engagement-scoring and cohort-tagging fields aren't even transactional data — they're derived, read-heavy, recomputed periodically, and have no business being inside a transactional write-side aggregate at all.
+
+None of these three teams' concerns share a real invariant with each other. There is no rule that says "a reminder-preference change must be atomically consistent with an engagement score" — which is exactly the eventual-consistency test from Intermediate Q9: if nothing requires same-transaction atomicity, it doesn't belong in the same aggregate.
+
+**Redesign — split by Bounded Context, correlate by ID, coordinate via events:**
+
+```csharp
+// Billing context — owns the actual Subscription aggregate: plan, status, renewal, invoicing
+namespace Billing.Domain
+{
+    public class Subscription   // Aggregate Root — the "true" transactional subscription
+    {
+        public SubscriptionId Id { get; }
+        public SubscriberId SubscriberId { get; }        // reference, not embedded — correlates across contexts
+        public PlanId PlanId { get; private set; }
+        public SubscriptionStatus Status { get; private set; }
+        public DateTime RenewalDate { get; private set; }
+
+        public void Renew()
+        {
+            if (Status == SubscriptionStatus.Cancelled)
+                throw new DomainException("Cannot renew a cancelled subscription.");
+            RenewalDate = RenewalDate.AddMonths(1);
+            _domainEvents.Add(new SubscriptionRenewed(Id, SubscriberId, RenewalDate));
+        }
+    }
+}
+
+// Notifications context — its own read model, populated by subscribing to Billing's events
+namespace Notifications.ReadModel
+{
+    public class SubscriptionReminderState   // not an aggregate — a projection this context owns and maintains
+    {
+        public SubscriberId SubscriberId { get; set; }
+        public DateTime NextRenewalDate { get; set; }     // kept in sync via SubscriptionRenewed
+        public DateTime? LastReminderSentAt { get; set; }
+        public ReminderChannel PreferredChannel { get; set; }
+    }
+}
+
+// Analytics context — same pattern: its own store, its own update cadence, no write access to Billing's aggregate
+namespace Analytics.ReadModel
+{
+    public class SubscriberEngagement
+    {
+        public SubscriberId SubscriberId { get; set; }
+        public int EngagementScore { get; set; }
+        public string CohortTag { get; set; }
+    }
+}
+```
+
+Billing's `Subscription` publishes `SubscriptionRenewed`, `SubscriptionCancelled`, etc.; Notifications and Analytics each subscribe and maintain their own projections, in their own storage, on their own deployment cadence — a Notifications-team migration can never again touch Billing's schema, because it isn't Billing's schema. `SubscriberId` (not a shared `Subscription` entity) is the correlation key across all three, exactly like `CustomerId` was in Scenario Q4.
+
+**Result:** each team's aggregate/read model now only carries the fields it actually has invariants (or query needs) for; a Billing deploy can no longer break Notifications' reminder logic, because they're no longer the same class, the same table, or even the same service boundary.
+
+**Practical guidance:** "three teams keep needing to add unrelated fields to the same class" is one of the most reliable field signals that a Bounded Context split is overdue — treat it the same way as Scenario Q4's shared-`Customer` symptom, not as a reason to add yet more governance process around a single shared model.
+
+---

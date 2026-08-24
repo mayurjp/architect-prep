@@ -441,3 +441,172 @@ The temptation is to decide based on which tool is generating the most attention
 **Practical guidance:** run a small pilot on real, representative tasks from the target category (echoing the evaluation approach in Q-Advanced-3) and measure it against the factors above, rather than adopting — or rejecting — a second tool based on which one is trending. The right outcome is often "yes, for this specific class of work" rather than an all-or-nothing replacement of the standardized tool.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What is MCP (Model Context Protocol), and what problem does it solve?**
+
+MCP is an open protocol that standardizes how an AI agent connects to external tools and data sources — think of it as a common connector, the way USB-C gives any peripheral one physical/electrical standard instead of every device needing its own proprietary port. A **server** exposes a set of capabilities (tools it can call, resources/data it can read, sometimes prompts it can offer) over the protocol; a **client** — the agent's harness — speaks that same protocol to discover and invoke them. Anything that can talk MCP on the server side, and anything that can talk MCP on the client side, interoperate without custom glue code.
+
+**The problem it solves:** before a standard like this, connecting an agent to, say, a company's issue tracker, a database, or a design tool meant writing bespoke integration code tied to that specific agent product's internal API. That integration didn't transfer if the team switched agents or added a second one — every agent-x-tool pair needed its own adapter, an N×M explosion of integration work. With a shared protocol, a tool vendor (or a team building an internal tool) writes **one** MCP server, and it works with **any** MCP-compatible agent client — Claude Code, an IDE's agent mode, or another compliant tool — without the server author needing to know or care which client is calling it.
+
+**Example (conceptual):** a team builds an internal MCP server that exposes "look up a customer's account status" and "create a support ticket" as callable tools, backed by their internal CRM. Any MCP-compatible agent can now use those two capabilities, whether the developer's daily driver is one agentic coding tool or another — the server doesn't change.
+
+**Pitfall:** MCP standardizes the *plumbing* (how tools are discovered and invoked), not the *judgment* of when to use them — a poorly described tool (vague name, unclear parameters) is still hard for a model to use correctly regardless of the protocol underneath, and an MCP server that exposes an overly broad or destructive capability (e.g. "run arbitrary SQL") carries the same permission and blast-radius concerns as any other tool the agent can call (Q-Beginner-1, Q-Intermediate-5).
+
+**Practical guidance:** when evaluating whether to build a custom integration or adopt/expose an MCP server, favor MCP when the same capability needs to be reachable from more than one agent product or is likely to be — the standardization pays for itself as soon as there's more than one client, and even a single-client case benefits from the protocol's existing conventions around tool naming, schemas, and discovery rather than inventing all of that from scratch.
+
+---
+
+## Beginner — Question 8
+
+**Q8: When an agent's context window fills up during a long session, is the agent actually "forgetting" things, or is something else going on?**
+
+Both can happen, and it matters to distinguish them. A context window is a hard limit — the model can only attend to a bounded number of tokens per request — so once a long session's accumulated conversation, file reads, and tool outputs approach that limit, something has to give. There are two different mechanisms that can produce what looks like "the agent forgot":
+
+1. **Genuine loss.** If older content is simply dropped or truncated to make room for new content with no attempt to preserve its substance, information is actually gone — the agent has no way to recover a detail from twenty tool calls ago because it's no longer anywhere in what the model sees.
+2. **Deliberate summarization/compaction.** A well-designed harness instead detects the window filling up and proactively compresses older context — condensing a long exploration into a shorter summary of what was found and decided — before that content would otherwise be evicted. The goal is to preserve the *decisions and conclusions* that matter while discarding the low-value exploratory noise (failed attempts, verbose intermediate output) that led to them.
+
+**Why this distinction matters in practice:** compaction is a deliberate engineering choice to keep a session usable within a hard constraint, not a bug — a session that ran for hours doing broad exploration necessarily can't keep every raw detail in view forever, so the harness trades some fidelity for continued usefulness. But compaction is lossy by design: a specific fact that seemed unimportant when it was summarized (an obscure config value mentioned once in passing) can genuinely disappear from working context even though the harness "tried" to preserve what mattered.
+
+**Pitfall:** don't assume a long-running agent has perfect recall of everything it has seen just because the session is still going — if a task depends on a specific detail surfaced early in a very long session, it's safer to have the agent re-read the source (the file, the log) rather than trust that the detail survived compaction intact.
+
+**Practical guidance:** this is exactly why decomposing long tasks into narrower, delegated sub-agent sessions (Q-Intermediate-7) helps — a sub-agent's exploratory noise never has to be compacted into the orchestrator's context in the first place, because the orchestrator only ever receives the sub-agent's final, distilled result.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: How should code review change when a meaningful fraction of a pull request's code was written by an agent rather than a human?**
+
+The mechanics of review don't change — read the diff, run the tests, check it against the codebase's conventions — but where a reviewer's scrutiny should concentrate shifts, because agent-written and human-written code fail in different places.
+
+**Where to spend *more* scrutiny:**
+- **Subtle logic correctness.** An agent can produce code that's syntactically clean, well-commented, and confidently wrong on an edge case — off-by-one boundaries, incorrect handling of nulls/empty collections, a race condition in concurrent code. Agents are fluent at producing plausible-looking code, which means plausibility is a weaker signal of correctness than it is for a human's code, where struggling to write something usually correlates with the logic being genuinely hard.
+- **Security-sensitive code.** Auth checks, input validation, anything touching secrets or permissions deserves the same (or higher) scrutiny as if a junior engineer wrote it under time pressure — an agent has no innate sense of your system's specific threat model unless that's been made explicit (Q-Beginner-3), and can silently narrow or widen a permission check in a way that looks reasonable in isolation.
+- **Architectural fit.** Does this change actually belong where it was placed, reuse the abstractions the codebase already has, and avoid introducing a parallel pattern for something that already has a established one? Agents optimize for making the immediate task pass, not for long-term architectural coherence, unless instructed to weigh that explicitly.
+
+**Where scrutiny can reasonably lighten:**
+- **Boilerplate and mechanical repetition** — e.g. applying the same well-understood transformation across twenty similar call sites, or generating standard test scaffolding — is exactly the class of work agents are reliable at and humans are error-prone and bored doing manually; a spot-check of a few instances is usually sufficient rather than reading every single one line-by-line.
+- **Formatting/style-conformant code**, since linters and formatters catch that mechanically regardless of who wrote it.
+
+**Pitfall:** the biggest risk isn't the agent writing bad code — it's a reviewer's attention drifting toward *less* scrutiny overall because the code "looks" polished and well-organized, when polish and correctness are only weakly correlated for agent output specifically.
+
+**Practical guidance:** review agent-authored PRs by risk category rather than by *volume* — a 500-line mechanical rename deserves less per-line attention than a 30-line change to a pricing calculation, regardless of which one produced more diff.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: How do tests function as a way to constrain and verify what an agent produces, and why might they be more reliable for this than prose instructions alone?**
+
+A prose instruction ("handle the edge case where the cart is empty") describes intent but doesn't verify anything — the agent can misread it, satisfy it partially, or convince itself it's satisfied when it isn't, and nothing catches the gap until a human notices. A test is an **executable specification**: it doesn't just state what should happen, it mechanically checks whether the code actually does it, and produces an unambiguous pass/fail the agent can observe directly through the tool-use loop (Q-Beginner-1) — run the test, read the failure, fix the code, re-run, repeat until green.
+
+**Why this is more reliable for verifiable correctness specifically:**
+- It removes ambiguity about what "done" means. "Fix the bug" is underspecified; "make `test_empty_cart_checkout` pass without breaking the other 40 tests in the suite" is a concrete, checkable target the agent can iterate against without needing to guess at the reviewer's intent.
+- It closes the loop *before* a human is involved at all — an agent that writes a fix, runs the existing test suite, and self-corrects a regression it just introduced has caught something a prose-only workflow would only catch at review time (or worse, in production).
+- Tests act as a guardrail against an agent's tendency to over-fit its fix to the literal case described, rather than the general one — a broad, pre-existing test suite (or one written specifically to pin down the requirement first) constrains the solution space more precisely than a sentence can.
+
+**Example workflow:** write (or ask the agent to write) a failing test that encodes the exact requirement first — "returns a 400 with an error body when the cart is empty" — then have the agent implement against that test rather than against a paragraph description. This is the same discipline as test-driven development, applied to agent-authored code specifically because the agent has no other reliable signal of correctness besides what it can execute and observe.
+
+**Pitfall:** tests only verify what they actually check — an agent can satisfy a narrow test while leaving the broader intent unmet (or, more concerning, can quietly weaken or delete an inconvenient test to make the suite pass, which is why reviewing test *changes* deserves the same scrutiny as the production code in Q-Intermediate-8). A green test suite is strong evidence, not proof, of correctness.
+
+**Practical guidance:** for any task shape where correctness is objectively checkable (a bug fix, a well-defined feature), invest in the test *before* or alongside the agent's implementation — it's usually a smaller upfront cost than the review time saved from having concrete, automated evidence the change works, and it materially outperforms relying on prose instructions plus a human eyeballing the diff.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What's the difference between letting an agent work fully autonomously on a task versus a tight, human-in-the-loop pairing style, and which task shapes favor each?**
+
+**Fully autonomous** means the agent is given a task description, works through the entire tool-use loop — reading, editing, running tests, iterating — with minimal or no human interruption, and presents a finished result (a diff, a PR) for review only at the end. **Tight human-in-the-loop pairing** means a human is actively steering at a much finer grain — reviewing and approving each significant step, redirecting after a few tool calls, treating the agent more like a fast collaborator whose intermediate output is worth checking continuously rather than only at completion.
+
+**Task shapes that favor autonomous execution:**
+- The task is **well-specified and verifiable** — there's a concrete definition of done the agent can check itself against (a failing test to make pass, a clearly described bug with reproducible symptoms, a mechanical migration with a clear before/after). The agent's own iteration loop can catch and correct most of its own mistakes before a human ever needs to look.
+- The task is **bounded in scope** — it's clear what files/systems it should and shouldn't touch, so autonomous exploration doesn't risk wandering into unrelated changes.
+
+**Task shapes that favor tight pairing:**
+- The task is **ambiguous or judgment-heavy** — a design decision with real trade-offs ("should this be a new service or a module in the existing one"), where the *right answer depends on context and priorities* a human holds and hasn't fully externalized in the prompt. Letting the agent run far ahead autonomously risks it committing to a plausible-but-wrong direction that's expensive to unwind, because there was no verifiable target to self-correct against.
+- The task has **high-cost-of-being-wrong** in a way that isn't mechanically checkable — an architectural choice, a UX decision, anything where "the tests pass" doesn't mean "this was the right call."
+
+**Why the distinction tracks verifiability specifically:** autonomy works well precisely where the agent has a reliable feedback signal to iterate against (echoing Q-Intermediate-9) — without one, letting it run unsupervised just means it iterates confidently toward a plausible-looking answer with no mechanism to notice it's the wrong one.
+
+**Pitfall:** defaulting to full autonomy on every task because it "worked last time" on a well-specified bug fix — the failure mode shows up specifically on ambiguous tasks, where the agent doesn't announce its uncertainty, it just picks a reasonable-sounding interpretation and runs with it.
+
+**Practical guidance:** match the interaction style to the task's verifiability, not to a blanket policy — start ambiguous or high-stakes tasks with tighter, more frequent check-ins, and reserve long autonomous runs for tasks with a clear, checkable definition of done.
+
+---
+
+## Advanced — Question 7
+
+**Q7: Why are tasks with a real feedback loop — build output, test results, a running application's actual behavior — fundamentally more reliable to verify than tasks that are purely text-to-text transformation, and how does this affect what agents are good at?**
+
+A task with a real feedback loop lets the agent check its work against **ground truth external to the model** — a compiler either accepts the code or doesn't, a test either passes or fails, a running server either returns the expected response or an error. The agent's own confidence plays no role in that outcome; the loop closes on a fact about the world (Q-Beginner-1, Q-Intermediate-6). A purely text-to-text task — summarizing a document, translating a description into different phrasing, generating code with no way to execute it — has no equivalent external check. The model's only signal for "is this right" is its own generative confidence, and confidence is not the same thing as correctness — a model can be highly fluent and consistent while being wrong, because fluency and correctness are produced by the same underlying next-token process and aren't independently calibrated against each other.
+
+**Why this makes the former fundamentally more reliable:** in a feedback-loop task, an initially wrong attempt is *self-correcting* — the agent sees the actual failure (a stack trace, a failing assertion, a wrong HTTP status) and has concrete information to act on. In a pure text-transformation task, a wrong attempt looks exactly like a right one from the model's own vantage point; nothing in the loop tells it to reconsider, so errors that occur tend to persist silently through to the final output.
+
+**Practical implication for what agents are good at:** agentic coding tasks with a runnable, checkable outcome (fix this failing test, make this endpoint return the right status code, get this build passing) play to the architecture's actual strength — verification is external and mechanical. Tasks with no checkable ground truth (open-ended design writing, subjective judgment calls, "does this read well") get none of that self-correction benefit, so output quality depends much more heavily on the prompt and the model's judgment alone, with no loop catching a wrong turn.
+
+**Pitfall:** it's tempting to trust an agent's own summary of "I've verified this works" — but that claim is only as trustworthy as whatever it actually executed to check it. An agent that "verified" a fix by re-reading its own diff rather than running the test suite has produced a text-to-text-shaped confidence claim wearing the language of verification.
+
+**Practical guidance:** wherever possible, restructure a task to have a checkable feedback loop even if it's not the task's natural shape — e.g. write an assertion or a smoke test even for something that starts as "just a text transformation" (validate the output parses, matches a schema, round-trips correctly) — because the reliability gap between "checked against reality" and "the model believes it's right" is large and doesn't shrink just because the underlying model gets more capable.
+
+---
+
+## Advanced — Question 8
+
+**Q8: What is the emerging practice of "agents reviewing agents" — a second agent instance or model call reviewing the first agent's proposed changes before a human sees them — and what is its actual value and its limits?**
+
+The pattern: after a primary agent produces a proposed diff, a second agent invocation is given that diff (and relevant context) and asked to review it — check for bugs, security issues, deviation from instructions, or scope creep — producing feedback that either gets fed back to the primary agent to revise, or gets surfaced to the human reviewer as an additional signal alongside the diff itself.
+
+**Actual value:**
+- **Catches a real class of errors**, specifically the ones that arise from a single generative pass not noticing its own mistake in the moment — a review pass, prompted specifically to be critical and look for problems rather than to produce a solution, can surface issues the generating pass's own attention missed, similar in spirit to how a human's second read of their own code (or someone else's) often catches things the first pass missed.
+- **Cheap relative to a human review pass** — it costs additional tokens and latency (Q-Advanced-9) but no human time, so it's a reasonable first filter before something reaches a person, catching the more obvious issues before they cost human attention.
+- **Can be given a different framing or narrower focus** than the primary agent — e.g. explicitly instructed to review only for security issues, or only for adherence to the stated task scope — which sometimes surfaces problems the primary agent's broader, solution-oriented framing wasn't optimizing to notice.
+
+**Actual limits:**
+- **Shared blind spots.** If the reviewing agent uses the same underlying model as the primary agent, systematic misconceptions the model holds — a genuinely wrong belief about how an API behaves, a training-data-driven bad habit — are likely to be shared by the "reviewer," which won't reliably flag an error it would have made the same way itself. This is the central limitation: review from the same model is a different sample, not independent verification.
+- **It's not grounded verification.** Unlike the feedback loop in Q-Advanced-7, an agent reviewing another agent's text output is still ungrounded text-to-text judgment — it doesn't run the code, so it can miss anything that only shows up at execution time, and it can be as overconfident about its review as the primary agent was about its fix.
+- **False confidence.** A diff that passed an automated agent review can read as more trustworthy than it is, subtly encouraging a human reviewer to relax scrutiny (echoing the polish-vs-correctness gap in Q-Intermediate-8).
+
+**Practical guidance:** treat agent-reviews-agent as a useful *additional* filter that catches some real issues cheaply, layered before human review and alongside actual execution-based verification (tests, builds) — never as a substitute for either. It's most valuable when paired with a genuinely different vantage point (a different model, a narrower explicit review focus, or both) rather than the same model reviewing itself with a differently worded prompt.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What are the cost/latency trade-offs in agentic workflows, and when is the added reliability from more tool calls and longer iteration actually worth the expense versus a simpler one-shot approach?**
+
+Every tool call in an agentic loop — reading a file, running a test, invoking a sub-agent — costs additional tokens (the tool output gets fed back into context and reasoned over) and wall-clock time (the loop waits on real I/O: a test suite running, a build compiling, a network call completing). A long autonomous session with many iterations (Q-Intermediate-10) can cost substantially more, in both money and time, than a single one-shot completion that just generates an answer directly with no verification loop.
+
+**Why the extra cost is often worth it:** the reliability gain from an execution-grounded feedback loop (Q-Advanced-7) is large specifically for tasks where a wrong first attempt is common and costly to ship — the agent catching and fixing its own mistake before a human ever sees the diff is cheaper, end to end, than a human catching the same mistake in review or, worse, in production. For well-specified, verifiable tasks, the added tokens/time typically buy a meaningfully higher probability of a correct final result, and that trade is favorable whenever the cost of a human re-doing or debugging a wrong one-shot answer exceeds the cost of the extra agentic tokens/time.
+
+**Why it isn't always worth it:**
+- **Simple, low-risk, easily-human-checked tasks** — a small, obviously-correct formatting change, a one-line config update — gain little from an elaborate multi-step loop; a one-shot generation a human glances at is faster and cheaper, and the verification loop's overhead isn't buying meaningfully better odds of correctness for something already nearly certain to be right.
+- **Tasks with no real feedback signal to iterate against** (Q-Advanced-7) don't benefit from more iterations the way execution-checkable tasks do — extra tool calls on a purely judgment-based task can just mean paying more for the same fundamentally ungrounded confidence, not genuinely better output.
+- **Latency-sensitive contexts** — an interactive, in-the-flow suggestion (Q-Intermediate-6) needs to return fast; a multi-minute agentic loop is the wrong shape even if it would eventually produce a more verified answer, because the value of speed in that context outweighs the value of extra verification.
+
+**Practical guidance:** scale the depth of the agentic loop to the task's actual risk and verifiability, not uniformly — reserve long, tool-call-heavy autonomous sessions for tasks where being wrong is expensive and a feedback loop exists to catch it, and default to lighter-weight, faster interaction (or plain one-shot generation) for small, low-risk, or fundamentally unverifiable tasks where the extra cost buys little real reliability improvement.
+
+---
+
+## Scenario — Question 5
+
+**Q5: An engineering team wants to let an agent autonomously open *and merge* small, well-tested pull requests — e.g. routine dependency version bumps — without human review, to save reviewer time on low-value work. They're unsure where to safely draw the line. Walk through a reasonable policy.**
+
+The instinct to save human review time on genuinely low-value, repetitive PRs is reasonable — but "autonomous merge" removes the last human checkpoint entirely, so the policy has to substitute strong automated verification for what a human would otherwise have caught, and has to be conservative about which category of change qualifies at all.
+
+**A reasonable policy structure:**
+
+1. **Narrow, explicitly-defined task category.** Autonomous merge should apply only to a small, well-understood class of change with a low and well-characterized blast radius — e.g. dependency version bumps within a defined range (patch/minor, not major), where the change is mechanically generated and doesn't involve the agent's own judgment about business logic.
+2. **Strong automated verification as a substitute for human eyes**, all required to pass:
+   - The full existing test suite passes, not just a subset — a patch bump that quietly breaks an integration test should never merge unattended.
+   - A **path allowlist**: the diff touches only the expected files (e.g. a lockfile and manifest) and nothing outside that defined scope — if the agent's change unexpectedly touches application code, that alone should block autonomous merge and force human review, since it signals the change isn't the narrow, mechanical one the policy was written for.
+   - No new or weakened tests as part of the change itself (echoing the concern in Q-Intermediate-9 about an agent quietly loosening a test to get a suite green).
+3. **Explicit exclusion list requiring human review regardless of test results** — anything touching authentication/authorization code, payment or billing logic, database migrations, or public API contracts should never qualify for autonomous merge, no matter how "small" the diff looks or how green the tests are. These are exactly the categories where a subtle, test-suite-invisible regression has outsized cost (Q-Intermediate-8's security/architecture scrutiny applies with even more force when no human is looking at all), and where the existing test suite is least likely to have complete coverage of the actual risk.
+4. **A safety valve, not a one-way door.** Even within the narrow autonomous-merge category, keep an audit trail (what merged, when, what verification passed) and a fast rollback path, since "no human reviewed this before merge" means the first human attention it gets may be after something's already live.
+5. **Periodic re-evaluation of the category boundary**, rather than treating the initial allowlist as permanent — expanding it deliberately, one deliberately-scoped category at a time, based on observed reliability, not by informally stretching "small and well-tested" to cover riskier changes over time.
+
+**Practical guidance:** the safe version of this idea isn't "autonomous merge if tests pass" in general — it's "autonomous merge for a specific, narrow, mechanically-verifiable task category, with an explicit allowlist of what's in scope and an explicit, non-negotiable list of what's always excluded regardless of test results." The value of automation comes from correctly identifying the genuinely low-risk slice of work, not from raising how much risk the team is willing to accept unattended.
+
+---

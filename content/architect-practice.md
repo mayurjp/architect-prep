@@ -85,6 +85,46 @@ Technical debt is a financial metaphor (coined by Ward Cunningham): shipping a q
 
 ---
 
+## Beginner — Question 4
+
+**Q4: What is a Non-Functional Requirement (NFR), and why do architects have to elicit it explicitly rather than wait for stakeholders to state it?**
+
+A Non-Functional Requirement describes *how well* a system must do something, as opposed to a Functional Requirement, which describes *what* the system must do. "Users can search for a product by name" is functional. "Search results must return in under 300ms at the 95th percentile, for up to 10,000 concurrent users, with 99.95% availability" is non-functional — the same feature, but with the quality attributes attached that determine whether the implementation can be a single unindexed database query or needs a dedicated search cluster with caching and horizontal scaling.
+
+**Why architects specifically have to go dig for these:** stakeholders naturally describe systems in terms of visible, functional behavior — screens, workflows, buttons, reports — because that's what they experience and can picture. Performance targets, security posture, scalability ceilings, availability guarantees, and compliance requirements are largely invisible when the system works, and only become visible, painfully, when it doesn't. A product owner asking for "a dashboard showing order history" is unlikely to volunteer "and it needs to stay responsive when we have 50x today's order volume during the holiday sale" — not because they don't care, but because it doesn't occur to them to say it; they assume it's implied. It is architecturally significant precisely because it's unstated: build the dashboard against unindexed queries with no caching, and the holiday-sale requirement (learned only when it's too late to redesign cheaply) forces a rewrite under the worst possible time pressure.
+
+**How to elicit NFRs properly:** ask directly and concretely, category by category — expected load and its peak-to-average ratio, latency expectations users will actually notice, required uptime and what "down" costs per hour, who can see what data (security/compliance), and how long data must be retained. Push for numbers, not adjectives: "fast" and "reliable" aren't requirements an architecture can be designed against; "under 500ms" and "99.9% monthly uptime" are.
+
+**Common pitfall:** treating NFRs as a one-time checklist filled in at kickoff and never revisited — a system's actual load and availability needs shift as the business grows, and yesterday's NFRs quietly become wrong assumptions baked into the architecture.
+
+**Practical guidance:** most of the decisions that are expensive to reverse later (see Beginner Q5, on architecturally significant decisions) trace back to an NFR, not a functional feature — so eliciting NFRs explicitly, early, and in concrete numbers is one of the highest-leverage things an architect does before design even starts.
+
+---
+
+## Beginner — Question 5
+
+**Q5: What makes a decision "architecturally significant," and why shouldn't an architect try to weigh in on every decision?**
+
+Not every decision on a project needs an architect's attention, and trying to review everything is both exhausting and counterproductive — it slows teams down on low-stakes choices and, worse, dilutes the architect's authority so that when they do raise a concern, it reads as just more of the same background noise. The useful filter is **reversibility, not size**: a decision is architecturally significant when it is expensive, slow, or risky to change later — regardless of how much code it takes to implement — and not significant when it can be changed cheaply even if it looks like a big decision on the surface.
+
+**A quick checklist — a decision is likely architecturally significant if:**
+
+| Question | If "yes" |
+|---|---|
+| Does it define a boundary between systems/teams (an API contract, a database schema shared across services)? | Likely significant — boundaries are expensive to renegotiate once other parties depend on them |
+| Does reversing it require a data migration, not just a code change? | Likely significant — data outlives code and is far harder to move |
+| Does it lock in a specific vendor, protocol, or platform with high switching cost? | Likely significant |
+| Would reversing it require coordinating multiple teams, not just one? | Likely significant |
+| Can a single engineer change their mind next sprint with a local code change and no one else notices? | Not significant — leave it to the team |
+
+**Concrete contrast:** choosing whether a particular class uses a `for` loop or LINQ is not architecturally significant — it's trivially reversible, contained to one file, and reversing it costs minutes. Choosing the message format two services will use to communicate (say, a specific versioned schema, synchronous REST vs. async events) *is* architecturally significant — once a second team builds against it, changing it means a coordinated migration across every consumer, which can take months and carry real production risk.
+
+**Why this matters for how an architect spends their time:** attention is the scarcest resource an architect has. Reviewing every pull request or sitting in every design conversation for low-reversibility decisions is not diligence, it's a failure to prioritize — and it trains teams to either wait for permission on things they should just decide, or to route around the architect entirely because engaging them is slow. The discipline of asking "how expensive would it be to undo this?" before deciding whether to get involved is what lets an architect stay focused on the small number of decisions that actually carry long-term risk, and move fast (or delegate entirely) on everything else.
+
+**Practical guidance:** make the reversibility filter explicit and shared with the team, not just held privately — when engineers know which category of decision needs architect sign-off and which doesn't, they stop escalating everything defensively and start making the reversible calls themselves, which is exactly the outcome you want.
+
+---
+
 ## Intermediate — Question 1
 
 **Q1: How do you decide whether to build a capability in-house or buy/adopt a third-party or SaaS solution?**
@@ -179,6 +219,66 @@ An architecture review exists to catch expensive-to-reverse mistakes before they
 
 ---
 
+## Intermediate — Question 5
+
+**Q5: What is "last responsible moment" decision-making, and how do you tell the difference between deferring wisely and just being indecisive?**
+
+The last responsible moment (a term from lean software development) is the point at which deferring a decision any longer would start costing more than the extra information you'd gain by waiting. It sits between two failure modes that both feel like discipline but aren't: deciding too early, locking in a choice on incomplete information because "we need to decide something," and deciding too late, sitting on an architecturally significant decision (Beginner Q5) past the point where the delay itself is blocking other work.
+
+**Why deciding early is a real risk, not just caution:** an architecturally significant decision made before you understand the domain well tends to be wrong in ways that are expensive to unwind, precisely because it's significant — that's the whole definition. A team that locks in a specific database technology in week one, before anyone has profiled the actual read/write pattern the product will need, is optimizing for the comfort of having decided over the quality of the decision.
+
+**Why deciding late is an equally real risk:** every day a significant decision stays open, other work stacks up waiting on it, or people build around the ambiguity in inconsistent ways that themselves become hard to unwind — indecision isn't neutral, it has its own compounding cost, and "we're keeping our options open" can quietly become an excuse to avoid an uncomfortable call.
+
+**How to actually find the last responsible moment, rather than just guessing:**
+1. Identify what specific information you're missing that would change the decision — not "more confidence" in general, but a concrete unknown (e.g., "we don't yet know if writes will be 10x or 1000x reads").
+2. Identify the cheapest way to learn that specific thing — often a spike or POC (Intermediate Q6), sometimes just waiting for a milestone that will naturally resolve it (the first real customer's usage pattern, the results of a load test already scheduled).
+3. Identify what's genuinely blocked by not deciding yet, and its cost per day of delay.
+4. Decide when cost-of-delay starts exceeding value-of-more-information — that crossover point is the last responsible moment, not "as late as possible" and not "as early as possible."
+
+**Concrete example:** choosing between two message brokers for a system still in early design. Rather than deciding in week one, the team defers the choice for three weeks while building the message-producing and message-consuming code against an abstraction interface — genuinely useful work that isn't blocked by the choice — and uses that window to prototype both brokers against the actual expected throughput. By week three, real data exists and the decision is made with far less risk of reversal.
+
+**Practical guidance:** the discipline isn't "defer everything" or "decide everything fast" — it's naming, for each significant decision, what specifically you're waiting to learn and what it's costing you to wait, so deferring is a deliberate strategy with an end condition, not a default avoidance.
+
+---
+
+## Intermediate — Question 6
+
+**Q6: How should a Proof of Concept (POC) or spike be scoped and evaluated so it does its job properly, and what's the most common way it goes wrong?**
+
+A POC's entire job is to answer one specific, risky, currently-unknown question as cheaply as possible — "can this database handle our write pattern at the load we expect," "does this third-party API actually support the auth flow we need," "is this UI framework compatible with our existing component library." It is explicitly not meant to become production code. That distinction sounds obvious stated directly, but it's the single most common way POCs fail in practice.
+
+**How to scope a POC properly:**
+1. **State the specific unknown it exists to answer, in one sentence, before writing any code.** If you can't state it precisely, you're not ready to start the POC — you're just exploring, which is fine, but shouldn't be called a POC with a deadline attached.
+2. **Build only what's needed to answer that question** — skip error handling, skip tests, skip production configuration, skip anything not directly load-bearing for answering the specific unknown. A POC proving a database can sustain a write pattern doesn't need a UI, auth, or logging; it needs a script that writes at the target rate and measures the result.
+3. **Set a hard time box.** A POC without a deadline tends to quietly grow features because "it's basically working," which is exactly how it starts sliding toward production without anyone deciding that on purpose.
+4. **Decide up front what "answered" looks like** — a specific measurable outcome (throughput achieved, latency measured, feature confirmed present in the vendor's API), not a vague sense that "it seems to work."
+5. **Plan to throw it away.** State this explicitly to the team before starting — the code exists to produce a decision, not to be shipped, and anyone extending it afterward should be doing so as a deliberate, separate decision to actually build the feature properly, not by inertia.
+
+**The common failure mode, and why it's dangerous:** a POC "works," a deadline is looming, and someone reasons "it already works, let's just harden it a little and ship it" — the exact load-bearing "temporary" workaround pattern examined in Scenario Q4, except caught earlier, before 18 months of dependencies accumulate. The danger is that a POC was deliberately built without NFRs in mind (Beginner Q4) — no security review, no error handling for the failure modes production traffic will actually hit, no thought given to scaling past the narrow scenario it proved — so shipping it directly means shipping code that was never evaluated against the requirements production code needs to meet.
+
+**Practical guidance:** treat "ship the POC as-is" as a request that needs the same scrutiny as any other corner-cutting-under-deadline-pressure scenario (Scenario Q3) — name what NFRs it hasn't been evaluated against, and negotiate either a scoped hardening pass with a real deadline or an honest, documented acceptance of the risk, rather than letting "it already works" silently substitute for "it's ready."
+
+---
+
+## Intermediate — Question 7
+
+**Q7: What is a Reference Architecture (or "Golden Path"), and what's the trade-off in adopting one?**
+
+A Reference Architecture is a documented, supported, default way of building a given class of system within an organization — for example, "every new customer-facing REST service starts from this service template: this logging library, this auth middleware, this deployment pipeline, this database access pattern." A Golden Path is the same idea framed operationally: the path of least resistance for a team building something new is also the organizationally-sanctioned, well-supported one, so teams don't have to independently discover (or rediscover) the same architectural decisions from scratch.
+
+**Why this matters at organizational scale:** without a reference architecture, every team independently re-derives answers to the same questions — which logging format, which retry policy, which auth pattern, which deployment approach — and they typically converge on *different* answers, each locally reasonable, collectively expensive. The cost shows up later: a platform team can't build one shared observability dashboard because every service logs differently; a security audit takes months because every service authenticates differently; a new hire takes weeks to get productive on a second team because nothing about their first team's setup transfers. A reference architecture converts N teams' worth of redundant decision-making and inconsistency into one well-reasoned default, documented once and reused.
+
+**What makes a good one, practically:**
+- It's backed by working, runnable scaffolding (a template repo, a starter kit), not just a document nobody actually opens.
+- It's opinionated about the things that are expensive to get inconsistent across teams (auth, observability, deployment, data-access patterns) and silent about things that don't matter at that level (internal code style within a single service).
+- It's owned and kept current — a golden path referencing a deprecated library is worse than no golden path, because it actively misleads teams who trust it.
+
+**The real trade-off — flexibility for genuinely unusual needs:** a reference architecture is, by design, optimized for the common case, and a team with a genuinely atypical requirement (unusually high throughput, an unusual compliance regime, a legacy integration the template can't accommodate) pays a real cost if forced onto it anyway — the "golden path" becomes a straitjacket rather than a shortcut. The failure mode runs in both directions: treating the reference architecture as mandatory for every case discourages legitimate deviation and produces awkward workarounds bolted onto a template that doesn't fit; treating it as merely a suggestion that everyone quietly ignores loses the entire benefit of convergence.
+
+**Practical guidance:** make the reference architecture the strong default with an explicit, lightweight exception process (an architect conversation and a short ADR explaining why this team's case is different) — most teams should follow it without debate, and the rare team with a genuine reason to deviate has a clear, sanctioned path to do so rather than either silently complying with a bad fit or silently ignoring the standard.
+
+---
+
 ## Advanced — Question 1
 
 **Q1: Make the real case for Monolith vs Microservices — not "microservices are modern," but the actual trade-offs, and when does a modular monolith beat both?**
@@ -270,6 +370,46 @@ Conway's Law, stated by Melvin Conway in 1968: "Organizations which design syste
 
 ---
 
+## Advanced — Question 5
+
+**Q5: What is architectural risk assessment ("risk storming"), and how is it different from a general design review?**
+
+A general architecture review (Intermediate Q4) evaluates a specific design against requirements, boundaries, and failure modes as a whole — it's reactive in the sense that it examines a design someone has already proposed. Architectural risk assessment, sometimes run as a structured workshop called "risk storming," is narrower and more proactive: its entire purpose is to surface the biggest unknowns and single points of failure *before* they're baked into a committed design, specifically the things most likely to be expensive to discover late.
+
+**What it looks for, specifically:**
+- **Unproven integrations** — a dependency on a third-party API, a new internal service, or a library the team has never used in production at this scale, where "will this actually work the way the documentation says" is still an open question.
+- **Single points of failure** — a component with no redundancy where the diagram implies a distributed, resilient system but a closer look reveals one database, one queue, or one service instance that, if it fails, takes everything down with it.
+- **The biggest unknowns** — not everything unknown, but ranked: which unknowns, if they turn out badly, would be the most expensive to have discovered late. A team typically has a long list of small unknowns and one or two that actually threaten the project; risk storming exists to find those one or two before committing.
+- **Load-bearing assumptions nobody has verified** — "the vendor's API can handle our expected volume," "the existing team has the on-call capacity to run one more service," assumptions a design quietly depends on without anyone having checked they're actually true.
+
+**How it's typically run, as a lightweight workshop:** the team walks through the proposed architecture diagram component by component, and for each one asks explicitly: what could go wrong here, how likely is it, how bad would it be, and how would we know it's happening. Risks get plotted on a simple likelihood-vs-impact grid, and the highest-risk items get an owner and a concrete mitigation or a decision to spike/POC (Intermediate Q6) that specific unknown before committing further — the point isn't to eliminate all risk, which is impossible, it's to make sure the team is *choosing* which risks to accept rather than discovering them by accident in production.
+
+**Why doing this early matters disproportionately:** the cost of discovering a single point of failure or a bad integration assumption rises sharply the later it's found — cheap to redesign on a whiteboard, expensive to redesign after three teams have built against the flawed assumption, catastrophic to discover during a production incident. Risk storming is specifically positioned to happen *before* that cost curve steepens.
+
+**Practical guidance:** run a lightweight risk assessment on any architecturally significant decision (Beginner Q5) before it's finalized, not as a substitute for the full design review but as an earlier, narrower pass focused purely on "what could go badly wrong here" — it's cheap (an hour, a whiteboard, the right people in the room) relative to the cost of the risks it catches.
+
+---
+
+## Advanced — Question 6
+
+**Q6: What does it mean for an architecture to have "option value," and how do you judge which flexibility is actually worth preserving versus wasted effort?**
+
+Borrowed from finance, an "option" is the right, but not the obligation, to take some future action at a cost paid now. Applied to architecture: a design choice has option value when it preserves your ability to change direction later at a low cost, even if you never end up needing to — the value isn't in using the flexibility, it's in having it available cheaply if a future need materializes that you can't fully predict today. A repository interface sitting between your application code and your specific database technology is a small, deliberate cost paid now (an extra layer of indirection) that buys the option to swap databases later without rewriting the application layer — whether or not that swap ever actually happens.
+
+**Why this is a genuinely different lens than "just build it well":** it reframes flexibility from a vague virtue ("good code should be extensible") into a specific, costed trade-off — every abstraction boundary you add costs something real today (more indirection, more code to understand, a slower path for a new engineer to trace how something actually works) in exchange for an option whose value depends entirely on whether you'll ever need to exercise it. Architecture-as-option-value asks you to price both sides explicitly, the same discipline used elsewhere in this material (Advanced Q2 on prioritizing -ilities, Intermediate Q2 on translating trade-offs) rather than treating "flexible" as an unqualified good.
+
+**Why over-designing for hypothetical flexibility has a real, often underestimated cost:** a system built with abstraction layers for every dimension it might conceivably need to change in — pluggable database, pluggable message broker, pluggable auth provider, configurable everything — pays the indirection cost on every one of those axes permanently, whether or not any of them ever gets exercised. This is the well-known trap of speculative generality: the code becomes harder to read and reason about today, in service of options that in practice are rarely all cashed in, and the team that built the flexibility often isn't even the one that ends up needing (or not needing) it two years later.
+
+**How to judge which options are actually worth preserving:**
+1. **Estimate the probability the option gets exercised**, honestly, based on concrete signals (an actual second vendor already being evaluated, not "vendors sometimes change").
+2. **Estimate the cost of the option today** (the abstraction's ongoing indirection tax) versus **the cost of not having it if needed later** (a much larger, forced rewrite under pressure).
+3. **Favor options at boundaries that are already showing signs of instability or genuine uncertainty** (Advanced Q1's point about domain boundaries still shifting) over boundaries that have been stable and well-understood for years — flexibility is worth more where the uncertainty is real.
+4. **Prefer cheap options over expensive ones** — an interface boundary around a database call is nearly free; a full plugin architecture supporting arbitrary swappable persistence engines is not, and rarely earns its cost.
+
+**Practical guidance:** default to building the option only at the one or two boundaries where change is plausible and the cost of not having flexibility later is genuinely high (often exactly where an NFR, Beginner Q4, is least certain) — and be willing to say no to "let's make this configurable just in case" everywhere else, naming the real cost of that flexibility out loud rather than granting it by default because it sounds prudent.
+
+---
+
 ## Scenario — Question 1
 
 **Q1: A team is frustrated with a legacy monolith and proposes rewriting it from scratch as microservices, citing "the old code is bad" as the entire justification. As the architect, how do you respond?**
@@ -340,5 +480,25 @@ This is the predictable end state of undocumented, unvisible technical debt (Beg
 5. **If it's not fixed immediately, at minimum bring it into the light**: give it a named owner, write the ADR that should have existed 18 months ago (context, what it actually does now, why it's risky, what fixing it would take), and add a fitness function or monitoring check if there's a way to at least detect when it's approaching a failure condition, even before it's replaced.
 
 **The deeper lesson to bring back to the team:** this is exactly the scenario the "deliberate and tracked, not silent" discipline from Beginner Q3 exists to prevent. The corrective action isn't only fixing this one instance — it's using it as a concrete, visible example to reinforce the norm that "temporary" workarounds get an ADR and an explicit revisit trigger the day they're introduced, not 18 months later when a review happens to stumble onto them.
+
+---
+
+## Scenario — Question 5
+
+**Q5: A team asks you to sign off on shipping a POC directly to production next week, arguing "it already works and we're out of time." How do you assess the real risk and negotiate a responsible path forward?**
+
+"It already works" is answering the wrong question. A POC's job, done properly (Intermediate Q6), is to cheaply answer one narrow, risky unknown — it was never evaluated against the NFRs (Beginner Q4) production traffic actually needs: security posture, error handling for realistic failure modes, observability, and scalability past the specific scenario it was built to prove. "It works" in the sense of "the happy path I tested by hand behaves correctly" is a very different claim from "it is production-ready," and treating the two as equivalent is exactly the load-bearing-"temporary"-workaround failure mode (Scenario Q4) forming in real time, except this time it's catchable before it ships rather than discovered 18 months later.
+
+**How to assess the real risk, concretely:**
+1. **Establish what the POC was actually built to prove**, and confirm it proved only that. If it was built to answer "can this third-party API do the auth flow we need," that tells you nothing about whether its error handling, logging, or input validation are production-grade — because none of that was in scope for what it was trying to answer.
+2. **Walk the NFRs the production system needs and check each one explicitly against what actually exists** — security review done? Rate limiting and input validation present? Failure modes for the downstream dependency being down handled, or does it just crash? Logging and alerting wired up so an on-call engineer can actually debug it at 3am? Load-tested anywhere near expected production volume?
+3. **Name the gap in concrete terms**, the same translation technique used for any trade-off (Intermediate Q2): "this hasn't been checked for what happens if the payment provider times out — right now it just hangs the request indefinitely, which at our expected traffic would exhaust connections within about twenty minutes of a partial outage."
+
+**Negotiating a path forward — three real options, not a binary yes/no:**
+- **A scoped hardening pass with a hard deadline**, when the gap is narrow and specific — the POC solved the genuinely hard, novel part correctly, and what's missing is a short, bounded list of production concerns (error handling, basic observability, a security pass) that can be added in days, not weeks. This is usually the right answer when the underlying approach is sound.
+- **A fuller rebuild of the risky parts**, when the POC's shortcuts go deeper than surface hardening — for example, it was built against an in-memory data structure that fundamentally won't survive a restart, or the "auth flow" was stubbed out entirely rather than proven. Here, "it already works" was true only in a sense that doesn't transfer, and papering over that with a quick pass would just be building the next load-bearing workaround.
+- **Accepting the risk explicitly and documenting it**, when the deadline is genuinely immovable and the gap is real but survivable for a bounded time — ship it as a deliberate, tracked exception (the deliberate-and-prudent quadrant from Beginner Q3) with a named owner, a documented list of exactly what's missing, and a committed date to close the gap, rather than shipping it silently as if it were finished.
+
+**Practical guidance:** never accept "it already works" as a substitute for checking it against the requirements it was never built to meet — the negotiation isn't architect-says-no versus team-ships-anyway, it's making the actual gap and its cost visible so the team and stakeholders choose one of the three paths above deliberately, the same discipline applied to every other deadline-pressure scenario in this material.
 
 ---
