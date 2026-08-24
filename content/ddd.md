@@ -1148,3 +1148,433 @@ Billing's `Subscription` publishes `SubscriptionRenewed`, `SubscriptionCancelled
 **Practical guidance:** "three teams keep needing to add unrelated fields to the same class" is one of the most reliable field signals that a Bounded Context split is overdue — treat it the same way as Scenario Q4's shared-`Customer` symptom, not as a reason to add yet more governance process around a single shared model.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: How do you enforce Value Object immutability in C#, and what does `record` or `readonly struct` actually buy you over a plain class with get-only properties?**
+
+A Value Object (Beginner Q2) is defined by its attributes, not an identity — two `Money` instances with the same amount and currency *are* the same value, and that only holds if neither instance can be mutated out from under code holding a reference to it. Immutability isn't a nice-to-have style choice for Value Objects; it's the property that makes equality-by-value and safe sharing actually correct.
+
+**Plain class with get-only properties — immutable, but incompletely:**
+
+```csharp
+public class Money
+{
+    public decimal Amount { get; }
+    public string Currency { get; }
+    public Money(decimal amount, string currency) { Amount = amount; Currency = currency; }
+    // must hand-write Equals/GetHashCode or two equal Moneys compare unequal by reference
+}
+```
+
+This compiles and is immutable, but C# gives you reference equality for free on a class — without overriding `Equals`/`GetHashCode`, `new Money(10, "USD") == new Money(10, "USD")` is `false`, which directly contradicts what a Value Object is supposed to mean.
+
+**`record` — the idiomatic fix, gives both immutability and value equality in one declaration:**
+
+```csharp
+public record Money(decimal Amount, string Currency)
+{
+    public static Money operator +(Money a, Money b)
+    {
+        if (a.Currency != b.Currency) throw new InvalidOperationException("Currency mismatch.");
+        return new Money(a.Amount + b.Amount, a.Currency);
+    }
+}
+
+var price = new Money(10.00m, "USD");
+var samePrice = new Money(10.00m, "USD");
+Console.WriteLine(price == samePrice);   // true — member-wise equality, generated automatically
+// price.Amount = 20;                    // compile error — init-only, no public setter exists
+```
+
+`record` synthesizes `Equals`, `GetHashCode`, and `ToString()` from the declared members, and its positional properties are `init`-only by default — no accidental mutation path exists at all, not even from within the same assembly.
+
+**`readonly struct`** is the value-type alternative — appropriate for very small, frequently-allocated Value Objects (a `Point` or `Coordinates`) where avoiding heap allocation matters; the `readonly` modifier on the struct itself (not just its members) guarantees the compiler rejects any mutating method, including implicitly mutating ones the compiler would otherwise silently allow via defensive copies.
+
+**Common pitfall:** using `record` but adding a mutable collection property (`List<string> Tags { get; set; }`) — the record's generated equality still calls `Equals` on that list reference, not its contents, and the list itself remains freely mutable, quietly reintroducing the exact bug immutability was meant to prevent.
+
+**Practical guidance:** default to `record` for Value Objects in modern C# — it's less code than a hand-rolled class and eliminates the "forgot to override Equals" class of bug entirely; reach for `readonly struct` only when profiling shows allocation pressure from a Value Object created in a hot path.
+
+---
+
+## Beginner — Question 8
+
+**Q8: An Aggregate Root is often described as "protecting its invariants," but what actually enforces that in code — is it a naming convention, or something the compiler enforces?**
+
+It's the latter, and this is the detail that separates a real Aggregate Root from a class that merely has "Aggregate" in a design doc somewhere. The enforcement mechanism is ordinary C# encapsulation — private setters, private fields, and methods that are the *only* path to mutation — not a base class, an attribute, or a naming convention that a future developer has to remember to respect.
+
+**What doesn't enforce anything — public setters, invariant checked "elsewhere":**
+
+```csharp
+public class Order
+{
+    public OrderStatus Status { get; set; }          // anyone can set this directly
+    public List<OrderLine> Lines { get; set; } = new();
+}
+
+// somewhere in a service:
+order.Status = OrderStatus.Submitted;    // no check that Lines is non-empty — nothing stops this
+```
+
+Here "the aggregate enforces invariants" is a comment in a design doc, not a fact about the code — any caller anywhere in the codebase can set `Status` directly, bypassing whatever rule was supposed to gate submission (this is the anemic-model failure from Beginner Q3/Q4, specifically as it applies to aggregates).
+
+**What actually enforces it — private setter, mutation only through a behavior method:**
+
+```csharp
+public class Order
+{
+    public OrderStatus Status { get; private set; }   // compiler rejects order.Status = x from outside
+    private readonly List<OrderLine> _lines = new();
+    public IReadOnlyCollection<OrderLine> Lines => _lines.AsReadOnly();
+
+    public void AddLine(OrderLine line)
+    {
+        if (Status != OrderStatus.Draft)
+            throw new DomainException("Cannot add lines to a submitted order.");
+        _lines.Add(line);
+    }
+
+    public void Submit()
+    {
+        if (!_lines.Any())
+            throw new DomainException("Cannot submit an order with no lines.");
+        Status = OrderStatus.Submitted;    // the ONLY line in the codebase that can set this
+    }
+}
+```
+
+Now `order.Status = OrderStatus.Submitted` from outside the class is a compile error, not a code-review nitpick — `private set` and the exposure of `_lines` only as `IReadOnlyCollection<T>` (not `List<T>`, which would let a caller `.Add()` directly around `AddLine`'s check) close off every path except the ones with a guard clause in front of them.
+
+**Common pitfall:** exposing a backing collection as its concrete mutable type (`public List<OrderLine> Lines { get; }`) — even without a public setter, callers can still call `order.Lines.Add(...)` and bypass `AddLine`'s invariant entirely; only `IReadOnlyCollection<T>`/`IReadOnlyList<T>` genuinely closes that gap.
+
+**Practical guidance:** when reviewing whether something is really an Aggregate Root, don't ask "does it have behavior methods" — ask "is there any public path that mutates state without going through one of them." If the answer is yes, the invariant is aspirational, not enforced.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What's the difference between a domain event and an integration event, and why is conflating them a common and costly mistake?**
+
+Both are "something happened, past tense" — `OrderPlaced`, `PaymentReceived` — and the naming similarity is exactly why teams conflate them, but they solve different problems at different scopes, and treating one as the other creates real coupling and reliability bugs.
+
+**Domain event** (already covered throughout this file, e.g. Intermediate Q9): an in-process notification, published and handled within the same Bounded Context, typically within — or immediately after — the same transaction that raised it. Its purpose is to let one aggregate trigger a side effect on another part of *the same context* without the triggering aggregate needing a direct reference to the thing it's affecting.
+
+**Integration event:** a message published *across* a service/Bounded-Context boundary — serialized, put on a broker (RabbitMQ, Azure Service Bus, Kafka), and consumed by a different service, possibly owned by a different team, possibly written in a different language. It has a public, versioned contract because external consumers depend on it; a domain event has no such obligation because nothing outside the context ever sees it.
+
+```csharp
+// Domain event — internal shape, can change freely as long as in-process handlers agree
+public record OrderPlaced(OrderId OrderId, IReadOnlyList<(ProductId, int Qty)> Lines) : IDomainEvent;
+
+// Integration event — public contract, versioned, stable field names, no internal types leaked
+public record OrderPlacedIntegrationEvent(Guid OrderId, string CustomerEmail, decimal Total, DateTime PlacedAtUtc);
+
+public class PublishIntegrationEventOnOrderPlaced : INotificationHandler<OrderPlaced>
+{
+    public async Task Handle(OrderPlaced e, CancellationToken ct)
+    {
+        var order = await _orders.GetByIdAsync(e.OrderId);
+        await _bus.PublishAsync(new OrderPlacedIntegrationEvent(
+            e.OrderId.Value, order.CustomerEmail, order.Total, DateTime.UtcNow), ct);
+    }
+}
+```
+
+Note the translation step: the domain event's handler *produces* the integration event rather than the domain event being serialized and shipped directly — this is deliberate, mirroring the Anti-Corruption Layer idea (Advanced Q4) in reverse, keeping the internal domain model free to evolve without breaking external consumers' contract.
+
+**Why conflating them is costly:** publishing a domain event straight onto a message broker locks the internal model's shape to an external contract — renaming an internal field now breaks another team's consumer. Going the other direction, treating an integration event as if it carries in-process transactional guarantees (assuming it arrives "with" the transaction, or that handling it is instant) leads to code that doesn't account for delivery delay, retries, or duplicate delivery, all of which are normal for a message broker but never happen with an in-process domain event.
+
+**Practical guidance:** always translate at the boundary — one or more domain events inside a context, an explicit outbound integration event published (often via the outbox pattern from Intermediate Q3) once behavior settles. Never let an internal event type's namespace or serialization format leak into another service's consumer.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: What is "persistence ignorance," and how do you implement a Repository with EF Core without letting EF-specific concerns leak into the domain model?**
+
+Persistence ignorance means the domain model — entities, aggregates, value objects — has no idea *how* or *whether* it's persisted: no base class inherited from an ORM, no attributes decorating properties, no navigation-property shape dictated by what EF Core finds convenient. The domain model is written purely in terms of domain concepts; persistence is an entirely separate concern layered on top via the Repository pattern (Intermediate Q6).
+
+**What violates it — EF concerns bleeding into the domain class:**
+
+```csharp
+[Table("Orders")]                                   // EF attribute inside the domain model
+public class Order
+{
+    [Key] public int Id { get; set; }                // public setter added only so EF can materialize it
+    public virtual ICollection<OrderLine> Lines { get; set; }   // virtual added only for lazy-loading proxies
+}
+```
+
+Every one of those accommodations exists to satisfy EF Core, not the domain — and the public setters this forces open are exactly the encapsulation hole Beginner Q8 warns about.
+
+**Persistence-ignorant domain + separate EF mapping configuration:**
+
+```csharp
+// Domain model — no EF references anywhere, private setters intact
+public class Order
+{
+    public OrderId Id { get; private set; }
+    private readonly List<OrderLine> _lines = new();
+    public IReadOnlyCollection<OrderLine> Lines => _lines.AsReadOnly();
+    public void Submit() { /* invariants enforced here, per Beginner Q8 */ }
+}
+
+// Separate mapping file — EF Core's Fluent API, kept entirely outside the domain assembly
+public class OrderEntityConfiguration : IEntityTypeConfiguration<Order>
+{
+    public void Configure(EntityTypeBuilder<Order> builder)
+    {
+        builder.HasKey(o => o.Id);
+        builder.Property(o => o.Id).HasConversion(id => id.Value, v => new OrderId(v));
+        builder.Metadata.FindNavigation(nameof(Order.Lines))!
+            .SetPropertyAccessMode(PropertyAccessMode.Field);   // EF writes to the private _lines field directly
+    }
+}
+
+// Repository — the only place EF Core is visible at all
+public class EfOrderRepository : IOrderRepository
+{
+    private readonly AppDbContext _db;
+    public Task<Order?> GetByIdAsync(OrderId id) => _db.Orders.FirstOrDefaultAsync(o => o.Id == id);
+    public Task AddAsync(Order order) => _db.Orders.AddAsync(order).AsTask();
+}
+```
+
+`PropertyAccessMode.Field` is the key trick: it tells EF Core to materialize `Lines` by writing directly to the private `_lines` field via reflection, bypassing the need for a public setter entirely, so the domain model's encapsulation survives contact with the ORM completely intact.
+
+**Common pitfall:** adding `[Required]`/`[MaxLength]` data-annotation attributes to domain properties "just for validation" — this is the same leak in miniature; validation *is* a domain concern, but it belongs enforced in a constructor or behavior method (throwing a `DomainException`), not delegated to an EF attribute that only fires at `SaveChanges` time.
+
+**Practical guidance:** if deleting the EF Core NuGet reference from the domain project would break it, persistence ignorance has already been violated — the domain assembly should reference nothing but the base class library and, at most, a lightweight abstractions package.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What does it mean to unit test a rich domain model "in isolation," and why is this held up as a key payoff of investing in DDD's tactical patterns?**
+
+Because a well-designed aggregate is persistence-ignorant (Intermediate Q11) and enforces its own invariants through behavior methods (Beginner Q8) rather than delegating checks to a service or the database, it can be constructed directly in a unit test with `new`, exercised through its public methods, and asserted on — with zero database, zero HTTP, zero test containers, and no mocking framework in sight.
+
+```csharp
+public class OrderTests
+{
+    [Fact]
+    public void Submit_WithNoLines_ThrowsDomainException()
+    {
+        var order = new Order(OrderId.New(), CustomerId.New());   // constructed directly, no repository involved
+
+        var act = () => order.Submit();
+
+        act.Should().Throw<DomainException>()
+           .WithMessage("Cannot submit an order with no lines.");
+    }
+
+    [Fact]
+    public void Submit_AfterAddingLines_TransitionsToSubmitted()
+    {
+        var order = new Order(OrderId.New(), CustomerId.New());
+        order.AddLine(new OrderLine(ProductId.New(), quantity: 2, unitPrice: new Money(10m, "USD")));
+
+        order.Submit();
+
+        order.Status.Should().Be(OrderStatus.Submitted);
+    }
+
+    [Fact]
+    public void AddLine_AfterSubmit_ThrowsDomainException()
+    {
+        var order = new Order(OrderId.New(), CustomerId.New());
+        order.AddLine(new OrderLine(ProductId.New(), 1, new Money(5m, "USD")));
+        order.Submit();
+
+        var act = () => order.AddLine(new OrderLine(ProductId.New(), 1, new Money(5m, "USD")));
+
+        act.Should().Throw<DomainException>();
+    }
+}
+```
+
+No `IOrderRepository`, no `DbContext`, no `WebApplicationFactory` — the test runs in milliseconds and fails only when the domain's actual behavior changes, not when an unrelated infrastructure detail (a connection string, a migration, a test database's state left over from a previous run) gets in the way.
+
+**Why this is a genuine payoff, not just "testing is good":** contrast this with testing a Transaction Script (Advanced Q6) or an anemic model with logic scattered across services — those require standing up whatever infrastructure the script talks to directly, or mocking so many collaborators that the test mostly verifies the mocks were called correctly rather than that the business rule holds. A rich domain model's tests read like a specification of the business rules themselves (`Submit_WithNoLines_ThrowsDomainException` *is* documentation of the invariant).
+
+**Common pitfall:** reaching for a mocking framework to test an aggregate anyway, out of habit — if a test of `Order.Submit()` needs a mock, that's a signal the aggregate has picked up a dependency it shouldn't have (an injected service call inside a behavior method), which is itself a persistence-ignorance or single-responsibility violation worth fixing rather than working around with more mocks.
+
+**Practical guidance:** aggregate unit tests should be the fastest, most numerous tests in the suite, and a broken one should always mean "a business rule changed," never "the test database needed a reset" — if that's not true yet, it's a sign the domain model still has an infrastructure leak somewhere (Intermediate Q11).
+
+---
+
+## Advanced — Question 9
+
+**Q9: Layered/Clean Architecture insists the Domain layer has zero dependencies pointing outward, toward infrastructure. Why is this specific dependency direction — not just "layers exist" — what actually makes a domain model testable and portable?**
+
+The rule isn't "organize code into layers" (many codebases do that and still fail this test) — it's specifically that the dependency arrow at compile time must point *from* infrastructure *toward* the domain, never the reverse. `clean-architecture.md` covers the full ring structure and the Dependency Inversion mechanics that make this work in an ASP.NET Core project; the point worth isolating here is *why* this particular direction is the one that buys testability and portability, since a lot of "layered" code gets the direction backwards while still drawing boxes labeled correctly.
+
+**Getting the direction wrong — Domain compiles fine, but only because it silently depends on infrastructure:**
+
+```csharp
+// In the "Domain" project, but referencing EF Core and a concrete SQL-backed service
+public class Order
+{
+    public void Submit(AppDbContext db)              // domain method takes an infrastructure type as a parameter
+    {
+        var creditOk = db.Customers.Any(c => c.Id == CustomerId && !c.CreditHold);  // domain code running a LINQ-to-SQL query
+        if (!creditOk) throw new DomainException("Customer on credit hold.");
+    }
+}
+```
+
+This class lives in a folder called "Domain," but it cannot be compiled, let alone unit-tested (Intermediate Q12), without EF Core and a real or in-memory database present — the folder name says "domain," the actual dependency graph says "infrastructure." Every test of `Submit()` now needs a `DbContext`, defeating the entire "construct directly and assert" payoff.
+
+**Getting the direction right — the domain declares an interface, infrastructure implements it:**
+
+```csharp
+// Domain project — defines what it needs, owns nothing about how it's satisfied
+public interface ICreditCheck { bool IsOnCreditHold(CustomerId id); }
+
+public class Order
+{
+    public void Submit(ICreditCheck creditCheck)
+    {
+        if (creditCheck.IsOnCreditHold(CustomerId))
+            throw new DomainException("Customer on credit hold.");
+    }
+}
+
+// Infrastructure project — references Domain, implements its interface; Domain never references this project
+public class EfCreditCheck : ICreditCheck
+{
+    public bool IsOnCreditHold(CustomerId id) => _db.Customers.Any(c => c.Id == id && c.CreditHold);
+}
+```
+
+Now `Order.Submit()` can be tested by passing a fake `ICreditCheck` that returns `true`/`false` — no database, no EF Core reference in the Domain project at all, and the *compiler*, not a code-review checklist, is what prevents the regression, since the Domain project's `.csproj` simply has no reference to add.
+
+**Why this is what makes portability real:** because Domain has no outward reference, the same Domain assembly can be hosted behind a REST API today and a message-driven worker tomorrow, or have its EF Core repository swapped for a different store, without the Domain project changing at all — portability isn't an aspiration, it's a direct, mechanical consequence of the reference graph having only one valid direction.
+
+**Practical guidance:** the fastest way to audit this is literally to open the Domain project's dependencies list — any reference to EF Core, ASP.NET Core, or a message-broker SDK is the violation, full stop, regardless of how the code inside is organized or named.
+
+---
+
+## Advanced — Question 10
+
+**Q10: CQRS read models often bypass the aggregate entirely for queries — doesn't that defeat the purpose of protecting invariants behind the aggregate? Why is this considered acceptable, even correct, DDD?**
+
+The apparent contradiction dissolves once "protecting invariants" is understood precisely: an aggregate protects invariants against *mutation*, not against being *read*. A query that only displays data changes nothing and therefore has no invariant to violate — asking a read model to "go through the aggregate" first would mean loading a full object graph, applying no behavior to it, and immediately throwing that graph away in favor of a DTO, which is pure overhead with no corresponding safety benefit.
+
+**What loading through the aggregate for a query actually costs:**
+
+```csharp
+// "Correct-looking" but wasteful: load the whole aggregate just to read three fields
+public async Task<OrderSummaryDto> GetSummary(OrderId id)
+{
+    var order = await _orderRepository.GetByIdAsync(id);   // hydrates Order + all OrderLines + any nested VOs
+    return new OrderSummaryDto(order.Id, order.Status, order.Lines.Sum(l => l.LineTotal));
+}
+```
+
+This pays the full cost of aggregate hydration — every child entity, every value object, potentially lazy-loaded navigation properties — to produce three scalar values that get discarded the instant the method returns. No invariant was checked, none could be, because nothing was mutated.
+
+**The read-model alternative — a flat, denormalized projection, no aggregate involved:**
+
+```csharp
+public record OrderSummaryDto(Guid Id, string Status, decimal Total);
+
+public async Task<OrderSummaryDto> GetSummary(Guid id) =>
+    await _db.Orders
+        .Where(o => o.Id == id)
+        .Select(o => new OrderSummaryDto(o.Id, o.Status, o.LineTotals.Sum()))   // SQL projection, no domain objects materialized
+        .SingleAsync();
+```
+
+This is Advanced Q8's write/read split made explicit at the cost level: the query runs as a single efficient SQL projection, can freely join across tables that belong to entirely different aggregates (`Order` plus `Customer.Name`), and never risks violating an invariant because it never attempts a mutation in the first place.
+
+**Why this doesn't undermine DDD:** DDD's actual claim is narrower than "all data access goes through the aggregate" — it's "all *mutating* access goes through the aggregate boundary that owns the invariant being protected." A read path that never calls a single behavior method, never calls `SaveChanges`, and produces a DTO the caller can't even feed back into a repository is categorically outside what the invariant-protection guarantee was ever about.
+
+**Common pitfall:** allowing a read model's DTO to be mutated and then passed back into a write operation "since it's basically the same shape as the aggregate" — this reintroduces exactly the risk the aggregate boundary exists to prevent, because the DTO has none of the aggregate's guard clauses. Read models must be one-way: query out, never write back in without going through a proper command and aggregate.
+
+**Practical guidance:** if a query needs to display data, reach for a purpose-built read model without hesitation, even when it duplicates data the aggregate also holds — that duplication (kept in sync via domain events, per Intermediate Q9) is a deliberate, healthy trade of storage/consistency-lag for query simplicity and performance, not a modeling shortcut to feel guilty about.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What is the "Big Ball of Mud," and why is even a messy, imperfect, explicit Context Map still strictly better than having none?**
+
+"Big Ball of Mud" (a term from Brian Foote and Joseph Yoder, adopted widely in DDD writing) describes the architecture a system arrives at by default when nobody deliberately draws Bounded Context boundaries: one sprawling, tangled model where every class can reference every other class, terms mean subtly different things depending on which code path reads them, and there is no map — implicit or explicit — of where one concept's authority ends and another's begins. It isn't a boundary strategy; it's the absence of one, and it's the gravity every codebase decays toward without active resistance.
+
+**How it forms without anyone deciding to build it:** a `Customer` class gets a field added by the billing team, then the shipping team, then support — each addition locally reasonable, none of them coordinated against a boundary, because no boundary was ever declared (this is Scenario Q4 and Q5's failure mode, generalized to the whole system rather than one aggregate). Multiply that across every entity in a codebase for a few years and the result is a system where changing anything requires understanding almost everything, because nothing was ever partitioned to prevent that.
+
+**Why an explicit Context Map — even one that honestly documents Shared Kernel, Conformist, and Anti-Corruption Layer relationships in a system with real inconsistencies — beats having none:**
+
+```text
+Explicit (messy but mapped):                     Big Ball of Mud (no map at all):
++-----------+   ACL    +-------------+            +----------------------------------+
+| Ordering  |<-------->| Legacy ERP  |             |  Everything                       |
++-----------+          +-------------+             |  references                       |
+     |  Conformist                                  |  everything,                      |
+     v                                              |  nobody knows                     |
++-----------+                                       |  which "Customer"                 |
+| Shipping  |  <- known to be tightly coupled,       |  field is safe to                 |
++-----------+     documented as a debt to pay down   |  change without                   |
+                                                      |  breaking something               |
+                                                      +----------------------------------+
+```
+
+The left side is genuinely messy — a Conformist relationship is not a design win, an Anti-Corruption Layer around legacy ERP is an admission of unideal integration — but every relationship on it is *known*, named, and therefore something a team can reason about, prioritize fixing, or safely leave alone because its blast radius is understood. The right side has the same underlying mess with none of that visibility: a change's blast radius is "unknown until it breaks something in production."
+
+**Common pitfall:** treating "we don't have time to do proper Context Mapping" as a reason to skip it entirely, rather than doing a rough, incomplete map — even a whiteboard photo naming the known Shared Kernels and Conformist relationships gives the next engineer touching that code something to check before assuming a change is safe.
+
+**Practical guidance:** a Context Map's value isn't in being clean; it's in existing at all and being kept roughly current — treat "our context map is embarrassing" as evidence the system needs one even more urgently, not as a reason to keep it undocumented.
+
+---
+
+## Scenario — Question 6
+
+**Q6: A multi-day order-fulfillment workflow spans three Bounded Contexts — Ordering places the order, Inventory reserves and later commits stock, and Shipping schedules and confirms delivery — with waiting periods between each step and the possibility of failure (an inventory shortfall, a failed delivery attempt) requiring compensating action days after the process started. Where does the state for "which step this particular order is on" live?**
+
+The instinctive first answer — "put a `FulfillmentStatus` field on the `Order` aggregate and update it as things happen" — is the same trap Scenario Q4/Q5 diagnose in miniature: it assumes one aggregate can own state that actually spans three separate Bounded Contexts' invariants and lifecycles, each changing on its own schedule, none of which `Order` alone can observe or control.
+
+**Why forcing it into `Order` breaks down:** `Order` would need to know about inventory reservation state (Inventory's concern), shipping schedule state (Shipping's concern), and the timing/retry logic connecting them — none of which are things the `Order` aggregate has any authority over or visibility into on its own. Worse, `Order.Submit()`'s original invariant ("can't submit with no lines") has nothing to do with "has inventory been reserved three days later," and cramming both into one class recreates exactly the unrelated-concerns-sharing-a-class problem from Scenario Q5, just spread across contexts instead of teams.
+
+**Recognizing this needs a process manager (saga):** the defining symptom is that the thing being tracked — "where is this fulfillment in its multi-day journey" — has its own lifecycle, its own state machine, and its own failure/compensation logic, entirely separate from any single aggregate's invariants. That's precisely what a process manager exists for: a stateful coordinator, itself persisted, that listens for domain/integration events from multiple Bounded Contexts and reacts by issuing commands to advance (or compensate) the process — without any single aggregate needing to know the other contexts exist.
+
+```csharp
+public class OrderFulfillmentProcess    // the saga's own persisted state — not part of any domain aggregate
+{
+    public Guid OrderId { get; set; }
+    public FulfillmentStep CurrentStep { get; set; }   // AwaitingInventory, AwaitingShipment, Completed, Compensating
+    public DateTime StartedAtUtc { get; set; }
+}
+
+public class OrderFulfillmentSaga :
+    INotificationHandler<OrderPlaced>,
+    INotificationHandler<InventoryReserved>,
+    INotificationHandler<InventoryShortfall>,
+    INotificationHandler<ShipmentConfirmed>
+{
+    public async Task Handle(OrderPlaced e, CancellationToken ct)
+    {
+        await _store.Save(new OrderFulfillmentProcess { OrderId = e.OrderId, CurrentStep = FulfillmentStep.AwaitingInventory });
+        await _bus.Send(new ReserveInventory(e.OrderId, e.Lines));      // command into Inventory's context
+    }
+
+    public async Task Handle(InventoryReserved e, CancellationToken ct)
+    {
+        var process = await _store.Load(e.OrderId);
+        process.CurrentStep = FulfillmentStep.AwaitingShipment;
+        await _bus.Send(new ScheduleShipment(e.OrderId));                // command into Shipping's context
+    }
+
+    public async Task Handle(InventoryShortfall e, CancellationToken ct)
+    {
+        var process = await _store.Load(e.OrderId);
+        process.CurrentStep = FulfillmentStep.Compensating;
+        await _bus.Send(new CancelOrder(e.OrderId));                     // compensating command back into Ordering
+    }
+}
+```
+
+`Order`, the `InventoryItem`, and `Shipment` aggregates each keep enforcing only their own invariants, exactly as before; the saga is the only thing that knows the *sequence* they participate in, and it's the only place "which step is this order on, three days in" is allowed to live.
+
+**Practical guidance:** the tell is duration and cross-context reach — a workflow that completes within one aggregate's own transaction is just a behavior method; a workflow that spans multiple contexts, waits on external events, and needs compensating logic on failure is a process manager, full stop, and trying to squeeze it into one aggregate's field list is how Scenario Q4/Q5's symptoms get reintroduced one workflow at a time.
+
+---

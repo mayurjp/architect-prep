@@ -996,3 +996,236 @@ Because `CounterA` and `CounterB` are adjacent `long`s (8 bytes each), they very
 **Supporting tactics beyond manual review:** stress-test with many concurrent threads hammering the suspected code path with no debugger attached and tight timing (this preserves the race window instead of eliminating it); consider tools built for this class of bug (thread/concurrency analyzers, or deliberately inserting `Thread.Sleep`/`Task.Yield` at suspected race points during testing to widen the interleaving window and make the bug reproduce *more* often, not less). But the first, cheapest, and highest-yield step is always static: read the code for shared mutable state with no synchronization, because that symptom profile is close to diagnostic on its own.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What does a race condition actually look like at the instruction level? Walk through why `counter++` on a shared `int` is not one atomic operation.**
+
+A race condition happens when two or more threads access shared mutable state concurrently, at least one of them writes, and the outcome depends on the unpredictable timing of how their operations interleave. The classic minimal example is two threads incrementing a shared, unsynchronized `int`:
+
+```csharp
+int counter = 0;
+
+void IncrementManyTimes()
+{
+    for (int i = 0; i < 100_000; i++)
+        counter++; // looks like one operation, is NOT one operation
+}
+
+var t1 = new Thread(IncrementManyTimes);
+var t2 = new Thread(IncrementManyTimes);
+t1.Start(); t2.Start();
+t1.Join(); t2.Join();
+
+Console.WriteLine(counter); // almost never prints 200000 — reliably prints something less
+```
+
+**Why `counter++` isn't atomic:** the C# statement compiles to three separate machine-level steps: (1) **read** the current value of `counter` from memory into a register, (2) **add** 1 to the value in the register, (3) **write** the register's value back to `counter`'s memory location. Nothing prevents the OS scheduler from switching threads *between* those three steps. Consider both threads reading `counter == 41` at nearly the same moment — thread A computes 42 and writes it back; thread B, having already read the stale value 41 before A's write, also computes 42 and writes it back. Two increments happened, but the counter only advanced by one — a lost update. Multiply that lost-update pattern across 200,000 total increments running on multiple cores and the final count is reliably lower than 200,000, by a different, non-deterministic amount on every run.
+
+**Common pitfall:** assuming that because a line of source code is short and looks like a single expression, it executes as a single indivisible CPU operation. This is one of the most common false assumptions that leads directly to race-condition bugs — the same read-modify-write shape hides inside `dict[key]++`, `if (x == null) x = new Foo();` done without synchronization, and any "read a field, compute something from it, write it back" sequence.
+
+**The fix, and why it's covered elsewhere:** `lock`, `Interlocked.Increment(ref counter)`, or a concurrent collection all close this gap by making the read-modify-write sequence atomic or mutually exclusive — covered in depth in the lock/Monitor and `Interlocked` questions above. The point of this example is purely to make the invisible three-step nature of `counter++` concrete, since that mental model is the foundation for recognizing race conditions in real, less obvious code.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: How does `System.Threading.Timer` or `PeriodicTimer` compare to a `while (true) { await Task.Delay(...); ... }` loop for recurring background work?**
+
+All three trigger work repeatedly, but they differ in thread-pool footprint, precision, and cancellation ergonomics.
+
+**`System.Threading.Timer`** invokes a callback on a thread-pool thread at a fixed interval, entirely independent of any `async` context:
+
+```csharp
+using var timer = new Timer(_ => DoWork(), null, dueTime: 0, period: 5000);
+```
+
+It's lightweight (no dedicated thread while idle) but its callback is `void`-returning and synchronous — if `DoWork` needs to be `async`, you must `async void` it or fire-and-forget a `Task`, which reintroduces unobserved-exception risk (see the `async void` question). It also has no built-in overlap protection: if a callback runs longer than the period, the next tick can start while the previous one is still running, requiring manual reentrancy guards.
+
+**`PeriodicTimer`** (added in .NET 6) is the modern, `async`-first replacement:
+
+```csharp
+using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+while (await timer.WaitForNextTickAsync(cancellationToken))
+{
+    await DoWorkAsync(); // naturally sequential — no overlap unless you explicitly fan out
+}
+```
+
+`WaitForNextTickAsync` is a proper awaitable that consumes no thread while waiting, integrates cleanly with a `CancellationToken` (cancellation simply makes it return `false`/throw, ending the loop with no extra plumbing), and — because the loop body naturally runs to completion before the next `await` — avoids the overlap problem `Timer` has by construction, unless you deliberately fire work without awaiting it.
+
+**A raw `while (true) { await Task.Delay(period); ... }` loop** is the manual equivalent of `PeriodicTimer` and works, but has a subtle precision flaw: `Task.Delay` measures its interval starting *after* the previous iteration's work finishes, so if `DoWorkAsync` takes 200ms, the effective period drifts to `period + 200ms` each cycle. `PeriodicTimer` ticks on the original schedule (skipping missed ticks rather than drifting), giving more predictable cadence for genuinely periodic work.
+
+**Practical guidance:** prefer `PeriodicTimer` for new async recurring-work code — it has the cleanest cancellation story and avoids the drift and overlap pitfalls of the alternatives. Reach for `System.Threading.Timer` only in synchronous or legacy contexts where pulling in `async` isn't practical. Avoid hand-rolled `Task.Delay` loops unless you specifically want drift-tolerant, non-overlapping-by-construction spacing and don't have `PeriodicTimer` available.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: How does `IProgress<T>`/`Progress<T>` let a background async operation safely report progress back to a UI thread?**
+
+`IProgress<T>` is a simple callback abstraction — `void Report(T value)` — that a long-running async method calls to publish incremental progress, without knowing or caring who's listening or on what thread they need to run.
+
+```csharp
+async Task DownloadWithProgressAsync(IProgress<int> progress, CancellationToken ct)
+{
+    for (int i = 0; i <= 100; i += 10)
+    {
+        await Task.Delay(200, ct);       // simulate work happening on a pool thread
+        progress?.Report(i);             // publish progress — safe to call from any thread
+    }
+}
+
+// UI thread (e.g., WPF/WinForms event handler):
+var progress = new Progress<int>(percent => progressBar.Value = percent); // captures SynchronizationContext HERE
+await DownloadWithProgressAsync(progress, cancellationToken);
+```
+
+**The mechanism — why it's safe:** `Progress<T>` (the concrete implementation) captures `SynchronizationContext.Current` at the moment it's *constructed*, exactly the same capture point covered in the `SynchronizationContext`/`ConfigureAwait` question. When the background code calls `progress.Report(value)` from a thread-pool thread, `Progress<T>` doesn't invoke the callback directly on that thread — it posts the callback through the captured context (`SynchronizationContext.Post`), which marshals it back onto the UI thread's message loop. This means the consumer's callback (`percent => progressBar.Value = percent`) can safely touch UI controls even though `Report` itself was called from a worker thread — exactly the cross-thread-UI-access problem that would otherwise throw `InvalidOperationException` in WPF/WinForms.
+
+**Why the constructor matters:** because the context is captured at construction time, `new Progress<int>(...)` must be created on the UI thread (or whatever thread's context you want callbacks marshaled back to) — constructing it from a background thread captures the wrong (or no) context and defeats the whole point.
+
+**Common pitfall:** assuming `Report` calls are synchronous and ordered with respect to the reporting code. `Progress<T>` posts each report asynchronously, so a burst of rapid `Report` calls can coalesce or reorder relative to other UI work in ways a naive reader wouldn't expect; it's also not intended as a guaranteed-delivery channel — for back-pressured, ordered streaming, prefer `IAsyncEnumerable<T>` or a `Channel<T>`, both covered elsewhere in this file.
+
+**Practical guidance:** `IProgress<T>` is the right, purpose-built tool specifically for the "report percentage/status back to whoever's watching, safely, regardless of thread" scenario — don't hand-roll `SynchronizationContext.Post` calls yourself when this abstraction already exists.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: `BlockingCollection<T>` and `Channel<T>` both support producer/consumer scenarios — how do they differ, and why should new code generally prefer `Channel<T>`?**
+
+**`BlockingCollection<T>`** (from .NET Framework-era `System.Collections.Concurrent`) is a thread-based, synchronous blocking wrapper around a concurrent collection (`ConcurrentQueue<T>` by default). Consumers call `.Take()` or enumerate `.GetConsumingEnumerable()`, and if the collection is empty, the calling **thread blocks** — it's parked, unable to do anything else, until an item arrives or the collection is marked complete.
+
+```csharp
+var queue = new BlockingCollection<int>(boundedCapacity: 100);
+
+// Producer thread
+Task.Run(() => { for (int i = 0; i < 1000; i++) queue.Add(i); queue.CompleteAdding(); });
+
+// Consumer thread — .Take() BLOCKS the thread while waiting for an item
+foreach (var item in queue.GetConsumingEnumerable())
+    Process(item);
+```
+
+**`Channel<T>`** (from `System.Threading.Channels`, .NET Core-era) is the async-first successor: producers and consumers use `WriteAsync`/`ReadAsync` (or `WaitToReadAsync` + `TryRead`), which **await** rather than block when the channel is empty (or full, for a bounded channel) — no thread is parked.
+
+```csharp
+var channel = Channel.CreateBounded<int>(100);
+
+// Producer
+_ = Task.Run(async () => {
+    for (int i = 0; i < 1000; i++) await channel.Writer.WriteAsync(i);
+    channel.Writer.Complete();
+});
+
+// Consumer — awaits, doesn't block a thread while the channel is empty
+await foreach (var item in channel.Reader.ReadAllAsync())
+    await ProcessAsync(item);
+```
+
+**Why `Channel<T>` is generally preferred in new code:** `BlockingCollection<T>`'s blocking `.Take()` consumes a full thread-pool (or dedicated) thread for the entire time a consumer is idle waiting for work — exactly the thread-pool-starvation risk pattern covered in the Scenario tier, especially damaging if you spin up several consumers. `Channel<T>` consumes no thread while waiting, composes naturally with `async`/`await` and `IAsyncEnumerable<T>` (`ReadAllAsync`), integrates with `CancellationToken` throughout, and offers finer-grained backpressure/bounding behavior (`BoundedChannelFullMode` options like `Wait`, `DropOldest`, `DropWrite`) than `BlockingCollection<T>`'s single blocking-add behavior.
+
+**When `BlockingCollection<T>` still shows up:** legacy codebases predating `Channel<T>` (.NET Core 3.0+), or genuinely synchronous, dedicated-thread producer/consumer pipelines (e.g., a classic `Thread`-per-worker design) where there's no `async` context to integrate with anyway.
+
+**Practical guidance:** default to `Channel<T>` for any new producer/consumer code, particularly in server applications where thread-pool pressure matters. Reserve `BlockingCollection<T>` for maintaining existing code already built on it or genuinely thread-based (non-async) pipelines.
+
+---
+
+## Advanced — Question 10
+
+**Q10: When is `ReaderWriterLockSlim` a better fit than a plain `lock`, and what pitfall does it introduce that `lock` doesn't have?**
+
+A plain `lock` (via `Monitor`) is **exclusive for every access** — even two threads that only want to *read* shared state are serialized against each other, because `lock` has no concept of "read" vs "write." For state that's read very frequently and written rarely (a cached configuration object, a reference dictionary refreshed occasionally), that's wasted concurrency: readers that could safely run simultaneously are needlessly queued behind one another.
+
+`ReaderWriterLockSlim` distinguishes the two access modes explicitly:
+
+```csharp
+private readonly ReaderWriterLockSlim _rwLock = new();
+private Dictionary<string, string> _cache = new();
+
+public string? Get(string key)
+{
+    _rwLock.EnterReadLock();          // multiple readers allowed concurrently
+    try { return _cache.TryGetValue(key, out var v) ? v : null; }
+    finally { _rwLock.ExitReadLock(); }
+}
+
+public void Set(string key, string value)
+{
+    _rwLock.EnterWriteLock();         // exclusive — blocks all readers and writers
+    try { _cache[key] = value; }
+    finally { _rwLock.ExitWriteLock(); }
+}
+```
+
+**Why it can outperform `lock` for this access pattern:** any number of threads can hold the read lock simultaneously, so a read-heavy workload gets genuine parallelism on the read path, with exclusivity reserved only for the rare write. A plain `lock` gives none of that — every reader pays the full serialization cost of a writer, even though readers never conflict with each other. The performance win only materializes when reads are both frequent *and* the protected work is non-trivial (a cheap dictionary lookup may not offset `ReaderWriterLockSlim`'s higher per-acquisition overhead compared to `Monitor`); for cheap, short critical sections, a plain `lock` can actually win despite serializing readers.
+
+**The write-starvation pitfall:** because reads can overlap freely, a steady stream of overlapping readers can keep the lock continuously read-held, indefinitely delaying a writer waiting for exclusive access — a starving writer, unlike the bounded, FIFO-ish fairness a plain `lock` roughly provides. `ReaderWriterLockSlim` mitigates this somewhat (once a writer is waiting, by default new readers queue behind it rather than jumping the line indefinitely), but under sustained heavy read load it's still a real risk worth load-testing for, not a purely theoretical one.
+
+**Practical guidance:** reach for `ReaderWriterLockSlim` specifically for read-heavy/write-rare shared state where the protected work per access is substantial enough to make separating reader concurrency worthwhile; default to plain `lock` otherwise, since it's simpler, has lower overhead for short critical sections, and has no write-starvation failure mode to reason about.
+
+---
+
+## Advanced — Question 11
+
+**Q11: Why do some types need `IAsyncDisposable`/`await using` instead of the synchronous `IDisposable`/`using`, and what does that buy you?**
+
+`IDisposable.Dispose()` is synchronous by contract — it must complete its cleanup without ever awaiting anything. That's fine for cleanup that's genuinely fast and CPU-only (releasing a handle, clearing a reference), but it's a problem for resources whose correct cleanup is itself an I/O operation — most commonly, flushing buffered data over a network connection before closing it.
+
+```csharp
+public class BufferedNetworkWriter : IAsyncDisposable
+{
+    private readonly Stream _stream;
+    // ...
+
+    public async ValueTask DisposeAsync()
+    {
+        await _stream.FlushAsync();   // async flush — genuinely needs to await I/O
+        await _stream.DisposeAsync(); // Stream itself implements IAsyncDisposable too
+    }
+}
+
+await using (var writer = new BufferedNetworkWriter(stream))
+{
+    await writer.WriteAsync(data);
+} // DisposeAsync() is awaited here, automatically, even if an exception is thrown above
+```
+
+**Why forcing this into synchronous `Dispose()` is a real problem, not just style:** if `DisposeAsync`'s work were crammed into a synchronous `Dispose()`, the only options are blocking on the async flush (`.Wait()`/`.Result` — reintroducing the deadlock risk from the `.Result` question, and also a synchronous block on I/O that should have stayed asynchronous) or skipping the flush and risking silently dropped, unflushed data — neither is acceptable for a type whose whole purpose is guaranteeing bytes actually reach the network before the connection closes.
+
+**`await using`** is the compiler-supported consumer side: it ensures `DisposeAsync()` is *awaited* — not fired-and-forgotten — at the end of the block, including when an exception propagates through the block, exactly mirroring what `using`/`Dispose()` guarantees synchronously. `IAsyncDisposable.DisposeAsync()` returns `ValueTask` rather than `Task` deliberately, for the same low-allocation reasoning covered in the `Task` vs `ValueTask` question — disposal is called extremely often and is frequently already-complete-synchronously in practice.
+
+**Common pitfall:** implementing both `IDisposable` and `IAsyncDisposable` on the same type (common for backward compatibility) and forgetting that `Dispose()` must still provide *some* safe, synchronous cleanup path for callers who can't `await` — usually by blocking briefly on the async path or duplicating a synchronous-safe subset of the cleanup, documented clearly so callers know synchronous disposal may not flush.
+
+**Practical guidance:** implement `IAsyncDisposable` whenever meaningful cleanup work involves `await`-worthy I/O (flushing streams, closing async database connections/transactions, network teardown handshakes); keep plain `IDisposable` for cleanup that's genuinely synchronous. Always prefer `await using` over `using` when a type offers `IAsyncDisposable`, so cleanup isn't silently skipped or forced synchronous.
+
+---
+
+## Scenario — Question 6
+
+**Q6: A background worker service reads from a `Channel<T>` with several consumer `Task`s running concurrently to increase throughput. Under load, some items get processed twice. What's the likely bug, and what's the correct multi-consumer pattern?**
+
+**The likely bug:** each consumer independently starts its own `await foreach` enumeration (or its own read loop) over the *same* `ChannelReader<T>`, often written like this:
+
+```csharp
+// BUGGY-LOOKING BUT ACTUALLY THE RIGHT SHAPE — the real bug is usually elsewhere:
+async Task ConsumeAsync(ChannelReader<T> reader, CancellationToken ct)
+{
+    await foreach (var item in reader.ReadAllAsync(ct))
+        await ProcessAsync(item); // if THIS isn't idempotent-safe, double-processing looks like a channel bug
+}
+
+var consumers = Enumerable.Range(0, 4)
+    .Select(_ => ConsumeAsync(channel.Reader, ct))
+    .ToArray();
+await Task.WhenAll(consumers);
+```
+
+This pattern is actually correct — `ChannelReader<T>.ReadAllAsync()` and `TryRead` are internally synchronized: each individual item is delivered to exactly one caller, even with multiple consumers racing to read from the same reader concurrently. So double-processing with this shape means the double-processing is happening **downstream of the read**, not at the channel — the most common real causes are: (1) `ProcessAsync` itself is not idempotent and something upstream (a retry, a duplicate write into the channel, an at-least-once producer) legitimately delivers the same logical item twice; (2) a bug where each consumer accidentally gets its **own separate reader/channel instance** instead of sharing one (e.g., a DI registration that's `Transient` instead of `Singleton` for the channel, so each consumer resolves a fresh channel and somehow both end up populated from the same source); or (3) exception handling that catches a failure *after* successful processing but re-queues/retries the item as if it hadn't been processed yet.
+
+**Diagnosing it:** confirm all consumers share the exact same `Channel<T>`/`ChannelReader<T>` instance (log its object identity, or check DI lifetime); add a per-item correlation ID logged at both read-time and process-completion-time to see whether the same ID is genuinely read twice by the channel (rare, would indicate a real bug in usage) versus read once but processed/retried twice downstream (far more common).
+
+**The correct multi-consumer pattern:** share one `Channel<T>` instance and one `ChannelReader<T>` across all consumer tasks exactly as shown above — that part is safe by design. Make `ProcessAsync` itself idempotent (safe to run twice on the same item, e.g., via an upsert instead of an insert, or a processed-IDs check) wherever the upstream source can plausibly redeliver, and ensure any retry logic only re-queues on genuine failure, with the success path never both completing *and* retrying the same item.
+
+---

@@ -814,3 +814,225 @@ In a multi-instance deployment (multiple app servers, not just multiple concurre
 **Why both fixes together, not just one:** jittered TTLs reduce the *odds* of synchronized expiry causing a stampede, but don't eliminate the risk entirely (a spike can still coincide with any expiry, jittered or not) — request coalescing eliminates the actual damage mechanism (thousands of redundant simultaneous queries) regardless of why the cache miss happened, making it the more fundamental fix, with jittered TTLs as defense in depth.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What's the difference between applying a resiliency pattern at the network/infrastructure layer (e.g., a service mesh sidecar doing retries and circuit breaking with no application code involved) versus applying it in application code directly (e.g., with Polly)?**
+
+Every pattern discussed so far — retry, timeout, circuit breaker, bulkhead — can be implemented in two fundamentally different places: **inside the application process** (a library like Polly wrapping your outbound calls) or **outside the application process, in the network path** (a sidecar proxy, typically part of a service mesh like Istio or Linkerd, that intercepts every inbound/outbound call transparently).
+
+**Infrastructure-layer (sidecar/mesh) resiliency:** the mesh's sidecar proxy sits next to every service instance and applies retry, timeout, and circuit-breaking policy to the traffic flowing through it — configured centrally (often via YAML applied to the mesh control plane), not in each service's code. The huge advantage is consistency and zero code burden: every service in the mesh gets the same baseline resilience regardless of what language or framework it's written in, and policy changes (tune a timeout, adjust a breaker threshold) roll out without redeploying application code. The downside is that the proxy operates at the network level (HTTP/gRPC semantics) and has no visibility into business logic — it can't know that "this specific call is a payment charge and must never be retried blindly" versus "this is a read that's safe to hedge." It also adds a real hop of latency and operational complexity (running and upgrading the mesh itself is nontrivial).
+
+**Application-layer (Polly) resiliency:** the code that issues the call also decides the policy, with full access to business context — it can choose not to retry a payment call, can attach an idempotency key, can pick a fallback that makes sense for that specific data. It's more precise but the burden (and the risk of inconsistency) falls on every developer to apply it correctly, call site by call site, in every language a polyglot fleet happens to use.
+
+```csharp
+// Application-layer: the service itself decides "payments never retry, reads do"
+var paymentsPipeline = new ResiliencePipelineBuilder()
+    .AddTimeout(TimeSpan.FromSeconds(3)) // no retry — see Advanced Q2 on idempotency
+    .Build();
+```
+
+**Practical guidance:** the two are complementary, not competing — many production systems run a mesh for baseline network-level resilience (uniform timeouts, mTLS, coarse circuit breaking) *and* Polly in-process for business-aware decisions (idempotency-sensitive retries, fallbacks with real cached data). Relying on the mesh alone risks retrying something unsafe; relying on app code alone means reimplementing the same policy in every service.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: What is load shedding, and how does it differ from and complement rate limiting and back-pressure?**
+
+Load shedding is the deliberate, proactive rejection of a portion of incoming requests once a system is at or approaching capacity, choosing to serve the requests it *does* accept well rather than accepting everything and degrading uniformly until it crashes. The guiding principle is that partial availability (serving 80% of traffic well) beats false availability (attempting 100% of traffic and serving all of it badly, or serving none of it once the system falls over entirely).
+
+**How it differs from rate limiting (Advanced Q4) and back-pressure (Advanced Q7):** rate limiting is typically a *per-client, per-key* quota enforced regardless of the server's real-time health ("you get 100 requests per 10 seconds, full stop") — it protects against any single caller's excess, but a server can still be overwhelmed by aggregate traffic from many well-behaved clients all under their individual limits. Back-pressure is about *signaling* — telling callers to slow down and giving them information (a `Retry-After`) to act on. **Load shedding is about the server's own real-time admission decision, driven by its own current load**, not a per-client quota or a signal to the caller — it actively decides "I will not even attempt to serve this request" based on live system health (CPU, queue depth, latency percentiles), often shedding lower-priority traffic first.
+
+```csharp
+app.Use(async (context, next) =>
+{
+    // Shed low-priority traffic when the system is under real load pressure —
+    // decided from live health signals, not a fixed per-client quota.
+    if (_loadMonitor.IsOverloaded() && context.Request.Headers["X-Priority"] == "low")
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        context.Response.Headers.RetryAfter = "5";
+        return;
+    }
+    await next();
+});
+```
+
+**Why priority matters here:** effective load shedding is rarely uniform — it typically sheds by priority (drop analytics/logging traffic before checkout traffic), so the system keeps its most important work healthy even under sustained overload rather than randomly failing a mix of critical and non-critical requests.
+
+**How the three work together:** rate limiting caps individual bad actors, back-pressure communicates capacity signals outward, and load shedding is the server's last line of self-preservation when aggregate load — even from well-behaved clients — exceeds what it can handle. A well-designed system layers all three: rate limits at the edge, back-pressure signals throughout, and load shedding as the final safety valve protecting the process itself from falling over.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: What is the Ambassador pattern, and how does it relate to (but differ from) a full service mesh?**
+
+The Ambassador pattern deploys a small, out-of-process helper — typically a sidecar container running alongside the application — that handles cross-cutting network concerns (retries, circuit breaking, TLS termination/origination, request logging, protocol translation) on behalf of the main service, so the application's own code can stay focused on business logic and simply talk to "localhost" instead of implementing that networking logic itself.
+
+**Mechanism:** the application sends its outbound (or receives its inbound) traffic through the local ambassador process rather than directly to the network. The ambassador applies the resilience/networking policy and forwards the (possibly retried, possibly TLS-wrapped) call onward. Because it's a separate process, it can be written, versioned, and upgraded independently of the application, and — crucially — reused across services written in different languages, since the ambassador container is the same regardless of whether the app behind it is C#, Java, or Python.
+
+```yaml
+# Simplified sidecar deployment — the ambassador container shares the pod,
+# and the app talks to it over localhost instead of the network directly.
+containers:
+  - name: order-service
+    image: order-service:latest
+    env:
+      - name: PAYMENTS_URL
+        value: "http://localhost:9001"  # calls go to the local ambassador, not PaymentService directly
+  - name: payments-ambassador
+    image: ambassador-retry-proxy:latest
+    ports:
+      - containerPort: 9001
+```
+
+**How it differs from a full service mesh:** a mesh (Istio, Linkerd) is a *fleet-wide, centrally managed* system — every service gets a sidecar, all sidecars are configured from one control plane, and the mesh typically handles service discovery, mTLS across the whole fleet, and global traffic policy (canary routing, global circuit-breaking dashboards) as one coherent system. The Ambassador pattern is a narrower, often per-dependency idea: a lightweight helper solving one specific cross-cutting concern for one service (or one outbound dependency) without necessarily requiring fleet-wide infrastructure, a control plane, or buy-in from the whole organization. In practice, a service mesh's sidecar proxy *is* an implementation of the Ambassador pattern generalized and centrally operated across an entire fleet — the pattern is the underlying idea; the mesh is one large-scale, standardized way to apply it everywhere at once.
+
+**Practical guidance:** reach for a standalone ambassador when you need one service's networking concern solved without adopting mesh infrastructure org-wide; adopt a full mesh when the same need recurs across many services and centralized, consistent policy and observability become worth the added operational complexity.
+
+---
+
+## Advanced — Question 9
+
+**Q9: Why does resiliency testing belong in CI/CD as a deployment gate, distinct from the production chaos-engineering experiments covered in Advanced Q8, and what does that look like concretely?**
+
+Chaos engineering (Advanced Q8) validates resiliency mechanisms against *real* production traffic and infrastructure, on a recurring cadence, to catch drift over time. **CI/CD resiliency testing is different in purpose and timing**: it's a pre-deploy gate that runs automatically on every change, specifically to catch a resiliency regression — someone removing a timeout, changing a retry count to something unsafe, breaking a fallback's error handling — *before* that change ever reaches production, rather than discovering it during the next game day or, worse, during a real incident.
+
+**Two concrete techniques belong here:**
+
+1. **Contract tests for resilience configuration** — assertions that a given HTTP client pipeline still has the policies it's supposed to have, at the values it's supposed to have, so a refactor can't silently drop a circuit breaker or widen a timeout without a test failing.
+
+```csharp
+[Fact]
+public void PaymentClient_Pipeline_Has_CircuitBreaker_And_Bounded_Timeout()
+{
+    var pipeline = ResiliencePipelineRegistry.Get("PaymentService");
+    Assert.Contains(pipeline.Strategies, s => s is CircuitBreakerStrategy);
+    Assert.True(pipeline.GetTimeout() <= TimeSpan.FromSeconds(5));
+}
+```
+
+2. **Fault-injection integration tests** — a test harness stands up the service against a fake/mocked dependency that's deliberately configured to time out, return 500s, or hang, and asserts the *observable behavior* is correct: does the circuit breaker actually trip after the configured threshold, does the fallback actually return the expected degraded response, does an unrelated endpoint stay responsive while the failing dependency is being hammered.
+
+```csharp
+[Fact]
+public async Task OrderHistory_Stays_Responsive_When_PaymentService_Times_Out()
+{
+    _paymentServiceStub.ConfigureToTimeoutOnEveryCall();
+    var response = await _client.GetAsync("/api/orders/history"); // unrelated endpoint
+    response.EnsureSuccessStatusCode(); // must not be starved by the bulkhead-isolated PaymentService failures
+}
+```
+
+**Why this can't just be chaos engineering run more often:** chaos experiments require real infrastructure, real traffic, and deliberate scheduling/approval — they're too slow and too risky to run on every pull request. CI fault-injection tests are fast, deterministic, and run in isolation, making them suitable as a hard merge/deploy gate; chaos engineering remains the periodic, higher-fidelity check that the *whole system*, including infrastructure and real traffic patterns, still behaves as these unit-level tests assume.
+
+**Practical guidance:** treat a failing resilience contract test the same as a failing functional test — block the merge. This is what keeps resiliency mechanisms from silently rotting between chaos game days.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What is a system's "blast radius," and how do bulkheads, circuit breakers, and timeouts collectively work together to shrink it?**
+
+Blast radius is the scope of a failure's impact — how much of the system is affected when one component fails, as distinct from the failure itself. The goal of resiliency engineering isn't to prevent every failure (impossible in a distributed system, per Beginner Q1) — it's to make sure a failure's blast radius stays small and contained instead of spreading to unrelated parts of the system. This is the unifying frame an architect actually reasons in: not "which pattern do I add here" but "what is currently able to blow up, and how far would the damage spread."
+
+**How each pattern shrinks blast radius, and why none of them alone is sufficient:**
+
+- **Timeout** bounds *how long* one failing call can hold a resource — without it, a single hung dependency can tie up a thread indefinitely, and blast radius grows unbounded with time.
+- **Bulkhead** (Intermediate Q3) bounds *how much shared resource* one dependency's calls can ever consume — without it, even correctly-timed-out calls to a failing dependency can, in high enough volume, exhaust the thread pool that unrelated requests also depend on. This is precisely what contained the OrderService incident in Scenario Q1: the bulkhead put a hard ceiling on how many threads Payments failures could ever consume, no matter how bad Payments got.
+- **Circuit breaker** (Intermediate Q1) bounds *how long the system keeps trying* against a dependency that has already shown it's failing — without it, timeouts and bulkheads still let a fixed amount of damage recur on every single request indefinitely; the breaker stops the bleeding entirely once failure is statistically clear.
+
+**Together, they answer three separate questions about the same failure:** timeout answers "how long can one bad call cost me," bulkhead answers "how much of my total capacity can one bad dependency ever consume," and circuit breaker answers "how long do I keep paying that cost before I stop trying." A system missing any one of the three still has an unbounded blast radius along that dimension — e.g., a bulkhead with no timeout still lets each of its limited slots be held forever by one hung call, and a circuit breaker with no bulkhead still lets a burst of calls exhaust shared resources before the breaker has enough samples to trip.
+
+```csharp
+builder.Services.AddHttpClient("PaymentService")
+    .AddResilienceHandler("payment-pipeline", pipeline =>
+    {
+        pipeline.AddConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = 20 }); // caps total consumption
+        pipeline.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions { FailureRatio = 0.5 }); // caps duration
+        pipeline.AddTimeout(TimeSpan.FromSeconds(3)); // caps per-call cost
+    });
+```
+
+**Practical guidance:** when reviewing a new dependency integration, ask all three questions explicitly rather than adding patterns reflexively — "what's the per-call cost cap, what's the total-resource cap, and what's the duration cap" is a more durable design checklist than "did we remember to add Polly."
+
+---
+
+## Advanced — Question 11
+
+**Q11: Why is graceful shutdown a resiliency concern, and what does handling it correctly involve?**
+
+Every pattern so far has addressed a service *receiving* a failure from something else. Graceful shutdown addresses the mirror case: a healthy service instance being deliberately terminated — a rolling deploy replacing pods, a horizontal-scale-down removing instances, a spot/preemptible VM being reclaimed — and what happens to the requests it was actively handling at that exact moment. Handled poorly, the instance's *own* termination becomes the failure the rest of the system has to absorb: in-flight requests get connection-reset errors, a partially-processed message gets neither completed nor safely retried, and a client sees an error that had nothing to do with any real fault, just bad timing against a routine, planned event.
+
+**What graceful shutdown actually requires, as a sequence:**
+
+1. **Receive and handle the termination signal** — in a containerized environment this is `SIGTERM`, sent before the process is forcibly killed (`SIGKILL`) after a grace period.
+2. **Stop accepting new work immediately** — flip readiness to unhealthy (so the load balancer/orchestrator stops routing new traffic here) while the process itself keeps running.
+3. **Let in-flight work finish, within a bounded grace period** — requests already being processed should be allowed to complete normally rather than being cut off mid-response; the bound matters because some requests may hang, and the process still needs to exit eventually.
+4. **Exit cleanly** — close connections, flush any buffers, then terminate.
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+builder.Host.ConfigureHostOptions(o =>
+{
+    o.ShutdownTimeout = TimeSpan.FromSeconds(25); // bounded grace period for in-flight work to finish
+});
+var app = builder.Build();
+
+var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+lifetime.ApplicationStopping.Register(() =>
+{
+    // Fires on SIGTERM, before shutdown begins — flip readiness so the load
+    // balancer stops sending new traffic while in-flight requests still drain normally.
+    HealthState.MarkNotReady();
+});
+```
+
+**How this relates to Kubernetes without duplicating readiness-probe mechanics:** Kubernetes' `preStop` hook is what creates the *safety window* this depends on — it runs (and the pod stays in the endpoint list a moment longer) before `SIGTERM` is even sent, giving the load balancer's already-cached routing table time to catch up and stop sending new connections, so the app-level "stop accepting, finish in-flight" logic above isn't racing against traffic still arriving. The two are complementary layers, not duplicates: `preStop`/endpoint removal is infrastructure buying the app time; `SIGTERM` handling and connection draining above is the app actually using that time correctly.
+
+**Common pitfall:** an app with no `SIGTERM` handler at all gets forcibly killed at the end of the grace period having done nothing to drain — every in-flight request at that instant is simply severed, indistinguishable to the client from a crash.
+
+---
+
+## Scenario — Question 6
+
+**Q6: A service is deployed via a rolling update. During every deployment, roughly 1–2% of in-flight requests fail with connection-reset errors — old pods are being killed before they finish requests already in progress. Diagnose and fix.**
+
+**Diagnosis — a missing graceful-shutdown / connection-draining implementation, the gap described in Advanced Q11.** During a rolling update, Kubernetes terminates old pods as new ones become ready: it removes the pod from the Service's endpoint list and sends `SIGTERM`, then — after a grace period — sends `SIGKILL` if the process hasn't exited. If the application has no `SIGTERM` handler, the default .NET behavior (or an unhandled signal in another runtime) is to terminate essentially immediately, severing any connection that's mid-request at that instant. Separately, there's an unavoidable propagation delay between "pod removed from endpoints" and "every load balancer/proxy in the path has actually stopped routing new traffic there" — during that window, new connections can still arrive at a pod that's already decided to shut down. Both gaps produce the same symptom: requests that were legitimately in flight get cut off mid-response, surfacing to clients as connection resets, entirely disconnected from any real application fault.
+
+**The fix — handle `SIGTERM`, stop accepting new work, drain in-flight requests within a bounded grace period, and coordinate with Kubernetes' `preStop` hook:**
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+builder.Host.ConfigureHostOptions(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));
+var app = builder.Build();
+
+var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+lifetime.ApplicationStopping.Register(() => HealthState.MarkNotReady());
+// Kestrel + IHostApplicationLifetime already stop accepting new connections
+// on ApplicationStopping and let existing requests complete up to ShutdownTimeout.
+
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = c => c.Tags.Contains("ready") && HealthState.IsReady
+});
+```
+
+```yaml
+# Kubernetes: give the endpoint-removal propagation delay somewhere safe to happen
+# BEFORE SIGTERM is sent, so new traffic has already stopped arriving by the
+# time the app begins draining what's left.
+lifecycle:
+  preStop:
+    exec:
+      command: ["sh", "-c", "sleep 5"]
+terminationGracePeriodSeconds: 40   # must exceed preStop sleep + app's own ShutdownTimeout
+```
+
+**Why both pieces are needed:** the `preStop` sleep absorbs the endpoint-propagation race so the pod isn't still receiving fresh connections after it's begun shutting down; the app-level `SIGTERM` handling ensures that whatever was already in flight when shutdown began gets to finish instead of being severed. Fixing only one half leaves the other gap open — `preStop` alone doesn't help if the app still terminates in-flight requests immediately on `SIGTERM`, and app-level draining alone doesn't help if new connections keep arriving throughout the drain window because the load balancer hasn't caught up yet.
+
+**Verification:** re-run the rolling update under synthetic sustained load and confirm the connection-reset rate drops to zero — this is also a good candidate for a CI fault-injection test (Advanced Q9) that sends `SIGTERM` mid-request to a test instance and asserts the in-flight response still completes successfully.
+
+---

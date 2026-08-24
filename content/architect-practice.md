@@ -502,3 +502,138 @@ This is the predictable end state of undocumented, unvisible technical debt (Beg
 **Practical guidance:** never accept "it already works" as a substitute for checking it against the requirements it was never built to meet — the negotiation isn't architect-says-no versus team-ships-anyway, it's making the actual gap and its cost visible so the team and stakeholders choose one of the three paths above deliberately, the same discipline applied to every other deadline-pressure scenario in this material.
 
 ---
+
+## Beginner — Question 6
+
+**Q6: What is an architectural "smell," analogous to a code smell? Give examples.**
+
+A code smell is a surface-level pattern in source code that isn't provably a bug, but reliably correlates with deeper design problems — a long parameter list, a god class. An architectural smell is the same idea one level up: a structural warning sign visible from the outside of a system's boundaries — deployment topology, data ownership, team coupling — that suggests a boundary problem worth investigating, without necessarily being proof that anything is wrong yet.
+
+**Common examples:**
+
+| Smell | What it looks like | What it usually indicates |
+|---|---|---|
+| Lockstep deployment | Two "independent" services must always be deployed together, or one breaks | The service boundary doesn't match the real seam in the domain — they're one logical unit split in two |
+| Shared database | Several services read/write the same tables directly, no owning service | No real data ownership; a schema change anywhere risks breaking everyone silently |
+| Chatty integration | Two services exchange many small synchronous calls to complete one logical operation | The boundary was drawn through the middle of a single business transaction |
+| Sprawling shared library | A "common" package that every service depends on and that changes constantly | Shared code is acting as a stealth service, coupling everyone to its release cadence |
+| Divergent naming for the same concept | "Customer," "Account," and "Client" all mean the same entity in different services | No agreed bounded context; integration code is full of ad hoc translation |
+
+**Why "smell," not "defect":** none of these prove the architecture is wrong. Lockstep deployment between two services might be entirely appropriate if they genuinely share a single transactional invariant that can't be safely split. The value of naming it a smell is that it flags *where to look* — it earns an investigation, a conversation, maybe a fitness function to track it over time — without demanding an immediate fix or triggering a redesign on suspicion alone.
+
+**Practical guidance:** train the team to notice and name these out loud the moment they're seen ("that's a shared-database smell") rather than silently working around them. Naming them early is cheap; the alternative is the same pattern getting worse for months until it's an incident, at which point it's indistinguishable from the load-bearing-workaround problem (see Scenario Q4) — expensive to unwind and nobody remembers deciding to build it that way.
+
+---
+
+## Intermediate — Question 8
+
+**Q8: How does an RFC or design-doc process complement a formal ADR? When would a team use one vs. the other?**
+
+The distinction is about *when in the decision's lifecycle* the document exists. An ADR is written **after** a decision has been made — it's a historical record: this is what we chose, why, and what we rejected. An RFC (or design doc) is written **before** a decision is finalized — it's a proposal, circulated to gather feedback, poke holes, and surface objections while the decision is still changeable. Confusing the two causes real friction: writing an ADR too early locks in a decision before it's been stress-tested by the people who'll live with it; writing an RFC and never following it with an ADR means the eventual decision — which may differ from the original proposal after feedback — is never actually recorded.
+
+**How they fit together as a pipeline:**
+
+1. **RFC/design doc drafted** by whoever is proposing the change, laying out the problem, the proposed approach, alternatives considered, and open questions — deliberately incomplete in places, inviting comment.
+2. **Review period** — asynchronous comments, a review meeting, or both. This is where the disagreement (Scenario Q2-style) happens *on paper*, before code exists, which is far cheaper to resolve than after implementation starts.
+3. **Decision reached**, possibly different from the original RFC proposal after feedback folded in.
+4. **ADR written** capturing the final decision, referencing the RFC as background context but standing alone as the permanent record — the RFC can be archived or left as historical discussion; the ADR is what future readers rely on.
+
+**When to use which:** reach for an RFC when the decision is still genuinely open, involves multiple stakeholders whose input will materially change the outcome, or is contentious enough that skipping review risks a costly reversal later. Skip straight to an ADR when the decision is narrow, uncontroversial, or already effectively made (documenting a choice, not soliciting one) — running a full RFC cycle for a decision nobody's going to contest is process for its own sake.
+
+**Common pitfall:** treating the RFC as the permanent record and never writing the ADR — six months later nobody can find "the decision," only a debate thread with an ambiguous ending.
+
+---
+
+## Intermediate — Question 9
+
+**Q9: How should a team right-size its architecture documentation? What failure modes appear at each extreme?**
+
+Documentation volume for architecture, like technical debt, has a cost curve with a minimum, not a monotonic "more is better" relationship — both too little and too much cause real, distinct failure modes, and the job is finding the point between them where documentation is trusted and worth maintaining.
+
+**Failure mode 1 — too little (tribal knowledge loss):** decisions live only in the heads of the people who made them. This looks fine day to day — the team ships, everyone "just knows" why things are the way they are — until someone leaves, and the knowledge leaves with them (the exact scenario in Scenario Q6). New hires ramp slowly because there's nothing to read, only people to interrupt. Worse, undocumented rationale gets silently violated: someone "fixes" a deliberate workaround because nothing recorded *why* it existed, reintroducing a bug that was already solved once.
+
+**Failure mode 2 — too much (documentation that goes stale and loses trust):** a team that documents everything upfront — every component diagram, every sequence flow, every field-level data dictionary — produces artifacts that are expensive to maintain and, in practice, don't get maintained. The code changes daily; the 40-page design doc doesn't. Within a few months the documentation actively lies about the system, and once someone catches it lying once, nobody trusts it again — at which point maintaining it is pure waste, since engineers default back to reading the code directly, and new documentation efforts inherit the same distrust.
+
+**How to right-size it in practice:**
+1. Document *decisions and their rationale* (ADRs), not implementation detail that the code already expresses better and more accurately than prose ever will.
+2. Keep documents living only where they're cheap to update — next to the code, reviewed in the same pull request, so a change that invalidates the doc is caught at review time rather than drifting silently.
+3. Prefer a small number of high-signal artifacts (ADRs, a lightweight current-state diagram, an onboarding doc) over exhaustive coverage — completeness is less valuable than the top 10% of decisions actually being findable.
+4. Periodically audit for staleness and either fix or explicitly retire documents that no longer match reality — a doc marked "known stale, do not trust" is more honest, and less damaging, than one silently rotting.
+
+**Practical guidance:** the test for "is this worth documenting" is the same test used for ADRs (Beginner Q1) — would a reasonable engineer question this decision later, and is it expensive to reverse or rediscover? If yes, write it down once, keep it short, and keep it near the code it governs.
+
+---
+
+## Intermediate — Question 10
+
+**Q10: How are the roles of Solution Architect, Enterprise Architect, and Software/Technical Architect commonly distinguished? Why do the boundaries blur in smaller organizations?**
+
+These three titles overlap heavily in practice, but the distinction most organizations intend is one of **scope**: how much of the organization a given architectural decision is expected to affect.
+
+| Role | Primary scope | Typical concerns | Time horizon |
+|---|---|---|---|
+| **Software/Technical Architect** | A single system or a small set of closely related services | Internal structure, service boundaries, technology choices within the system, code-level and integration-level design | Weeks to a couple of years — the life of the system |
+| **Solution Architect** | Delivery of one specific solution or project, often spanning multiple systems and teams | How several existing systems, new components, and integrations fit together to satisfy one business initiative; owns the technical design for a single delivery effort end to end | The length of the project/initiative |
+| **Enterprise Architect** | The whole organization's technology portfolio | Standards, shared platforms, technology strategy, reducing duplicate capability across teams, alignment between IT investment and business strategy | Multi-year, often outlives any single project |
+
+A useful way to hold the distinction: a Technical Architect asks "how should *this system* be built," a Solution Architect asks "how do these systems come together to deliver *this initiative*," and an Enterprise Architect asks "what should *every* system in this organization look like, and are we duplicating investment across them."
+
+**Why the boundaries blur in smaller organizations:** all three concerns still exist in a small company — someone still has to think about single-system design, cross-system delivery, and organization-wide consistency — but there usually isn't enough volume of work in any one scope to justify a dedicated headcount for it. A 30-engineer company doesn't need a full-time Enterprise Architect setting portfolio-wide standards across dozens of systems when there are only four systems total; the same person who designs the flagship system's internals is also, by necessity, the one keeping the handful of other systems consistent with each other. The *concerns* don't disappear, they just consolidate onto fewer people — which is why a "Staff Engineer" or "Architect" at a smaller company is routinely expected to operate at all three altitudes depending on the week, while at a large enterprise those altitudes are deliberately separated into different roles, different reporting lines, and even different departments, precisely because the coordination overhead of consolidating them at that scale would be worse than the overhead of separating them.
+
+**Practical guidance:** when joining or structuring a team, name which scope a given decision actually requires — a decision made with system-level authority but enterprise-level blast radius (e.g., picking a new database engine that becomes a de facto organizational standard) is exactly where mismatched scope causes the most damage.
+
+---
+
+## Advanced — Question 7
+
+**Q7: How does the classic "iron triangle" of scope, time, cost, and quality apply specifically to architectural decisions?**
+
+The iron triangle states that of scope, time, and cost (with quality often held as the implicit fourth corner, or the thing that suffers when the other three are fixed), you cannot fix all of them simultaneously — improving one requires releasing slack on at least one other. Most engineers understand this at the *project* level (more scope needs more time or more people). The distinctly architectural version of this is that the trade-off shows up **inside individual technical decisions**, often invisibly, and the architect's job is to make the sacrificed corner explicit rather than let it be decided by default.
+
+**How it shows up concretely in architecture work:**
+- **Cutting scope** to hit a date: shipping with two services sharing a database instead of properly separated (Scenario Q3) — the boundary work is descoped, not the deadline moved.
+- **Cutting quality** to hit a date: skipping the load test, deferring the security review, accepting a POC's error handling as "good enough" (Scenario Q5) — the corners being sacrificed are non-functional requirements, which are easy to cut because their absence isn't visible until later.
+- **Spending more cost** to preserve scope and quality on a fixed timeline: buying a managed service instead of building one (see Build vs Buy material), or adding contractors to parallelize work that has real limits on parallelization.
+- **Extending time** to preserve scope and quality: the honest option, and often the hardest to get approved, because it requires someone with authority to move a date that was announced before the technical reality was understood.
+
+**Why naming the sacrifice explicitly matters:** every one of these trade-offs happens whether or not anyone says it out loud — the difference between a healthy team and an unhealthy one is not whether trade-offs occur, it's whether they're decided deliberately or fallen into silently. An architect who lets "we'll cut the corner" happen implicitly (nobody says which corner, it's just quietly under-tested) reproduces the exact undocumented-debt failure mode from Beginner Q3. An architect who says explicitly, in front of the stakeholders who own the date, "hitting this date means we are cutting quality specifically in the areas of load testing and security review — here's the resulting risk" converts an invisible default into an informed decision someone actually chose.
+
+**Practical guidance:** whenever a deadline, budget, or scope constraint is handed down as fixed, treat it as an instruction to explicitly identify which of the remaining corners is being sacrificed, translate that sacrifice into concrete risk (the same translation discipline as Intermediate Q2 and Scenario Q3), and get it acknowledged by whoever owns the constraint — not silently absorbed by the engineering team.
+
+---
+
+## Advanced — Question 8
+
+**Q8: How should a public/external API be versioned and evolved without breaking existing consumers? Why is this a good case study in decisions that are expensive to reverse?**
+
+A public API is architecturally unusual because the "consumers" of the interface are, by definition, systems you don't control and often can't even see — you can't grep for every caller the way you can inside your own codebase, and you frequently can't force them to upgrade on your schedule. That combination — invisible callers, no forced migration — is what makes API design decisions some of the most expensive to reverse in all of architecture: a mistake in an internal service can be fixed by coordinating with the three teams that call it; a mistake in a public API might be depended on by thousands of integrations you'll never identify, some of which will never upgrade voluntarily.
+
+**The discipline that manages this:**
+
+1. **Semantic versioning with real meaning, not just a marketing number.** MAJOR changes break compatibility, MINOR adds functionality compatibly, PATCH fixes bugs compatibly — and consumers must be able to trust that a MINOR or PATCH bump is genuinely safe to pull in without review, or the versioning scheme is worthless.
+2. **Additive-only changes within a major version.** New optional fields, new endpoints, new enum values (if consumers are contractually required to tolerate unknown ones) are safe; removing fields, renaming fields, tightening validation, or changing the meaning of an existing field are not — even if the change feels small internally, an external consumer's brittle client can break on any of them.
+3. **Explicit deprecation windows with real, communicated timelines**, not "eventually." A deprecated field or endpoint should keep working, emit a deprecation signal (a header, a changelog entry, an email to registered API consumers), and carry a stated sunset date far enough out that realistic integration teams — who may not treat your API as a priority — have time to act.
+4. **Version the contract, not just the code.** Whether via URL path (`/v2/...`), a header, or content negotiation, old and new versions must be able to run simultaneously in production for the length of the deprecation window — this is an operational cost (running two contract surfaces at once) that has to be planned for, not discovered.
+5. **Monitor actual usage of deprecated surfaces** before removing them — "we announced it" is not the same as "nobody's using it anymore"; usage telemetry is the only reliable signal that a breaking removal is actually safe.
+
+**Why this is a strong case study for expensive-to-reverse decisions:** the cost of a bad choice here doesn't show up at decision time — it shows up months or years later, multiplied by every external integration built on top of it, and by then the "fix" isn't a code change, it's a multi-party negotiation and migration project. It's the sharpest illustration in this material of why architecturally significant decisions deserve disproportionate upfront care relative to how small they might look in a diff.
+
+---
+
+## Scenario — Question 6
+
+**Q6: A legacy system's original architect has left the company, no ADRs exist, and the current team is now afraid to change a critical piece of infrastructure because nobody understands why it was built that way. How do you recover the lost context safely before making any change?**
+
+This is the tribal-knowledge failure mode (Intermediate Q9) fully realized: the rationale was never written down, the person holding it left, and the team is now paying for it in the worst way — not just slower work, but genuine fear of touching something they don't understand, which is itself a risk (an unmaintained, unmodifiable critical system is a slow-motion incident). The instinct to either leave it completely alone forever, or to rewrite it from scratch to "finally understand it," are both premature. The right approach is archaeology first, change second — and to treat understanding as something to be actively reconstructed and recorded, not assumed.
+
+**How to recover the context safely:**
+
+1. **Git archaeology.** Read the commit history for the component in full, not just the latest state — commit messages, PR descriptions, and especially any linked tickets or discussion threads often preserve fragments of the original reasoning even when no formal ADR exists. Look for the *shape* of the change over time: was this built incrementally in response to specific incidents, or designed upfront? Each tells a different story about what constraints were real.
+2. **Interview whoever's left who touched it**, even peripherally — the original architect leaving doesn't mean all context left with them. Former teammates, downstream consumers, on-call engineers who've had to work around its quirks at 3am, and support/ops staff who've seen it fail all hold partial pieces. Ask specifically for war stories ("what's the worst incident this thing caused, and what did we learn") — incidents are where undocumented constraints usually surface.
+3. **Trace what actually depends on it now**, not what it was originally built to serve — the same blast-radius mapping used for any load-bearing workaround (Scenario Q4). Current dependents often reveal *de facto* requirements that were never explicit anywhere, because something downstream quietly started relying on an implementation detail.
+4. **Write a retroactive ADR before touching anything** — capturing the best current understanding: what it does, the best-reconstructed reasoning for why it was built this way, what currently depends on it, and what remains genuinely unknown. Mark the unknowns as unknowns explicitly rather than guessing confidently; a documented "we don't know why it does X, treat with caution" is more useful than a false narrative.
+5. **Treat the first change as a controlled experiment in understanding, not just a fix.** Make the smallest possible change, instrument it heavily, and use the system's actual behavior under that change to confirm or correct the reconstructed model from step 4 — updating the retroactive ADR afterward with what was actually learned, so the next person inherits a real, tested account instead of another guess.
+
+**Why this order matters:** skipping straight to a rewrite risks silently dropping a constraint nobody remembered was load-bearing (Scenario Q4's failure mode, but self-inflicted this time); skipping straight to "just fix the bug" without reconstructing context risks the same. Recovering the context first, writing it down, and only then changing the system — carefully, and using the change itself to validate the reconstructed understanding — is the only version of this that leaves the system in better shape than it was found, for the next person too.
+
+---

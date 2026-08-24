@@ -1406,3 +1406,240 @@ function cloneConfig(config) {
 **Broader guidance:** treat `JSON.parse(JSON.stringify(...))` as an anti-pattern for anything beyond plain JSON-safe data — flag it in review wherever the source object might carry `Date`, `Map`/`Set`, circular references, or functions. Prefer `structuredClone` for the data portion, and explicitly extract-and-reattach any functions, since no built-in clone primitive in JavaScript is able to duplicate a function.
 
 ---
+
+## Beginner — Question 11
+
+**Q11: What does `for...in` actually iterate over, versus `for...of` and `Object.keys()`/`Object.values()`/`Object.entries()`? What's the classic `for...in` pitfall involving the prototype chain?**
+
+`for...in` iterates over **enumerable property keys**, own *and inherited* — it walks the entire prototype chain, visiting an object's own enumerable keys first, then any enumerable keys found further up the chain. `for...of` is completely different: it iterates over **values**, driven by the iterable protocol (`Symbol.iterator`), and only works on things that implement it — arrays, strings, `Map`, `Set`, generators, `NodeList`. A plain object is *not* iterable by default, so `for...of obj` throws `TypeError: obj is not iterable`. `Object.keys()`, `Object.values()`, and `Object.entries()` each return an array — of own enumerable keys, own enumerable values, or own enumerable `[key, value]` pairs respectively — and critically, all three look only at **own** properties, never inherited ones.
+
+The classic pitfall: adding a property to a constructor's `prototype` (or any object further up a chain) makes it enumerable by default, so `for...in` silently picks it up as if it belonged to every instance:
+
+```javascript
+function Animal(name) { this.name = name; }
+Animal.prototype.legs = 4;   // enumerable by default — no defineProperty used
+
+const dog = new Animal('Rex');
+
+for (const key in dog) {
+  console.log(key);          // 'name', then 'legs' — legs is inherited, not dog's own!
+}
+
+Object.keys(dog);            // ['name'] — only the own property
+```
+
+**Pitfalls:** code that does `for (const key in obj) { ... obj[key] ... }` without guarding will process inherited properties too, which is especially dangerous if any library has extended `Object.prototype` (rare today, but historically common) — every plain object in the program would suddenly show that property in every `for...in` loop. The standard guard is `if (Object.hasOwn(obj, key))` inside the loop.
+
+**Guidance:** avoid `for...in` for arrays entirely (use `for...of`, or `.forEach`/`.map` for index+value access) and avoid it for objects unless you explicitly want inherited properties too and guard with `Object.hasOwn`; default to `Object.keys/values/entries` (own-only, returns a real array you can chain array methods on) or `for...of` over `Object.entries(obj)` when you need both key and value together.
+
+---
+
+## Beginner — Question 12
+
+**Q12: Why does `typeof arr === 'object'` fail to distinguish an array from a plain object, and how does `Array.isArray()` solve this correctly?**
+
+`typeof` reports `'object'` for every non-null object value — plain objects, arrays, dates, regexes, `Map`s, all of it — because arrays don't get their own `typeof` result; they're just objects with extra exotic behavior (numeric index handling, `.length` auto-updating) layered on top. That means `typeof x === 'object'` can never tell you whether `x` is `[1, 2, 3]` or `{ 0: 1, 1: 2, 2: 3 }`:
+
+```javascript
+typeof [1, 2, 3] === 'object';   // true
+typeof { a: 1 } === 'object';    // true — identical result, no way to tell them apart
+```
+
+`Array.isArray(x)` checks a value's actual internal `[[Class]]`/exotic-Array-object status directly, rather than inspecting its prototype chain or any user-visible property — so it correctly returns `true` only for genuine arrays and `false` for everything else, including array-like objects (`{ length: 3, 0: 'a' }`) and objects that merely have `Array.prototype` in their chain via unusual means:
+
+```javascript
+Array.isArray([1, 2, 3]);        // true
+Array.isArray({ a: 1 });         // false
+Array.isArray('abc');            // false — a string, even though it's iterable and has .length
+Array.isArray({ length: 0 });    // false — array-like, but not a real array
+```
+
+**Pitfalls:** `x instanceof Array` looks like an alternative, and mostly works within a single realm, but it checks the prototype chain against *that specific global's* `Array` constructor — so it silently returns `false` for an array created in a different realm (a different `<iframe>`, a different Node `vm` context, a worker), because that array's prototype chain points to a *different* `Array.prototype` object. `Array.isArray()` was specifically designed to sidestep this and gives the correct answer across realms.
+
+**Guidance:** never use `typeof` to test for "is this an array" — it can't, by design. Use `Array.isArray()` universally; reserve `instanceof` for cases where realm-crossing genuinely isn't a concern and a class hierarchy check (not just "is it an array") is what's actually needed.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: When should `Set` and `Map` be used instead of a plain array or object, and what concrete bug can result from using a plain object as a lookup table with non-string keys?**
+
+`Set` stores a collection of **unique values** of any type, with `O(1)` average-case `.has()`/`.add()`/`.delete()` — a strict upgrade over deduplicating with an array and checking membership via `.includes()`, which is `O(n)` per lookup. `Map` stores key-value pairs where **keys can be any value** — objects, functions, `NaN`, even other `Map`s — not just strings/symbols, preserves insertion order during iteration, and exposes `.size` directly, unlike counting `Object.keys(obj).length`.
+
+The concrete bug: a plain object used as a lookup table coerces every key to a **string** (via `ToPropertyKey`) before storing it. Two distinct objects both stringify to the same `'[object Object]'` by default, so they collide and silently overwrite each other:
+
+```javascript
+const cache = {};
+const key1 = { id: 1 };
+const key2 = { id: 2 };
+cache[key1] = 'first';
+cache[key2] = 'second';        // key2 stringifies to the SAME string as key1
+
+console.log(cache);            // { '[object Object]': 'second' } — 'first' silently lost
+console.log(Object.keys(cache).length);   // 1, not 2 — data loss, no error raised
+```
+
+`Map` compares keys by identity (via SameValueZero, no coercion), so distinct object references never collide:
+
+```javascript
+const cache = new Map();
+cache.set(key1, 'first');
+cache.set(key2, 'second');
+console.log(cache.size);       // 2 — both entries present, correctly distinguished
+```
+
+**Pitfalls:** this bug is easy to miss in review because it doesn't throw — it just quietly overwrites data, and the resulting symptom ("a cache entry is missing" or "wrong value returned") surfaces far from the actual coercion. `Set`/`Map` also aren't JSON-serializable directly (`JSON.stringify(new Map())` produces `{}`), which matters when persisting or sending them over the wire.
+
+**Guidance:** default to `Map` the moment keys might not be strings, or when insertion order and `.size` matter; default to `Set` for uniqueness checks instead of array `.includes()` scans, especially in hot paths or over large collections.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: How do `Array.prototype.flat()` and `flatMap()` work, and why is `flatMap()` preferred over chaining `.map().flat()` separately?**
+
+`arr.flat(depth)` returns a new array with nested sub-arrays flattened up to `depth` levels (default `depth` is `1`); passing `Infinity` flattens arbitrarily deep, regardless of how nested the structure is. It does not mutate the original array.
+
+```javascript
+const nested = [1, [2, 3], [4, [5, 6]]];
+nested.flat();          // [1, 2, 3, 4, [5, 6]]   — only depth 1 flattened
+nested.flat(2);         // [1, 2, 3, 4, 5, 6]      — depth 2 flattens the inner array too
+[1, [2, [3, [4]]]].flat(Infinity);   // [1, 2, 3, 4]
+```
+
+`arr.flatMap(fn)` is equivalent to calling `.map(fn)` immediately followed by `.flat(1)`, but implemented as a **single pass** — one array traversal instead of two, and no intermediate array of arrays is ever materialized before being flattened:
+
+```javascript
+[1, 2, 3].flatMap(x => [x, x * 2]);   // [1, 2, 2, 4, 3, 6]
+```
+
+Here `map` alone would produce `[[1, 2], [2, 4], [3, 6]]`; `flatMap` flattens that one level in the same operation, yielding the flat result directly. A common real use is turning "one input into zero or more outputs" — e.g., filtering while mapping by having the callback return `[]` for items to drop and `[value]` for items to keep, avoiding a separate `.filter()` pass.
+
+**Pitfalls:** `flatMap()` only flattens **one level**, same as `flat()`'s default — nested arrays two levels deep still need an explicit `.flat(2)` or a second `flatMap`; people sometimes assume `flatMap` flattens fully, since "flat" is in the name. Neither method mutates the original array — both allocate and return a new one, so forgetting to reassign or use the return value (`arr.flat(); /* result discarded */`) is a no-op bug, same class of mistake as forgetting `.sort()`'s return isn't a copy (`.sort()` mutates *and* returns the same array, the opposite trap).
+
+**Guidance:** reach for `flat(Infinity)` when normalizing arbitrarily nested data of unknown depth (e.g., recursively-collected results); reach for `flatMap` specifically when a `.map()` step naturally produces zero-or-more results per item, since it avoids the extra allocation and pass that `.map().flat()` would cost.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What's the difference between the `in` operator, `hasOwnProperty()`, and `Object.hasOwn()` for checking whether a property exists — particularly regarding the prototype chain?**
+
+`in` checks the **entire prototype chain** — it returns `true` if the property exists anywhere the object can reach it, own or inherited, enumerable or not. `hasOwnProperty()` checks **only the object's own properties**, ignoring anything inherited, regardless of enumerability. `Object.hasOwn(obj, prop)` (ES2022) does exactly what `hasOwnProperty()` does semantically — own-only, enumerability-independent — but as a **static method** rather than one looked up on the object itself.
+
+```javascript
+const obj = { a: 1 };
+'a' in obj;                     // true — own property
+'toString' in obj;              // true — inherited from Object.prototype!
+obj.hasOwnProperty('a');        // true
+obj.hasOwnProperty('toString'); // false — own-only, correctly excludes it
+```
+
+That static-vs-method distinction matters in one real edge case: an object created with `Object.create(null)` has **no prototype at all**, so it has no inherited `hasOwnProperty` method to call:
+
+```javascript
+const noProto = Object.create(null);
+noProto.a = 1;
+noProto.hasOwnProperty('a');    // TypeError: noProto.hasOwnProperty is not a function
+Object.hasOwn(noProto, 'a');    // true — works regardless of the object's prototype
+```
+
+`Object.hasOwn()` is also immune to a subtler issue: an object could define its **own** property literally named `hasOwnProperty` that shadows the inherited method with something unrelated, silently breaking `obj.hasOwnProperty(...)` calls; `Object.hasOwn()`, being external to the object, can't be shadowed this way.
+
+**Pitfalls:** the once-common defensive pattern `Object.prototype.hasOwnProperty.call(obj, 'a')` exists specifically to route around both the null-prototype and the shadowing problem — `Object.hasOwn()` was added to make that verbose workaround unnecessary. Reaching for plain `in` when "own property" was actually meant is a frequent source of bugs, since it silently also matches every inherited method name (`toString`, `valueOf`, `constructor`, ...).
+
+**Guidance:** use `Object.hasOwn(obj, prop)` as the default modern choice for "does this object own this property" — it's safe against null-prototype objects and shadowing, and is what current style guides recommend over `hasOwnProperty()`. Reserve `in` for the rarer case where inherited properties (like checking whether a method exists anywhere in an object's usable interface) genuinely should count.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What are currying and partial application as functional patterns in JavaScript? Walk through transforming a multi-argument function into a sequence of single-argument functions, with a practical use case.**
+
+**Currying** transforms a function that takes multiple arguments, `f(a, b, c)`, into a chain of functions each taking a single argument: `f(a)(b)(c)`. **Partial application** is the related, more general idea of fixing *some* arguments now and returning a function that accepts the rest — not necessarily one at a time. Currying is really partial application applied repeatedly, one argument per step.
+
+```javascript
+function curry(fn) {
+  return function curried(...args) {
+    if (args.length >= fn.length) return fn.apply(this, args);
+    return (...more) => curried.apply(this, [...args, ...more]);
+  };
+}
+
+function log(level, module, message) {
+  console.log(`[${level}] ${module}: ${message}`);
+}
+
+const curriedLog = curry(log);
+const errorLog = curriedLog('ERROR');       // partially applied: level fixed
+const dbErrorLog = errorLog('Database');    // partially applied: module fixed too
+dbErrorLog('Connection timeout');           // [ERROR] Database: Connection timeout
+```
+
+`fn.length` (the number of declared parameters, `3` for `log`) tells `curried` how many arguments to collect before actually invoking `fn`; each intermediate call that doesn't yet have enough arguments returns a new closure remembering what's been supplied so far. This is a genuinely practical pattern for building **reusable, pre-configured** versions of a general function — a validator curried down to `isAtLeast(0)` becomes a reusable `isPositive` check; a logger curried down to `curriedLog('ERROR')('Database')` becomes a reusable, scoped `dbErrorLog` that call sites can invoke with just the message, without re-specifying context every time.
+
+**Pitfalls:** the generic `curry()` helper relies on `fn.length`, which breaks for functions with default parameters, rest parameters, or destructured arguments — `fn.length` undercounts or misreports arity in those cases, so hand-written curried functions (returning nested arrow functions explicitly) are often more predictable than a generic auto-curry utility. Deeply curried call chains can also hurt readability and stack-trace clarity compared to a single call with named arguments or an options object.
+
+**Guidance:** reach for currying/partial application when the same function is repeatedly called with some arguments fixed across many call sites (config, logging, event handler factories) — it turns repetition into a one-time setup call. For one-off argument-fixing, a simple arrow-function wrapper (`const f2 = (b) => f(fixedA, b)`) is often clearer than pulling in a generic curry utility.
+
+---
+
+## Advanced — Question 11
+
+**Q11: Why does `===` check reference identity rather than structural equality for objects and arrays, what's the difference between shallow and deep equality, and what are the implications for frameworks whose change detection relies on reference equality?**
+
+`===` on objects and arrays compares whether both operands are **the exact same object in memory** — it never looks at their contents. Two arrays or objects with identical-looking contents are never `===` unless they're literally the same reference:
+
+```javascript
+[1, 2, 3] === [1, 2, 3];   // false — two distinct array instances
+{ a: 1 } === { a: 1 };     // false — two distinct object instances
+
+const a = [1, 2, 3];
+const b = a;
+a === b;                   // true — same reference, not a coincidence of contents
+```
+
+**Shallow equality** compares only the top-level keys/values with `===` (e.g., `Object.keys(x).every(k => x[k] === y[k])`) — it correctly detects a changed top-level primitive but misses a change nested one level deeper, since a nested object reference can stay `===` even if *its* contents changed. **Deep equality** recursively compares nested structures value-by-value, which correctly detects any difference anywhere in the tree but costs proportionally to the size of the structure — potentially expensive if run on every check.
+
+This is precisely why UI frameworks lean on reference equality for change detection rather than deep comparison: comparing "is this the same reference as last time" is `O(1)` regardless of how large the object graph is, versus `O(n)` for a deep walk repeated on every render/check cycle. React's `React.memo`/`useMemo` and Angular's `OnPush` strategy (conceptually — see `angular.md` for Angular's specifics) both use this trade-off: a prop/input is treated as "unchanged" if its reference is `===` to the previous one, full stop, without inspecting contents.
+
+**Pitfalls:** the direct consequence is that **mutating** an object or array in place (`arr.push(x)`, `obj.field = y`) never changes its reference, so reference-equality-based change detection doesn't see the mutation as a change at all — the UI silently fails to update even though the data genuinely changed. The fix is always to produce a **new** reference on every logical change — `[...arr, x]` instead of `arr.push(x)`, `{ ...obj, field: y }` instead of `obj.field = y` — so the reference comparison correctly reflects that something changed.
+
+**Guidance:** treat "always create a new reference for a change, never mutate in place" as a load-bearing rule the moment any reference-equality-based optimization (memoization, `OnPush`, `shouldComponentUpdate`) is anywhere downstream of the data — the correctness of those optimizations depends entirely on that discipline being followed consistently.
+
+---
+
+## Scenario — Question 6
+
+**Q6: A function is documented as "pure" — same input always produces the same output, no side effects — but a caller later discovers that the array they passed in was mutated after calling it, causing bugs far from the call site. Diagnose the violation and fix it.**
+
+```javascript
+function getTopScores(scores, n) {
+  return scores.sort((a, b) => b - a).slice(0, n);   // looks pure — returns a value, no explicit assignment to scores
+}
+
+const scores = [42, 17, 99, 3, 88];
+const top3 = getTopScores(scores, 3);
+
+console.log(top3);     // [99, 88, 42]
+console.log(scores);   // [99, 88, 42, 17, 3] -- caller's original array got reordered!
+```
+
+**Root cause:** `Array.prototype.sort()` sorts **in place** and returns the *same* array reference it was called on — it does not allocate a new sorted copy. `getTopScores` calls `.sort()` directly on the `scores` parameter, which is the same reference the caller passed in (JavaScript passes object references by value, so the parameter and the caller's variable point at the identical array). Sorting `scores` inside the function therefore reorders the caller's original array as a side effect, even though nothing about the function's signature or return value suggests it does. This is exactly the kind of "pure function contract violation" that's dangerous precisely because it's invisible at the call site — the bug only shows up later, wherever else `scores` is used and now unexpectedly appears reordered.
+
+**Diagnosis:** compare the argument's identity/contents before and after the call (`const before = [...scores]; getTopScores(scores, 3); assert.deepEqual(scores, before)`) — a genuinely pure function leaves it unchanged. `.sort()`, `.reverse()`, `.splice()`, `.push()`/`.pop()`/`.shift()`/`.unshift()`, and `.fill()`/`.copyWithin()` are the classic mutating array methods that create exactly this trap, since several of them (`.sort()`, `.reverse()`, `.splice()`) *also* return a value, making them look deceptively like the non-mutating methods (`.map()`, `.filter()`, `.slice()`) that return a new array and leave the original untouched.
+
+**Fix:** copy the array before mutating it, so the in-place sort only ever touches the copy:
+
+```javascript
+function getTopScores(scores, n) {
+  return [...scores].sort((a, b) => b - a).slice(0, n);   // copy first — original never touched
+  // ES2023 alternative: scores.toSorted((a, b) => b - a).slice(0, n)
+}
+```
+
+`toSorted()`, `toReversed()`, `toSpliced()`, and `with()` (ES2023) are non-mutating counterparts added specifically to remove this trap — each returns a new array, leaving the receiver untouched.
+
+**Broader guidance:** treat any parameter passed into a function that claims purity as effectively read-only, and audit for the classic in-place-mutating array methods whenever "pure" is part of a function's contract — this class of bug is common precisely because `.sort()` in particular looks like it should behave like `.filter()`/`.map()` and doesn't.
+
+---

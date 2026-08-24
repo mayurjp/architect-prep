@@ -610,3 +610,122 @@ The instinct to save human review time on genuinely low-value, repetitive PRs is
 **Practical guidance:** the safe version of this idea isn't "autonomous merge if tests pass" in general — it's "autonomous merge for a specific, narrow, mechanically-verifiable task category, with an explicit allowlist of what's in scope and an explicit, non-negotiable list of what's always excluded regardless of test results." The value of automation comes from correctly identifying the genuinely low-risk slice of work, not from raising how much risk the team is willing to accept unattended.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What does a "hallucinated" tool call or API look like in an agentic coding context specifically, and how is it different from a chat model just being wrong in a text answer?**
+
+In a plain chat response, hallucination means the model states something false in prose — a wrong fact, a misremembered detail — and the reader has to catch it by knowledge or by checking elsewhere; nothing in the interaction itself surfaces the error. In an agentic coding context, hallucination takes a more specific and more consequential shape: the agent **confidently emits a tool call or a piece of code that references something that doesn't exist** — calling a library function that was never part of that library's actual API, passing a CLI flag the tool doesn't support, importing a package under a name that isn't real, or reading/writing a file path that was never created. It looks exactly like correct usage in form — plausible function name, plausible arguments, plausible syntax — because the model is pattern-matching against everything it has seen from similar libraries and similar tasks, not looking anything up.
+
+**Why this happens:** a coding agent draws on a huge amount of training exposure to many libraries' conventions, and those conventions genuinely rhyme with each other — argument order, naming patterns, common flag names. When the model doesn't have a precise, current recollection of the *actual* API surface of the specific library or CLI version in play, it fills the gap with the most statistically plausible completion, which is often close enough to look right and wrong enough to fail.
+
+**Example:** an agent asked to parse a CSV in Python might confidently write `pandas.read_csv(path, dtype_map=...)` when the actual keyword argument is `dtype`, not `dtype_map` — a name that sounds right, follows a pattern seen in other libraries, and simply isn't real.
+
+**Pitfall:** this is easy to miss on a quick skim, because the mistake isn't a syntax error — it's a real function call to a nonexistent symbol, which often *looks* more trustworthy than a genuinely awkward line of code, precisely because it's fluent and idiomatic-looking.
+
+**Practical guidance:** treat any unfamiliar API surface an agent produces as worth a quick sanity check against real documentation before shipping it, especially for less common libraries or CLI tools where the agent's training exposure is thinner — see Q-Beginner-10 for why an agent with tool access catches this itself far more often than a human has to.
+
+---
+
+## Beginner — Question 10
+
+**Q10: Why does an agent with real tool access tend to catch and self-correct a hallucinated API call faster than a pure chat completion that never executes anything?**
+
+A pure chat completion produces its answer in one generative pass and stops — there is no step where the claim "this function exists and works this way" gets checked against reality, so a hallucinated call (Q-Beginner-9) ships in the final text exactly as confidently as a correct one, indistinguishable to the model itself. An agent with real tool access is structurally different: after it writes the code, the **agentic loop** (Q-Beginner-1) actually runs it — executes the script, invokes the CLI, imports the module — and gets back a real, external result: a `TypeError: unexpected keyword argument`, a `command not found`, a stack trace pointing at the exact wrong line.
+
+**Why this produces faster self-correction:** the error message is concrete, specific, and impossible for the model to argue with — it's not another guess, it's the actual runtime or interpreter telling the agent precisely what's wrong. The agent can read that error, recognize the named argument or function doesn't exist, often look up the real signature (by inspecting the installed package, reading its source, or checking `--help` output), and retry with a corrected call — all within the same session, often before a human ever sees the mistake. This mirrors the broader "grounded feedback loop" idea (see the file's coverage of real feedback loops vs. text-to-text tasks): execution is ground truth external to the model, and the model's own confidence plays no role in whether the loop reports success or failure.
+
+**Contrast:** a chat-only interaction has no equivalent event. If a hallucinated function name appears in a code snippet pasted into a chat window, the human has to run it themselves, notice the failure, and paste the error back in manually for the model to even become aware anything was wrong — an extra round trip that an agent with tool access skips entirely by executing the code itself as a normal part of producing an answer.
+
+**Pitfall:** self-correction via execution catches *runtime-detectable* hallucinations reliably, but not all of them — a hallucinated argument that happens to be silently accepted (e.g., swallowed by `**kwargs`) or a subtly wrong return-value assumption that doesn't raise an error can still slip through unnoticed, because nothing failed loudly enough to trigger the correction.
+
+**Practical guidance:** this is a strong reason to prefer an agent workflow with genuine execution access over a copy-paste chat workflow whenever the task touches an API or library the model might not have precise, current knowledge of — the execution step is doing real verification work a text-only exchange has no way to replicate.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: How does memory work across multiple separate agent invocations, and what's the trade-off in deciding what's worth persisting across sessions versus re-deriving each time?**
+
+By default, a fresh agent session starts with **no memory of any prior session** — each invocation begins with an empty context window and only knows what's in the current prompt, the files it reads during this run, and whatever the harness chooses to hand it at startup. Closing a session and opening a new one is not like resuming a conversation; it's a genuinely new agent with no recollection of yesterday's exploration, decisions, or dead ends, unless something outside the model's own memory carries that forward.
+
+**The persistent-memory alternative:** some tools offer an explicit notes/memory mechanism — a file or store the agent reads at the start of a session and can write to during or at the end of one — letting information survive across invocations deliberately rather than by accident. This might capture a codebase's quirks discovered the hard way, a running list of "don't do X, it broke Y," or project conventions the agent worked out weren't documented anywhere.
+
+**The trade-off in what to persist:**
+- **Worth persisting:** hard-won, non-obvious facts that were expensive to discover and are unlikely to change — e.g. "the test suite requires a local Postgres instance on port 5433, not the default," or "this module's public interface is frozen for backward compatibility even though it looks refactorable." Re-deriving this every session wastes real exploration budget for no benefit, since the answer doesn't change.
+- **Worth re-deriving:** anything that could have changed since it was last observed — current file contents, current test results, the current state of a branch. Persisting a stale snapshot of these risks the agent acting on outdated information with unwarranted confidence, which is often worse than spending the tokens to re-check.
+
+**Pitfall:** treating persisted memory as infallible just because it's written down — a note captured six months ago about a codebase's structure can silently go stale as the code changes, and an agent trusting it uncritically can make confidently wrong decisions built on outdated assumptions.
+
+**Practical guidance:** persist facts about *intent and hard-won context* (why something is the way it is, what past attempts failed and why), and re-derive facts about *current state* (what the code currently does) fresh each session — the former is cheap to trust and expensive to rediscover; the latter is the opposite.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What makes a good task description for a coding agent working in a large, unfamiliar codebase, and why shouldn't a prompt just assume the agent will explore optimally on its own?**
+
+An agent turned loose on a large codebase with only a vague instruction ("fix the login bug") has to spend real context budget just finding its bearings — searching for relevant files, reading through directory structures, following imports to figure out where the actual logic lives. That exploration isn't free: every file read and every search result consumes tokens in the context window (Q-Advanced-1 and the file's coverage of context windows and retrieval), competing with the budget available for actually reasoning about and fixing the problem. An agent will eventually find its way through sufficiently thorough search, but "eventually, through broad search" is a worse use of a limited context budget than being pointed at the right starting point directly — and there's no guarantee the search strategy it improvises lands on the most relevant files first.
+
+**What a good task description does instead:**
+- **Names concrete entry points** — the specific file(s), class, or function where the relevant logic lives, or at minimum the subsystem/module name, rather than only a symptom description.
+- **States what's already known** — e.g. "the bug reproduces when a user submits the form twice quickly; the relevant handler is in `LoginController.cs`, look at the session-token generation around there" — so the agent's first exploration is targeted, not a cold search across the whole tree.
+- **Flags what NOT to touch**, when relevant, so the agent doesn't spend time considering (or accidentally modifying) unrelated areas that happen to come up in a broad search.
+- **Points to relevant existing tests or documentation**, if any exist, so the agent can orient against ground truth rather than inferring intended behavior purely from reading implementation code.
+
+**Pitfall:** over-trusting an agent to "just explore and figure it out" on a genuinely large, unfamiliar codebase treats exploration as free — it isn't, and a vague prompt on a large codebase often burns a disproportionate share of the available context on orientation, leaving less budget for the actual fix and its verification.
+
+**Practical guidance:** invest a little human effort up front in naming the right entry points and relevant files, the same way you'd brief a new engineer joining a large codebase rather than just handing them a bug report and a repository link — the time spent pointing is usually smaller than the context/time an agent would otherwise spend discovering the same thing by trial and error.
+
+---
+
+## Advanced — Question 10
+
+**Q10: What's the trade-off between giving an agent broad, standing permissions versus requiring narrow, per-action approval for everything it does — and how does "approval fatigue" undermine the safety benefit of the narrow approach over time?**
+
+**Broad, standing permissions** — letting an agent run commands, edit files, and take actions within some pre-approved scope without stopping to ask each time — buys faster iteration and a workflow with far fewer interruptions; a human isn't pulled away from other work every few seconds to click "approve." The cost is that a mistake (or a genuinely destructive action, however rare) can execute before anyone reviews it. **Narrow, per-action approval** — a prompt before every meaningfully risky action — is safer in principle, since nothing destructive happens without a human explicitly seeing and confirming it first. But this safety is not free: constant interruption has a real friction cost, and that cost compounds in a specific, non-obvious way.
+
+**Approval fatigue:** the same dynamic as alert fatigue in monitoring and security — when a human is asked to approve dozens of low-stakes actions in a row, each individually reasonable, attention degrades. The reviewer starts clicking "approve" reflexively rather than actually reading what's being approved, because the marginal action almost always turns out to be fine, and evaluating each one carefully doesn't feel worth the cost after the first several. The practical effect is that narrow per-action approval, which looks safer on paper, can end up providing *less* real protection than intended, precisely because the volume of prompts trains the human to stop scrutinizing them — the one genuinely risky action in a long stream of routine ones is the one most likely to get rubber-stamped through.
+
+**Why this matters for policy design:** the safety value of an approval gate depends on the human actually engaging with it, not just on the gate existing. A system that prompts for everything indiscriminately erodes the very attention it's trying to leverage.
+
+**Practical guidance:** the resolution isn't "always broad" or "always narrow" — it's **tiering permissions by actual risk**, so approval prompts are reserved for genuinely consequential actions (destructive commands, pushes to protected branches, spending money, touching production) while routine, easily-reversible actions (reading files, running local tests, editing within a scoped directory) proceed without interruption. This keeps the approval signal meaningful — a human who rarely sees a prompt is far more likely to actually read the one that shows up.
+
+---
+
+## Advanced — Question 11
+
+**Q11: How do agentic coding tools handle long-running, multi-hour or multi-day tasks in practice, and why does breaking a large task into independently-resumable, verifiable milestones matter even for an agent rather than only for human project-management reasons?**
+
+A single agent session is bounded by both its context window (Q-Intermediate-8's compaction discussion) and practical constraints like process lifetime, network interruptions, or a human needing to end a session and pick it back up later. A task that genuinely spans hours or days can't just run as one unbroken loop — in practice, agentic tools handle this through **checkpointing**: the agent (or the surrounding harness) periodically records concrete, durable progress — commits, updated task-tracking notes, a summary of what's been done and what's left — so that a new session, whether resumed by the same agent after an interruption or picked up fresh, can reconstruct where things stand without having to redo completed work or re-derive already-settled decisions from scratch.
+
+**Why decomposition into independently-resumable, verifiable milestones matters — and not only for human reasons:**
+- **Resumability requires a clean stopping point.** If a task is one giant undifferentiated pass, an interruption mid-pass leaves an ambiguous, possibly inconsistent state — partially edited files, no clear signal of what's done. A milestone with a clear "this part is complete and verified" boundary (a passing test, a merged commit) is the only kind of progress that's safe to build on top of after a gap.
+- **Verifiability bounds error accumulation.** An agent working across many hours without ever checking its own work against something concrete (tests passing, a build succeeding) risks compounding a wrong assumption made early on across everything built afterward. Verifying at each milestone catches drift before it propagates further, the same self-correction benefit as a tight feedback loop (Q-Advanced-7) applied at a coarser, multi-step grain.
+- **Compaction makes fresh milestones cheaper to resume from.** A well-defined milestone boundary is a natural point to compact or hand off context — the next phase only needs the milestone's *outcome*, not the full history of how it was reached.
+
+**Pitfall:** treating milestone breakdown as purely a human-facing status-reporting convenience — a checklist for the person watching — understates its function; it's equally a mechanism for keeping the agent's own error rate bounded and its resumed context small and trustworthy.
+
+**Practical guidance:** for any task expected to run long, define milestones that are each independently verifiable (a specific test suite passes, a specific component builds and runs) *before* starting, so both the agent and a resuming session have an unambiguous way to confirm "everything up to here is solid" rather than relying on memory or assumption.
+
+---
+
+## Scenario — Question 6
+
+**Q6: An engineer asks an agent to "refactor this module to use the new API" across a codebase with 200 call sites. The agent's context window can't hold all 200 sites' surrounding code simultaneously. Walk through a viable strategy.**
+
+Attempting this as one giant undifferentiated pass — reading all 200 call sites' surrounding context into a single session and rewriting everything in one continuous stretch of reasoning — runs straight into the context-window limit (Q-Intermediate-8) and, even if it technically fit, would concentrate all the risk in one unverified, unreviewable blob of changes with no checkpoint to catch an early mistake before it's been repeated 200 times.
+
+**A viable strategy:**
+
+1. **Enumerate first, without loading full context.** Use search/grep across the codebase to produce a complete, precise list of the 200 call sites — file and line — *before* reading any of their surrounding code in depth. This step is cheap: it doesn't require holding each site's context, only locating them, and it gives both the agent and the human a concrete scope to work against instead of an open-ended "find them as you go."
+2. **Group into batches by similarity or by module.** Call sites that follow the same pattern (same old-API usage shape) can very likely be transformed the same way — group these together so the transformation logic only needs to be worked out once per pattern, not reinvented per site. Grouping by module/directory also keeps each batch's surrounding context coherent and small.
+3. **Process one batch at a time**, small enough to fit comfortably in context alongside the actual transformation work — reading, editing, and reasoning about maybe 10–20 sites per batch rather than all 200 at once.
+4. **Verify between batches, not only at the end.** Run the relevant tests after each batch, before moving to the next. This catches a systematically wrong transformation (a misunderstanding of the new API's semantics) after the first batch, when it's cheap to fix and re-apply, rather than after all 200 sites have been changed the same wrong way.
+5. **Track batch progress durably** (a checklist, commits per batch) so the work is resumable if the session is interrupted partway (Q-Advanced-11) — no batch needs to be redone, and the next session can see exactly which sites remain.
+
+**Pitfall:** skipping step 1 (enumeration) and instead discovering call sites incrementally via ad hoc search during the refactor risks missing some sites entirely — the fix ships silently incomplete because nothing ever confirmed "these are all 200."
+
+**Practical guidance:** treat enumeration as the specification of scope, batching as the way to fit the work within context and risk limits, and per-batch test verification as the mechanism that turns "refactor everywhere" from one risky leap into 10–20 independently-checked, independently-correct steps.
+
+---

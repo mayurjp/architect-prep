@@ -1149,3 +1149,215 @@ Set the initial threshold near the current, already-reduced size (with some head
 **Practical guidance:** treat "does this belong in the initial bundle" as a question asked at the time a route is added, not retroactively — anything gated behind a role, a feature flag, or a rarely-visited section of the app is close to a default candidate for `loadComponent`/`loadChildren`, and a CI-enforced budget is what makes that discipline durable across a team and over time rather than dependent on someone remembering during code review.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is `ng-template`, and how does `ngTemplateOutlet` let you define a reusable, parameterized chunk of markup? How is this different from content projection with `ng-content`?**
+
+`ng-template` declares a block of markup that Angular does **not** render inline — it's compiled into a `TemplateRef` and only rendered when something explicitly instantiates it (via a structural directive, `ngTemplateOutlet`, or a `ViewContainerRef`). By itself, an `<ng-template>` in a component's markup produces nothing in the DOM; it's a piece of "template you own" that you can render zero, one, or many times, in this component or hand off elsewhere.
+
+**Basic reuse with `ngTemplateOutlet`:**
+
+```html
+<ng-template #rowTemplate let-item let-i="index">
+  <div class="row">{{ i }}: {{ item.name }}</div>
+</ng-template>
+
+<ng-container *ngTemplateOutlet="rowTemplate; context: { $implicit: activeItem, index: 0 }"></ng-container>
+<ng-container *ngTemplateOutlet="rowTemplate; context: { $implicit: archivedItem, index: 1 }"></ng-container>
+```
+`let-item` binds the context's `$implicit` value; `let-i="index"` binds a named context key. The same template is rendered twice with different data, avoiding duplicated markup — the templating equivalent of extracting a function.
+
+**Passing a `TemplateRef` as an `@Input()`** is the more powerful pattern: a reusable component (a table, a card, a modal) accepts a caller-supplied `TemplateRef` and decides *when and how many times* to render it, still fully controlled by the consuming component's own data:
+
+```typescript
+@Input() rowTemplate?: TemplateRef<{ $implicit: Item; index: number }>;
+```
+```html
+<ng-container *ngFor="let item of items; let i = index">
+  <ng-container *ngTemplateOutlet="rowTemplate ?? defaultRow; context: { $implicit: item, index: i }"></ng-container>
+</ng-container>
+```
+
+**Contrast with `ng-content`:** `ng-content` projects markup the *consumer wrote inline* between a component's tags, rendered exactly once, at a fixed slot, with no parameterization — the consumer has no control over re-rendering it multiple times with different data. `ng-template` + `ngTemplateOutlet`/`TemplateRef` inputs instead give the *host* component control over when, how many times, and with what contextual data a caller-supplied fragment renders — much closer to passing a render function than passing static children.
+
+**Common pitfall:** forgetting `<ng-container>` and instead wrapping the outlet in a real element adds an unwanted extra DOM node; `<ng-container>` is itself a non-rendering placeholder, which is why it pairs naturally with structural template rendering.
+
+#### Follow-up: When would you reach for a `TemplateRef` input instead of just adding more `@Input()` flags to change a component's appearance?
+
+Once customization needs go beyond toggling a few boolean/enum options — e.g., "the caller wants a completely different cell renderer per column in a data table" — a `TemplateRef` input scales far better than an ever-growing list of conditional `@Input()`s and `*ngIf` branches inside the reusable component, and keeps the reusable component decoupled from the specifics of what any particular caller wants to render.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is the `@defer` block, and how does it differ from route-level lazy loading? Walk through its triggers and a practical use case.**
+
+`@defer` is Angular's built-in template-level deferred-loading mechanism (stable since v17): it lets you mark a section of a component's *own* template — along with the components, directives, and pipes it exclusively uses — to be split into a separate JS chunk and rendered only once a trigger condition is met, rather than being part of the component's initial render. This is distinct from route-level lazy loading (`loadComponent`/`loadChildren`), which splits code at the *routing* boundary (an entire page/feature); `@defer` splits code *within* a single already-loaded component, for content that isn't needed immediately even though the rest of the component is.
+
+**Basic syntax and triggers:**
+
+```html
+@defer (on viewport) {
+  <heavy-chart [data]="chartData" />
+} @placeholder {
+  <div class="chart-placeholder">Chart loading…</div>
+} @loading (minimum 200ms) {
+  <spinner />
+} @error {
+  <p>Couldn't load the chart.</p>
+}
+```
+`@placeholder` renders before the trigger fires; `@loading` shows while the chunk downloads (the `minimum` avoids a loading-flash for fast connections); `@error` covers a failed dynamic import. Triggers include `on idle` (default — browser idle time), `on viewport` (IntersectionObserver-based, ideal for below-the-fold content), `on interaction` (click/keydown on the placeholder or a referenced element), `on hover`, `on timer(2000)`, and `on immediate`; multiple triggers can be combined, and a `when someCondition` form defers based on an arbitrary expression instead.
+
+**Practical use case:** a product page with a below-the-fold "customer reviews" section that pulls in a large reviews-rendering component and its own dependencies. `@defer (on viewport)` keeps that code out of the initial bundle for the product page entirely, downloading it only once the user actually scrolls near it — improving the page's initial load and Core Web Vitals (particularly LCP/INP) without the reviews section needing its own route.
+
+**Key mechanical detail:** Angular's compiler statically analyzes the deferred block to determine which standalone components/pipes/directives are used *only* inside it, and moves exactly those into the separate chunk — this is why deferred content must be built from standalone dependencies; anything still declared in an NgModule and shared with the eager template can't be cleanly split out.
+
+**Common pitfall:** deferring content that's immediately visible above the fold with `on idle` still delays it slightly and can cause layout shift if the placeholder's dimensions don't match the eventual content — always reserve space in the placeholder to avoid CLS regressions.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: `HttpClient` interceptors run as a chain around every outgoing request. Walk through how ordering works, using a scenario with an auth interceptor, a logging interceptor, and an error-handling interceptor all applied to the same request.**
+
+Functional interceptors are registered as an ordered array via `provideHttpClient(withInterceptors([...]))`, and they compose like middleware: each interceptor receives the request and a `next` function representing "the rest of the chain," and can inspect/transform the request before calling `next(req)`, and inspect/transform the response (or catch errors) in the Observable `next(req)` returns. Registration order **is** execution order for the request-outbound direction, and the exact reverse for the response-inbound direction — the first interceptor in the array is the outermost wrapper.
+
+```typescript
+provideHttpClient(
+  withInterceptors([authInterceptor, loggingInterceptor, errorInterceptor])
+)
+```
+
+```typescript
+export const authInterceptor: HttpInterceptorFn = (req, next) => {
+  const token = inject(AuthService).token();
+  const authedReq = token ? req.clone({ setHeaders: { Authorization: `Bearer ${token}` } }) : req;
+  return next(authedReq);
+};
+
+export const loggingInterceptor: HttpInterceptorFn = (req, next) => {
+  const start = performance.now();
+  return next(req).pipe(
+    tap({
+      next: () => console.log(`${req.method} ${req.url} — ${(performance.now() - start).toFixed(0)}ms`),
+    })
+  );
+};
+
+export const errorInterceptor: HttpInterceptorFn = (req, next) =>
+  next(req).pipe(
+    catchError((err: HttpErrorResponse) => {
+      if (err.status === 401) inject(AuthService).logout();
+      return throwError(() => err);
+    })
+  );
+```
+
+**Execution flow for one request:** `authInterceptor` runs first, attaching the token and forwarding a *modified* request; `loggingInterceptor` runs next, starting its timer and forwarding the same request further; `errorInterceptor` runs last before the actual HTTP call is dispatched. The response then flows back through the chain in reverse — `errorInterceptor` sees it first (able to catch a 401 and trigger logout before anyone else sees the error), then `loggingInterceptor` logs timing, then `authInterceptor`.
+
+**Why order matters concretely here:** if `loggingInterceptor` were registered *before* `authInterceptor`, it would log the request URL/method before the Authorization header is attached — fine for logging, but if it also logged headers, it'd log an unauthenticated request. More critically, if `errorInterceptor` were registered *first* (outermost), a 401 caused by a missing/expired token would be caught and trigger logout *before* `authInterceptor` even had a chance to run on retried requests, and errors thrown deeper in the chain (e.g., a malformed request `authInterceptor` itself might produce) wouldn't be visible to it at all.
+
+**Common pitfall:** forgetting that `next(modifiedReq)` must be called with the modified request, not the original — passing `req` instead of `authedReq` silently drops the transformation, a bug that's easy to introduce mid-refactor and easy to miss because the request still succeeds for already-unauthenticated endpoints.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What accessibility (a11y) considerations are specific to building Angular SPAs, beyond generic HTML semantics? Cover focus management on route change, ARIA binding, and the Angular CDK's a11y utilities.**
+
+SPAs break a browser behavior screen reader users rely on by default: on a traditional multi-page site, navigating to a new page moves focus to the top of the document and screen readers announce the new page title. In an Angular SPA, a route change swaps out component content via the Router without a full page load, so focus silently stays wherever it was (often on a link that no longer exists in the DOM) and nothing is announced — a genuinely common, easy-to-miss production a11y bug.
+
+**Focus management on route change:**
+
+```typescript
+export class AppComponent {
+  constructor(router: Router) {
+    router.events.pipe(filter(e => e instanceof NavigationEnd)).subscribe(() => {
+      const heading = document.querySelector('h1');
+      heading?.setAttribute('tabindex', '-1');
+      heading?.focus();
+    });
+  }
+}
+```
+Moving focus to the new page's main heading (or a skip-to-content landmark) after each navigation restores the expected "you're now somewhere new" cue for keyboard and screen-reader users; `tabindex="-1"` makes a non-interactive element programmatically focusable without adding it to the tab order.
+
+**ARIA attribute binding:** Angular binds ARIA attributes like any other attribute, using `[attr.aria-*]` (ARIA attributes aren't DOM properties, so the plain property-binding syntax doesn't apply):
+
+```html
+<button [attr.aria-expanded]="isOpen" [attr.aria-controls]="panelId" (click)="toggle()">
+  Details
+</button>
+<div [id]="panelId" [attr.aria-hidden]="!isOpen">…</div>
+```
+This is easy to get wrong by binding `[aria-expanded]` directly (works in some cases via property reflection but is unreliable) instead of the explicit `attr.` prefix.
+
+**CDK a11y utilities (`@angular/cdk/a11y`):**
+- **`LiveAnnouncer`** — programmatically pushes a message into an `aria-live` region for announcements that don't correspond to a visible, focusable element (e.g., "3 results found" after an async filter update): `this.liveAnnouncer.announce('3 results found')`.
+- **`FocusTrap`/`cdkTrapFocus`** — confines Tab/Shift+Tab cycling within a modal or drawer so keyboard focus can't silently escape to background content while the modal is open, and `FocusMonitor` tracks *how* an element was focused (mouse, keyboard, programmatic) for precise focus-visible styling.
+
+**Practical guidance:** these gaps rarely show up in manual mouse-driven QA, which is exactly why they're overlooked until an audit, a keyboard-only user, or a legal accessibility requirement (WCAG/ADA compliance) surfaces them — treating route-change focus and dynamic-content announcements as a checklist item on every new route/modal, not an afterthought, is cheaper than retrofitting an entire app later.
+
+---
+
+## Advanced — Question 9
+
+**Q9: What is Ivy, Angular's rendering engine, and what changed from the older View Engine compiler at a conceptual level?**
+
+Ivy (the default rendering/compilation pipeline since Angular 9) replaced Angular's older "View Engine" compiler with a fundamentally different code-generation strategy, without changing the component-authoring API (decorators, templates, DI) that developers write against.
+
+**Per-component compilation instead of whole-module compilation:** View Engine compiled an `NgModule` and its declared components together, producing large, interdependent generated factory files — a component's compiled output referenced its module's metadata, meaning components couldn't easily be understood or tree-shaken in isolation. Ivy compiles each component **locally and independently** into its own set of instructions (a `ɵcmp` definition containing the compiled template as a sequence of low-level instruction calls — `ɵɵelementStart`, `ɵɵtext`, `ɵɵproperty`, etc. — rather than a single opaque render function). A component's compiled artifact is self-contained and doesn't need its consuming module's metadata to exist or execute correctly.
+
+**Why this enables smaller bundles and better tree-shaking:** because each component's compiled output is self-contained, a bundler can determine "is this component actually referenced anywhere" and eliminate it (and its compiled template instructions) if not, without needing to reason about module-wide graphs. This is also the mechanical foundation that made **standalone components** possible later — without View Engine's module-centric compilation model, a component that doesn't belong to any `NgModule` wouldn't have had a coherent compilation unit to begin with.
+
+**Locality and incremental compilation:** because compiling one component doesn't require whole-program knowledge of other components/modules, Ivy supports faster incremental rebuilds during development, and libraries can ship pre-compiled Ivy code (via the Angular Package Format) that's directly usable rather than requiring a Metadata.json-driven re-linking step View Engine needed.
+
+**Runtime behavior differences worth knowing (without deep compiler internals):** Ivy templates compile to actual JS instruction calls that execute directly against the DOM incrementally (closer to how other modern frameworks generate render functions), rather than View Engine's more indirect factory/definition object model — this is part of why Ivy enables faster change detection in practice and why error stack traces in Ivy point more directly at meaningful template locations.
+
+**Practical relevance today:** View Engine was fully removed years ago (Ivy has been the only compiler since Angular 13), so this is largely historical/conceptual context now — but it's still asked because it explains *why* several modern Angular capabilities (standalone components, smaller production bundles, Angular's ability to more aggressively tree-shake unused directives/pipes) exist at all, rather than being unrelated feature additions.
+
+**Common pitfall in interviews:** overstating Ivy as "just a performance optimization" — its bigger structural significance is decoupling compilation from the module system, which is the prerequisite for standalone APIs, not merely a speed improvement.
+
+---
+
+## Advanced — Question 10
+
+**Q10: Compare Angular's built-in `$localize`/extraction-based i18n with a runtime translation library like `transloco` or `ngx-translate`. What's the build-time vs. runtime trade-off?**
+
+**Built-in i18n (`$localize`, `ng extract-i18n`):** translatable text is marked in templates (`i18n` attribute) or code (`$localize` tagged template strings), extracted at build time into a translation source file (XLIFF/XMB), sent to translators, and the *translated* files are fed back into a **separate build per locale** — `ng build --localize` produces one fully compiled, locale-specific output bundle per language, with translations baked directly into the compiled templates as static strings.
+
+```html
+<h1 i18n="@@welcomeHeader">Welcome back, {{ userName }}</h1>
+```
+```typescript
+const msg = $localize`:@@saveConfirm:Changes saved successfully`;
+```
+
+**Runtime i18n libraries (`transloco`, `ngx-translate`):** translations live in JSON files loaded at runtime; a pipe/directive (`{{ 'welcome' | transloco }}`) looks up the current locale's string dynamically on every render, and switching locale means loading a different JSON file and re-rendering — no rebuild required.
+
+**The core trade-off:**
+- **Bundle/deployment complexity vs. runtime cost.** Build-time i18n means N locales = N separate deployed bundles (and typically N separate URLs/subpaths, e.g. `/en/`, `/fr/`), which multiplies CI build time and hosting/CDN complexity, but each bundle ships with **zero runtime translation-lookup overhead** — no pipe evaluation, no JSON fetch, no re-render on locale change (because locale can't change without a full page navigation to a different build). Runtime libraries deploy a single bundle for all locales, trivially simple to host, but pay a small ongoing runtime cost (pipe/directive evaluation on every change-detection pass) and require shipping translation JSON as a separate asset fetched over the network.
+- **Instant locale switching.** With build-time i18n, changing locale means navigating to a different deployed build (a full page reload) — there's no way to flip languages in-place. Runtime libraries support switching locale live, in-session, without a reload — important if the product requires an in-app language switcher rather than a locale chosen once (e.g. via URL/subdomain) per visit.
+- **Translation workflow.** Build-time i18n's extraction files (XLIFF) are typically routed through a formal translation-management pipeline and require a rebuild+redeploy for every translation update to go live — translators can't self-serve; a developer/CI step is always in the loop. Runtime JSON files can often be edited and deployed independently of the app's build (even hot-swapped from a CDN), letting translators or a translation-management platform push updates without involving a developer per change.
+
+**Practical guidance:** built-time i18n suits products with a small, relatively stable set of locales chosen at load (marketing sites, enterprise software with locale-per-tenant) where bundle-per-locale deployment is acceptable and runtime performance matters most. Runtime libraries suit products needing live in-app language switching, frequent translator-driven updates, or many/dynamic locales where maintaining N separate build artifacts becomes operationally unreasonable.
+
+---
+
+## Scenario — Question 6
+
+**Q6: An Angular app needs to support 8 locales. The team is debating build-time i18n (`$localize`, a separate deployed bundle per locale) versus a runtime translation library (`transloco`/`ngx-translate`, one bundle, JSON-driven). Walk through the trade-offs that should actually drive this decision.**
+
+This is a trade-off question with no universally correct answer — the right response walks through the concrete axes rather than declaring one approach categorically better.
+
+**Deployment/CDN complexity vs. bundle size and runtime overhead:** build-time i18n with 8 locales means 8 separate compiled output directories, each needing its own hosting path (`/en/`, `/de/`, `/ja/`, …) and its own entry in CI (8x build time, unless build steps are parallelized), but each visitor downloads only *their* locale's bundle with translations already baked in as static strings — no JSON fetch, no lookup pipe evaluated on every change-detection cycle. Runtime i18n ships one bundle regardless of locale count (CI stays simple, one deployable artifact), but every visitor's bundle includes the i18n library and pulls a translations JSON file over the network, plus a small but real per-render cost for translation-key lookups at scale (long lists with many translated cells, for instance).
+
+**Can users switch locale without a full reload?** This is often the deciding factor in practice. If the product requires an in-app language switcher (a settings toggle, a dropdown in the header) that changes the UI language *without* navigating away, build-time i18n cannot do this at all — switching locale means loading a different pre-built bundle, i.e., a full page navigation. If that in-app-switch requirement is real (not just "nice to have"), it eliminates build-time i18n regardless of how the other trade-offs shake out. If locale is instead determined once per session (via URL path, subdomain, or `Accept-Language` at first load, with users rarely if ever switching mid-session), build-time i18n's lack of live switching is a non-issue.
+
+**Translation update workflow:** ask who updates translations and how often. If translations change frequently and non-developers (translators, a localization team, a third-party translation-management platform) need to ship updates independently, runtime JSON files decouple that from the app's release cycle — a translation fix can go out without a developer-driven rebuild+redeploy. If build-time i18n is chosen, every translation fix — even a single typo — requires a full rebuild and redeploy of that locale's bundle, which is a meaningfully heavier process for a team that iterates on copy often.
+
+**Recommended framing for 8 locales specifically:** 8 is enough that build-time's CI multiplication (8 full builds) and hosting complexity (8 deployed bundle paths, routing logic to serve the right one) start to be a genuine operational cost, not a rounding error — this tips the scale toward runtime i18n unless the product has hard requirements for zero-runtime-cost rendering (e.g., extremely performance-sensitive, high-traffic public pages) or translations are genuinely static and rarely touched. Conversely, if per-visitor performance is paramount (a marketing/landing page optimized for Core Web Vitals) and locale is chosen once via URL/subdomain with no in-app switch, build-time i18n's zero runtime overhead is worth the added CI/deploy complexity. The decision should be driven by these three concrete factors — not by which approach is more modern or which the team has used before.
+
+---
