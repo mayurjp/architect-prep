@@ -250,5 +250,19 @@
     "description": "ADRs, technical debt trade-offs, build-vs-buy, monolith-vs-microservices framing, and stakeholder decisions.",
     "order": 36,
     "color": "#78716C"
+  },
+  {
+    "id": "dsa",
+    "title": "Data Structures & Algorithms",
+    "description": "Arrays, linked lists, trees, graphs, hashing, sorting/searching, complexity analysis, and problem-solving patterns.",
+    "order": 37,
+    "color": "#16A34A"
+  },
+  {
+    "id": "behavioral-leadership",
+    "title": "Behavioral & Leadership Interviews",
+    "description": "STAR-format questions on conflict, mentoring, failure, influence-without-authority, and technical leadership.",
+    "order": 38,
+    "color": "#B45309"
   }
 ]
