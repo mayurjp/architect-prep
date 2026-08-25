@@ -2381,3 +2381,51 @@ GROUP BY Region;
 This tells SQL Server: "First, group all rows together that share the same `Region`. Then, for each of those groups, calculate the sum of `SaleAmount`."
 
 ---
+
+## Intermediate — Question 28
+
+**Q28: What is a User-Defined Table Type in SQL Server, and how does it let you pass an entire table as a single parameter into a stored procedure (a Table-Valued Parameter)?**
+
+A User-Defined Table Type (UDTT) is a reusable schema you register once with `CREATE TYPE ... AS TABLE`, defining a set of columns exactly like a table definition. Once registered, that type can be used as the data type of a stored procedure parameter — letting client code pass in an entire set of rows in a single call, instead of either making one round-trip per row or hand-rolling a comma-separated string/XML blob and parsing it apart on the server.
+
+**Defining the type and a procedure that accepts it:**
+```sql
+CREATE TYPE OrderLineTableType AS TABLE (
+    ProductId INT NOT NULL,
+    Quantity INT NOT NULL
+);
+GO
+
+CREATE PROCEDURE InsertOrderLines
+    @OrderId INT,
+    @Lines OrderLineTableType READONLY   -- table-valued parameters MUST be READONLY
+AS
+BEGIN
+    INSERT INTO OrderLines (OrderId, ProductId, Quantity)
+    SELECT @OrderId, ProductId, Quantity FROM @Lines;
+END;
+```
+
+**Calling it from C# with `SqlCommand` — passing an in-memory `DataTable` as a single parameter:**
+```csharp
+var lines = new DataTable();
+lines.Columns.Add("ProductId", typeof(int));
+lines.Columns.Add("Quantity", typeof(int));
+lines.Rows.Add(101, 2);
+lines.Rows.Add(204, 1);
+
+using var cmd = new SqlCommand("InsertOrderLines", connection) { CommandType = CommandType.StoredProcedure };
+cmd.Parameters.AddWithValue("@OrderId", orderId);
+var tvpParam = cmd.Parameters.AddWithValue("@Lines", lines);
+tvpParam.SqlDbType = SqlDbType.Structured;
+tvpParam.TypeName = "dbo.OrderLineTableType";
+cmd.ExecuteNonQuery();
+```
+
+**Why `READONLY` is required:** a table-valued parameter's rows can be read inside the procedure (joined against, selected from, inserted elsewhere) but never modified in place — SQL Server enforces this because the parameter is passed by reference for efficiency (no row-by-row marshaling), and allowing in-place mutation would create ambiguous semantics about what the caller should see afterward.
+
+**Why this beats the alternatives:** a comma-separated string parameter requires writing and maintaining a custom split/parse function on the server, loses real typing (everything arrives as text, then must be cast), and handles delimiters-inside-values awkwardly; an XML parameter is more structured but adds parsing overhead and verbose call-site code. A TVP keeps full column typing end-to-end and lets the query optimizer treat the incoming rows like any other table source, including using it directly in a `JOIN` for a bulk `UPDATE` or `MERGE`.
+
+**Common Pitfall:** trying to reuse the same table type for wildly different bulk operations "because it's already there" — a UDTT is a schema contract shared by every procedure that references it, so a one-off need to add an extra column for a single caller either forces an unrelated schema change everywhere else the type is used, or produces awkward workarounds like nullable filler columns; treat a table type as a stable, purpose-built shape for its scenario rather than a generic all-purpose row-bag.
+
+---
