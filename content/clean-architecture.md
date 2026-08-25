@@ -2404,6 +2404,73 @@ Because a Domain model calling out to multiple external systems (a legacy shippi
 
 ---
 
+## Intermediate — Question 24
+
+**Q24: What is the "Dependency Rule" in Clean Architecture, and how does it guarantee the isolation of the Domain?**
+
+The Dependency Rule states that source code dependencies can only point *inward*. Nothing in an inner circle can know anything at all about something in an outer circle. 
+
+- The Domain layer (Entities) is at the center and depends on nothing.
+- The Application layer (Use Cases) depends only on the Domain.
+- The Infrastructure/Presentation layers (Web, Database, UI) are on the outside, and they depend on the Application and Domain layers.
+
+This rule guarantees that a change to an external framework, database, or UI cannot force a change in the core business logic, because the core logic is entirely unaware of those external concerns.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: In Clean Architecture, what is a "Use Case" (or Interactor), and how does it differ from a Domain Entity?**
+
+A Domain Entity encapsulates enterprise-wide business rules (rules that would exist even if the system were run manually on paper). 
+A Use Case (Application Business Rule) encapsulates application-specific business rules. It orchestrates the flow of data to and from the entities.
+
+For example, a Use Case might:
+1. Retrieve an `Order` entity from an abstract repository.
+2. Tell the `Order` entity to `CalculateTotal()`.
+3. Save the `Order` via the repository.
+4. Return a simple DTO to the presentation layer.
+
+The Use Case *orchestrates* the work, but delegates the actual business decisions (like calculating taxes or discounts) to the Domain Entities.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: How does CQRS (Command Query Responsibility Segregation) complement Clean Architecture at the Application layer?**
+
+CQRS splits an application's operations into two separate models: Commands (which mutate state) and Queries (which read state but never mutate it).
+
+In Clean Architecture, this maps perfectly to Use Cases. Instead of having a giant `OrderService` with both read and write methods, you create distinct, focused Use Cases: `CreateOrderCommand` and `GetOrderDetailsQuery`. 
+- **Commands** typically load rich Domain Entities to enforce strict business invariants before saving.
+- **Queries** can bypass the rich Domain Model entirely, using a lightweight query (like Dapper or raw SQL) to read data straight from the database into a simple DTO, avoiding the overhead of mapping to entities just to read them.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is the role of the "Interface Adapters" layer (Controllers, Presenters, Gateways)?**
+
+The Interface Adapters layer acts as a translator between the outside world (the Web, the Database) and the inside world (Use Cases and Entities).
+
+Data crosses the boundary in a format most convenient for the *inner* layers. The Adapter's job is to convert data from the external format (like an HTTP JSON request or an SQL ResultSet) into the internal format (a Use Case Request DTO), and vice versa. 
+
+For example, an MVC Controller is an adapter. It parses the HTTP request, packages it into a plain C# DTO, passes it to a Use Case, and then translates the Use Case's response back into an HTTP 200 JSON response.
+
+---
+
+## Intermediate — Question 28
+
+**Q28: How do you handle Cross-Cutting Concerns (like logging or authorization) without polluting the Use Cases in Clean Architecture?**
+
+Because the Application Layer (Use Cases) shouldn't be coupled to infrastructure concepts (like a specific logging framework or HTTP headers), injecting `ILogger` or `IHttpContextAccessor` into every Use Case violates the clean boundary.
+
+Instead, Clean Architecture frequently relies on the **Decorator Pattern** or **Middleware/Pipelines** (like MediatR Pipeline Behaviors). 
+You wrap your core Use Case execution in a separate class or pipeline step that handles the cross-cutting concern. 
+For example, a `LoggingDecorator` logs the request, then calls the real Use Case, then logs the response. The Use Case itself remains completely pure and ignorant of the logging.
+
+---
+
 ## Advanced — Question 23
 
 **Q23: What is "Persistence Ignorance" as a formal DDD/Clean Architecture principle, and how does EF Core's own practical requirements (parameterless constructors, `virtual` navigation properties for Lazy Loading, both covered under EF Core) sometimes create unavoidable, pragmatic tension with it?**
@@ -2441,5 +2508,53 @@ PRACTICAL EF Core usage: navigation properties often need to be 'virtual'
 Because most teams accept this as a pragmatic, worthwhile trade-off — the alternative (a fully persistence-ignorant model requiring a separate, hand-mapped persistence model entirely distinct from the domain model) adds substantial mapping-layer complexity for a benefit that's often more theoretical than practically valuable — many Clean Architecture codebases knowingly accept these specific, narrow EF Core accommodations as an acceptable compromise, while still keeping the Domain model genuinely free of actual EF Core *namespace references*, attributes, or base classes.
 
 **Common Pitfall:** treating any accommodation for a persistence framework's technical requirements (a `virtual` property, a parameterless constructor) as a wholesale violation of Clean Architecture's Dependency Rule, when in fact these are structural concessions with no actual compile-time *reference* to Infrastructure/EF Core types at all — the meaningful distinction is between "the Domain project doesn't reference EF Core assemblies" (still true) and "the Domain model's shape shows zero influence from persistence concerns" (a stricter, often impractical ideal most teams reasonably don't pursue to its absolute extreme).
+
+---
+
+## Beginner — Question 24
+
+**Q24: What is Clean Architecture?**
+
+Clean Architecture is a software design philosophy promoted by Robert C. Martin (Uncle Bob). Its primary goal is to separate the concerns of a software application into distinct layers, ensuring that the core business logic (the Domain) is completely isolated from external frameworks, user interfaces, and databases. This makes the application highly testable, maintainable, and adaptable to change.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is the Dependency Rule in Clean Architecture?**
+
+The Dependency Rule is the single most important rule in Clean Architecture: **Source code dependencies must only point inward.**
+
+This means that code in an inner layer can have no knowledge of (and no references to) anything in an outer layer. The Domain layer (the innermost layer) cannot reference the database or the UI. The outer layers depend on the inner layers, never the reverse.
+
+---
+
+## Beginner — Question 26
+
+**Q26: Describe the role of the Domain Layer.**
+
+The Domain Layer (also known as Entities or Core) sits at the very center of the architecture. 
+
+It contains the enterprise-wide business rules and core domain objects. It is the most stable and isolated part of the application. Crucially, it must have **zero dependencies** on any other layer or external framework (like ASP.NET Core or Entity Framework). It is pure C# logic.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is the Application Layer?**
+
+The Application Layer (also known as Use Cases) sits directly outside the Domain Layer. 
+
+It contains application-specific business rules. It orchestrates the flow of data to and from the Domain entities to achieve a specific use case (e.g., "Checkout Cart", "Create User"). It depends on the Domain layer, but is completely unaware of the UI or the specific database being used.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is the Infrastructure Layer?**
+
+The Infrastructure Layer is an outer layer that contains all the technical implementations and integrations with the outside world.
+
+This is where you write the code that actually talks to the SQL database (using Entity Framework), reads from the file system, or calls a third-party REST API. It implements the interfaces (abstractions) defined by the inner Application Layer, ensuring the inner layers never directly depend on these concrete external technologies.
 
 ---

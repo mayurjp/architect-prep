@@ -2294,3 +2294,90 @@ The primary payoff is **partition elimination**: a query filtering `WHERE OrderD
 **Practical guidance:** reach for partitioning once a table's rows exceed the point where index maintenance, backups, or purge operations become individually painful at the whole-table level — it's an operational and I/O-elimination tool first, a raw query-speed tool only for partition-aligned predicates.
 
 ---
+
+## Beginner — Question 27
+
+**Q27: What is the purpose of the `UNIQUE` constraint and how does it differ from a Primary Key?**
+
+Both constraints ensure that the values in a column (or a group of columns) are completely unique across all rows in a table.
+
+**Key Differences:**
+1. **Null Values:** A `UNIQUE` constraint allows exactly *one* `NULL` value (in SQL Server), because `NULL` is considered equal to another `NULL` for the purpose of the constraint. A `PRIMARY KEY` cannot contain `NULL` values at all.
+2. **Number per Table:** A table can have multiple `UNIQUE` constraints (e.g., one on `Email` and one on `SocialSecurityNumber`). A table can have only *one* `PRIMARY KEY`.
+3. **Clustered Index:** By default, a Primary Key creates a clustered index (which physically sorts the data on disk), while a Unique constraint creates a non-clustered index.
+
+---
+
+## Beginner — Question 28
+
+**Q28: Explain the difference between `TRUNCATE` and `DELETE`.**
+
+Both commands remove rows from a table, but they operate very differently:
+
+**`DELETE`:**
+- Is a Data Manipulation Language (DML) operation.
+- Removes rows one by one and logs each individual row deletion in the transaction log. (Slower).
+- Can be used with a `WHERE` clause to selectively remove rows.
+- Fires `DELETE` triggers.
+
+**`TRUNCATE`:**
+- Is a Data Definition Language (DDL) operation.
+- Removes all rows by deallocating the data pages used to store the table's data, logging only the page deallocations. (Much faster).
+- Cannot be used with a `WHERE` clause (it deletes everything).
+- Does not fire `DELETE` triggers.
+- Resets identity columns (auto-increment) back to their seed value.
+
+---
+
+## Beginner — Question 29
+
+**Q29: What is a View in SQL Server?**
+
+A View is essentially a "virtual table" whose contents are defined by a stored SQL query. It does not store data itself (unless it is an Indexed/Materialized View); instead, it dynamically pulls data from the underlying base tables every time it is queried.
+
+**Purposes of a View:**
+- **Simplicity:** Hides complex `JOIN`s and calculations from the user, presenting a simple tabular interface.
+- **Security:** Restricts access to specific rows or columns. You can grant a user access to the View without granting them access to the underlying tables.
+- **Backward Compatibility:** If the underlying database schema changes, the View can be modified to keep returning the same expected structure to legacy applications.
+
+---
+
+## Beginner — Question 30
+
+**Q30: Explain what the `NULL` value represents and how you check for it in SQL.**
+
+In SQL, `NULL` represents the *absence of a value*. It does not mean zero, and it does not mean an empty string (`""`). It means "unknown" or "not applicable."
+
+Because `NULL` is unknown, you cannot compare it using standard equality operators (`=` or `!=`). Comparing anything to `NULL` (even another `NULL`) yields an "Unknown" result, which evaluates to false in a `WHERE` clause.
+
+**How to check for it:**
+Instead of standard operators, you must use `IS NULL` or `IS NOT NULL`.
+
+```sql
+-- WRONG: This will not return rows where Email is NULL
+SELECT * FROM Users WHERE Email = NULL;
+
+-- CORRECT:
+SELECT * FROM Users WHERE Email IS NULL;
+```
+
+---
+
+## Beginner — Question 31
+
+**Q31: What is the `GROUP BY` clause used for?**
+
+The `GROUP BY` clause is used to arrange identical data into groups. It is almost always used in conjunction with aggregate functions like `COUNT()`, `SUM()`, `AVG()`, `MAX()`, or `MIN()`.
+
+For example, if you have a `Sales` table and want to know the total sales amount for each individual region, you would `GROUP BY Region` and use `SUM(Amount)`.
+
+```sql
+SELECT 
+    Region, 
+    SUM(SaleAmount) AS TotalSales
+FROM Sales
+GROUP BY Region;
+```
+This tells SQL Server: "First, group all rows together that share the same `Region`. Then, for each of those groups, calculate the sum of `SaleAmount`."
+
+---

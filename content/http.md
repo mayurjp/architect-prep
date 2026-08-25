@@ -2246,3 +2246,53 @@ Two separate infrastructure issues commonly cause this, and both need addressing
 **2. Proxy idle timeout shorter than SignalR's keep-alive interval.** Many reverse proxies and load balancers apply their own idle-connection timeout (closing a connection that's had no traffic for, say, 60 seconds) — if this is shorter than SignalR's configured `KeepAliveInterval`/ping frequency (covered under ping/pong keep-alives, earlier), the proxy silently kills the connection out from under the application before SignalR's own keep-alive traffic would have kept it alive. The fix is aligning the proxy's idle timeout to comfortably exceed SignalR's keep-alive interval, ensuring keep-alive ping traffic reaches the proxy frequently enough to be recognized as "still active" and never gets treated as idle.
 
 ---
+
+## Beginner — Question 27
+
+**Q27: What is HTTP?**
+
+HTTP (Hypertext Transfer Protocol) is the foundation of data communication for the World Wide Web. It is an application-layer, request-response protocol where a client (like a web browser) sends a request to a server, and the server returns a response containing the requested resource (like an HTML page or JSON data).
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is an HTTP Method (Verb)?**
+
+An HTTP Method indicates the desired action to be performed on the target resource. 
+- **GET:** Retrieve a resource (read-only).
+- **POST:** Submit data to create a new resource.
+- **PUT:** Replace or update an existing resource.
+- **DELETE:** Remove a resource.
+- **PATCH:** Apply partial modifications to a resource.
+
+---
+
+## Beginner — Question 29
+
+**Q29: What is a Status Code?**
+
+A Status Code is a 3-digit number returned by the server to indicate the result of the client's request.
+- **1xx (Informational):** Request received, continuing process.
+- **2xx (Successful):** The action was successfully received and understood (e.g., 200 OK).
+- **3xx (Redirection):** Further action must be taken to complete the request.
+- **4xx (Client Error):** The request contains bad syntax or cannot be fulfilled (e.g., 404 Not Found).
+- **5xx (Server Error):** The server failed to fulfill an apparently valid request (e.g., 500 Internal Server Error).
+
+---
+
+## Beginner — Question 30
+
+**Q30: What is an HTTP Header?**
+
+HTTP Headers allow the client and server to pass additional information along with an HTTP request or response. They consist of a case-insensitive name followed by a colon, then its value. For example, `Content-Type: application/json` tells the receiver how to interpret the body of the message, and `Authorization: Bearer <token>` is used for security credentials.
+
+---
+
+## Beginner — Question 31
+
+**Q31: What is the difference between HTTP and HTTPS?**
+
+HTTPS is the secure version of HTTP. While standard HTTP transmits data in plain text (meaning anyone intercepting the network traffic can read it), HTTPS encrypts the data using TLS (Transport Layer Security). This ensures confidentiality, data integrity, and authentication between the client and the server.
+
+---

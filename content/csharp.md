@@ -2203,6 +2203,138 @@ Because `async`/`await` and `Task`-based asynchrony provide dramatically better 
 
 ---
 
+## Intermediate — Question 26
+
+**Q26: How does the `yield return` keyword work in C#, and what problem does it solve when returning collections?**
+
+The `yield return` keyword is used to create a custom iterator. When you use it inside a method that returns `IEnumerable<T>`, the compiler automatically generates a hidden state machine class that implements `IEnumerator<T>`. 
+
+Instead of building a complete list in memory and returning it all at once, `yield return` allows the method to return elements one at a time, pausing its execution after each `yield return` and resuming from that exact spot when the caller requests the next item.
+
+```csharp
+public IEnumerable<int> GenerateNumbers()
+{
+    yield return 1; // Execution pauses here until the caller asks for the next item
+    yield return 2;
+    yield return 3;
+}
+```
+
+**What it solves:** 
+It enables "lazy evaluation" (deferred execution). If you need to iterate over a massive dataset (like parsing a 10GB log file), loading everything into a `List<T>` before returning would crash your app with an `OutOfMemoryException`. Using `yield return` streams the data, keeping memory usage flat.
+
+**Common Pitfall:** Because execution is deferred, if you have a `try/catch` block inside an iterator method, any exceptions that occur before the first `yield return` won't actually be thrown when the method is *called*, but rather when the result is *iterated*.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What are Generic Constraints in C#, and why are they necessary when working with type parameters?**
+
+By default, a generic type parameter `<T>` can be absolutely anything (a struct, a class, an interface). Because the compiler doesn't know what `T` is, it only allows you to call methods that belong to `System.Object` (like `ToString()` or `GetType()`).
+
+Generic Constraints (applied using the `where` keyword) tell the compiler exactly what capabilities `T` is guaranteed to have, unlocking the ability to call specific methods on it or instantiate it.
+
+```csharp
+// T must be a reference type (class), implement IDisposable, and have a parameterless constructor
+public void Process<T>(T item) where T : class, IDisposable, new()
+{
+    // Because of 'new()', we can instantiate it
+    T newItem = new T(); 
+    
+    // Because of 'IDisposable', we can call Dispose on it
+    item.Dispose(); 
+}
+```
+
+**Common Constraints:**
+- `where T : class` (must be a reference type)
+- `where T : struct` (must be a non-nullable value type)
+- `where T : new()` (must have a public parameterless constructor)
+- `where T : SomeBaseClass` (must inherit from `SomeBaseClass`)
+
+---
+
+## Intermediate — Question 28
+
+**Q28: What is the difference between `Func`, `Action`, and `Predicate` delegates in .NET?**
+
+They are all built-in, generic delegates provided by the BCL to represent method signatures, eliminating the need to declare custom `delegate` types for 99% of use cases.
+
+- **`Action`**: Represents a method that takes 0 to 16 parameters and **does not return a value** (returns `void`).
+  ```csharp
+  Action<string> log = msg => Console.WriteLine(msg);
+  ```
+- **`Func`**: Represents a method that takes 0 to 16 parameters and **returns a value**. The *last* generic type parameter is always the return type.
+  ```csharp
+  Func<int, int, string> add = (a, b) => (a + b).ToString();
+  ```
+- **`Predicate`**: A specialized delegate representing a method that takes exactly one parameter and returns a `bool`. It is mostly used for filtering or searching (e.g., in `List<T>.FindAll`). It is functionally identical to `Func<T, bool>`.
+  ```csharp
+  Predicate<int> isEven = x => x % 2 == 0;
+  ```
+
+---
+
+## Intermediate — Question 29
+
+**Q29: How do Extension Methods work under the hood, and what are their limitations?**
+
+Extension methods allow you to "add" methods to existing types (even sealed classes like `string` or framework types like `IEnumerable<T>`) without modifying the original source code or creating derived classes. 
+
+Under the hood, an extension method is just syntactic sugar for a standard static method call. The compiler translates `obj.MyExtension()` into `StaticClass.MyExtension(obj)`.
+
+To create one, the method must be:
+1. `public static`
+2. Inside a non-generic, non-nested `static class`
+3. Have the `this` keyword before the first parameter (which defines the type being extended).
+
+```csharp
+public static class StringExtensions 
+{
+    public static bool IsCapitalized(this string input) => 
+        !string.IsNullOrEmpty(input) && char.IsUpper(input[0]);
+}
+
+// Usage
+bool result = "Hello".IsCapitalized(); // Syntactic sugar
+bool real = StringExtensions.IsCapitalized("Hello"); // What actually compiles
+```
+
+**Limitations:**
+- They cannot access `private` or `protected` members of the type they are extending.
+- If the class adds an actual instance method with the exact same signature later, the instance method wins; the extension method will be silently ignored by the compiler.
+
+---
+
+## Intermediate — Question 30
+
+**Q30: What are Covariance and Contravariance in C# Generics (`out` and `in` keywords)?**
+
+They allow you to safely assign generic interfaces or delegates to variables of different generic types, based on inheritance.
+
+- **Covariance (`out`)**: Allows you to use a *more derived* type than specified. It only works when the type is used exclusively as an **output** (return type). 
+  `IEnumerable<T>` is covariant (`IEnumerable<out T>`).
+  ```csharp
+  // A string "is-a" object. Since IEnumerable only produces items (outputs), this is safe.
+  IEnumerable<string> strings = new List<string>();
+  IEnumerable<object> objects = strings; 
+  ```
+
+- **Contravariance (`in`)**: Allows you to use a *less derived* (more generic) type than specified. It only works when the type is used exclusively as an **input** (method parameters).
+  `Action<T>` is contravariant (`Action<in T>`).
+  ```csharp
+  // An Action that can handle ANY object
+  Action<object> printObj = obj => Console.WriteLine(obj);
+  
+  // You can safely pass a string to it, because a string IS an object.
+  Action<string> printStr = printObj;
+  ```
+
+**Common Pitfall:** `List<T>` does not support either. It is *invariant*. You cannot assign a `List<string>` to a `List<object>`. If you could, you would be able to add an `int` to the `List<object>`, which would crash because the underlying list is actually a `List<string>`.
+
+---
+
 ## Advanced — Question 25
 
 **Q25: What is `Unsafe.SizeOf<T>()`, and how does it let you obtain a generic type's size at runtime without requiring an `unsafe` context or the type being constrained to `unmanaged`?**
@@ -2229,5 +2361,149 @@ Unsafe.SizeOf<T>(): works for ANY type argument, GENERIC-friendly, and
 Because generic, size-aware low-level code (implementing a custom allocator, working with `Span<T>`-based binary serialization generically across many value types) needs to know a type parameter's size without knowing that specific type in advance, `Unsafe.SizeOf<T>()` fills a gap the ordinary `sizeof` operator's generic-parameter limitation leaves open — a narrow but genuinely useful tool for advanced, performance-oriented generic code.
 
 **Common Pitfall:** calling `Unsafe.SizeOf<T>()` on a reference type expecting to learn the size of the actual object on the heap — for a reference type, it returns the size of a *reference* (a pointer, 4 or 8 bytes depending on platform), not the size of the object's actual heap allocation, which requires an entirely different technique to measure.
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is a property in C# and how does it differ from a field?**
+
+A field is a variable declared directly in a class or struct. A property is a member that provides a flexible mechanism to read, write, or compute the value of a private field. Properties act like methods under the hood (getters and setters) but are accessed like fields.
+
+```csharp
+public class Person {
+    // Field - exposed directly (not recommended)
+    public string name;
+    
+    // Auto-implemented property
+    public int Age { get; set; }
+    
+    // Property with backing field and logic
+    private decimal _salary;
+    public decimal Salary {
+        get { return _salary; }
+        set {
+            if (value < 0) throw new ArgumentException();
+            _salary = value;
+        }
+    }
+}
+```
+
+**Why it matters:** Properties allow you to add validation, lazy loading, or trigger events (like `INotifyPropertyChanged`) when a value changes, without changing the public API of the class. Interfaces can define properties, but they cannot define fields.
+
+#### Follow-up: What is an init-only setter?
+Introduced in C# 9, `init` replaces `set` to allow assigning the property only during object initialization (like in an object initializer). After initialization, the property becomes immutable.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is the `using` statement and what problem does it solve?**
+
+The `using` statement provides a convenient syntax that ensures the correct use of `IDisposable` objects. When an object acquires an unmanaged resource (like a file handle, database connection, or network stream), it must release it when done. The `using` statement guarantees that the `.Dispose()` method is called even if an exception occurs.
+
+```csharp
+// Traditional using block
+using (var stream = new FileStream("data.txt", FileMode.Open)) {
+    // Read from stream
+} // stream.Dispose() is automatically called here
+
+// C# 8+ using declaration (cleaner syntax)
+public void ProcessFile() {
+    using var stream = new FileStream("data.txt", FileMode.Open);
+    // Read from stream
+} // stream.Dispose() is called at the end of the method scope
+```
+
+**Mechanism:** The compiler translates a `using` block into a `try...finally` block under the hood, placing the `.Dispose()` call safely inside the `finally` block so it executes regardless of normal exit or exception.
+
+---
+
+## Beginner — Question 28
+
+**Q28: Explain basic exception handling (`try`, `catch`, `finally`, `throw`) in C#.**
+
+Exception handling allows a program to deal with unexpected runtime errors gracefully instead of crashing abruptly.
+
+- **`try`**: Wraps the code that might throw an exception.
+- **`catch`**: Handles the specific exception if one occurs in the `try` block. You can have multiple `catch` blocks for different exception types.
+- **`finally`**: Executes code regardless of whether an exception was thrown or not. Often used for cleanup (though `using` is preferred for `IDisposable`).
+- **`throw`**: Used to manually signal that an error has occurred.
+
+```csharp
+try {
+    int result = 10 / int.Parse("0");
+}
+catch (DivideByZeroException ex) {
+    Console.WriteLine("Cannot divide by zero!");
+}
+catch (Exception ex) {
+    Console.WriteLine($"A general error occurred: {ex.Message}");
+    throw; // Rethrow the exception while preserving the stack trace
+}
+finally {
+    Console.WriteLine("Execution finished.");
+}
+```
+
+**Common Pitfall:** Writing `throw ex;` inside a catch block resets the stack trace to that line, hiding the original source of the error. Always use `throw;` alone to rethrow.
+
+---
+
+## Beginner — Question 29
+
+**Q29: What are string interpolation and verbatim strings?**
+
+Both are syntactic features that make working with strings easier and more readable.
+
+**String Interpolation (`$`)**: Allows you to embed expressions directly inside string literals instead of using `string.Format` or concatenation.
+```csharp
+string name = "Alice";
+int age = 30;
+// Output: Alice is 30 years old.
+string msg = $"{name} is {age} years old."; 
+```
+
+**Verbatim Strings (`@`)**: Tells the compiler to ignore escape characters (like `\n` or `\t`). This is incredibly useful for file paths or multiline text.
+```csharp
+// Without verbatim, you must double the backslashes
+string path1 = "C:\\Temp\\folder\\file.txt";
+
+// With verbatim, it's much cleaner
+string path2 = @"C:\Temp\folder\file.txt";
+```
+
+**Combination:** You can combine them using `$@` or `@$` for interpolated multiline strings or paths containing variables.
+
+---
+
+## Beginner — Question 30
+
+**Q30: What is an `enum` and when should you use it?**
+
+An `enum` (enumeration) is a distinct value type that consists of a set of named constants representing integral values (usually `int` by default).
+
+```csharp
+public enum OrderStatus {
+    Pending = 0,
+    Processing = 1,
+    Shipped = 2,
+    Delivered = 3
+}
+
+public void UpdateOrder(OrderStatus status) {
+    if (status == OrderStatus.Delivered) {
+        // Notify customer
+    }
+}
+```
+
+**Why use it:** 
+1. **Readability:** `OrderStatus.Shipped` is much clearer than the magic number `2`.
+2. **Type Safety:** The compiler ensures you can only pass valid `OrderStatus` values to methods expecting it, preventing bugs where someone passes a random integer.
+
+#### Follow-up: What is the `[Flags]` attribute on an enum?
+The `[Flags]` attribute indicates that the enum represents a bit field (a combination of values). By assigning values as powers of 2 (1, 2, 4, 8), you can combine multiple enum values using the bitwise OR (`|`) operator and check them using the `.HasFlag()` method.
 
 ---

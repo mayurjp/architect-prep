@@ -729,3 +729,108 @@ Attempting this as one giant undifferentiated pass — reading all 200 call site
 **Practical guidance:** treat enumeration as the specification of scope, batching as the way to fit the work within context and risk limits, and per-batch test verification as the mechanism that turns "refactor everywhere" from one risky leap into 10–20 independently-checked, independently-correct steps.
 
 ---
+
+## Beginner — Question 11
+
+**Q11: What is a "skill" or reusable custom command in an agentic coding tool, and how is it different from just writing a detailed prompt from scratch each time?**
+
+A skill (also called a custom command, workflow, or slash command depending on the tool) is a **named, packaged set of instructions** — saved once, invoked repeatedly — that tells the agent how to carry out a specific recurring task without the human re-typing the same detailed brief every time. Concretely, it's usually a file (often markdown, sometimes with a bit of structured metadata) describing the steps, conventions, or checks a particular kind of task requires, registered under a short name so a person (or another automated trigger) can invoke it by that name instead of re-explaining the task in full.
+
+**Why this differs from an ad hoc detailed prompt:** a well-written one-off prompt gets the agent through *that* task well, but the effort of writing it is spent again from scratch the next time the same kind of task comes up — a teammate doing the same recurring task has no way to benefit from the first person's careful phrasing unless they happen to see and copy it. A skill turns that effort into a durable, shared, invokable asset: write the instructions once, and every future invocation — by the original author or anyone else on the team — gets the same quality of briefing without re-deriving it.
+
+**Example (conceptual):** a team that regularly needs agents to "add a new REST endpoint following our layered convention" could package that as a skill — naming the controller/service/repository pattern to follow, the test file to update, the OpenAPI doc to regenerate — invoked by a short name rather than restating all of that in prose each time a new endpoint is needed.
+
+**Pitfall:** treating every one-off task as worth packaging into a skill adds maintenance overhead (a skill can go stale the same way any documentation can, see Q-Intermediate-3 on instructions files) for no benefit if that exact task shape never recurs — the value only accrues for genuinely repeated task patterns.
+
+**Practical guidance:** reach for a skill/custom command when a task shape recurs often enough that re-explaining it each time is a measurable, repeated cost — the same judgment call as deciding when a piece of code is worth extracting into a shared function rather than left inline.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: How should teams handle secrets and credentials safely around an agent that can run arbitrary shell commands, and why is putting real secrets directly in an instructions file a bad idea?**
+
+An agent with shell access can, in principle, read anything its sandbox can reach and can include what it reads in its own output — a commit message, a PR description, a debugging print statement, or a summary sent back to the user. An instructions file (Q-Beginner-3) is loaded into the agent's context automatically and is exactly the kind of file an agent might quote from, echo while explaining its actions, or accidentally include in a log — so a real API key or database password pasted directly into it is one careless echo away from ending up somewhere it shouldn't: a commit, a shared transcript, or a support ticket pasted for debugging.
+
+**Safer patterns:**
+- **Environment-variable references, not literal values.** An instructions file or task description should say "the database connection uses the `DATABASE_URL` environment variable, already configured in this environment" — never the connection string itself. The agent can use the variable through a shell command without the actual secret value ever needing to appear as literal text in its context.
+- **A secrets manager as the source of truth.** Real credentials live in a dedicated store (a cloud secrets manager, a vault) that injects them into the runtime environment at execution time; the agent's instructions reference *how* to obtain a credential (which variable, which lookup) rather than the credential's value.
+- **Deliberate sandbox scoping.** Even with secrets kept out of the instructions file, the agent's execution environment should only actually have access to the credentials it needs for the task at hand — a sandbox that can reach production secrets "just in case" creates risk that has nothing to do with whether those secrets appear in a prompt.
+
+**Pitfall:** assuming a secret is "safe" merely because it's not literally pasted into the instructions file, while the agent's shell still has broad environment access to it — the file is only one leak surface among several; the sandbox's actual reachable scope matters just as much (see Q-Advanced-12 on sandboxing mechanics).
+
+**Practical guidance:** apply the same discipline used for any automated system with credential access — least-privilege scoping of what the environment can reach, secrets injected at runtime rather than hardcoded anywhere text-based, and treating anything an agent might read as something it might also, deliberately or not, repeat back.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: What's the value of an agent being able to run and read the results of a linter, type-checker, or formatter as part of its own loop, rather than leaving that entirely to human review?**
+
+A linter, type-checker, or formatter is a fast, deterministic, mechanical check — it catches a specific, well-defined class of issue (a type mismatch, an unused import, inconsistent formatting, a style-guide violation) with no ambiguity about whether the issue exists. When an agent has that tool wired into its own iteration loop (Q-Advanced-1), it can run the check itself, read the output, and fix what it flags — closing the same kind of grounded feedback loop described for tests (Q-Intermediate-9, Q-Advanced-7), just for a narrower, purely mechanical category of correctness rather than behavioral correctness.
+
+**Why this is worth having, specifically:**
+- **It's cheaper and faster than a human catching the same issue in review.** A type error or formatting inconsistency caught by a human reviewer costs a review round-trip — the reviewer has to notice it, write the comment, and wait for a fix. An agent that runs the type-checker itself catches and fixes the same issue in seconds, before the diff is ever shown to anyone, for a class of problem that doesn't require human judgment to identify.
+- **It frees human review to focus on what actually needs judgment.** If mechanical issues are already caught and resolved before a PR is opened, a reviewer's attention concentrates on the things a linter fundamentally can't evaluate — logic correctness, architectural fit, security implications (Q-Intermediate-8) — rather than spending review cycles on things a tool could have caught for free.
+- **It's unambiguous, unlike style-only prose instructions.** Telling an agent "follow our formatting conventions" in prose is weaker guidance than the agent just running the actual formatter and matching its output exactly — the same "executable specification beats prose" argument made for tests in Q-Intermediate-9.
+
+**Pitfall:** a linter/type-checker only catches what it's configured to catch — an agent running a lint pass and seeing it pass clean can create a false sense that the code is broadly correct, when linting says nothing about behavioral correctness (Q-Advanced-7's distinction between mechanical checks and real feedback loops still applies).
+
+**Practical guidance:** wire mechanical checks (lint, type-check, format) into the agent's own loop as a cheap, fast, always-run step before considering a task complete — it's a strictly better use of both agent and human time than deferring purely mechanical issues to a human review pass.
+
+---
+
+## Advanced — Question 12
+
+**Q12: How does agentic coding tools' sandboxing actually work at a mechanical level, and how is it different from an agent simply being told via prompt instructions what it's not allowed to do?**
+
+Prompt-level instructions ("do not access the network," "do not touch files outside this directory") are just text in the model's context — the model can, in principle, choose to ignore or misinterpret them, whether through a genuine reasoning error, an ambiguous task that seems to require the forbidden action, or adversarial/confused input that manipulates it into acting against its instructions (echoing the prompt-injection risk in Q-Advanced-4). Prompt instructions are a *request*, enforced only by the model's own compliance — there is nothing external stopping it from attempting a disallowed action if it decides to.
+
+**Sandboxing is the technical backstop underneath the permission model (Q-Intermediate-5) that doesn't depend on the model's compliance at all.** It's a genuinely constrained execution environment — implemented at the OS/container/VM level, not the prompt level — where the actions available to the agent's shell are actually restricted regardless of what the model attempts:
+- **Filesystem restrictions.** The process the agent's shell commands run in may only have read/write access to a specific directory tree (a container's mounted volume, a worktree), so even a command that *tries* to write outside that scope fails at the OS level — not because the model chose not to try, but because the underlying process has no permission to do so.
+- **Network restrictions.** A sandboxed execution environment can be configured with no route to arbitrary external hosts by default — so even if the model were manipulated into attempting to exfiltrate data to an external URL, the attempt fails at the network layer, not because the model refrained.
+- **Process/resource isolation.** Running in a disposable container or VM means the worst case of a destructive command is bounded to that isolated environment — it can't reach the host machine's other processes, credentials, or persistent state at all.
+
+**Why this distinction matters:** a permission model built only on prompt instructions is only as reliable as the model's adherence to text, which degrades under adversarial or sufficiently confusing input. A permission model backed by actual sandboxing degrades much more gracefully — even a fully compromised or badly confused agent session is contained by what the execution environment physically allows, independent of what the model was told or what it decided to attempt.
+
+**Pitfall:** treating "the instructions file says not to do X" as equivalent to "the agent cannot do X" — the former is a request the model could fail to honor; only an actual technical restriction (no filesystem access outside a path, no network route out) is a guarantee.
+
+**Practical guidance:** use prompt-level instructions for shaping normal, well-intentioned behavior (they're cheap and usually sufficient for that), but rely on actual sandboxing — not prompt wording — for anything where the cost of the instruction being ignored, misread, or subverted would be serious; the two work together, with sandboxing as the backstop for when prompt-level guidance fails.
+
+---
+
+## Advanced — Question 13
+
+**Q13: In a regulated environment, how does an organization decide whether AI-agent-authored code needs different governance or audit-trail requirements than human-authored code, without treating agent-authored code as inherently less trustworthy once it's passed the same review bar?**
+
+The core principle to hold onto: once a change has passed the same review, testing, and approval gates required of any change (Q-Intermediate-4), its provenance — human-typed or agent-assisted — doesn't make the *code itself* more or less trustworthy going forward. Governance requirements specific to agent involvement should target something different: **traceability of how the change came to exist**, which regulated environments often need regardless of whether an AI was involved, but which AI involvement makes newly relevant to capture.
+
+**What typically does need to change:**
+- **Recording that a PR was agent-assisted, and to what degree.** Compliance and audit processes in regulated industries often need to answer "how was this change produced" as part of an audit trail — not because agent-authored code is worse, but because some regulatory frameworks specifically require disclosure of AI involvement in produced artifacts, and because it's useful forensic information if an incident is later traced back to a specific change (was this a fully autonomous merge, a human-reviewed agent PR, or entirely human-written — Q-Scenario-5's autonomous-merge policy is exactly the kind of thing an auditor would want visibility into).
+- **Confirming the review bar wasn't quietly lowered.** The actual governance risk isn't "agent code is worse" — it's the temptation to relax review rigor because agent output "looks" polished (the same false-confidence pattern from Q-Intermediate-8 and Q-Advanced-8). A regulated environment's real obligation is verifying the *same* review standard was actually applied, not inventing a stricter standard purely because of authorship.
+- **Tooling/prompt/permission configuration as part of the audit surface.** If an agent operated with elevated permissions or autonomous-merge privileges (Q-Scenario-5) on a regulated codebase, the configuration that granted that scope is itself something an auditor may need to review — not the code's correctness, but the process controls around how much autonomy was permitted.
+
+**What doesn't need to change:** the substantive bar for correctness, security review, and test coverage — applying a *stricter* correctness standard to agent-authored code than human-authored code (beyond what's needed for provenance tracking) isn't justified once both have passed the same gate; it conflates "we should know how this was made" with "this is less trustworthy because of how it was made."
+
+**Practical guidance:** separate the two questions explicitly — "did this change meet our quality bar" (answered the same way regardless of authorship) and "can we reconstruct and disclose how this change was produced" (a new, additive requirement agent involvement introduces) — and build governance around the second without letting it bleed into unequally suspicious treatment of the first.
+
+---
+
+## Scenario — Question 7
+
+**Q7: An agent with shell access is asked to "clean up temp files" in a project directory. Interpreted too broadly, that instruction could match and delete files well outside the intended temp-file scope. Walk through the guardrails that prevent this in practice.**
+
+"Clean up temp files" is exactly the shape of ambiguous, broad-sounding instruction that invites an overly literal or overly broad interpretation — a pattern like `*.tmp` might be exactly right, or a poorly chosen `rm -rf` against a loosely-matched directory could sweep up build output, cached dependencies, or even uncommitted work that happens to live in a directory with "temp" in its name. This is structurally the same failure class walked through in Q-Scenario-1 ("clean up build artifacts") — an ambiguous destructive instruction executed without a checkpoint.
+
+**Guardrails that prevent it in practice:**
+
+1. **Scope destructive commands to specific, narrow paths and patterns — never broad wildcards.** "Delete files matching `*.tmp` inside `./build/tmp/`" is unambiguous; "clean up temp files" is not. Part of the fix is on the human side (Q-Intermediate-3's discipline of specific scoping), and part is the agent's own responsibility to *ask* for the narrow scope rather than guess one when the instruction is broad and the target is destructive.
+2. **A dry-run/preview step before anything is actually deleted.** Listing exactly which files match the intended pattern (`ls`/`find` with the same filter that would be used for deletion) and showing that list — to the agent's own next reasoning step, and ideally to the human — before executing the delete turns an irreversible action into a reviewable one. If the preview surfaces a file that clearly doesn't belong (something clearly not a temp file, something with recent uncommitted changes), that's the signal to stop and narrow the scope before proceeding, not after.
+3. **Confirmation before anything irreversible, as a standing principle.** This is the same tiering logic from Q-Intermediate-5 and Q-Advanced-4 applied to exactly this class of case: a command's *pattern* (deletion, matching a wildcard, touching more than a handful of files) is enough on its own to warrant a confirmation gate, independent of how the task was originally phrased — the ambiguity in "clean up temp files" is precisely the kind of ambiguity a standing "confirm before irreversible action" rule is designed to catch, because it doesn't rely on the agent (or the human writing the prompt) having anticipated this specific failure mode in advance.
+4. **Checking repository/working-tree state first.** As in Q-Scenario-1, running `git status` before a broad delete and treating unexpected uncommitted changes in the matched scope as a reason to pause is a cheap, mechanical check that catches the worst-case outcome (losing real work) even if the scope itself was reasonable.
+
+**Pitfall:** treating "temp files" as self-evidently safe to delete broadly because the word "temp" sounds low-stakes — the risk isn't in the concept of temp files, it's in how loosely a pattern matching them can be written and how easily that pattern can over-match in a real, messy directory tree.
+
+**Practical guidance:** the general lesson from both this scenario and Q-Scenario-1 is the same: any instruction combining a destructive action with an ambiguous or broad scope should route through preview-then-confirm, regardless of how mundane the task sounds — "temp file cleanup" and "build artifact cleanup" fail the same way, for the same underlying reason, and are prevented by the same standing discipline.
+
+---

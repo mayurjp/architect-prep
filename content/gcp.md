@@ -1968,3 +1968,59 @@ Because this physical co-location mirrors the exact same underlying benefit Inte
 **Common Pitfall:** applying Interleaved Indexes broadly to every secondary index without confirming the query pattern actually benefits from parent-row co-location — for an index whose queries never actually need related parent-table data alongside the indexed results, an ordinary, non-interleaved secondary index is simpler and provides no meaningfully different performance characteristic, making the added interleaving complexity unnecessary.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is Google Compute Engine (GCE)?**
+
+Google Compute Engine (GCE) is GCP's Infrastructure-as-a-Service (IaaS) offering that lets you create and run virtual machines (VMs) on Google's infrastructure.
+
+It is analogous to Amazon EC2 or Azure Virtual Machines. You have full control over the operating system, can attach persistent disks, configure networking, and install any software you need. It is typically used when you need maximum control or are "lift-and-shifting" legacy applications that cannot be containerized easily.
+
+---
+
+## Beginner — Question 25
+
+**Q25: Explain the purpose of Google Cloud Storage (GCS).**
+
+Google Cloud Storage (GCS) is a managed, highly scalable object storage service for storing unstructured data in GCP (analogous to Amazon S3 or Azure Blob Storage).
+
+You store files (called "objects") inside containers (called "buckets"). It is ideal for storing static assets for websites, user-uploaded media (images/videos), backups, or large datasets for machine learning. GCS provides different "storage classes" (Standard, Nearline, Coldline, Archive) allowing you to balance retrieval speed and storage costs based on how frequently the data will be accessed.
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is the difference between Cloud SQL and Cloud Spanner?**
+
+Both are fully managed relational database services on GCP, but they serve different scales:
+
+- **Cloud SQL:** A managed service for standard relational databases (MySQL, PostgreSQL, and SQL Server). It handles backups, replication, and patching for you. It scales vertically well, but its horizontal scaling is limited to read replicas. It is best for traditional web apps with standard scaling needs.
+- **Cloud Spanner:** A globally distributed, horizontally scalable, strongly consistent relational database built entirely by Google. It provides the ACID guarantees of a traditional SQL database but can scale horizontally across regions like a NoSQL database. It is best for massive, global enterprises that outgrow the limits of Cloud SQL.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is Google Kubernetes Engine (GKE)?**
+
+Google Kubernetes Engine (GKE) is a managed, production-ready environment for deploying, managing, and scaling containerized applications using Kubernetes.
+
+Instead of manually installing and configuring a Kubernetes control plane (the master nodes), Google manages the control plane for you. You simply specify how many worker nodes you need, and GKE provisions the VMs, joins them to the cluster, handles upgrades, and integrates deeply with GCP networking and load balancers. GKE is widely considered one of the most robust managed Kubernetes offerings because Google originally created Kubernetes.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is a GCP Project?**
+
+A GCP Project is the fundamental organizing entity for Google Cloud resources. Every resource you create (a VM, a Storage Bucket, a Cloud Function) must belong to a project.
+
+It acts as a boundary for:
+- **Billing:** All resources inside a project are billed to the project's associated billing account.
+- **Permissions:** You assign IAM roles at the project level to control who can access the resources within it.
+- **APIs:** You enable or disable specific Google Cloud APIs on a per-project basis.
+
+A common practice is to create separate projects for different environments (e.g., `my-app-dev`, `my-app-prod`) to ensure complete isolation.
+
+---

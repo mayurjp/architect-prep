@@ -2011,3 +2011,66 @@ Because Hierarchical Partition Keys let a container's physical partitioning gran
 **Common Pitfall:** choosing a Hierarchical Partition Key's level ordering without considering actual query patterns — queries filtering only on the *first* level of the hierarchy remain efficient, but a query filtering only on a *later* level (skipping the first) loses the ability to target specific physical partitions directly, falling back to a broader, less efficient scan across partitions, similar to querying by a non-partition-key field in a single-level design.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is the difference between Azure App Service and Azure Functions?**
+
+Both are Platform-as-a-Service (PaaS) offerings used to host code without managing underlying servers, but they target different computing models.
+
+- **Azure App Service:** Designed for hosting traditional, always-running web applications (like an ASP.NET Core MVC app) or REST APIs. You pay for the underlying compute instances (the App Service Plan) regardless of whether your app is currently processing requests or sitting idle.
+- **Azure Functions:** Microsoft's serverless "Functions-as-a-Service" offering. It is designed for small, event-driven pieces of code (e.g., a function that runs whenever a new file is uploaded to Blob storage). In the Consumption plan, you only pay for the exact milliseconds your code is actively running, and it automatically scales from zero to thousands of concurrent executions.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is an Azure Resource Group?**
+
+An Azure Resource Group is a logical container that holds related resources for an Azure solution. 
+
+In Azure, every resource (a VM, a database, a VNet) must belong to exactly one Resource Group. 
+
+**Why it is used:**
+- **Lifecycle Management:** You can easily deploy, update, or delete all resources belonging to an application at once by targeting the Resource Group (e.g., deleting a "dev" resource group destroys all dev resources instantly).
+- **Access Control:** You can apply Role-Based Access Control (RBAC) at the Resource Group level to grant a team access to manage only their specific application's resources.
+- **Cost Tracking:** You can view billing costs grouped by Resource Group.
+
+---
+
+## Beginner — Question 26
+
+**Q26: Explain what Azure Blob Storage is.**
+
+Azure Blob Storage is Microsoft's object storage solution for the cloud. It is designed to store massive amounts of unstructured data.
+
+"Unstructured data" means data that doesn't adhere to a particular data model or definition, such as:
+- Images, documents, or PDF files.
+- Video and audio streams.
+- Log files or backup archives.
+
+Blob Storage is highly scalable and can be accessed from anywhere in the world via HTTP/HTTPS. It is typically used for serving images or documents directly to a browser, storing files for distributed access, or acting as the data lake for big data analytics.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is Azure Active Directory (Azure AD / Entra ID)?**
+
+Azure Active Directory (now officially renamed to **Microsoft Entra ID**) is Microsoft's cloud-based identity and access management service. 
+
+It provides authentication (verifying who a user is) and authorization (verifying what a user is allowed to do) for cloud applications. 
+
+It differs from traditional on-premises Windows Server Active Directory (which uses Kerberos/NTLM). Entra ID uses modern web-based identity protocols like OAuth 2.0, OpenID Connect, and SAML to secure web apps, APIs, and access to the Azure Portal itself. It also powers the login system for Microsoft 365.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is the purpose of an Azure Virtual Network (VNet)?**
+
+An Azure Virtual Network (VNet) is the fundamental building block for your private network in Azure. It enables many types of Azure resources, such as Azure Virtual Machines (VMs), to securely communicate with each other, the internet, and on-premises networks.
+
+A VNet is similar to a traditional network that you'd operate in your own data center, but brings the benefits of Azure's infrastructure such as scale, availability, and isolation. You can define your own private IP address spaces, create subnets, configure route tables, and apply Network Security Groups (NSGs) to act as firewalls blocking unwanted traffic between subnets.
+
+---

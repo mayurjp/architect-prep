@@ -2983,3 +2983,56 @@ Because an advisory-only Sunset header provides no actual pressure to migrate if
 **Common Pitfall:** announcing a Sunset date via the header but then repeatedly pushing back the actual enforcement date when lagging clients complain — this trains API consumers to treat every future Sunset header announcement as an empty, non-binding threat, undermining the entire mechanism's usefulness for the *next* deprecation cycle, since clients learn from experience that the advertised date doesn't actually mean anything concrete.
 
 ---
+
+## Beginner — Question 26
+
+**Q26: What does REST stand for and what is it?**
+
+REST stands for **Representational State Transfer**. It is a software architectural style that defines a set of constraints to be used for creating Web services. 
+
+RESTful APIs allow communicating systems to access and manipulate textual representations of Web resources using a uniform and predefined set of stateless operations (usually standard HTTP methods like GET, POST, PUT, DELETE).
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is a "Resource" in REST?**
+
+A resource is the fundamental concept in a RESTful API. It is an object, data, or something that can be accessed and manipulated by the API. 
+
+Resources are identified by Uniform Resource Identifiers (URIs). For example, in an e-commerce API, `Orders`, `Customers`, and `Products` are resources. You interact with them via URLs like `https://api.store.com/v1/customers/123`.
+
+---
+
+## Beginner — Question 28
+
+**Q28: Explain the difference between `PUT` and `POST` in REST.**
+
+- **`POST`:** Used to **create** a new resource. The server determines the new resource's URI (often assigning it an ID). It is not idempotent (calling it twice creates two resources).
+- **`PUT`:** Used to **update or replace** an existing resource at a specific, known URI. If the resource doesn't exist, it can sometimes be used to create it (if the client controls the ID). It is idempotent (calling it twice with the same payload has the same effect as calling it once).
+
+---
+
+## Beginner — Question 29
+
+**Q29: What is the purpose of HTTP Status Codes in a REST API?**
+
+HTTP Status Codes are a standard way for the server to communicate the result of a client's request. Instead of parsing the response body to figure out if an operation succeeded, clients rely on the status code.
+
+Common categories:
+- **2xx (Success):** 200 OK, 201 Created. The request was successful.
+- **4xx (Client Error):** 400 Bad Request, 401 Unauthorized, 404 Not Found. The client made a mistake.
+- **5xx (Server Error):** 500 Internal Server Error. The server crashed or failed unexpectedly.
+
+---
+
+## Beginner — Question 30
+
+**Q30: What does it mean for a REST API to be "stateless"?**
+
+Statelessness means that every single HTTP request from a client to the server must contain all the information necessary for the server to understand and process the request. 
+
+The server does not store any "session" state about the client between requests. 
+- *Why it matters:* It makes the API highly scalable, because any server behind a load balancer can handle any request from any client at any time, without needing to look up a shared session state.
+
+---

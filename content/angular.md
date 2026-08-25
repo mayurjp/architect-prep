@@ -1361,3 +1361,302 @@ This is a trade-off question with no universally correct answer — the right re
 **Recommended framing for 8 locales specifically:** 8 is enough that build-time's CI multiplication (8 full builds) and hosting complexity (8 deployed bundle paths, routing logic to serve the right one) start to be a genuine operational cost, not a rounding error — this tips the scale toward runtime i18n unless the product has hard requirements for zero-runtime-cost rendering (e.g., extremely performance-sensitive, high-traffic public pages) or translations are genuinely static and rarely touched. Conversely, if per-visitor performance is paramount (a marketing/landing page optimized for Core Web Vitals) and locale is chosen once via URL/subdomain with no in-app switch, build-time i18n's zero runtime overhead is worth the added CI/deploy complexity. The decision should be driven by these three concrete factors — not by which approach is more modern or which the team has used before.
 
 ---
+
+## Beginner — Question 10
+
+**Q10: What do `@HostBinding` and `@HostListener` do, and why would a directive use them instead of binding to properties/events inside its own template?**
+
+A directive (unlike a component) has no template of its own — it attaches behavior to an *existing* host element that some other template already renders. `@HostBinding` and `@HostListener` are how a directive reaches out to bind a property or listen for an event **on that host element**, rather than on something inside a template the directive doesn't have.
+
+**`@HostBinding`** binds a directive class property to a property (or attribute/class/style) of the host element — whenever the bound class property changes, Angular updates the host element to match, the same way `[property]="expr"` would inside a template, except the "element" here is wherever the directive is applied, not something the directive itself declares.
+
+**`@HostListener`** attaches an event listener to the host element and routes the event into a directive method, equivalent to `(event)="handler($event)"` but again targeting the host rather than a template child.
+
+```typescript
+@Directive({
+  selector: '[appHighlight]',
+  standalone: true,
+})
+export class HighlightDirective {
+  @HostBinding('style.backgroundColor') backgroundColor = '';
+
+  @HostListener('mouseenter')
+  onMouseEnter() {
+    this.backgroundColor = 'lightyellow';
+  }
+
+  @HostListener('mouseleave')
+  onMouseLeave() {
+    this.backgroundColor = '';
+  }
+}
+```
+```html
+<p appHighlight>Hover over me</p>
+```
+
+Here, `appHighlight` never renders any markup of its own — it's applied directly to a `<p>` that some other component's template already owns, and `@HostBinding`/`@HostListener` let it reach into that specific `<p>` to toggle a style and react to mouse events, without the directive needing (or being able) to write template markup for it.
+
+**Modern equivalent — the `host` metadata object:** newer Angular code increasingly prefers declaring host bindings/listeners declaratively in the `@Directive`/`@Component` decorator's `host` property instead of per-property/method decorators, since it keeps all host-facing bindings in one place rather than scattered across the class:
+
+```typescript
+@Directive({
+  selector: '[appHighlight]',
+  host: {
+    '[style.backgroundColor]': 'backgroundColor',
+    '(mouseenter)': 'onMouseEnter()',
+    '(mouseleave)': 'onMouseLeave()',
+  },
+})
+export class HighlightDirective {
+  backgroundColor = '';
+  onMouseEnter() { this.backgroundColor = 'lightyellow'; }
+  onMouseleave() { this.backgroundColor = ''; }
+}
+```
+Both forms compile to the same underlying host-binding instructions; the `host` object is generally recommended in current style guides for readability when a directive/component has several host bindings, while `@HostBinding`/`@HostListener` remain common and equally valid for one or two.
+
+**Common pitfall:** forgetting that `@HostBinding`/`@HostListener` (and the `host` object) target the element the directive/component is *applied to*, not an element inside the component's own template — a component wanting to bind something on its own root host element uses the same mechanism, which is a frequent point of confusion for people used to thinking "bindings only happen in templates."
+
+**Practical guidance:** reach for host bindings whenever a directive needs to influence or react to the element it's attached to (styling, ARIA attributes, DOM events) — it's the idiomatic way to write attribute directives, and avoids the anti-pattern of directly manipulating `ElementRef.nativeElement` in code, which bypasses Angular's rendering abstraction and breaks under server-side rendering.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: When do you actually need `<ng-container>` instead of a plain `<div>`, and how do `@ViewChild`/`@ViewChildren` (and the newer `viewChild()`/`viewChildren()` signal queries) let a parent reach into a child's instance?**
+
+**`ng-container` vs `<div>`:** `<ng-container>` is a logical grouping construct that Angular strips out of the rendered DOM entirely — it exists only at the template-authoring level, to attach a structural directive (`*ngIf`, `*ngFor`, `@if`/`@for` desugar similarly) or apply `ngTemplateOutlet` to a group of elements *without* introducing a real wrapping element. A `<div>` always renders as an actual DOM node, which can break CSS (`display: flex` children expecting to be direct siblings, table markup requiring `<tr>`/`<td>` as direct children with no wrapper allowed) or add meaningless nesting to the accessibility tree.
+
+```html
+<ng-container *ngIf="user as u">
+  <h2>{{ u.name }}</h2>
+  <p>{{ u.email }}</p>
+</ng-container>
+```
+Using `<div *ngIf="user as u">` here would work functionally but adds a `<div>` with no styling purpose; `<ng-container>` conditionally renders the two elements with zero extra DOM footprint. It's essential inside `<table>`/`<tr>` structures, flex/grid layouts sensitive to direct-child selectors, and whenever you need to combine two structural directives that can't legally stack on one element.
+
+**View queries — `@ViewChild`/`@ViewChildren`:** let a parent component imperatively obtain a reference to a child component instance, a DOM element, or a directive found in its *own* template (not projected content, which needs `static: false` timing awareness or `@ContentChild` instead).
+
+```typescript
+@Component({ template: `<app-chart #chart [data]="data"></app-chart>` })
+export class DashboardComponent implements AfterViewInit {
+  @ViewChild('chart') chart!: ChartComponent;
+  ngAfterViewInit() {
+    this.chart.redraw(); // call a method directly on the child instance
+  }
+}
+```
+`@ViewChild` resolves once the view is initialized (`ngAfterViewInit`, not `ngOnInit` — the child hasn't rendered yet at that point); `@ViewChildren` returns a live `QueryList` for multiple matches, updating as matching elements are added/removed.
+
+**Signal-based queries — `viewChild()`/`viewChildren()`:** the newer functional equivalents return a `Signal` instead of requiring a lifecycle hook to read reliably:
+
+```typescript
+export class DashboardComponent {
+  chart = viewChild.required(ChartComponent);
+  redrawChart() {
+    this.chart().redraw();
+  }
+}
+```
+Because it's a signal, the value is always current wherever read (including inside `computed()` or an `effect()`), and `viewChild.required(...)` throws clearly if the target doesn't exist, versus `@ViewChild`'s `!` non-null assertion silently masking a `undefined` until something calls a method on it and throws at runtime.
+
+**Practical guidance:** view queries are an escape hatch for imperative interaction (calling a child's method, reading its native element for a focus/measurement need) that can't be expressed through `@Input()`/`@Output()` alone — prefer plain data-down/events-up binding when possible, since it keeps components decoupled and testable in isolation; reach for `viewChild()`/query APIs only when the interaction is genuinely imperative (a chart library's `redraw()`, a form's `focus()`).
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What's the actual trade-off in adopting a component library like Angular Material for a real project, versus building custom components?**
+
+Angular Material (or any mature component library — PrimeNG, Nebular, and similar) provides a ready-made set of accessible, tested, themeable components — buttons, form fields, dialogs, data tables, date pickers, autocomplete — built to a consistent design system (Material Design, in Angular Material's case) and wired for accessibility out of the box (correct ARIA roles, keyboard navigation, focus management already implemented and tested against screen readers).
+
+**What adopting it buys a real project:**
+- **Consistency for free.** Every consumer of `MatButton`, `MatFormField`, `MatDialog` gets the same spacing, elevation, typography, and interaction patterns without a design system being hand-built and enforced by convention — meaningfully reduces UI drift across a team of several developers building different features in parallel.
+- **Accessibility work already done.** Focus trapping in `MatDialog`, correct `aria-*` wiring on `MatSelect`/`MatAutocomplete`, keyboard interaction patterns for a `MatMenu` — these are genuinely hard to get fully right from scratch, and a mature library has had years of bug reports and audits to fix edge cases a custom component wouldn't hit until it ships to a real user with a screen reader.
+- **Less custom CSS.** Theming is handled through a defined API (Sass theming mixins or, in current Angular Material, CSS custom properties via M3 theming) rather than hand-rolled component-by-component stylesheets.
+
+**What it costs:**
+- **API and theming constraints.** Customizing a `MatFormField`'s internals, or getting a design that deviates significantly from Material's visual language (a bespoke, brand-heavy design system), fights the library rather than being served by it — deep visual customization of Material components is possible but often requires overriding internal CSS classes not officially part of the public API, which breaks on version upgrades.
+- **Bundle size and unused surface area.** Pulling in `@angular/material` and `@angular/cdk` adds weight even if only a handful of components are used, though tree-shaking mitigates this for unused component modules with standalone imports.
+- **Migration lock-in.** Once dozens of components across the app are `mat-*`, moving to a different design language later is a substantial rewrite, not a targeted change.
+
+**Practical guidance:** for internal tools, admin dashboards, and B2B products where consistent, accessible UX matters more than a unique visual identity, adopting a library like Angular Material is close to always the right call — the accessibility and consistency wins outweigh the theming friction. For a consumer-facing product with a strong, distinctive brand/design system, teams often use the CDK alone (`@angular/cdk` ships the *behavioral* primitives — overlay positioning, focus trapping, drag-drop, virtual scrolling — without Material's visual components) and build custom-styled components on top of those primitives, getting the hard-to-build interaction logic without inheriting Material's visual opinions.
+
+---
+
+## Advanced — Question 11
+
+**Q11: What does it mean to run Angular fully zoneless — Zone.js removed entirely — and what are the current trade-offs of doing that versus staying on Zone.js-based change detection?**
+
+Zone.js works by monkey-patching essentially every async browser API (`setTimeout`, `Promise`, DOM event listeners, `XMLHttpRequest`, etc.) so that Angular is notified whenever *any* async operation completes anywhere in the app, and triggers change detection across the whole component tree in response. This is what makes classic Angular "just work" without manually telling it when to re-render — but it's also inherently coarse: an unrelated `setTimeout` firing in a third-party library can trigger a full change-detection pass across components that had nothing to do with it.
+
+**Zoneless mode** (`provideZonelessChangeDetection()`, stable as of recent Angular versions) removes Zone.js from the bundle and build entirely — Angular no longer monkey-patches async APIs or reacts to "something async happened somewhere." Instead, Angular knows exactly when to re-render because **Signals notify it directly**: a component's template reading a signal registers that dependency, and when the signal's value changes, only the components that actually read it are scheduled for a change-detection check — not the whole tree.
+
+**Concrete trade-offs today:**
+- **Bundle size and startup cost drop measurably** — Zone.js itself is removed, and its monkey-patching overhead at startup disappears.
+- **Change detection becomes precise rather than global** — no more "some unrelated component's `setTimeout` triggered a full-tree check"; only signal-driven updates schedule work, which is both faster and easier to reason about.
+- **Every piece of state that should trigger a re-render must be a signal (or an `async` pipe/observable feeding one), full stop.** A component that still mutates a plain class field (`this.count++`) and expects the template to reflect it has no mechanism to trigger re-render in zoneless mode — Zone.js was silently covering for exactly this pattern before, so it's the single biggest source of "works with Zone.js, breaks zoneless" migration bugs.
+- **Third-party library compatibility.** Libraries that rely on Zone.js's implicit "any async triggers CD" behavior (some older component libraries, certain testing utilities built around `fakeAsync`/`tick()` which are themselves Zone.js-dependent) need auditing before a zoneless migration — a library calling a plain callback outside Angular's knowledge won't trigger a re-render unless the state it mutates is signal-based.
+- **Migration is generally incremental**, not all-or-nothing: `provideZonelessChangeDetection()` can be adopted while the codebase still has non-signal state in places, but any component relying on Zone.js's implicit change detection for that state needs to be converted to signals (or manually call `ChangeDetectorRef.markForCheck()`) to keep working correctly.
+
+**Practical guidance:** for a new project built signal-first from the start, zonelessness is close to "just the modern default" — there's little reason to pay Zone.js's bundle/precision cost. For a large existing app with substantial non-signal state and third-party dependencies assuming Zone.js's behavior, treat it as a deliberate, incremental migration (audit for direct field mutation expected to trigger re-render, replace with signals) rather than a flag flipped in an afternoon.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What does `strictTemplates` do, and why is enabling it worth the migration pain on a large, loosely-typed legacy template codebase?**
+
+Angular's template compiler doesn't just parse templates into render instructions — with `strictTemplates: true` set in `tsconfig.json`'s `angularCompilerOptions`, it also **type-checks template expressions against TypeScript's type system**, the same way TypeScript checks a `.ts` file, catching binding errors at build time instead of only surfacing them as `undefined`/silent-no-op bugs at runtime.
+
+```json
+{
+  "angularCompilerOptions": {
+    "strictTemplates": true
+  }
+}
+```
+
+**What it actually catches:**
+
+```html
+<!-- Property that doesn't exist on the component's type -->
+<app-user-card [naem]="user.name"></app-user-card>
+<!-- Error: Property 'naem' does not exist on type 'UserCardComponent' -->
+
+<!-- Type mismatch on an @Input() -->
+<app-user-card [age]="user.name"></app-user-card>
+<!-- Error: Type 'string' is not assignable to type 'number' -->
+
+<!-- Calling a method with the wrong argument type -->
+<button (click)="deleteUser(user)">Delete</button>
+<!-- Error if deleteUser expects a string id, not a User object -->
+
+<!-- Nullable access without narrowing -->
+<p>{{ user.profile.bio }}</p>
+<!-- Error if `profile` is `Profile | null` and hasn't been narrowed -->
+```
+Without `strictTemplates`, several of these fail *silently* — a misspelled `[naem]` binding is simply ignored (Angular just doesn't bind anything, no error, no warning), which is a genuinely common source of "why isn't this updating" bugs that take real debugging time to trace back to a typo, versus an immediate red squiggle and a failed build with strict mode on.
+
+**Why it's worth the pain on a legacy codebase:** a loosely-typed template codebase typically has accumulated years of exactly these silent failures — misspelled bindings nobody noticed because the UI degraded quietly rather than erroring, `any`-typed component properties that let genuinely wrong data flow into child components undetected, optional-chaining gaps that only surface as a production null-reference error under specific data conditions. Turning on `strictTemplates` surfaces the *existing* bugs (not just prevents future ones) — the initial migration pain is largely the cost of a debt that was already there, made visible all at once instead of trickling in as user-reported production incidents.
+
+**Migration approach for a large legacy app:** `strictTemplates` is typically enabled incrementally — start with `fullTemplateTypeCheck: true` (a lighter intermediate step) if the jump is too large, or enable `strictTemplates` and triage the resulting error list by component, fixing the highest-traffic/highest-risk components first rather than requiring a single all-at-once fix across the whole app; some teams temporarily suppress specific errors with `// @ts-ignore`-equivalent template comments on a tracked list to unblock CI while working through the backlog methodically.
+
+**Common pitfall:** treating the initial wave of errors as "the compiler being overly strict" and disabling it again rather than fixing the underlying issues — the errors are almost always real latent bugs (or at minimum, genuinely ambiguous types worth clarifying), not compiler false positives, since template type checking reuses the same type system already trusted for the rest of the codebase's `.ts` files.
+
+**Practical guidance:** enable `strictTemplates` on every new project by default — the cost is near zero when the codebase grows with it from day one. On a legacy app, budget it as a dedicated, tracked migration (not an afterthought squeezed into unrelated feature work), because the error volume on a large loosely-typed app can be substantial, but the alternative is leaving an entire class of runtime template bugs permanently undetectable until a user hits them.
+
+---
+
+## Scenario — Question 7
+
+**Q7: A team's Angular test suite has become extremely slow and brittle — tests frequently need `fakeAsync`/`tick()` to work around async timing, and unrelated changes keep breaking unrelated tests. Investigation shows most components subscribe to multiple services, call APIs, and coordinate application state directly inside `ngOnInit`. How do you diagnose this and guide the refactor?**
+
+**Diagnosing the root cause:** when a component's `ngOnInit` directly subscribes to several services, kicks off HTTP calls, and coordinates the resulting state (deciding what to fetch next based on a first response, merging multiple streams, handling error/retry logic inline), testing that component means testing all of that orchestration logic *through* the component — which forces every test to mock every dependency the orchestration touches, control the timing of every async operation involved (hence the `fakeAsync`/`tick()` proliferation, since `ngOnInit`'s async work needs to be manually advanced to complete), and re-verify the same orchestration logic repeatedly across every test that touches the component, even tests that only care about a specific rendering detail. A change to *any* piece of that orchestration (a new field to fetch, a reordered API call) tends to shift async timing enough to break tests asserting on unrelated behavior — exactly the brittleness described.
+
+**The fix: extract orchestration into an injectable service, leave the component thin.** The component's job becomes reading state (increasingly, via signals) and dispatching user actions; a dedicated service owns subscribing to dependencies, sequencing API calls, and coordinating resulting state.
+
+```typescript
+// Before: orchestration lives in the component
+export class OrderDetailComponent implements OnInit {
+  order?: Order;
+  shipping?: ShippingInfo;
+  ngOnInit() {
+    this.orderService.getOrder(this.orderId).pipe(
+      switchMap(order => {
+        this.order = order;
+        return this.shippingService.getShipping(order.shippingId);
+      })
+    ).subscribe(shipping => this.shipping = shipping);
+  }
+}
+```
+```typescript
+// After: a service owns orchestration, exposing signals
+@Injectable({ providedIn: 'root' })
+export class OrderDetailStore {
+  #order = signal<Order | undefined>(undefined);
+  #shipping = signal<ShippingInfo | undefined>(undefined);
+  order = this.#order.asReadonly();
+  shipping = this.#shipping.asReadonly();
+
+  loadOrder(orderId: string) {
+    return this.orderService.getOrder(orderId).pipe(
+      tap(order => this.#order.set(order)),
+      switchMap(order => this.shippingService.getShipping(order.shippingId)),
+      tap(shipping => this.#shipping.set(shipping))
+    ).subscribe();
+  }
+}
+
+export class OrderDetailComponent implements OnInit {
+  private store = inject(OrderDetailStore);
+  order = this.store.order;
+  shipping = this.store.shipping;
+  ngOnInit() { this.store.loadOrder(this.orderId); }
+}
+```
+
+**Why this fixes the test problems directly:** `OrderDetailStore` can now be tested in complete isolation with `TestBed`-free unit tests (or minimal `TestBed` for `inject()`), mocking only `orderService`/`shippingService`, asserting the sequencing and resulting signal state directly — no component fixture, no `detectChanges()`, no `fakeAsync` needed for orchestration logic since it's tested as plain RxJS/service code, not through Angular's change-detection cycle. The component's own tests shrink to verifying it renders `store.order()`/`store.shipping()` correctly and calls `store.loadOrder()` on init — a shallow, fast, stable test that stubs `OrderDetailStore` entirely and never touches real async timing at all.
+
+**Common pitfall in the refactor:** stopping halfway — extracting the service but still having the component read raw Observables and subscribe to them itself (rather than exposing signals/simple synchronous state), which keeps async-timing concerns leaking back into component tests. The goal is for component tests to need zero knowledge of *how* the data arrives, only what the component does with whatever state it currently has.
+
+**Practical guidance:** this pattern (thin components, orchestration in injectable "store" or "facade" services) also pays off outside testing — it makes orchestration logic reusable across multiple components, keeps components focused on presentation, and is a natural fit for signal-based state management without needing a heavier third-party state library for moderate-complexity apps.
+
+---
+
+## Beginner — Question 11
+
+**Q11: What is Angular?**
+
+Angular is a popular, open-source web application framework developed by Google. It is a complete, opinionated framework for building single-page client applications (SPAs) using HTML and TypeScript. It provides a robust architecture based on components, dependency injection, and declarative templates.
+
+---
+
+## Beginner — Question 12
+
+**Q12: What is a Component in Angular?**
+
+A Component is the fundamental building block of an Angular application. 
+
+It consists of three parts:
+1. A TypeScript class that contains the application data and logic.
+2. An HTML template that defines the UI.
+3. CSS styles specific to that component.
+Components are organized into a tree structure to form the complete user interface.
+
+---
+
+## Beginner — Question 13
+
+**Q13: What is Data Binding in Angular?**
+
+Data Binding is the automatic synchronization of data between the component's TypeScript class (the model) and its HTML template (the view). 
+- **Interpolation (`{{ value }}`)**: From class to template.
+- **Property Binding (`[property]="value"`)**: From class to template.
+- **Event Binding (`(event)="handler()"`)**: From template to class.
+- **Two-Way Binding (`[(ngModel)]="value"`)**: Synchronizes both ways simultaneously.
+
+---
+
+## Beginner — Question 14
+
+**Q14: What is a Directive?**
+
+A Directive is a class in Angular that can modify the structure or behavior of the DOM. 
+- **Structural Directives** (like `*ngIf` or `*ngFor`) change the layout of the DOM by adding or removing elements.
+- **Attribute Directives** (like `ngClass` or `ngStyle`) change the appearance or behavior of an existing element.
+*(Note: Technically, a Component is just a Directive with a template).*
+
+---
+
+## Beginner — Question 15
+
+**Q15: What is a Service in Angular?**
+
+A Service is a broad category encompassing any value, function, or feature that an application needs. A service is typically a class with a narrow, well-defined purpose (e.g., fetching data from an API, logging, or validating input). 
+
+Instead of writing this logic directly inside a Component, you write it in a Service and use Angular's Dependency Injection system to provide it to any Component that needs it, keeping components lean and focused purely on the UI.
+
+---

@@ -2253,6 +2253,62 @@ Because a large, real-world schema often naturally organizes around feature area
 
 ---
 
+## Intermediate — Question 23
+
+**Q23: What is the N+1 problem in GraphQL, and how does DataLoader solve it?**
+
+The N+1 problem occurs when a query fetches a list of N parent items, and then the resolver for a child field executes a separate database query for *each* of those N items (1 query for the parents + N queries for the children). Because GraphQL executes resolvers field-by-field, this is incredibly common.
+
+**DataLoader** solves this by using *batching* and *caching*. When a resolver needs a child record (e.g., the `Author` for a `Book`), it asks the DataLoader. Instead of querying the database immediately, DataLoader waits a few milliseconds, gathers all the requested Author IDs from all the executing `Book` resolvers, and executes a *single* batched database query (e.g., `WHERE Id IN (...)`). It then distributes the results back to the correct resolvers.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: How should Authentication and Authorization be handled in a GraphQL API?**
+
+Authentication (identifying the user) should happen at the HTTP/Web server level, *before* the request ever reaches the GraphQL execution engine. The resulting user context is then passed into the GraphQL **Context** object.
+
+Authorization (checking permissions) should generally happen inside your business logic layer or inside the specific field **Resolvers**. You should *not* put authorization logic purely in the schema definition. By checking permissions in the resolver, you ensure that if a user requests a field they aren't allowed to see, you can return a specific error for that field or return `null`, while still returning the rest of the allowed data in the graph.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What are GraphQL Subscriptions, and how do they differ from Queries and Mutations?**
+
+- **Queries** fetch data (read-only, executed once).
+- **Mutations** modify data and then fetch a result (write-then-read, executed once).
+- **Subscriptions** maintain a persistent connection to the server to push real-time updates to the client.
+
+While Queries and Mutations usually occur over standard HTTP POST requests, Subscriptions are typically implemented over long-lived WebSockets. When a specific event happens on the server (e.g., a new message is created), the server pushes the updated data shape requested by the Subscription down the WebSocket to all subscribed clients.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is GraphQL Introspection, and why is it generally disabled in production?**
+
+Introspection is a feature of GraphQL that allows a client to query the schema itself to discover all available types, queries, mutations, and fields. It powers developer tools like GraphiQL and auto-complete features.
+
+In production environments, Introspection is almost always disabled for security reasons. Exposing the entire schema allows attackers to effortlessly map your entire API surface, discover hidden administrative mutations, or find deprecated fields they might exploit. Disabling it forces attackers to guess endpoint structures blindly, adding a layer of security by obscurity.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is the "Connections" pattern (Relay Cursor Connections) for Pagination in GraphQL?**
+
+While simple offset/limit pagination works, GraphQL often uses the Relay Connections specification for robust, cursor-based pagination. 
+
+Instead of returning a simple array of items, it returns a `Connection` object containing:
+- `Edges`: An array of objects. Each edge contains a `Node` (the actual data item) and a `Cursor` (an opaque string pointing to that item's exact position in the database).
+- `PageInfo`: Metadata about the pagination state (`hasNextPage`, `endCursor`).
+
+Clients use the `endCursor` from `PageInfo` to request the next page (`after: "cursor-string"`). This pattern handles real-time data insertions/deletions much better than offset pagination, where items might shift between pages.
+
+---
+
 ## Advanced — Question 22
 
 **Q22: What is Apollo Federation's `@shareable` directive, and how does it let multiple subgraphs independently resolve the same field on a shared type without Federation treating that overlap as a conflict requiring `@override` (covered earlier)?**
@@ -2288,5 +2344,58 @@ WITH @shareable on BOTH subgraphs' definitions: Federation UNDERSTANDS
 Because `@shareable` explicitly documents an intentional, deliberate overlap in schema ownership — as opposed to `@override`'s single, exclusive-ownership-transfer semantics — it's the correct tool specifically for genuinely simple, duplicable field resolution logic that doesn't warrant the coordination overhead of designating one single authoritative subgraph, letting the query planner freely choose whichever subgraph is more convenient for a given overall query plan.
 
 **Common Pitfall:** marking a field `@shareable` when its resolution logic actually differs meaningfully between subgraphs (rather than being genuinely identical, simple, duplicated logic) — since the query planner may pick either subgraph's resolver for a given query, inconsistent resolution logic across "shareable" subgraphs can produce a response whose specific field value silently depends on which subgraph the planner happened to choose, a subtle correctness risk `@shareable` is only safe for when the resolvers are truly equivalent.
+
+---
+
+## Beginner — Question 23
+
+**Q23: What is GraphQL?**
+
+GraphQL is a query language for APIs and a runtime for fulfilling those queries with your existing data. 
+
+Invented by Facebook, it provides a complete and understandable description of the data in your API, giving clients the power to ask for exactly what they need and nothing more. Unlike REST which uses multiple URLs for different resources, GraphQL typically uses a single endpoint (`/graphql`) for all requests.
+
+---
+
+## Beginner — Question 24
+
+**Q24: Explain the difference between a `Query` and a `Mutation`.**
+
+These are two of the core operation types in GraphQL:
+- **`Query`:** Used to **read** or fetch data. It is analogous to a `GET` request in REST. Queries are designed to be side-effect-free (they don't change the database).
+- **`Mutation`:** Used to **write** or modify data (Create, Update, Delete). It is analogous to `POST`, `PUT`, or `DELETE` requests in REST.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is a GraphQL Schema?**
+
+A Schema is the core of any GraphQL server. It defines a strongly typed contract between the client and the server. 
+
+It explicitly lists exactly what queries and mutations are available, what objects they return, and what fields those objects have. Clients use the schema to know exactly what they are allowed to ask for, and the server uses it to validate incoming queries before executing them.
+
+---
+
+## Beginner — Question 26
+
+**Q26: How does GraphQL solve the "Over-fetching" and "Under-fetching" problems found in REST?**
+
+- **Over-fetching:** Getting more data than you need. (e.g., Calling a REST `/users/1` endpoint just to get the user's name, but downloading a massive JSON payload with their address, history, and preferences). 
+- **Under-fetching:** Not getting enough data in a single request. (e.g., Having to call `/users/1`, then wait, then call `/users/1/posts` to get the related data).
+
+**GraphQL's Solution:** The client sends a specific query detailing exactly the fields it wants, including nested relationships. The server responds with exactly that shape of data in a single round-trip, completely eliminating both over-fetching and under-fetching.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is the "N+1 Problem" in the context of GraphQL?**
+
+The N+1 problem is a performance issue that often occurs in GraphQL when resolving nested relationships.
+
+If you query a list of 10 `Users`, and for each user you request their `Posts`, a naive GraphQL server will execute 1 query to get the users, and then `N` (10) separate queries to get the posts for each user. This results in 11 total database queries for a single API request, crushing database performance. 
+
+It is typically solved using tools like **DataLoader**, which batches the N individual queries into a single bulk query.
 
 ---

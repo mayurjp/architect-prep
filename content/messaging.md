@@ -1974,6 +1974,57 @@ Because auto-commit's timing is based purely on a fixed interval rather than gen
 
 ---
 
+## Intermediate — Question 23
+
+**Q23: What is the Outbox Pattern, and how does it ensure reliable publishing of events when saving state to a database?**
+
+When a system needs to update a database *and* publish a message (e.g., create an order and publish `OrderCreated`), doing both across a network is prone to distributed transaction failures (e.g., the DB commits, but the broker is down).
+
+The **Outbox Pattern** solves this by using a single local database transaction to both save the business entity (the Order) *and* insert the event into an "Outbox" table in the exact same database. Because they are in the same DB, the transaction guarantees both succeed or both fail. A separate background worker then continuously polls or tails the Outbox table, publishes the events to the message broker, and marks them as processed, guaranteeing at-least-once delivery without distributed transactions.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is the Competing Consumers pattern, and how does it enable horizontal scaling of message processing?**
+
+The **Competing Consumers** pattern involves multiple instances of a consumer service listening to the *same* message queue. 
+
+Instead of broadcasting a message to all consumers, the message broker ensures that each message in the queue is delivered to exactly *one* of the available consumers. If the system experiences a spike in traffic and the queue starts backing up, you can simply spin up more instances of the consumer service. They will seamlessly join the pool of competing consumers, increasing the system's overall throughput and draining the queue faster without any changes to the publisher.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is a Dead Letter Queue (DLQ), and how is it used to handle poison messages?**
+
+A **Dead Letter Queue (DLQ)** is a special secondary queue provided by message brokers where messages are routed if they cannot be processed successfully after a certain number of retries.
+
+A "poison message" is a message that continually crashes the consumer (e.g., due to malformed JSON or an edge-case bug). Without a DLQ, this message would continually be re-queued and re-processed forever, blocking the queue and consuming CPU. By configuring a maximum retry count, the broker automatically moves the poison message to the DLQ after it exhausts its retries, allowing the consumer to move on to the next healthy message. Engineers can then inspect the DLQ to diagnose the bug.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is the primary difference between a traditional Message Broker (like RabbitMQ) and an Event Streaming Platform (like Kafka)?**
+
+The core difference lies in how messages are stored and consumed:
+- **Message Brokers (RabbitMQ):** Focus on "smart broker, dumb consumer." Messages are temporarily queued, pushed to consumers, and deleted immediately after the consumer acknowledges them. It is designed for task routing and transient queues.
+- **Event Streaming (Kafka):** Focus on "dumb broker, smart consumer." Messages are written to a durable append-only log and retained for a configured time (e.g., 7 days) regardless of whether they have been consumed. Consumers track their own "offset" (position) in the log, allowing them to rewind and replay historical events.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is the difference between At-Most-Once, At-Least-Once, and Exactly-Once delivery semantics?**
+
+These define the guarantees a messaging system provides regarding message delivery:
+- **At-Most-Once (Fire and Forget):** A message is delivered zero or one times. If the network drops or the consumer crashes before processing, the message is lost forever. (Lowest latency, lowest reliability).
+- **At-Least-Once:** A message is guaranteed to be delivered, but in failure scenarios (like a consumer crashing after processing but before acknowledging), it may be redelivered. Consumers *must* be idempotent to handle duplicates safely. (Standard for most enterprise systems).
+- **Exactly-Once:** The holy grail of messaging. The system guarantees the message is processed and its effects are recorded exactly once, even in the event of failures. This is extremely difficult to achieve and usually requires specialized coordination between the broker and the consumer's datastore.
+
+---
+
 ## Advanced — Question 22
 
 **Q22: What is Kafka's Cooperative Sticky rebalancing strategy, and how does it reduce a rebalance's disruption (covered earlier) by only reassigning the specific partitions that actually need to move, rather than revoking every partition from every consumer?**

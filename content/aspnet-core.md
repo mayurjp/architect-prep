@@ -2278,6 +2278,80 @@ Because `HttpContext.Features` (covered elsewhere as a general extensibility mec
 
 ---
 
+## Intermediate — Question 25
+
+**Q25: How do Background Tasks work in ASP.NET Core, and what is the difference between `IHostedService` and `BackgroundService`?**
+
+ASP.NET Core allows you to run tasks in the background (outside the context of an HTTP request) using hosted services. 
+
+- `IHostedService` is the fundamental interface. It requires you to implement `StartAsync(CancellationToken)` and `StopAsync(CancellationToken)`. You must be very careful not to block `StartAsync`, because it blocks the rest of the application startup process until it completes.
+- `BackgroundService` is an abstract base class that implements `IHostedService` for you. It provides a single `ExecuteAsync(CancellationToken)` method. It is much easier to use because it automatically runs your long-running loop on a background thread without blocking application startup.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: Why should you use `IHttpClientFactory` instead of directly instantiating `new HttpClient()`?**
+
+Directly instantiating `new HttpClient()` is a well-known anti-pattern in .NET. Although it implements `IDisposable`, disposing it immediately closes the underlying socket connections. If you create and dispose them constantly under heavy load, you will quickly exhaust the server's available sockets ("socket exhaustion").
+
+Conversely, creating a single static `HttpClient` solves socket exhaustion but creates a new problem: it caches DNS resolutions indefinitely, meaning it won't respect DNS changes (like a load balancer failing over).
+
+`IHttpClientFactory` solves both problems by managing a pool of underlying `HttpMessageHandler` instances. It reuses the handlers to prevent socket exhaustion, but rotates them periodically (every 2 minutes by default) to ensure DNS changes are respected.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is the difference between `IOptions<T>`, `IOptionsSnapshot<T>`, and `IOptionsMonitor<T>` in ASP.NET Core configuration?**
+
+All three are used to inject strongly-typed configuration settings, but they handle updates differently:
+
+- **`IOptions<T>`:** Singleton. Evaluated once at startup. It does not read configuration changes made while the app is running.
+- **`IOptionsSnapshot<T>`:** Scoped. Evaluated once per HTTP request. It reads updated configuration values when a new request starts, keeping the configuration consistent throughout that specific request's lifetime.
+- **`IOptionsMonitor<T>`:** Singleton. Real-time. It can be injected anywhere and its `.CurrentValue` reflects changes immediately. It also provides an `OnChange` event to execute code when configuration updates.
+
+---
+
+## Intermediate — Question 28
+
+**Q28: What is the difference between Output Caching and Response Caching in modern ASP.NET Core?**
+
+- **Response Caching** relies heavily on HTTP headers (`Cache-Control`). It instructs the *client* (the browser or an intermediate proxy) to cache the response. The ASP.NET Core Response Caching middleware tries to respect these headers, but it doesn't cache responses if the client sends an `Authorization` header or bypass headers.
+- **Output Caching** (introduced in .NET 7) is purely server-side. It caches the generated response in the server's memory (or Redis) regardless of what HTTP caching headers the client sends. It gives the server absolute control over the cache, supports cache invalidation/tagging, and works perfectly with authenticated requests (unlike Response Caching).
+
+---
+
+## Intermediate — Question 29
+
+**Q29: How do you resolve a Scoped service (like `DbContext`) from inside a Singleton service (like an `IHostedService`)?**
+
+You cannot inject a Scoped service directly into a Singleton's constructor. Because the Singleton lives forever, it would trap the Scoped service, keeping it alive forever (a "captured dependency" or memory leak). ASP.NET Core's DI container will throw an exception if you try this.
+
+Instead, you must inject `IServiceProvider` (or `IServiceScopeFactory`) into the Singleton. Whenever you need the Scoped service, you manually create a new scope, resolve the service, do your work, and then dispose of the scope.
+
+```csharp
+public class MyBackgroundTask : BackgroundService
+{
+    private readonly IServiceProvider _serviceProvider;
+
+    public MyBackgroundTask(IServiceProvider serviceProvider) => _serviceProvider = serviceProvider;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // Create a scope specifically for this unit of work
+        using (var scope = _serviceProvider.CreateScope()) 
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.Records.AddAsync(new Record(), stoppingToken);
+            await db.SaveChangesAsync(stoppingToken);
+        } // The scope (and the DbContext) is safely disposed here
+    }
+}
+```
+
+---
+
 ## Advanced — Question 23
 
 **Q23: Why does a conventional middleware class registered via `UseMiddleware<T>()` get constructed only once, for the application's entire lifetime — even for dependencies that are normally Scoped — and why must a Scoped dependency instead be injected via the `InvokeAsync` method's parameters rather than the constructor?**
@@ -2317,5 +2391,84 @@ InvokeAsync parameter injection: the FRAMEWORK resolves THESE parameters
 Because this is a genuinely easy mistake to make (constructor injection is the natural, default pattern everywhere else in ASP.NET Core), understanding *why* conventional middleware's constructor is special — a true singleton-lifetime constructor, despite the class handling per-request work — is essential for correctly consuming any Scoped dependency from within custom middleware; the framework doesn't produce a compile error for the incorrect pattern, only subtly wrong runtime behavior.
 
 **Common Pitfall:** injecting a Scoped dependency (most commonly a `DbContext`) into a conventional middleware's constructor, which compiles and even appears to work correctly during casual local testing (a single request at a time) — the bug only manifests under genuine concurrent, multi-request load, where every request incorrectly shares the exact same captured `DbContext` instance from the very first request, a `DbContext` (not being thread-safe, covered under EF Core) then producing corrupted or cross-contaminated data across unrelated requests.
+
+---
+
+## Beginner — Question 24
+
+**Q24: What is the `Program.cs` file in a modern ASP.NET Core application?**
+
+In modern ASP.NET Core (specifically .NET 6 and later), `Program.cs` is the entry point of the application. It uses a feature called "Top-Level Statements" to remove boilerplate code, meaning there is no explicit `Main` method or `Startup` class visible by default.
+
+This single file is where you:
+1. Create the `WebApplicationBuilder`.
+2. Register services into the Dependency Injection container (e.g., `builder.Services.AddControllers()`).
+3. Build the app (`var app = builder.Build();`).
+4. Configure the HTTP request pipeline using middleware (e.g., `app.UseHttpsRedirection()`).
+5. Run the application (`app.Run();`).
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is Dependency Injection (DI) and why is it built into ASP.NET Core?**
+
+Dependency Injection is a design pattern where an object receives its dependencies from an external source rather than creating them itself (e.g., using `new`). 
+
+ASP.NET Core has a built-in DI container. You register your services in `Program.cs` (e.g., `builder.Services.AddTransient<IEmailService, EmailService>()`). Then, when a controller or another class needs that service, it simply asks for it in its constructor.
+
+**Why it's built-in:**
+- It promotes loose coupling between classes.
+- It makes the application vastly easier to unit test, because you can inject mock dependencies during testing.
+- It centralizes the management of object lifetimes (Transient, Scoped, Singleton).
+
+---
+
+## Beginner — Question 26
+
+**Q26: Explain the concept of Middleware in ASP.NET Core.**
+
+Middleware refers to software components assembled into an application's HTTP pipeline to handle requests and responses. 
+
+When an HTTP request enters an ASP.NET Core application, it passes through a series of middleware components sequentially. Each component can:
+1. Choose to pass the request to the next component in the pipeline.
+2. Perform work before and after the next component in the pipeline.
+3. Short-circuit the pipeline (e.g., an authentication middleware stopping an unauthorized request and returning a 401 status directly).
+
+Common built-in middleware includes routing, authentication, authorization, CORS, and static files serving.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is the `appsettings.json` file used for?**
+
+The `appsettings.json` file is the default configuration file in an ASP.NET Core application. It stores application settings in a structured JSON format, such as database connection strings, logging levels, API keys, or custom feature flags.
+
+```json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information"
+    }
+  },
+  "ConnectionStrings": {
+    "DefaultConnection": "Server=myServer;Database=myDB;"
+  }
+}
+```
+ASP.NET Core automatically loads this file at startup. You can access these settings in your code using the `IConfiguration` interface, injected via dependency injection.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is Kestrel?**
+
+Kestrel is the default, cross-platform, open-source web server for ASP.NET Core. It is included by default in ASP.NET Core project templates.
+
+When you run an ASP.NET Core application, it runs inside Kestrel. Kestrel is responsible for listening for incoming HTTP requests, translating them into a format the application understands (`HttpContext`), and sending the application's responses back to the client.
+
+While Kestrel can be used as an edge server (directly facing the internet), it is often used behind a reverse proxy like IIS, Nginx, or Apache for additional security, load balancing, and connection management.
 
 ---

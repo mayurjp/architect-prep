@@ -2220,3 +2220,55 @@ Because this metadata is computed once and shared across every consumer that nee
 **Common Pitfall:** assuming Data Annotations attributes are read independently and redundantly by validation, Tag Helpers, and templates — in practice, MVC's `ModelMetadata` abstraction means all three consume the exact same, centrally-computed metadata, which is precisely why a custom `IDisplayMetadataProvider` or `IValidationMetadataProvider` can influence validation, rendering, and template selection simultaneously through one single customization point.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is the Model-View-Controller (MVC) pattern?**
+
+MVC is an architectural design pattern that separates an application into three main groups of components:
+
+- **Model:** Represents the data and the business logic of the application.
+- **View:** Responsible for displaying the data (the user interface).
+- **Controller:** Handles user interaction, works with the Model, and selects a View to render that displays the updated data.
+
+This separation of concerns makes the application easier to test, maintain, and scale.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is the role of a Controller in ASP.NET Core MVC?**
+
+The Controller acts as the orchestrator. It receives the incoming HTTP request from the user, interprets their intent, calls the appropriate business logic or database operations (via the Model), and finally determines what the response should be. It typically packages the resulting data and hands it off to a View to be rendered into HTML and returned to the browser.
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is a View in ASP.NET Core MVC?**
+
+A View is a file that contains the HTML markup and UI logic necessary to render the user interface. 
+
+In ASP.NET Core, Views use the **Razor** syntax (files ending in `.cshtml`), which allows you to seamlessly mix HTML with C# code. The View's only job is to take the data handed to it by the Controller (the View Model) and display it; it should never perform database calls or complex business logic.
+
+---
+
+## Beginner — Question 27
+
+**Q27: Explain what a Model is in ASP.NET Core MVC.**
+
+In ASP.NET Core MVC, "Model" typically refers to two different things:
+1. **Domain Model:** The classes that represent the core business entities and rules of your application (e.g., a `Customer` class that saves to the database).
+2. **View Model:** A specific, custom class created solely to carry data from the Controller to a specific View. It contains exactly the properties that the View needs to render, formatting the data so the View doesn't have to do any logic itself.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is Model Binding?**
+
+Model Binding is the mechanism ASP.NET Core uses to map data from an incoming HTTP request (like form fields, query string parameters, or route data) directly into the C# parameters of a controller action method.
+
+For example, if a user submits a form with a text box named `FirstName`, and your controller action has a parameter `string firstName` (or a class with a `FirstName` property), Model Binding automatically extracts the value from the request and populates the C# variable for you, saving you from having to manually parse the raw HTTP request.
+
+---

@@ -2405,6 +2405,56 @@ Because a single slow replica's occasional bad response directly determines a cl
 
 ---
 
+## Intermediate — Question 25
+
+**Q25: What is the CAP Theorem, and why can't a distributed system guarantee all three properties simultaneously?**
+
+The CAP theorem states that a distributed data store can only simultaneously provide two of the following three guarantees:
+- **Consistency (C):** Every read receives the most recent write or an error.
+- **Availability (A):** Every request receives a non-error response, without guaranteeing it contains the most recent write.
+- **Partition Tolerance (P):** The system continues to operate despite an arbitrary number of messages being dropped by the network between nodes.
+
+Because network partitions (P) are unavoidable in the real world, distributed systems must choose between Consistency (CP - pause availability until the network heals) or Availability (AP - return stale data until the network heals). You cannot have CA in a distributed system.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is the primary difference between Relational (SQL) and NoSQL databases?**
+
+- **Relational Databases (SQL):** Store data in structured tables with strict schemas. They excel at complex queries, joins, and providing strong ACID guarantees. They generally scale vertically (requiring bigger servers). Examples: SQL Server, PostgreSQL, MySQL.
+- **NoSQL Databases:** Store data in flexible, schema-less formats (like JSON documents, key-value pairs, or wide-columns). They sacrifice complex joins and strict transactions in favor of massive horizontal scalability and speed. They are ideal for unstructured data or high-velocity reads/writes. Examples: MongoDB, Redis, Cassandra.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: How does a Content Delivery Network (CDN) improve system latency and reduce load on origin servers?**
+
+A **Content Delivery Network (CDN)** is a globally distributed network of proxy servers (Edge locations) designed to deliver static content (images, CSS, JS, video) to users geographically faster.
+
+When a user in Tokyo requests an image hosted on an origin server in New York, the latency is naturally high. A CDN caches that image on an edge server in Tokyo. The next time a user in Tokyo requests the image, it is served almost instantly from the local edge server. This drastically reduces latency for the user and significantly reduces the bandwidth and processing load on the central origin server.
+
+---
+
+## Intermediate — Question 28
+
+**Q28: What is a Reverse Proxy, and how does it differ from a Forward Proxy?**
+
+- A **Forward Proxy** sits in front of *clients* and protects them. When employees on a corporate network browse the web, their traffic goes through a forward proxy, which might inspect, log, or block access to certain sites. The internet sees the proxy, not the internal clients.
+- A **Reverse Proxy** sits in front of *servers* and protects them. When the internet accesses your web application, they hit the reverse proxy (like Nginx, HAProxy, or YARP). The reverse proxy forwards the request to your backend servers. It provides benefits like load balancing, SSL termination, caching, and hiding your internal server architecture from the public internet.
+
+---
+
+## Intermediate — Question 29
+
+**Q29: What are the main differences between Monolithic and Microservices architectures?**
+
+- **Monolith:** An application where the UI, business logic, and data access layers are bundled into a single deployable codebase. It is easy to develop, test, and deploy initially. However, as it grows, it becomes difficult to scale individual components, tight coupling slows down development, and a bug in one module can crash the entire application.
+- **Microservices:** The application is split into small, independently deployable services organized around business capabilities (e.g., separate services for Billing, Inventory, and Shipping). They communicate over the network (HTTP/gRPC/Messaging). This allows teams to work independently, scale services individually, and use different technology stacks. The downside is significantly increased operational complexity (distributed transactions, network latency, deployments).
+
+---
+
 ## Advanced — Question 24
 
 **Q24: What is a "Poison Pill" message at the system-design level, and how does a message that deterministically crashes every consumer attempting to process it differ from an ordinary transient failure in terms of detection and mitigation?**
@@ -2427,5 +2477,70 @@ Poison Pill: a SPECIFIC message's CONTENT itself (a malformed field, an
 Because a Poison Pill's failure is deterministic rather than transient, naive retry-based resilience strategies (covered extensively elsewhere) not only fail to help but can actively worsen the situation — repeatedly crashing consumer instances, potentially triggering cascading restarts or exhausting a Dead Letter Queue's own retry budget (covered under Messaging) — making rapid, automated detection of "this specific message consistently causes a crash, regardless of which consumer instance handles it" an essential capability distinct from ordinary transient-failure handling.
 
 **Common Pitfall:** configuring aggressive automatic retry logic without any mechanism to distinguish a genuinely transient failure from a deterministic, message-content-caused crash — blindly retrying a Poison Pill message can trigger a cascading pattern of repeated consumer crashes and restarts, potentially destabilizing an entire consumer fleet, rather than quickly isolating the single problematic message to a Dead Letter Queue and continuing to process everything else normally.
+
+---
+
+## Beginner — Question 24
+
+**Q24: What is the difference between Latency and Throughput?**
+
+These are the two most fundamental metrics for measuring system performance:
+
+- **Latency:** The *time* it takes for a single request to complete. (How fast is it?). Measured in milliseconds (ms). If it takes 200ms from the moment a user clicks "Submit" to the moment they see a confirmation, the latency is 200ms.
+- **Throughput:** The *volume* of work a system can handle over a specific period of time. (How much can it do?). Measured in requests per second (RPS) or queries per second (QPS). If a server can handle 1,000 concurrent user requests every second, its throughput is 1,000 RPS.
+
+A water pipe analogy: Latency is how fast a single drop of water travels from one end of the pipe to the other. Throughput is how many gallons of water flow out of the pipe every minute.
+
+---
+
+## Beginner — Question 25
+
+**Q25: Explain the difference between Vertical Scaling and Horizontal Scaling.**
+
+When a system needs to handle more load, there are two ways to scale:
+
+- **Vertical Scaling (Scaling Up):** Adding more power (CPU, RAM, Disk) to an existing server. 
+  - *Pros:* Extremely easy, requires no architectural changes or code changes.
+  - *Cons:* Has a hard physical limit (you can only buy a server so big), and requires downtime to upgrade the hardware.
+- **Horizontal Scaling (Scaling Out):** Adding more servers (nodes) to the pool of resources and distributing the load among them.
+  - *Pros:* Virtually limitless scaling capacity, provides high availability and redundancy.
+  - *Cons:* Significantly increases architectural complexity (requires load balancers, stateless web tiers, and distributed data storage).
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is a Load Balancer and why is it used?**
+
+A Load Balancer is a device or software component that sits between incoming client requests and a group of backend servers. Its job is to distribute the incoming network traffic evenly across all available servers.
+
+**Why it is used:**
+1. **Prevents Overload:** Ensures no single server bears too much demand, which degrades performance.
+2. **High Availability:** If one server crashes or goes offline for maintenance, the load balancer detects the failure (via health checks) and immediately redirects traffic to the remaining healthy servers.
+3. **Enables Horizontal Scaling:** As traffic grows, you can seamlessly add new servers behind the load balancer without the clients ever needing to know.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is Caching? Give an example of a caching system.**
+
+Caching is the technique of temporarily storing copies of frequently accessed data in a fast, temporary storage layer (usually RAM) so that future requests for that data can be served much faster than fetching it from its primary storage location (like a disk-based database).
+
+If a database query takes 500ms to calculate a complex report, you can store the final result in a cache. The next 10,000 users who request that report will get it in 2ms from the cache, saving the database from doing the exact same work 10,000 times.
+
+**Examples:** Redis and Memcached are the two most famous distributed, in-memory caching systems used in system design.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is a Content Delivery Network (CDN)?**
+
+A Content Delivery Network (CDN) is a globally distributed network of proxy servers. Its primary goal is to deliver static content (images, CSS, JavaScript files, videos) to users faster.
+
+If your main server is located in New York, a user in Tokyo requesting a large image will experience high latency because the data has to travel halfway around the world. A CDN solves this by copying (caching) that image onto servers located in data centers all over the world (called Edge Locations). 
+
+When the user in Tokyo requests the image, the CDN routes their request to an Edge server located in Tokyo, delivering the image almost instantly and saving your New York server from having to handle the request at all.
 
 ---

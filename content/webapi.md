@@ -2201,6 +2201,59 @@ Because most Web APIs want one single, consistent error-handling behavior across
 
 ---
 
+## Intermediate — Question 24
+
+**Q24: What is Content Negotiation in ASP.NET Core Web API, and how does it determine the response format?**
+
+Content negotiation is the process where the API determines the best format for returning the response to the client (e.g., JSON, XML, or plain text). 
+
+It relies primarily on the HTTP `Accept` header sent by the client (e.g., `Accept: application/xml`). If the API is configured with formatters that support that requested type, it will serialize the response in that format. By default, ASP.NET Core only supports JSON, but you can configure it to support XML by calling `.AddXmlSerializerFormatters()` during startup. If the client requests a format the server doesn't support, the server can fall back to JSON or return a `406 Not Acceptable` status.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is the recommended way to handle global exceptions in a modern ASP.NET Core Web API?**
+
+While you *can* use Exception Filters, the most robust and recommended approach is to use **Exception Handling Middleware**. 
+
+Middleware catches unhandled exceptions globally across the entire request pipeline. In modern .NET (8+), you typically use the `IExceptionHandler` interface combined with `app.UseExceptionHandler()`. This allows you to write clean, centralized logic that catches the exception, logs it securely, and writes a standardized `ProblemDetails` JSON response back to the client, preventing stack traces from leaking into production.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is a `ProblemDetails` response (RFC 7807), and why is it useful?**
+
+`ProblemDetails` is a standardized JSON format (defined by IETF RFC 7807) for returning error details from HTTP APIs. 
+
+Instead of every API inventing its own custom error format (e.g., `{ "error": "bad", "code": 123 }`), `ProblemDetails` provides a consistent schema containing fields like `type` (a URI identifying the problem type), `title` (a short summary), `status` (the HTTP status code), and `detail` (a human-readable explanation). ASP.NET Core automatically returns `ValidationProblemDetails` when model binding fails, ensuring API consumers have a predictable way to parse and display errors.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: How does Model Binding work in Web API, and what are `[FromRoute]`, `[FromBody]`, and `[FromQuery]` used for?**
+
+Model binding is the process of mapping data from an incoming HTTP request to the parameters of a controller action method. 
+
+Because an HTTP request has data in multiple places, attributes explicitly tell the framework where to look:
+- `[FromRoute]`: Binds data from the URL path (e.g., the `12` in `/api/users/12`).
+- `[FromQuery]`: Binds data from the query string (e.g., the `page=2` in `/api/users?page=2`).
+- `[FromBody]`: Binds data from the request payload (the JSON body), usually parsing it into a complex C# object.
+
+---
+
+## Intermediate — Question 28
+
+**Q28: What is HATEOAS, and how does it relate to REST maturity?**
+
+HATEOAS stands for *Hypermedia As The Engine Of Application State*. It is the highest level (Level 3) of the Richardson Maturity Model for REST APIs.
+
+In a HATEOAS-compliant API, responses don't just contain raw data; they contain hyperlinks (often under a `_links` property) that tell the client what actions are currently possible based on the resource's state. For example, if an `Account` is overdrawn, the response might include a link to a `deposit` endpoint, but omit the link to the `withdraw` endpoint. The client navigates the API dynamically by following these links, rather than hardcoding URLs.
+
+---
+
 ## Advanced — Question 24
 
 **Q24: What is a custom `IOutputCachePolicy`, and how does it let output caching decisions (covered earlier) depend on arbitrary request context beyond the built-in `VaryBy` options?**
@@ -2238,5 +2291,57 @@ Custom IOutputCachePolicy: ARBITRARY C# logic decides caching ELIGIBILITY
 Because a custom policy has full access to `HttpContext` and can implement genuinely arbitrary logic, it's the appropriate escape hatch for caching decisions that don't map cleanly onto a simple header or query-parameter variation — at the cost of needing to write and maintain that logic explicitly, rather than relying on the built-in options' simpler, declarative configuration.
 
 **Common Pitfall:** implementing a custom `IOutputCachePolicy` whose caching-eligibility logic inadvertently ignores a security-sensitive distinction (caching a response containing user-specific data without properly varying the cache key by user identity) — a caching bug of this kind can leak one user's data to a different user who happens to receive the same cached response, a considerably more severe consequence than an ordinary caching correctness bug.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is ASP.NET Core Web API?**
+
+ASP.NET Core Web API is a framework for building HTTP services that can be consumed by a broad range of clients, including browsers, mobile devices, and desktop applications. It is the ideal platform for building RESTful applications on the .NET platform, focusing on returning data (like JSON or XML) rather than rendering HTML views.
+
+---
+
+## Beginner — Question 26
+
+**Q26: Explain what Routing is in Web API.**
+
+Routing is how ASP.NET Core matches an incoming HTTP request (like `GET /api/products/123`) to the specific executable code (the controller action method) that should handle it. 
+
+Web API almost exclusively uses **Attribute Routing**, where you place routing attributes (`[Route("api/[controller]")]`, `[HttpGet("{id}")]`) directly above the controller class and its methods to define the exact URL patterns they respond to.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is Content Negotiation?**
+
+Content Negotiation is the process by which the server and client agree on the format of the data being exchanged. 
+
+When a client sends a request, it includes an `Accept` header (e.g., `Accept: application/json` or `Accept: application/xml`). The Web API examines this header and automatically formats the response data into the requested format, provided the API is configured with the appropriate formatters.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What does the `[ApiController]` attribute do?**
+
+The `[ApiController]` attribute is placed on a controller class to enable several API-specific behaviors that make building web APIs easier. 
+
+Its most important features include:
+1. **Automatic Model Validation:** It automatically returns a 400 Bad Request if the incoming data doesn't pass validation, saving you from writing `if (!ModelState.IsValid)` in every action.
+2. **Attribute Routing Requirement:** It requires the controller to use attribute routing (rather than conventional routing).
+3. **Binding Source Inference:** It automatically assumes complex objects come from the request body (`[FromBody]`), and simple types come from the route or query string.
+
+---
+
+## Beginner — Question 29
+
+**Q29: Explain the purpose of `IActionResult` / `ActionResult<T>`.**
+
+These are the standard return types for Web API controller actions. They allow an action to return both the actual data (the payload) AND the appropriate HTTP status code (200 OK, 404 Not Found, etc.).
+
+- `IActionResult` is an interface allowing you to return various HTTP responses using helper methods like `Ok()`, `NotFound()`, or `BadRequest()`.
+- `ActionResult<T>` is a strongly-typed wrapper (introduced in .NET Core 2.1) that allows you to either return the specific data type `T` (which automatically becomes a 200 OK) or an `IActionResult` (like `NotFound()`), providing better tooling support for OpenAPI/Swagger generation.
 
 ---

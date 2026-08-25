@@ -1643,3 +1643,366 @@ function getTopScores(scores, n) {
 **Broader guidance:** treat any parameter passed into a function that claims purity as effectively read-only, and audit for the classic in-place-mutating array methods whenever "pure" is part of a function's contract — this class of bug is common precisely because `.sort()` in particular looks like it should behave like `.filter()`/`.map()` and doesn't.
 
 ---
+
+## Beginner — Question 13
+
+**Q13: Are strings mutable in JavaScript? What actually happens when you write `str[0] = 'X'`, and how do you "modify" a string correctly?**
+
+Strings are **immutable primitives** in JavaScript — once created, a string's characters can never be changed in place. There is no operation that rewrites a character inside an existing string value; every "string modification" actually **creates a brand-new string** and (usually) reassigns a variable to point at it.
+
+`str[0] = 'X'` looks like it should mutate index `0`, since array element assignment does exactly that. But strings only support **bracket-index reading**, not writing — indexed character access is implemented as a **read-only, non-writable property** on the string. What happens next depends on strict mode:
+
+```javascript
+let str = 'hello';
+str[0] = 'X';
+console.log(str); // 'hello' — silently unchanged, in normal (sloppy) mode
+
+function demo() {
+  'use strict';
+  const s = 'hello';
+  s[0] = 'X'; // throws TypeError: Cannot assign to read only property '0' of string 'hello'
+}
+```
+
+**Why the silent no-op happens in sloppy mode:** assigning to a non-writable property is defined by the spec to fail *silently* unless the code is running in strict mode, in which case it throws instead — the exact same rule that governs assigning to a property of a `Object.freeze()`d object. Since ES modules and class bodies are always strict, this trap tends to surface as a real error there, while old-style `<script>` code just eats the assignment with no feedback at all — arguably the more dangerous outcome, since nothing signals the bug.
+
+**The correct way to "modify" a string** is to build a new one using string methods and reassign:
+
+```javascript
+let str = 'hello';
+str = 'X' + str.slice(1);              // 'Xello' — new string, old one untouched
+str = str.replace('X', 'Y');           // 'Yello' — replace() also returns a new string
+const chars = str.split('');
+chars[0] = 'Z';
+str = chars.join('');                  // 'Zello' — index-friendly for multiple edits
+```
+
+**Common pitfall:** assuming `str[0] = 'X'` is just "a no-op you can ignore" — in strict-mode code (which is the default for most modern codebases) it's a thrown exception, not a harmless mistake, and can crash a request path that was never tested under that exact input.
+
+**Practical guidance:** treat every string as read-only data; use `slice`/`replace`/`split`+`join`/template literals to derive a new string, and always capture the return value — string methods never mutate their receiver.
+
+---
+
+## Beginner — Question 14
+
+**Q14: Why is `NaN !== NaN` true, and how do `Number.isNaN()` and `Object.is()` correctly handle this edge case?**
+
+`NaN` ("Not-a-Number") is the one value in JavaScript that is **never equal to itself**, under both `==` and `===`:
+
+```javascript
+console.log(NaN === NaN); // false
+console.log(NaN == NaN);  // false
+```
+
+**Why:** this isn't a JavaScript quirk specifically — it comes straight from the **IEEE 754** floating-point standard that JS's `number` type is built on, which defines `NaN` to compare as unequal to every value, including another `NaN`. The rationale from the standard's original design is that `NaN` represents "the result of an operation that has no meaningful numeric result" (`0/0`, `Math.sqrt(-1)`, parsing `"abc"` as a number), and two such failures aren't necessarily "the same" failure — so equality is defined to always say no, forcing a dedicated check instead.
+
+This breaks the naive way of testing for `NaN`:
+
+```javascript
+const result = 0 / 0;
+if (result === NaN) { /* never runs — always false, even here */ }
+```
+
+**`Number.isNaN(value)`** is the correct, purpose-built check — it returns `true` only if `value` actually *is* the `NaN` value:
+
+```javascript
+Number.isNaN(NaN);        // true
+Number.isNaN(0 / 0);      // true
+Number.isNaN('abc');      // false — a string, not NaN itself (see pitfall below)
+```
+
+**`Object.is(a, b)`** is a general same-value comparison that fixes two specific gaps in `===`: it correctly treats `NaN` as equal to itself, and — unlike `===` — distinguishes `+0` from `-0` (which `===` treats as equal):
+
+```javascript
+Object.is(NaN, NaN);   // true  — the fix this question is about
+Object.is(0, -0);      // false — ===  says true here; Object.is says false
+0 === -0;               // true
+```
+
+**Common pitfall:** the older global `isNaN(value)` (no `Number.` prefix) **coerces its argument to a number first**, so it wrongly reports `true` for non-numeric values that merely *look* like they might not convert cleanly: `isNaN('abc')` is `true` because `'abc'` coerces to `NaN`, even though `'abc'` itself is a string, not `NaN`. `Number.isNaN()` performs no coercion, so it only ever returns `true` for the actual `NaN` value.
+
+**Practical guidance:** always use `Number.isNaN()` over the global `isNaN()` to test for `NaN`; reach for `Object.is()` specifically when `NaN`-equality or `+0`/`-0` distinction genuinely matters (rare, but shows up in library internals like React's dependency-array comparison).
+
+---
+
+## Intermediate — Question 15
+
+**Q15: `reduce()` is often taught as "the array-summing method" — demonstrate it as a general-purpose fold by building a lookup map (object indexed by a unique key) from an array, and explain what makes `reduce` more fundamental than `map`/`filter`.**
+
+`Array.prototype.reduce(fn, initialValue)` doesn't just add numbers — it **folds** an entire array down into *any* single accumulated value: a number, a string, another array, or — very commonly in real code — an object. The accumulator can be built into arbitrarily complex shapes across the iteration, which is what makes `reduce` the most general of the three functional array methods.
+
+A frequent real-world use: turning an array of records into an **O(1) lookup map** keyed by id, instead of repeatedly scanning the array with `.find()`:
+
+```javascript
+const users = [
+  { id: 1, name: 'Ann' },
+  { id: 2, name: 'Bo' },
+  { id: 3, name: 'Cy' },
+];
+
+const byId = users.reduce((acc, user) => {
+  acc[user.id] = user;   // build an object, not a number
+  return acc;
+}, {});
+
+byId[2];   // { id: 2, name: 'Bo' } — O(1) lookup, no scanning
+```
+
+Once built, `byId[2]` is a direct property access — constant time regardless of array size — versus `users.find(u => u.id === 2)`, which re-scans the whole array (`O(n)`) on **every** lookup. Building the map once with `reduce` and reusing it is the standard fix when the same array needs repeated lookups by key.
+
+**Why `reduce` is the fundamental one:** both `map` and `filter` can be expressed *in terms of* `reduce` — `map` is a fold that always pushes a transformed element into a same-length accumulator array; `filter` is a fold that conditionally pushes into a growing accumulator array. `reduce` has no such constraint on what the accumulator looks like or how many items end up in it, which is why it's the more primitive operation the other two specialize.
+
+```javascript
+const mapViaReduce = (arr, fn) => arr.reduce((acc, x) => [...acc, fn(x)], []);
+const filterViaReduce = (arr, pred) => arr.reduce((acc, x) => pred(x) ? [...acc, x] : acc, []);
+```
+
+**Common pitfall:** forgetting the `initialValue` (`{}` here) — without it, `reduce` uses the array's first element as the starting accumulator, which is wrong the moment the desired accumulator shape (an object) differs from the array's element shape.
+
+**Practical guidance:** reach for `reduce` whenever the target shape isn't "same-length array" (map's job) or "subset array" (filter's job) — grouping, indexing, counting occurrences, and building trees from flat lists are all natural `reduce` folds.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What does `Object.freeze()` actually protect, and why doesn't it make nested objects immutable too?**
+
+`Object.freeze(obj)` prevents changes to `obj`'s **own, top-level properties**: no new properties can be added, no existing property can be reassigned or deleted, and (in strict mode) attempting any of those throws a `TypeError`. In sloppy mode, the attempt is silently ignored instead — the same "read-only property" rule covered for strings in Q13.
+
+```javascript
+const config = Object.freeze({ name: 'app', limits: { max: 10 } });
+
+config.name = 'changed';       // silently ignored (sloppy) / throws (strict)
+console.log(config.name);      // 'app' — unchanged either way
+
+config.limits.max = 999;       // this WORKS — no error, no silent failure
+console.log(config.limits.max); // 999 — the nested object was NOT protected
+```
+
+**Why this happens — the common misconception explained:** `Object.freeze()` is **shallow**. It only locks the property *slots* directly on the frozen object itself — for a property whose value is another object (like `limits`), freezing only prevents *reassigning that property to point elsewhere* (`config.limits = {}` would fail); it does nothing to the nested object `limits` itself, which remains a completely ordinary, fully mutable object. `Object.isFrozen(config)` returns `true`, but `Object.isFrozen(config.limits)` returns `false` — proving the freeze didn't propagate.
+
+**Achieving genuine deep immutability** requires recursively freezing every nested object:
+
+```javascript
+function deepFreeze(obj) {
+  Object.getOwnPropertyNames(obj).forEach(key => {
+    const value = obj[key];
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+      deepFreeze(value);
+    }
+  });
+  return Object.freeze(obj);
+}
+
+const frozen = deepFreeze({ name: 'app', limits: { max: 10 } });
+frozen.limits.max = 999;   // now silently ignored / throws — truly deep-frozen
+```
+
+**Common pitfall:** assuming a config object or Redux-style "immutable state" is safe just because the top level was frozen — a nested settings object, array, or class instance sitting inside it is still fully writable, and bugs from mutating it slip through code review because `Object.freeze()`'s name implies more protection than it delivers.
+
+**Practical guidance:** use plain `Object.freeze()` for flat, top-level-only constant objects (an enum-like map of string constants); reach for a `deepFreeze` utility, a library like Immer, or structural immutability patterns (spread-based updates, never mutating) when nested data genuinely needs to stay immutable throughout.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: Default parameters only activate for `undefined` — walk through why passing `null` or `0` behaves differently, and where this trips people up.**
+
+A default parameter value (`function f(x = defaultValue)`) is applied **only when the corresponding argument is `undefined`** — either because it was omitted entirely, or because `undefined` was passed explicitly. Every other value, including every other falsy value (`null`, `0`, `''`, `false`, `NaN`), is used exactly as given; the default is never consulted.
+
+```javascript
+function greet(name = 'Guest') { return name; }
+
+greet();            // 'Guest' — omitted, treated as undefined
+greet(undefined);   // 'Guest' — explicitly undefined, same as omitted
+greet(null);        // null    — null is a real, deliberate value; default does NOT kick in
+greet(0);           // 0       — falsy but not undefined; default does NOT kick in
+greet('');          // ''      — same reasoning
+```
+
+**Mechanism:** the spec's rule is a strict `=== undefined` check on the parameter's current value before evaluating the default expression — not a truthiness check. This is a deliberate design choice, distinguishing "no argument was meaningfully supplied" (`undefined`) from "a value was supplied, and it happens to be falsy" (`0`, `''`, `null`). It's the exact same distinction `??` draws versus `||` (covered in the Beginner tier) — default parameters behave like an implicit `??`, not an implicit `||`.
+
+**Where this trips people up in practice** — a function that *looks* like it validates input but actually silently swaps in the default for a legitimate value it wasn't expecting:
+
+```javascript
+function setVolume(level = 10) {
+  return level;
+}
+setVolume(0);      // 0 — correct: 0 stays 0, the default is NOT applied
+setVolume(null);   // null — also NOT replaced with 10, even though null clearly means "no value"
+```
+
+The `null` case is the real gotcha: many APIs use `null` to mean "explicitly no value," expecting a default to fill in — but default parameters don't treat `null` that way at all. If `null` needs to trigger the default too, it must be handled manually:
+
+```javascript
+function setVolumeSafe(level) {
+  const v = level ?? 10;   // ?? catches BOTH undefined and null
+  return v;
+}
+setVolumeSafe(null);   // 10 — now null is treated as "absent"
+```
+
+**Common pitfall:** assuming default parameters are a general "fallback for empty-ish values" mechanism — they only ever cover the single case of `undefined`. **Practical guidance:** use a plain default parameter when omission is the only "absent" signal you accept; use `??` inside the function body when both `undefined` and `null` should trigger the fallback.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What does `Array.prototype.sort()` do without an explicit comparator, and why does it produce wrong-looking results for numbers?**
+
+Without a comparator function, `.sort()` converts every element to a **string** and sorts those strings in UTF-16 code-unit order — it never compares numbers numerically by default, regardless of what type the array actually holds.
+
+```javascript
+console.log([10, 2, 1].sort());
+// [1, 10, 2] — NOT [1, 2, 10]
+```
+
+**Why:** as strings, `'1' < '10' < '2'` — string comparison works character by character, and `'1'` sorts before `'2'` regardless of what digits follow it, so `'10'` (starting with `'1'`) lands before `'2'`. The array *is* sorted correctly according to the rule that was actually applied (lexicographic string order); it's just not the rule most callers expect for a numeric array. This is entirely consistent, spec-defined behavior — not a bug — but it silently produces the wrong answer for any multi-digit numeric data.
+
+**The fix** is an explicit comparator: a function taking two elements `(a, b)` that returns negative (a comes first), positive (b comes first), or zero (equal order). For ascending numeric sort:
+
+```javascript
+console.log([10, 2, 1].sort((a, b) => a - b));
+// [1, 2, 10] — correct numeric ascending order
+```
+
+`a - b` is negative when `a < b` (so `a` sorts first), positive when `a > b`, and `0` when equal — exactly the contract `.sort()`'s comparator expects. Descending order simply flips the subtraction: `(a, b) => b - a`.
+
+**A concrete broken-then-fixed example on realistic data:**
+
+```javascript
+const prices = [100, 25, 3, 40];
+console.log(prices.sort());               // [100, 25, 3, 40] — string order, looks "unsorted"
+console.log(prices.sort((a, b) => a - b)); // [3, 25, 40, 100] — correct
+```
+
+Note the first line: string-comparing `'100'`, `'25'`, `'3'`, `'40'` happens to yield `100, 25, 3, 40` — the *original* order — which is especially deceptive since it can look like `.sort()` silently did nothing at all, rather than actively (mis)sorting.
+
+**Common pitfall:** testing `.sort()` only with single-digit numbers (`[9, 2, 7, 1]`), where string order and numeric order coincidentally agree — this makes the bug invisible in casual testing and lets it ship straight into production, where real data (prices, IDs, scores) rarely stays single-digit.
+
+**Practical guidance:** always pass an explicit comparator to `.sort()` for numeric data — there is no safe default to rely on — and remember `.sort()` mutates the array in place and returns the same reference (see the Scenario tier), so copy first (`[...arr].sort(...)`) if the original order must be preserved.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What is memoization, how do you implement it from scratch with a `Map`, and when is it actually safe to apply?**
+
+**Memoization** is a performance optimization that caches a function's return value, keyed by its arguments, so that calling the function again with the **same** arguments returns the cached result instantly instead of recomputing it. It's a manual, code-level analog to caching layers elsewhere in a system — trading memory for CPU time.
+
+```javascript
+function memoize(fn) {
+  const cache = new Map();
+  return (...args) => {
+    const key = JSON.stringify(args);   // simple key: serialize the argument list
+    if (cache.has(key)) return cache.get(key);
+    const result = fn(...args);
+    cache.set(key, result);
+    return result;
+  };
+}
+
+let calls = 0;
+function slowSquare(n) { calls++; return n * n; }
+const memoSquare = memoize(slowSquare);
+
+memoSquare(5); // computes, calls === 1
+memoSquare(5); // cache hit, calls stays 1 — same key, no recomputation
+memoSquare(6); // new key, computes, calls === 2
+```
+
+**The key strategy matters:** `JSON.stringify(args)` is a simple, workable key for primitive arguments, but breaks down for object arguments where two structurally-identical-but-different-reference objects would (correctly) get different keys, or where argument order in the object literal changes the JSON string despite meaning the same thing. Production memoizers often use a `WeakMap` keyed directly on a single object argument (avoiding serialization entirely and letting entries be garbage-collected, per the Advanced-tier `WeakMap` question) when the function takes one object parameter.
+
+**The trade-off:** every cached entry consumes memory for as long as the cache lives, and a `Map`-backed cache with no eviction policy grows unbounded if called with many distinct argument combinations — trading a real, growing memory cost for saved CPU time. An LRU cache (capped size, evicting the least-recently-used entry) is the usual fix when the argument space is large or unbounded.
+
+**When memoizing is actually safe — only for genuinely pure functions:** the cache silently returns a **stale** result for a memoized function whose output depends on anything besides its arguments (current time, a mutable external variable, network/database state) or that has side effects expected to run every call (logging, writes) — memoization would skip those side effects entirely on a cache hit. Memoizing an impure function doesn't just fail to help; it actively introduces correctness bugs that are hard to trace back to "this function was wrapped in a cache."
+
+**Common pitfall:** memoizing a function that takes object arguments by reference without considering that two different object references with identical contents get treated as different cache keys (or the same key, if serialized) depending on the key strategy chosen — decide deliberately, don't default without checking.
+
+**Practical guidance:** memoize expensive, provably pure computations called repeatedly with a bounded/small set of distinct inputs (parsing, recursive math like Fibonacci, expensive derived-data calculations); never memoize functions with side effects or external dependencies without first removing or isolating those dependencies.
+
+---
+
+## Scenario — Question 7
+
+**Q7: A production feature sorts an array of prices — `[100, 25, 3, 40]` — with plain `.sort()` and no comparator, producing a surprising, wrong-looking order. The developer is confused because the exact same code "worked" during manual testing with different numbers. Diagnose the root cause and fix it.**
+
+```javascript
+const prices = [100, 25, 3, 40];
+console.log(prices.sort());
+// [100, 25, 3, 40] — looks like nothing happened; NOT the expected [3, 25, 40, 100]
+```
+
+**Root cause:** `.sort()` with no comparator converts every element to a **string** and sorts lexicographically, not numerically (covered in depth in the Advanced tier). Comparing `'100'`, `'25'`, `'3'`, `'40'` as strings: `'1'` (from `'100'`) sorts before `'2'` (from `'25'`), which sorts before `'3'`, which sorts before `'4'` (from `'40'`) — character by character, the *first* character alone decides most of this ordering. That string ordering happens to reproduce the array's original order in this specific case, which is exactly what makes it look like `.sort()` silently failed to do anything, rather than actively applying the wrong rule.
+
+**Why it "worked" during manual testing — the coincidence, verified:** if the developer's test data happened to be single-digit numbers only, string order and numeric order agree by coincidence, because every element has exactly one digit and there's no multi-digit value to expose the mismatch:
+
+```javascript
+console.log([9, 2, 7, 1].sort());               // [1, 2, 7, 9]
+console.log([9, 2, 7, 1].sort((a, b) => a - b)); // [1, 2, 7, 9] — identical result either way
+```
+
+With only single-digit values, no element's string representation is a prefix of another's and no first-character comparison can disagree with numeric order, so the missing comparator never gets exercised in a way that produces a visibly wrong answer. The bug was always present — the test data just never had the shape (a number with more digits than another, like `100` vs `25`) needed to reveal it.
+
+**Fix:** supply an explicit numeric comparator:
+
+```javascript
+const sorted = [...prices].sort((a, b) => a - b); // [3, 25, 40, 100]
+```
+
+Copying with `[...prices]` first also avoids mutating the caller's original array in place, a separate concern covered in the Scenario tier's `.sort()`-mutation question — both issues (wrong order, and in-place mutation) come from the same method and are worth fixing together.
+
+**Broader guidance:** never trust `.sort()` without an explicit comparator on numeric data, and never trust that a passing manual/ad hoc test proves correctness for a sort — deliberately include multi-digit, out-of-order test values (not just small, single-digit ones) in any test suite touching `.sort()`, since single-digit data structurally cannot distinguish a correct numeric sort from an accidental string sort.
+
+---
+
+## Beginner — Question 15
+
+**Q15: What is JavaScript?**
+
+JavaScript is a high-level, interpreted programming language primarily used to add interactivity, dynamic behavior, and complex features to web pages. While originally designed to run entirely within the web browser (client-side), environments like Node.js now allow JavaScript to run on the server-side as well.
+
+---
+
+## Beginner — Question 16
+
+**Q16: What is the difference between `var`, `let`, and `const`?**
+
+- `var` is function-scoped (or globally scoped). It can be re-declared and updated. It is generally considered legacy and should be avoided.
+- `let` is block-scoped (scoped to the nearest `{}`). It can be updated, but not re-declared in the same scope.
+- `const` is also block-scoped. It cannot be updated or re-declared. However, if the `const` variable holds an object or array, its internal properties *can* still be mutated.
+
+---
+
+## Beginner — Question 17
+
+**Q17: What is the DOM?**
+
+The DOM (Document Object Model) is a programming interface for web documents. It represents the structure of an HTML page as a tree of objects (nodes). JavaScript can interact with the DOM to dynamically read, change, add, or delete HTML elements and CSS styles on the page after it has loaded.
+
+---
+
+## Beginner — Question 18
+
+**Q18: What is an Arrow Function?**
+
+An Arrow Function is a concise syntax for writing function expressions in modern JavaScript (ES6). 
+
+```javascript
+// Traditional Function
+const add = function(a, b) { return a + b; };
+
+// Arrow Function
+const add = (a, b) => a + b;
+```
+Beyond being shorter, arrow functions do not have their own `this` binding—they inherit `this` from the surrounding lexical scope, which solves many common bugs with callbacks.
+
+---
+
+## Beginner — Question 19
+
+**Q19: What is JSON?**
+
+JSON (JavaScript Object Notation) is a lightweight data-interchange format. It is easy for humans to read and write, and easy for machines to parse and generate. Although derived from JavaScript object literal syntax, it is language-independent and is the standard format for exchanging data between web clients and servers.
+
+---

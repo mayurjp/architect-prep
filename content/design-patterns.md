@@ -2616,6 +2616,67 @@ Because a Composite tree's node classes rarely change (the tree's *shape* is usu
 
 ---
 
+## Intermediate — Question 25
+
+**Q25: What is the Unit of Work pattern, and how does it relate to the Repository pattern?**
+
+The Unit of Work (UoW) pattern maintains a list of objects affected by a business transaction and coordinates the writing out of changes and the resolution of concurrency problems. In .NET, Entity Framework Core's `DbContext` is a built-in implementation of both the Repository (via `DbSet`) and Unit of Work (via `SaveChanges`) patterns.
+
+When used alongside custom Repositories, the Repositories handle the retrieval and modification of entities in memory, but they do *not* commit those changes to the database. Instead, a single `IUnitOfWork` instance is injected, which coordinates a single `Commit()` or `SaveChanges()` call at the very end of the business operation, ensuring all repository changes succeed or fail together as a single atomic transaction.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is the Bridge Pattern, and how does it prevent the "Cartesian Product" explosion of subclasses?**
+
+The Bridge pattern "decouples an abstraction from its implementation so that the two can vary independently."
+
+If you have a `Shape` abstraction (Circle, Square) and a `Color` implementation (Red, Blue), using inheritance to combine them leads to a Cartesian product of classes: `RedCircle`, `BlueCircle`, `RedSquare`, `BlueSquare`. Adding one new shape and one new color suddenly requires many new classes.
+
+The Bridge pattern solves this by using composition. You give the `Shape` class a reference to an `IColor` interface. Now, `Circle` just calls `_color.Fill()`. You only need 2 Shape classes and 2 Color classes, and they can be mixed and matched at runtime.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is the Flyweight Pattern, and when is it necessary?**
+
+The Flyweight pattern is a structural design pattern used to minimize memory usage or computational expenses by sharing as much as possible with similar objects. It is used when you need to create a massive number of objects that share common state.
+
+It works by separating an object's state into two parts:
+- **Intrinsic state:** Immutable data shared across many objects (e.g., a specific texture or mesh in a video game).
+- **Extrinsic state:** Context-specific data passed in at runtime (e.g., the X/Y coordinates of an individual tree).
+
+Instead of creating 10,000 Tree objects with duplicate textures, you create one `TreeType` (the Flyweight) and pass it to 10,000 lightweight context objects.
+
+---
+
+## Intermediate — Question 28
+
+**Q28: What is the Interpreter Pattern, and what is its primary use case?**
+
+The Interpreter pattern is a behavioral design pattern that defines a grammatical representation for a language and provides an interpreter to deal with this grammar.
+
+It is typically used to build Domain-Specific Languages (DSLs), parse mathematical expressions, or evaluate complex search queries. You create an abstract `Expression` interface with an `Evaluate(Context)` method, and concrete classes for Terminal expressions (like numbers or variables) and Non-Terminal expressions (like Add, Subtract, AND, OR). 
+
+While powerful for simple grammars, it becomes unmaintainable for complex languages, where tools like Abstract Syntax Trees (ASTs) or parser generators (like ANTLR) are preferred.
+
+---
+
+## Intermediate — Question 29
+
+**Q29: What is the Options Pattern (as implemented in modern .NET), and how does it improve upon static configuration classes?**
+
+While not a classic GoF pattern, the Options pattern is the standard architectural pattern for configuration in .NET Core / .NET 5+. It binds strongly-typed classes to configuration sections (e.g., from `appsettings.json`) and injects them via `IOptions<T>`, `IOptionsSnapshot<T>`, or `IOptionsMonitor<T>`.
+
+**Why it's better:**
+1. **Encapsulation & ISP:** Classes only ask for the specific subset of configuration they need (e.g., `IOptions<EmailSettings>`), rather than accessing a global `ConfigurationManager` containing everything.
+2. **Testability:** It's trivial to mock `IOptions<T>` in unit tests by passing a POCO.
+3. **Hot Reloading:** `IOptionsMonitor<T>` allows the app to react to configuration changes at runtime without restarting.
+
+---
+
 ## Advanced — Question 23
 
 **Q23: What is the Monostate pattern, and how does it provide an alternative to Singleton (covered extensively) where every instance shares the same underlying state, while still allowing ordinary object-construction syntax?**
@@ -2656,5 +2717,80 @@ Monostate: MANY instances can EXIST, created via ORDINARY `new` syntax --
 Because Monostate preserves ordinary object-construction syntax (useful when code expecting to `new` up a regular object shouldn't need to be rewritten to call a special singleton-accessor instead), it can be a smoother drop-in replacement for converting an existing, widely-`new`'d class into having Singleton-like shared-state behavior, without requiring every call site to change how it constructs the object — at the cost of state sharing being far less obvious/discoverable than an explicit `Singleton.Instance` reference makes it.
 
 **Common Pitfall:** using Monostate specifically because its shared-state nature is *less visible* than Singleton's explicit `.Instance` accessor, without recognizing that this same subtlety is a genuine design liability — a developer reading `new Configuration()` has no textual signal at all that this object secretly shares state with every other instance, making Monostate's hidden coupling considerably easier to overlook than Singleton's comparatively self-documenting access pattern.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is the difference between a Design Pattern and an Architectural Pattern?**
+
+While both are reusable solutions to common problems, they operate at entirely different levels of scale and abstraction.
+
+1. **Design Pattern:** Solves a localized, specific problem within a specific component or module. It deals with how classes and objects are structured and interact at a micro level. Examples: *Singleton, Observer, Factory, Decorator.*
+2. **Architectural Pattern:** Solves high-level, systemic problems across the entire application. It dictates the overall structure, deployment, and data flow of the system. Examples: *Microservices, Model-View-Controller (MVC), Event-Driven Architecture, Clean Architecture.*
+
+**Analogy:** If building a house, an Architectural Pattern decides the floor plan (where the kitchen goes relative to the living room). A Design Pattern decides how the plumbing connects under the kitchen sink. 
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is an "Anti-Pattern"? Provide an example.**
+
+An anti-pattern is a common response to a recurring problem that is usually ineffective and risks being highly counterproductive. It looks like a good idea on the surface but ultimately causes more problems than it solves.
+
+**Example: The "God Object"**
+A God Object is a class that knows too much or does too much. Instead of distributing responsibilities across multiple focused classes (Single Responsibility Principle), developers dump hundreds of methods and fields into one massive `Manager` or `Utility` class.
+
+**Why it's bad:**
+- It becomes impossible to maintain or test.
+- Every developer on the team has to modify the same file, leading to constant merge conflicts.
+- It breaks encapsulation because it touches everything.
+
+Other famous anti-patterns include "Spaghetti Code" (unstructured, tangled control flow) and "Premature Optimization" (making code complex for performance gains before proving a bottleneck exists).
+
+---
+
+## Beginner — Question 27
+
+**Q27: How do Design Patterns relate to the SOLID principles?**
+
+The SOLID principles (Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion) are the *rules* or *guidelines* for good object-oriented design. Design Patterns are specific *implementations* that naturally follow those rules to solve common problems.
+
+You can think of SOLID as the underlying physics of good design, and Design Patterns as the engineered machines built using those physics.
+
+**Examples:**
+- **Strategy Pattern** heavily relies on the **Open/Closed Principle**: You can add new strategies (Open for extension) without changing the context class that uses them (Closed for modification).
+- **Factory Pattern** utilizes the **Dependency Inversion Principle**: The client code depends on abstractions (interfaces) rather than concrete implementations when creating objects.
+
+---
+
+## Beginner — Question 28
+
+**Q28: Can Design Patterns become obsolete or outdated?**
+
+Yes. Design patterns are solutions to problems within the constraints of a specific language or paradigm. As programming languages evolve, what used to require a complex pattern might become a built-in language feature, rendering the original pattern obsolete (or at least unnecessary to manually implement).
+
+**Examples in C#:**
+- **The Iterator Pattern:** Historically required manually creating enumerator classes. Now, C# handles this natively with the `yield return` keyword and `IEnumerable<T>`.
+- **The Observer Pattern:** Historically required registering/deregistering objects manually in lists. In C#, `event` and `delegate` keywords, as well as `IObservable<T>` / `IObserver<T>` (Rx.NET), provide native, type-safe implementations of this pattern.
+
+Applying a classic GoF pattern manually when the language provides a modern, native alternative is an anti-pattern.
+
+---
+
+## Beginner — Question 29
+
+**Q29: Explain the concept of "Composition over Inheritance" and why Design Patterns favor it.**
+
+"Composition over Inheritance" (or Composite Reuse Principle) is a core rule stated in the original Gang of Four book. It dictates that you should achieve code reuse by composing objects (giving one object a reference to another) rather than inheriting from a base class.
+
+**The Problem with Inheritance:**
+Inheritance is a rigid, compile-time, "is-a" relationship. If a `Bird` inherits from `Animal`, it is permanently an animal. Changes to the base class can break all subclasses (the Fragile Base Class problem). It also doesn't allow changing behavior at runtime.
+
+**The Benefit of Composition:**
+Composition is a flexible, runtime, "has-a" relationship. An object *has* a behavior that can be swapped out dynamically.
+
+Many structural and behavioral patterns (like **Strategy**, **Decorator**, and **Bridge**) exist specifically to replace rigid inheritance structures with flexible composition, allowing you to change how an object behaves at runtime by injecting different components.
 
 ---

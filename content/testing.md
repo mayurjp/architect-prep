@@ -2216,3 +2216,54 @@ Because a minimal failing case isolates the actual root cause far more clearly t
 **Common Pitfall:** assuming a Property-Based Testing framework's shrinking process always converges on the theoretically globally-minimal failing case — shrinking algorithms use heuristics and can sometimes get stuck at a local minimum that's simpler than the original failure but not the absolute simplest possible one; the shrunk case is still typically far more debuggable than the original, even if not always perfectly minimal.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is a Unit Test?**
+
+A Unit Test is an automated test that verifies the behavior of a very small, isolated piece of code, usually a single function or method. 
+
+Unit tests run incredibly fast, do not talk to databases, file systems, or external APIs, and are the foundation of a healthy testing strategy, catching logic errors immediately during development.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is an Integration Test?**
+
+An Integration Test verifies that two or more different components of a system work correctly *together*. 
+
+Unlike unit tests, integration tests often involve real infrastructure—like writing to a real test database, calling a real file system, or hitting a real web API endpoint—to ensure the boundary between your code and the external system is configured correctly.
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is Mocking?**
+
+Mocking is the practice of creating fake versions of external dependencies (like a database repository or an HTTP client) to use during unit testing. 
+
+Instead of letting a function hit a real database, you pass it a "mock" repository that simply returns hardcoded data. This ensures the unit test remains fast, isolated, and focused solely on the logic inside the function being tested, rather than the reliability of the database.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is Test-Driven Development (TDD)?**
+
+TDD is a software development process relying on a very short, repeating cycle:
+1. **Red:** Write a failing test for a new piece of functionality before writing any actual code.
+2. **Green:** Write the absolute minimum amount of code necessary to make that test pass.
+3. **Refactor:** Clean up the code while ensuring the test continues to pass.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is Code Coverage?**
+
+Code Coverage is a metric (usually a percentage) that measures how many lines or branches of your source code are actually executed while your automated tests are running. 
+
+While high code coverage (e.g., 80%) is generally good, it does not guarantee the *quality* of the tests—it only proves the code was executed, not that the correct assertions were made.
+
+---

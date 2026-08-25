@@ -2128,6 +2128,57 @@ Because this information is exposed through the same `ServerCallContext` object 
 
 ---
 
+## Intermediate — Question 23
+
+**Q23: What are gRPC Interceptors, and how do they differ from ASP.NET Core HTTP Middleware?**
+
+Interceptors in gRPC are similar in concept to middleware, but they operate at the RPC level rather than the raw HTTP request level. 
+
+While HTTP middleware processes incoming HTTP requests (headers, paths, byte streams), an **Interceptor** intercepts the actual gRPC method invocation. It has strongly-typed access to the parsed request message and the response message. You use interceptors for cross-cutting concerns like logging, authentication, or validation, wrapping the execution of the RPC call before and after it reaches the actual service implementation.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: How does gRPC handle authentication (like passing Bearer tokens) compared to a REST API?**
+
+In REST, you pass authentication tokens using HTTP Headers (e.g., `Authorization: Bearer <token>`). 
+In gRPC, the equivalent concept is **Metadata**. 
+
+Under the hood, gRPC metadata is transmitted as HTTP/2 headers. When a client makes a call, it attaches the token to the call's metadata. On the server side (in .NET), gRPC integrates seamlessly with standard ASP.NET Core Authentication. The framework extracts the token from the metadata, validates it using standard JWT middleware, and populates the `HttpContext.User`, allowing you to use standard `[Authorize]` attributes on your gRPC services.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is the difference between Server Streaming and Client Streaming in gRPC?**
+
+gRPC supports four types of calls. Unary is simple request/response. The streaming types allow sending multiple messages over a single connection:
+- **Server Streaming:** The client sends one request message, and the server replies with a *stream* of multiple messages. (e.g., a client requests a stock ticker, and the server continuously sends price updates).
+- **Client Streaming:** The client sends a *stream* of multiple messages to the server, and the server replies with a single response once it has finished processing them. (e.g., a client streams chunks of a large file upload, and the server returns a single "Upload Complete" status).
+
+---
+
+## Intermediate — Question 26
+
+**Q26: How do you handle errors and exceptions in gRPC?**
+
+gRPC does not use HTTP status codes (like 404 Not Found or 500 Internal Server Error) for business logic errors. Instead, it uses a standardized set of **gRPC Status Codes** (e.g., `NotFound`, `InvalidArgument`, `Unauthenticated`).
+
+In C#, if your gRPC service encounters an error, you do not return a standard exception. Instead, you throw an `RpcException` containing the appropriate `StatusCode` and a descriptive message. The gRPC framework translates this exception into the proper HTTP/2 trailers to communicate the error state cleanly to the client in a cross-platform way.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is gRPC-Web, and why is it necessary for browser-based clients?**
+
+Standard gRPC requires deep control over the HTTP/2 connection, specifically the ability to read HTTP/2 Trailing Headers (trailers) to receive the final status code of a call. 
+
+Modern web browsers do not expose APIs that allow JavaScript to read HTTP/2 trailers directly. **gRPC-Web** is a protocol modification that bridges this gap. It encodes the gRPC request and response (including moving trailers into the body or standard headers) so it can be consumed by standard browser APIs like `fetch`. On the backend, a proxy (or middleware in ASP.NET Core) translates the gRPC-Web HTTP/1.1 or HTTP/2 requests back into standard gRPC for the server to process.
+
+---
+
 ## Advanced — Question 22
 
 **Q22: What are a gRPC channel's Subchannel connectivity states (`CONNECTING`, `READY`, `TRANSIENT_FAILURE`, `IDLE`), and how does a channel's aggregate state, derived from its subchannels, determine whether `WaitForReady` (covered earlier) actually blocks a call or lets it proceed immediately?**
@@ -2154,5 +2205,58 @@ WaitForReady=true behavior: if the CHANNEL's aggregate state is NOT
 Because `WaitForReady`'s blocking behavior is a direct consequence of this underlying subchannel-state machinery rather than an independent mechanism of its own, understanding the connectivity-state model explains precisely *when* `WaitForReady` will actually cause a delay (whenever no subchannel is currently `READY`) versus proceeding immediately (as soon as any subchannel reaches `READY`) — a call issued while every subchannel happens to be in `TRANSIENT_FAILURE` following a backend restart will wait exactly as long as it takes for at least one subchannel's connection attempt to succeed.
 
 **Common Pitfall:** assuming a channel's `READY` aggregate state guarantees every individual backend behind a load-balanced channel is currently reachable — the aggregate state only requires *at least one* subchannel to be `READY`; other subchannels serving other resolved addresses could simultaneously be in `TRANSIENT_FAILURE`, meaning some backends are unreachable even while the channel as a whole reports as healthy.
+
+---
+
+## Beginner — Question 23
+
+**Q23: What is gRPC?**
+
+gRPC (gRPC Remote Procedure Calls) is a modern, open-source, high-performance Remote Procedure Call (RPC) framework originally developed by Google. 
+
+It allows a client application to directly call a method on a server application on a different machine as if it were a local object. It uses HTTP/2 for transport, Protocol Buffers as the interface description language, and provides features like authentication, bidirectional streaming, and flow control out of the box.
+
+---
+
+## Beginner — Question 24
+
+**Q24: What are Protocol Buffers (Protobuf)?**
+
+Protocol Buffers are Google's language-neutral, platform-neutral, extensible mechanism for serializing structured data. 
+
+In gRPC, Protobuf serves two main purposes:
+1. **Interface Definition:** You write a `.proto` file to define the structure of your service and the messages it sends/receives.
+2. **Binary Serialization:** It encodes the data into a highly compressed, binary format for transmission over the network, making it much smaller and faster to parse than JSON or XML.
+
+---
+
+## Beginner — Question 25
+
+**Q25: Why is gRPC generally faster than a traditional REST API?**
+
+1. **Binary Payload:** gRPC uses Protobuf, which serializes data into a compact binary format. This results in smaller payloads and significantly faster CPU parsing compared to text-based JSON.
+2. **HTTP/2:** gRPC mandates HTTP/2, which supports multiplexing (sending multiple requests concurrently over a single TCP connection), header compression, and binary framing. Traditional REST often runs on HTTP/1.1, which is slower and requires multiple TCP connections for concurrent requests.
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is the purpose of code generation in gRPC?**
+
+Because gRPC relies on a strongly typed contract (the `.proto` file), you don't write the boilerplate networking or parsing code yourself.
+
+Instead, you use a compiler (like `protoc`) to automatically generate the client and server code in your preferred language (C#, Java, Go, Python, etc.). The server implements the generated interface, and the client simply calls methods on a generated stub, abstracting away the entire network layer.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What types of streaming does gRPC support?**
+
+Because it runs on HTTP/2, gRPC supports four types of communication:
+1. **Unary RPC:** A standard request-response (like REST).
+2. **Server Streaming RPC:** The client sends one request, and the server returns a continuous stream of messages (e.g., a stock ticker).
+3. **Client Streaming RPC:** The client sends a continuous stream of messages, and the server returns a single response when it's done (e.g., uploading a large file).
+4. **Bidirectional Streaming RPC:** Both client and server send a continuous stream of messages to each other concurrently (e.g., a real-time chat application).
 
 ---

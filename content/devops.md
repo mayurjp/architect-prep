@@ -1987,3 +1987,52 @@ Because toil that isn't explicitly measured tends to silently accumulate and cro
 **Common Pitfall:** tracking toil informally or anecdotally ("it feels like we spend a lot of time on manual deploys") rather than measuring it concretely (hours per week spent on specifically-identified repetitive tasks) — without a genuine measurement, there's no objective threshold to trigger the "now automate this" decision, and toil can quietly consume a growing share of a team's capacity indefinitely, with no data-driven signal to prompt intervention.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is DevOps?**
+
+DevOps is a set of practices, cultural philosophies, and tools that combines software development (Dev) and IT operations (Ops). 
+
+Its goal is to shorten the systems development life cycle and provide continuous delivery with high software quality, replacing the old model where developers threw code "over the wall" to operations teams to deploy and maintain.
+
+---
+
+## Beginner — Question 24
+
+**Q24: What is CI/CD?**
+
+- **Continuous Integration (CI):** The practice of frequently merging developer code changes into a central repository, where automated builds and tests run. It helps catch bugs early.
+- **Continuous Deployment / Delivery (CD):** The automated process of taking that tested code and releasing it to a staging or production environment, ensuring software can be reliably released at any time.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is Infrastructure as Code (IaC)?**
+
+Infrastructure as Code is the practice of managing and provisioning computing infrastructure (servers, databases, networks) through machine-readable definition files (like Terraform, ARM templates, or Bicep) rather than physical hardware configuration or interactive configuration tools. 
+
+IaC allows infrastructure to be version-controlled, tested, and reliably reproduced.
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is a Deployment Pipeline?**
+
+A deployment pipeline is an automated manifestation of your process for getting software from version control into the hands of your users. 
+
+It typically involves multiple stages: Source Code checkout -> Build & Compile -> Unit Tests -> Integration Tests -> Deploy to Staging -> Deploy to Production. If any step fails, the pipeline stops.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is Blue/Green Deployment?**
+
+Blue/Green deployment is a release strategy that reduces downtime and risk. 
+
+You maintain two identical production environments (Blue and Green). At any time, only one environment is live and serving all production traffic (e.g., Blue). You deploy the new version of the software to the idle environment (Green), test it thoroughly, and when ready, you simply flip the router/load balancer to point traffic to Green. If something goes wrong, you instantly flip back to Blue.
+
+---

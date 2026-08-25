@@ -2079,3 +2079,49 @@ Because generic, low-level infrastructure code (a high-performance generic seria
 **Common Pitfall:** assuming a `struct`'s "value type" nature alone guarantees it contains no references — a struct can freely contain reference-type fields (a `string`, a class reference) nested within it; `IsReferenceOrContainsReferences<T>()` correctly accounts for this by checking recursively through a struct's actual field composition, not merely whether `T` itself is a class or a struct.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is the difference between Latency and Throughput?**
+
+- **Latency** is the time it takes for a single request to be processed and a response returned (measured in milliseconds or seconds). It's about *speed*.
+- **Throughput** is the total number of requests a system can handle in a given period of time (e.g., requests per second or RPS). It's about *capacity*.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is Caching?**
+
+Caching is the process of storing copies of frequently accessed data in a fast, temporary storage location (the cache) so that future requests for that data can be served much faster than fetching it from the original, slower source (like a database or an external API).
+
+---
+
+## Beginner — Question 26
+
+**Q26: What is a Content Delivery Network (CDN)?**
+
+A CDN is a geographically distributed network of servers that caches static assets (like images, CSS files, JavaScript, and sometimes HTML pages). 
+
+When a user requests a file, the CDN routes the request to the server closest to them (the "edge server"), drastically reducing latency and offloading traffic from your main application servers.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is the difference between Horizontal and Vertical Scaling?**
+
+- **Vertical Scaling (Scaling Up):** Adding more power (CPU, RAM) to an existing single server. It is easier to implement but has a hard physical limit and can cause downtime during upgrades.
+- **Horizontal Scaling (Scaling Out):** Adding more servers to a pool and distributing the load across them (usually via a Load Balancer). It provides near-infinite scale and better fault tolerance.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is Connection Pooling?**
+
+Connection Pooling is a technique used to manage database connections. 
+
+Instead of opening a new, expensive connection to the database for every single request and then closing it, a pool of active connections is kept open. When the application needs a connection, it borrows one from the pool, uses it, and then returns it. This significantly reduces the latency and overhead of establishing TCP and authentication handshakes.
+
+---

@@ -2219,3 +2219,56 @@ Because Conway's Law describes a genuinely observed, near-inevitable tendency ra
 **Common Pitfall:** designing an "ideal" technical architecture on paper without considering the organization's actual team and communication structure — Conway's Law suggests that a technically elegant design misaligned with how teams actually communicate will tend to drift toward matching the team structure anyway over time, regardless of the original diagram's intent, making team structure a genuine architectural input, not a separate, unrelated organizational concern.
 
 ---
+
+## Beginner — Question 25
+
+**Q25: What does SOLID stand for?**
+
+SOLID is an acronym for five core object-oriented design principles intended to make software designs more understandable, flexible, and maintainable:
+- **S**ingle Responsibility Principle (SRP)
+- **O**pen-Closed Principle (OCP)
+- **L**iskov Substitution Principle (LSP)
+- **I**nterface Segregation Principle (ISP)
+- **D**ependency Inversion Principle (DIP)
+
+---
+
+## Beginner — Question 26
+
+**Q26: Explain the Single Responsibility Principle (SRP).**
+
+The Single Responsibility Principle states that a class should have one, and only one, reason to change. 
+
+This means a class should only have one job or responsibility. If a class is handling database access, formatting a report, and calculating taxes, it has multiple reasons to change. SRP encourages breaking these distinct responsibilities into separate, focused classes.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is the DRY principle?**
+
+DRY stands for "Don't Repeat Yourself." 
+
+It is a principle of software development aimed at reducing the repetition of software patterns. It states that every piece of knowledge or logic must have a single, unambiguous, authoritative representation within a system. When DRY is violated (often called WET: "Write Everything Twice"), changing a rule requires updating multiple places, leading to bugs when one place is missed.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is the KISS principle?**
+
+KISS stands for "Keep It Simple, Stupid" (or "Keep It Super Simple"). 
+
+It states that most systems work best if they are kept simple rather than made complicated. Unnecessary complexity should be avoided. A simpler solution is easier to read, easier to test, and easier to maintain than a clever but convoluted one.
+
+---
+
+## Beginner — Question 29
+
+**Q29: Explain the Open-Closed Principle (OCP).**
+
+The Open-Closed Principle states that software entities (classes, modules, functions) should be **open for extension, but closed for modification.**
+
+This means you should be able to add new behavior or features to a system without having to modify existing, tested, and working code. This is typically achieved by using interfaces, abstract classes, and polymorphism (allowing new classes to implement existing interfaces).
+
+---

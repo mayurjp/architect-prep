@@ -2122,6 +2122,56 @@ Because the vulnerability arises specifically from an *assumption* about input t
 
 ---
 
+## Intermediate — Question 24
+
+**Q24: What is CSRF (Cross-Site Request Forgery), and how do Anti-Forgery Tokens prevent it?**
+
+CSRF occurs when a malicious website tricks a user's browser into making an unwanted, authenticated request to a vulnerable application where the user is already logged in. Because browsers automatically attach session cookies to requests to the target domain, the server assumes the user intended the action (like transferring funds).
+
+**Anti-Forgery Tokens (Synchronizer Token Pattern)** prevent this. The server generates a unique, cryptographically strong, unpredictable token when rendering a form, and includes it as a hidden field. When the form is submitted, the server verifies the token. Because the malicious site cannot read the token from the target application (due to the Same-Origin Policy), it cannot include the valid token in its forged request, and the server rejects it.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is the difference between a JWT (JSON Web Token) and an Opaque Reference Token?**
+
+- **JWT (Self-Contained):** The token contains the actual user identity data (claims) encoded within it, along with a cryptographic signature. The resource server can validate the token and read the user data without ever contacting the authorization server. *Downside:* They cannot be easily revoked before expiration, and they can get very large.
+- **Reference/Opaque Token:** The token is just a random, meaningless string (a pointer). The resource server must call the authorization server (e.g., via an Introspection Endpoint) and present the token to look up the user's data. *Downside:* It requires a network call for every validation. *Upside:* It can be revoked instantly by the authorization server.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is the Principle of Least Privilege?**
+
+The Principle of Least Privilege states that a subject (a user, a service, a process) should be granted only the absolute minimum level of access and permissions necessary to perform its required tasks, and nothing more.
+
+If an application only needs to read from a database, its connection string should use a database user account that only has `SELECT` permissions. It should not have `INSERT/UPDATE/DROP` permissions, and it certainly shouldn't be a database admin. This drastically limits the "blast radius" if the application is compromised; an attacker who steals those credentials can only read data, not destroy it.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is CORS (Cross-Origin Resource Sharing), and does it protect the server or the client?**
+
+By default, web browsers enforce the **Same-Origin Policy**, which prevents JavaScript hosted on `domain-a.com` from making API calls to `domain-b.com`. 
+
+CORS is a mechanism that allows the server (`domain-b.com`) to explicitly tell the browser: "It is okay to let JavaScript from `domain-a.com` read my responses." It does this by returning specific HTTP headers (like `Access-Control-Allow-Origin`).
+
+CORS protects the **Client** (the browser user), not the server. It prevents malicious JavaScript on a bad site from reading a user's sensitive data from a good site. The server still processes the request; the browser simply blocks the JavaScript from seeing the *response* if the CORS headers are missing or mismatched.
+
+---
+
+## Intermediate — Question 28
+
+**Q28: How do Output Encoding and Input Validation differ in preventing Cross-Site Scripting (XSS)?**
+
+- **Input Validation** checks data as it arrives at the server (e.g., ensuring an age is a number, or a username has no special characters). While good for defense-in-depth, it is often insufficient for XSS because applications often *must* accept special characters (like `<` or `>`) in fields like comments or blog posts.
+- **Output Encoding** is the primary defense against XSS. It neutralizes data *right before* it is rendered in the browser, converting dangerous characters into safe HTML entities (e.g., `<script>` becomes `&lt;script&gt;`). This ensures the browser displays the data as literal text rather than executing it as code.
+
+---
+
 ## Advanced — Question 22
 
 **Q22: What is Blind Cross-Site Scripting (Blind XSS), and how does an attacker's injected payload execute in an admin or backend user's browser — somewhere the attacker cannot directly observe — requiring an out-of-band callback mechanism to detect successful exploitation?**

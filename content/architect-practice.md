@@ -637,3 +637,91 @@ This is the tribal-knowledge failure mode (Intermediate Q9) fully realized: the 
 **Why this order matters:** skipping straight to a rewrite risks silently dropping a constraint nobody remembered was load-bearing (Scenario Q4's failure mode, but self-inflicted this time); skipping straight to "just fix the bug" without reconstructing context risks the same. Recovering the context first, writing it down, and only then changing the system — carefully, and using the change itself to validate the reconstructed understanding — is the only version of this that leaves the system in better shape than it was found, for the next person too.
 
 ---
+
+## Beginner — Question 7
+
+**Q7: What's the actual difference between a "principle" and a "pattern" in architecture discussions, and why does conflating them cause confusion?**
+
+Both terms get thrown around loosely in conversation, often interchangeably, but they operate at different altitudes and answer different questions. A **principle** is a general guideline — broadly applicable, context-independent, and deliberately abstract, like "favor composition over inheritance," "single responsibility," or "depend on abstractions, not concretions." A principle doesn't tell you *what* to build; it tells you what quality to optimize for whenever you're deciding between options. A **pattern**, by contrast, is a specific, named, reusable solution *shape* for a recurring problem — Strangler Fig (Advanced Q3), Circuit Breaker, Repository, Saga. A pattern is concrete enough that two engineers who both know it can sketch the same diagram from just its name.
+
+**A useful test:** can you violate it and still be doing something reasonable, depending on context? Principles are near-universal — "single responsibility" is rarely wrong to want, even if applying it takes judgment. Patterns are situational — Circuit Breaker is the right tool for a flaky downstream dependency and actively unhelpful complexity if there's no unreliable call to protect. Principles guide *when* and *why* you'd reach for a pattern in the first place; a pattern is one concrete way of honoring one or more principles in a specific recurring situation.
+
+**Why conflating them causes real confusion:** it shows up as two failure modes. First, treating a principle like a pattern — applying "single responsibility" as a rigid rule ("every class must have exactly one public method") rather than a judgment call, producing absurd over-fragmentation nobody asked for. Second, treating a pattern like a principle — reaching for Circuit Breaker or Strangler Fig reflexively, everywhere, as if they were universal good practice rather than a specific answer to a specific problem, adding complexity nothing in the system actually needed. A team discussing "should we use this pattern here" is asking a narrow, falsifiable question about fit; a team discussing "are we honoring this principle" is asking a broader, more subjective one — mixing the two mid-conversation ("well Circuit Breaker follows single responsibility, so we should use it") skips the step of asking whether the problem the pattern solves is actually present.
+
+**Practical guidance:** when a design conversation stalls, ask explicitly which altitude you're arguing at — a disagreement about principle ("should this be more decoupled") needs a different resolution than a disagreement about pattern fit ("is Circuit Breaker the right tool here"), and naming which one you're actually debating usually unsticks the conversation.
+
+---
+
+## Intermediate — Question 11
+
+**Q11: How do you estimate and communicate the cost of a large architectural change to leadership, when the honest answer is "we don't fully know yet"?**
+
+The instinct when asked "how much will this cost and how long will it take" for something like "rewrite the payments system" is to produce a single number, because that's what the question seems to be asking for — but a single number for an intimidating, poorly-bounded change is close to fiction, and everyone involved usually knows it, which is exactly why these asks stall: leadership can't approve an unknowable number, and the architect can't honestly defend one. The fix isn't a better estimate — it's changing the shape of what's being estimated.
+
+**The reframe: break the large ask into a roadmap of smaller, independently-estimable, independently-valuable slices, using Strangler Fig (Advanced Q3) as the mechanical pattern.** Instead of "rewrite the whole payments system: 9-14 months, ask again in a year," the architect proposes: slice one (say, migrating refund processing, the smallest and best-understood piece) is scoped, estimated with real confidence because its boundary is small and known, and — critically — ships real value on its own, independent of whether any later slice ever happens. Each subsequent slice is estimated only once the prior slice is done and has taught the team something concrete about the system's actual shape, cost per slice, and hidden complexity.
+
+**Why this is a better answer to leadership, not a dodge:** it converts "trust me, it'll take about a year" (an unfalsifiable promise) into "here's a scoped, funded first step with a real estimate, that delivers value on its own even if we stop after it" (a checkable commitment). It also surfaces bad news early and cheaply — if slice one reveals the domain is far messier than expected, that's learned after weeks, not after eleven months of a monolithic project with nothing shippable yet. Leadership gets the ability to reprioritize or halt after each slice based on real data, not a sunk-cost hostage situation at month nine.
+
+**Practical guidance:** present it explicitly as a roadmap, not a project — a small number of slices, each with its own estimate, business value, and go/no-go point — and be upfront that later slices' estimates will sharpen as earlier ones complete. This is a harder sell in a single meeting than a confident wrong number, but it's the version that's still true a year later.
+
+---
+
+## Intermediate — Question 12
+
+**Q12: What does it mean that architecture is "a shared understanding," not "a document" — and why does a perfectly-documented architecture nobody has internalized still count as a failure?**
+
+It's tempting to treat architecture documentation — diagrams, ADRs (Beginner Q1), RFCs (Intermediate Q8) — as the deliverable itself: write it well, keep it current, and the job is done. That's a category error. The actual goal was never the document; it's that the team collectively understands and agrees on the system's structure and the reasoning behind it, well enough to make consistent decisions when the architect isn't in the room. The document is a *means* to that shared understanding, one tool among several — it is not the end itself, and optimizing for the artifact instead of the outcome it's supposed to produce is how teams end up with beautiful documentation and a codebase that doesn't resemble it.
+
+**What this looks like when it goes wrong:** a set of pristine diagrams and ADRs exists, reviewed and approved, sitting in a wiki nobody opens after week one. Six months later, three different engineers independently make three different, mutually inconsistent assumptions about how a service boundary works, each confident in their own reading — not because the documentation was wrong, but because reading a document once during onboarding isn't the same as *understanding*, and understanding is the thing that was actually needed to make good day-to-day decisions. The system drifts from the diagram the same way it drifts from any unenforced intention (see the fitness-function discussion, Intermediate Q3) — not because anyone rejected the design, but because nobody was actually carrying it in their head when they made the next hundred small decisions.
+
+**What building genuine shared understanding actually requires, beyond writing things down:** repetition in different forms — a design walkthrough where the team discusses and pokes at the reasoning live, not just reads it; new engineers explaining a boundary back in their own words during onboarding, not just acknowledging a doc; architecture decisions revisited out loud in reviews (Intermediate Q4) so the reasoning stays active rather than archived; and, ideally, fitness functions that make the intended structure a live, enforced fact rather than a historical claim.
+
+**Practical guidance:** treat a document's publication as the start of building shared understanding, not its completion — and judge documentation efforts by whether the team can correctly explain and apply the reasoning unprompted, not by whether the document exists and is accurate. A doc nobody internalized has failed at its real job even if every word in it is true.
+
+---
+
+## Advanced — Question 9
+
+**Q9: How does an architect honestly evaluate a system's architecture in retrospect, a year or more after it went live — and why does distinguishing "reasonable at the time" from "avoidably wrong" matter for review culture?**
+
+Retrospective architecture evaluation is easy to do badly: with a year of production data, incidents, and hindsight, almost every past decision looks obviously flawed from where you're standing now — that ease is exactly the trap. Pure hindsight-driven criticism ("why didn't we just use X") produces a review culture people dread and route around, the same failure mode as bikeshedding (Intermediate Q4) but pointed at people instead of designs. The honest version of this exercise requires deliberately reconstructing what was actually knowable *at decision time*, not what's obvious now.
+
+**The core distinction to draw, for each significant past decision:**
+- **Reasonable given what was known then:** the decision was made with a genuine, defensible read of the information, constraints, and risk available at the time — even though it turned out badly. Choosing a database that couldn't have been known to hit a scaling wall without load data nobody had yet is reasonable-but-wrong, not a mistake in the blameworthy sense.
+- **Avoidably wrong:** the information needed to make a better call was actually available at the time and was skipped, ignored, or never sought — a risk storming pass (Advanced Q5) that would have surfaced a known single point of failure, simply never run; an NFR (Beginner Q4) that stakeholders stated clearly and the design silently didn't meet.
+
+**How to actually run the retrospective:** for each decision under review, reconstruct the ADR's original context (if one exists — if not, this is exactly the archaeology of Scenario Q6) and ask specifically what information existed at the time, not what exists now. Separate "the assumption was reasonable and the world changed" from "the assumption was never validated." Track patterns across multiple retrospectives, not just single incidents — a team that keeps landing in "avoidably wrong" for the same category of gap (say, never load-testing before committing to a data store) has a process problem worth fixing, distinct from any single decision's outcome.
+
+**Why the distinction matters for culture:** a review process that punishes "reasonable at the time" decisions for turning out badly teaches people to stop making judgment calls under uncertainty at all — they'll either over-hedge every decision or stop documenting reasoning that could later be used against them, which quietly kills the ADR practice (Beginner Q1) this whole discipline depends on. A blameless review that still names avoidable gaps precisely is what keeps retrospectives useful instead of either toothless or punitive.
+
+---
+
+## Advanced — Question 10
+
+**Q10: How do architectural decisions interact with hiring and team composition — why is "we're adopting this niche technology" a genuinely architectural trade-off, not just an HR concern?**
+
+Technology choices are usually evaluated on technical merit — throughput, fit for the problem, operational maturity — and rarely evaluated on a dimension that compounds for years afterward: how hard the choice makes it to hire, onboard, and retain people who can operate it. This isn't a peripheral HR footnote bolted onto an otherwise-technical decision; it's a real cost with the same shape as vendor lock-in (Intermediate Q1) or option value (Advanced Q6) — paid continuously, easy to underweight because it doesn't show up in a benchmark or a proof of concept.
+
+**Where the cost actually shows up:**
+- **Hiring pool size.** A mainstream technology (Postgres, Kubernetes, Kafka, mainstream cloud services) has a large, liquid talent pool — job postings fill faster, at a more predictable salary band, with candidates who already carry the operational instincts the role needs. A niche technology (an exotic database, an in-house DSL, a language with a small industry footprint) shrinks that pool dramatically — sometimes to the point that hiring specifically for it becomes the bottleneck on team growth, not budget or headcount approval.
+- **Onboarding cost.** Even when a candidate is hired, a mainstream technology's new hire arrives with transferable muscle memory; a niche one requires training an engineer into competence from a much lower baseline, extending time-to-productivity for every single hire, indefinitely, as long as the technology stays in use.
+- **Retention and bus-factor risk.** A small team of specialists in a niche technology is a concentration risk — losing one or two people can mean losing most of the organization's operational knowledge of a system component, a sharper version of the tribal-knowledge problem in Intermediate Q9 and Scenario Q6, because there's no large external market to rehire the expertise from quickly.
+- **Compounding over the technology's lifetime**, not a one-time cost: every year the system runs on the niche choice, the hiring and onboarding tax gets paid again for every new team member, long after the original technical advantage that motivated the choice may have narrowed or vanished as competing mainstream tools matured.
+
+**How to weigh it, practically:** treat hireability as an explicit line item in any significant technology decision, alongside the technical evaluation — quantify the pool size and expected time-to-fill for the role this creates, not just the tool's benchmark numbers. A niche technology can still be the right call when its technical advantage is large and durable enough to justify the ongoing hiring tax; the failure mode is making that trade silently, discovering the real cost eighteen months later as an unfillable open req, and having no record (Beginner Q1) of whether anyone actually weighed it.
+
+---
+
+## Scenario — Question 7
+
+**Q7: An architect inherits a system where a past technology choice — say, a particular NoSQL database or messaging technology — is now a clearly poor fit for how the system evolved, but migrating away is a multi-quarter effort with real business risk. How do you build the case for the investment and sequence the migration safely?**
+
+The trap here runs in both directions: ignoring the mismatch indefinitely because it "still works" lets the cost compound silently the same way any undocumented debt does (Beginner Q3), while forcing an unjustified big-bang rewrite risks the exact failure mode Strangler Fig exists to avoid (Advanced Q3) — betting the business on a long, high-risk cutover for a problem that may not need one. The job is building a case grounded in real, comparable numbers, then sequencing the fix to de-risk it the same way any other large change should be de-risked.
+
+**Building the case — quantify the cost of staying, not just the cost of migrating.** Leadership naturally sees the migration's cost clearly (it's a line item with an estimate) and the status quo's cost invisibly (it's diffuse, ongoing, easy to mistake for zero). Make the staying-cost concrete and comparable, the same translation discipline used throughout this material (Intermediate Q2): engineering hours per quarter spent working around the technology's limitations, the incident rate and on-call burden it's directly responsible for, the features that are slower to build or flatly blocked because the current technology can't support them, and — per Advanced Q10 — the hiring and retention cost of staffing a team around a technology that's increasingly a poor fit. Presented next to the migration's estimated cost, "staying costs roughly $X per quarter and rising" versus "migrating costs $Y once" is a decision leadership can actually evaluate, rather than an abstract technical complaint.
+
+**Sequencing it safely, via Strangler Fig:** pick the first slice by lowest risk and clearest boundary, not by which part hurts most today — often a read-only or non-critical-path piece of functionality, migrated first to prove the new technology's behavior under real production load before anything critical depends on it. Run old and new in parallel with a synchronization mechanism during the transition (budgeted explicitly as real engineering work, per Advanced Q3's common pitfall), verify each slice with real traffic before cutting over, and decommission the old path per slice rather than leaving both running "just in case."
+
+**Practical guidance:** write the whole thing up as an ADR (Beginner Q1) documenting the quantified case, the rejected big-bang alternative, and the slice sequence — this converts "we should really migrate off this someday" from a recurring complaint into a funded, trackable roadmap with a first concrete step, the same move used in Intermediate Q11 for any large architectural ask.
+
+---

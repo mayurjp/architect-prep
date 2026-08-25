@@ -1578,3 +1578,358 @@ public class OrderFulfillmentSaga :
 **Practical guidance:** the tell is duration and cross-context reach — a workflow that completes within one aggregate's own transaction is just a behavior method; a workflow that spans multiple contexts, waits on external events, and needs compensating logic on failure is a process manager, full stop, and trying to squeeze it into one aggregate's field list is how Scenario Q4/Q5's symptoms get reintroduced one workflow at a time.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What's the difference between a DDD Entity and a plain database row/record with an ID column — isn't "has an identity" true of every table anyway?**
+
+Every row in a relational table technically "has an ID," so this distinction is easy to wave away — but it's not about whether an ID column exists. It's about what the identity is *for* and whether the object built around it protects anything.
+
+**A database row is a current-state snapshot.** A `SELECT * FROM Orders WHERE Id = 5` gives you whatever the row currently holds. The row has no memory of how it got there, no behavior of its own, and no opinion about whether the values it holds together are a *valid* combination — that's entirely up to whatever code last wrote to it. The ID is just a lookup key; nothing about the row's shape depends on it.
+
+**A DDD Entity's identity is what makes it "the same thing" across its whole lifecycle, independent of its current attributes.** An `Order` with `Id = 5` that started as an empty draft, had three lines added, was submitted, then partially refunded is still *the same order* throughout — every one of those states is a different set of attribute values, but the identity never changes, and DDD cares about that continuity specifically because business rules often reference it ("has this order ever been submitted," "was this the original amount or a refunded one"). More importantly, the Entity is not just data at that identity — it's data *plus the only methods allowed to change it* (Beginner Q8's private-setter discipline), so `order.Submit()` can refuse to run if the order has no lines, something a row update statement has no way to refuse.
+
+```csharp
+// DB row equivalent — an ID, current values, no memory of history, no self-protection
+UPDATE Orders SET Status = 'Submitted' WHERE Id = 5;   -- runs regardless of whether Lines is empty
+
+// Entity — same identity, but the identity is attached to protected behavior
+order.Submit();   // throws if _lines is empty; the row can never reach this state directly
+```
+
+**The practical difference shows up the moment two code paths touch the same row.** With a plain row, nothing stops one code path from writing `Status = 'Submitted'` while another writes `Total = 0` moments later, producing a combination the business would call broken. An Entity's identity is meaningless without the behavior wrapped around it — identity alone is just a key; identity *plus* enforced invariants is what DDD means by Entity.
+
+**Practical guidance:** if a class's only job is to mirror a table's columns with public getters/setters, it's a row with extra syntax, not a DDD Entity — regardless of what the class is named or whether it has an `Id` property. The tell is the same one from Beginner Q8: is there any path that changes the object's state without going through a method that could refuse to do so.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: In EF Core specifically, what practical discipline keeps "the Aggregate is a transaction boundary" from being just theory — and what happens in code when that discipline is violated?**
+
+Intermediate Q1 states the principle: one transaction should touch at most one aggregate. In EF Core, that principle becomes a concrete, checkable rule: **load one aggregate root, mutate it through its own methods, and call `SaveChanges()` once** — not partway through handling several aggregates, and not by reaching into a second aggregate's rows mid-handler.
+
+```csharp
+// Correct: one aggregate root loaded, mutated through its own method, one SaveChanges
+public async Task Handle(SubmitOrderCommand cmd, CancellationToken ct)
+{
+    var order = await _db.Orders.FindAsync(cmd.OrderId);
+    order.Submit();                 // invariant enforced inside the aggregate
+    await _db.SaveChangesAsync(ct); // one transaction, one aggregate root's changes
+}
+```
+
+`SaveChanges()` (or `SaveChangesAsync`) wraps everything the `DbContext`'s change tracker has accumulated into one implicit transaction. That's precisely why "one aggregate per `SaveChanges()` call" isn't a style preference — it's the mechanism that makes the consistency boundary real: if the aggregate's `Submit()` method is the only path that mutates it, and exactly one `SaveChanges()` commits that mutation, then the invariant `Submit()` checked is guaranteed to still hold the instant the transaction lands.
+
+**What violating it looks like — reaching into a second aggregate before saving:**
+
+```csharp
+public async Task Handle(SubmitOrderCommand cmd, CancellationToken ct)
+{
+    var order = await _db.Orders.FindAsync(cmd.OrderId);
+    order.Submit();
+
+    var inventoryItem = await _db.InventoryItems.FindAsync(cmd.ProductId);  // second aggregate, same handler
+    inventoryItem.Decrement(cmd.Quantity);                                  // its own invariant, now entangled
+
+    await _db.SaveChangesAsync(ct);   // one transaction now spans two aggregates' consistency boundaries
+}
+```
+
+This compiles and often "works" in testing, but it recreates the lock-contention problem from Scenario Q2/Intermediate Q9 in miniature: every order submission now takes a lock on an inventory row too, and the two aggregates' independent invariants are silently coupled to the same commit. The fix is the pattern already shown in Intermediate Q9 — `Submit()` raises `OrderPlaced`, a separate handler reacts and calls `SaveChanges()` again for `InventoryItem`, in its own transaction.
+
+**Practical guidance:** the concrete code-review check is "does this handler call `SaveChanges()` after touching more than one `DbSet` that maps to a different aggregate root's tables?" If yes, either the handler is doing too much, or the two aggregates were split incorrectly in the first place. A repository that only ever exposes `GetByIdAsync`/`SaveChangesAsync` for a single aggregate root (Intermediate Q2) makes this violation harder to write by accident, since there's no `IInventoryRepository` reachable from `IOrderRepository`'s context in the first place.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: Domain and integration events may be delivered more than once in a distributed system — why does that make handler idempotency a DDD-adjacent concern, and what does an idempotent handler actually look like?**
+
+Intermediate Q3 and Q10 cover *what* domain and integration events are and how they're dispatched (typically via an outbox pattern that guarantees an event is never silently lost between commit and publish). The unavoidable consequence of that reliability guarantee is the opposite failure mode: "at-least-once" delivery, not "exactly-once." A broker that guarantees an event isn't lost achieves that by retrying when it isn't sure a handler finished — which means the same `OrderPlaced` can legitimately arrive at a handler twice. A handler that assumes single delivery will double-charge, double-decrement inventory, or send two confirmation emails.
+
+```csharp
+// Not idempotent — running it twice for the same OrderPlaced double-decrements stock
+public class DecrementInventoryOnOrderPlaced : INotificationHandler<OrderPlaced>
+{
+    public async Task Handle(OrderPlaced e, CancellationToken ct)
+    {
+        var item = await _inventory.GetByIdAsync(e.ProductId);
+        item.Decrement(e.Quantity);           // runs again on redelivery — decrements twice
+        await _inventory.SaveChangesAsync(ct);
+    }
+}
+```
+
+This is the same underlying problem an HTTP idempotency key solves for a client retrying a POST — the concept, not the mechanics, carries over directly: the handler needs a way to recognize "I have already processed this specific event" and skip re-applying its effect, rather than relying on the event only ever arriving once.
+
+```csharp
+// Idempotent — records which event IDs have been applied, checked before acting
+public class DecrementInventoryOnOrderPlaced : INotificationHandler<OrderPlaced>
+{
+    public async Task Handle(OrderPlaced e, CancellationToken ct)
+    {
+        if (await _processedEvents.AlreadyHandledAsync(e.EventId, ct))
+            return;                                    // redelivery — effect already applied, do nothing
+
+        var item = await _inventory.GetByIdAsync(e.ProductId);
+        item.Decrement(e.Quantity);
+        await _processedEvents.MarkHandledAsync(e.EventId, ct);
+        await _inventory.SaveChangesAsync(ct);          // event-ID record and effect commit in the same transaction
+    }
+}
+```
+
+The `EventId` check and the domain mutation must commit together, in the same `SaveChanges()` call — recording "handled" in a separate transaction reopens the exact gap the outbox pattern was closing on the publish side, just moved to the consume side.
+
+**Common pitfall:** assuming a message broker's "exactly-once" marketing claim removes the need for this — most brokers that advertise it only guarantee exactly-once *delivery to the queue*, not exactly-once *execution of your handler's side effects*, especially once retries, timeouts, and consumer crashes are in the picture.
+
+**Practical guidance:** design domain event effects to be naturally idempotent where possible (`Decrement` by an absolute target rather than a relative amount, `SetStatus(Delivered)` rather than `AdvanceStatus()`) before reaching for an explicit processed-events table — some operations are idempotent by construction and need no bookkeeping at all.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: The term "Saga" shows up both in DDD literature and in general distributed-systems/microservices literature — do they mean the same thing?**
+
+Closely related, but not identically scoped, and conflating them causes real confusion when a team reads one source expecting the other's guarantees.
+
+**The original "Saga" (Garcia-Molina and Salem, 1987, database literature)** describes a long-running transaction broken into a sequence of local transactions, each with a defined **compensating transaction** that can undo its effect if a later step fails — the point being to achieve transaction-like all-or-nothing behavior across steps that can't share one ACID transaction, purely through forward steps and their reverses.
+
+**DDD literature's use (and Scenario Q6's "process manager")** borrows the term for the same broad shape — a multi-step, potentially long-running process with compensation on failure — but usually frames it specifically in terms of Bounded Contexts and aggregates: a saga/process manager coordinates *aggregates that must not be merged*, reacting to domain/integration events and issuing commands, precisely because DDD's own rule (Intermediate Q9) forbids one transaction spanning multiple aggregates. The DDD framing emphasizes *why* the coordination has to happen this way — because the aggregate boundary is a hard consistency wall — more than the general pattern does.
+
+**General microservices/resiliency literature** uses "Saga" more broadly for any multi-service, multi-step business transaction with compensation, often without reference to aggregates or Bounded Contexts at all — the concern there is service-to-service coordination and failure handling, and the pattern is frequently discussed alongside two implementation styles: **choreography** (each service reacts to the previous service's event with no central coordinator) and **orchestration** (a central saga orchestrator, similar to Scenario Q6's `OrderFulfillmentSaga`, explicitly issues each step's command).
+
+```text
+DDD framing:            "aggregates X and Y can't share a transaction, so a process
+                          manager coordinates them via events, one aggregate at a time"
+
+Distributed-systems      "service X and service Y can't share a transaction, so we
+framing:                  need compensating steps if step 2 fails after step 1 committed"
+```
+
+The mechanics — a persisted process state, forward steps, compensating actions, at-least-once event handling (which is exactly why Intermediate Q14's idempotency matters *inside* saga steps too) — are the same regardless of which literature you're reading. What differs is emphasis: DDD sources tend to justify the pattern from aggregate/consistency-boundary theory; general resiliency sources tend to justify it from service-autonomy and network-reliability concerns.
+
+**Practical guidance:** when a colleague says "saga," clarify whether they mean the orchestration/choreography implementation question (how do services coordinate) or the DDD-flavored question (which aggregates does this process touch, and why can't they share a transaction) — both are legitimate readings of the same word, and a design conversation that conflates them tends to produce a saga that's well-justified on one axis and unexamined on the other.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What is the "Ubiquitous Language" in Domain-Driven Design?**
+
+The Ubiquitous Language is a shared, rigorously defined vocabulary used by everyone on the project—both domain experts (the business side) and software developers. 
+
+It is "ubiquitous" because it is used everywhere: in spoken conversations, in requirements, and directly in the source code (class names, method names, variables). If the business experts call a concept a "Policy", developers must name the class `Policy`, not `Contract` or `Document`. If a term changes in the business, the code must be refactored to reflect that change. This eliminates the "translation layer" between business requirements and technical implementation.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: What is the difference between a Value Object and an Entity in DDD?**
+
+- **Entity:** An object defined by its continuous **identity**, regardless of its attributes. (e.g., A `Person`. If John changes his name or address, he is still the same person because his `Id` or SSN is the same).
+- **Value Object:** An object defined solely by its **attributes** (structural equality), with no conceptual identity. It is immutable. (e.g., An `Address`. If two addresses have the same street, city, and zip, they are exactly the same address. You don't update a Value Object; you replace it completely with a new one).
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is the difference between a Subdomain and a Bounded Context?**
+
+- A **Subdomain** exists in the *Problem Space*. It is a logical part of the real-world business (e.g., the Billing department, the Shipping department). It exists whether you write software for it or not.
+- A **Bounded Context** exists in the *Solution Space*. It is an explicit architectural boundary in your software where a specific Ubiquitous Language applies. 
+
+Ideally, they align 1:1 (one Bounded Context built to solve one Subdomain). But in legacy systems, one monolithic Bounded Context might span multiple Subdomains.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is an Aggregate and an Aggregate Root?**
+
+An **Aggregate** is a cluster of associated domain objects (Entities and Value Objects) that are treated as a single unit for data changes. It represents a strict transactional consistency boundary. 
+
+Every Aggregate has one specific Entity designated as the **Aggregate Root**. Outside objects can only hold references to the Root, never to the internal children. All modifications to the Aggregate must go through the Root's methods. This ensures the Root can enforce all business rules and invariants across the entire cluster of objects before saving.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What is a Domain Event, and how does it help decouple Aggregates?**
+
+A Domain Event is an immutable object representing something meaningful that occurred in the domain (e.g., `OrderShipped`, `InventoryDepleted`). 
+
+Because DDD mandates that a single transaction should only modify *one* Aggregate, Domain Events are used when a change in one Aggregate needs to trigger a side-effect in another. 
+Instead of the `Order` aggregate directly modifying the `Inventory` aggregate (creating tight coupling), the `Order` aggregate publishes an `OrderShipped` domain event. A separate event handler listens to that event and updates the `Inventory` aggregate in a separate transaction, ensuring loose coupling and eventual consistency.
+
+---
+
+## Advanced — Question 12
+
+**Q12: How do you introduce DDD into a legacy/brownfield codebase that wasn't built with it, without requiring a full rewrite?**
+
+A full rewrite is rarely justified and often fails outright (the "second-system effect" — a rewrite frequently takes longer than expected, and the business can't pause feature work while it happens). DDD adoption in a brownfield system instead works incrementally, treating strategic design as the entry point rather than tactical patterns.
+
+**Step 1 — map Bounded Contexts onto the existing system as it actually is, not as it should be.** Before changing any code, do an Event Storming pass (Intermediate Q8) against the current system's real behavior, and overlay candidate Bounded Context boundaries onto the existing module/table structure. This surfaces where the legacy code already has implicit seams (even a Big Ball of Mud, Advanced Q11, usually has some natural fault lines) and, just as usefully, where it doesn't — those unbounded areas are where the biggest payoff (and the biggest risk) lives.
+
+**Step 2 — pick one Bounded Context, usually the one causing the most pain or closest to the Core Domain, and wrap it with an Anti-Corruption Layer facing the rest of the legacy system.** This is Advanced Q4's ACL pattern turned inward: rather than treating "legacy" as an external vendor system, treat the *un-refactored parts of your own codebase* as the messy upstream, and build a translation seam so the newly-modeled context's domain model stays clean even while everything around it is still the old shape.
+
+```csharp
+// New Bounded Context's clean model, introduced alongside the legacy code —
+// not a replacement for it yet, just a parallel, correctly-modeled slice
+public class Order   // new rich aggregate
+{
+    public void Submit() { /* real invariants enforced here, finally */ }
+}
+
+// Anti-Corruption Layer translating the legacy schema into the new aggregate
+public class LegacyOrderTranslator
+{
+    public Order FromLegacyRow(LegacyOrderRow row) => Order.Reconstitute(row.Id, row.Status, /* ... */);
+}
+```
+
+**Step 3 — apply tactical patterns only inside the new context's boundary, leave the rest of the legacy system alone.** The legacy code outside the newly-carved context keeps working exactly as before; nothing requires touching it. Each subsequent iteration picks the next highest-value context and repeats — a "strangler fig" migration (incrementally replacing legacy behavior module by module while the old system keeps running) applied at the Bounded Context level rather than the endpoint or service level.
+
+**Common pitfall:** starting with tactical patterns (retrofitting rich aggregates onto legacy tables) before strategic mapping — without knowing the Bounded Context boundaries first, "richer" entities just end up modeling the wrong scope, entangled with whatever the legacy schema happened to couple together.
+
+**Practical guidance:** pick the first context based on business pain, not technical convenience — the Core Domain subdomain (Advanced Q7) causing the most bugs or slowest feature velocity is usually the highest-leverage starting point, since that's where DDD's investment pays off fastest and most visibly, building the case for continuing.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What's the trade-off of applying DDD's full tactical toolkit — aggregates, repositories, domain events — to a subdomain that's genuinely simple CRUD?**
+
+Advanced Q6 and Q7 already establish the classification (Core/Supporting/Generic) and the alternative (Transaction Script/Active Record) — this is the concrete cost side of getting that classification wrong in the over-engineering direction, since it's the direction that's easy to justify one decision at a time and hard to notice accumulating.
+
+**What the toolkit costs, regardless of whether it's earning its keep:** an aggregate root with private setters and behavior methods, a dedicated repository interface and implementation, domain events for state changes, a mapping configuration keeping the ORM out of the domain model (Intermediate Q11) — each piece is a real file, a real indirection a future reader has to trace through, and real ceremony around what might be a two-field settings row.
+
+```csharp
+// A "maintenance mode banner" setting — no real invariant, changes rarely, single field of consequence
+public class MaintenanceBannerSetting   // Aggregate Root?
+{
+    public SettingId Id { get; private set; }
+    private string _bannerText;
+    public string BannerText => _bannerText;
+
+    public void UpdateText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) throw new DomainException("Banner text cannot be empty.");
+        _bannerText = text;
+        _domainEvents.Add(new MaintenanceBannerTextChanged(Id, text));  // who's listening? usually nobody.
+    }
+}
+// Plus: ISettingRepository, EfSettingRepository, SettingEntityConfiguration, a command handler,
+// a domain event with zero subscribers — for one string field.
+```
+
+Compare to the honest Active Record equivalent: a class with a settable `BannerText` property and a straightforward `UPDATE Settings SET BannerText = @text` — same functional result, a fraction of the code, and nothing lost, because there was never a multi-field invariant to protect in the first place.
+
+**Where the cost actually bites:** it's not that the rich version is wrong, exactly — it's that every future developer touching this subdomain now has to understand aggregate/repository/domain-event conventions to make a one-line change, the domain event has no subscriber and exists purely as ceremony, and the pattern's presence signals "this is complex, be careful" about code that isn't complex at all, which wastes reviewer attention that should go toward the parts of the system that are.
+
+**Practical guidance:** the test from Advanced Q7 applies directly — ask whether this subdomain is Core, Supporting, or Generic before reaching for the tactical toolkit, not after. A settings banner, a static content page, an admin lookup-table editor are almost always Generic or thin Supporting subdomains: default to the simplest thing that works (a plain class, direct SQL or a generic `DbSet<T>` CRUD path) and only promote a subdomain to the full tactical toolkit when it demonstrably grows real invariants — not preemptively, on the theory that it might need them eventually.
+
+---
+
+## Scenario — Question 7
+
+**Q7: A team has correctly identified their Bounded Contexts, but `Ordering` and `Billing` both need "the current price of a product," disagree about who owns it, and end up with duplicated, occasionally-inconsistent copies. How do you resolve it?**
+
+The disagreement itself is the diagnostic clue: if both contexts think they might own product pricing, neither actually does — pricing is a distinct concept from either "placing an order" or "generating an invoice," and it's been left homeless, which is why it's drifted into two disconnected copies instead of one owned source.
+
+**Step 1 — recognize "current price" isn't Ordering's or Billing's concept at all.** Neither context's Ubiquitous Language naturally includes "set the price of a product" as something it does — Ordering's language is about carts and line items, Billing's is about invoices and payments. Pricing (list price, price tiers, discount rules, effective dates) is its own coherent set of rules and vocabulary, which is exactly the signal for a distinct Bounded Context — either its own `Pricing` context, or folded into `Catalog` if the team already has one and pricing rules aren't complex enough to warrant a fully separate context (Advanced Q7's Core-vs-Supporting judgment call applies here too).
+
+**Step 2 — give that context sole write ownership, and make it the only source of the *live* price.**
+
+```csharp
+// Catalog (or Pricing) Bounded Context — single source of truth for current price
+namespace Catalog.Domain
+{
+    public class Product
+    {
+        public ProductId Id { get; }
+        public Money CurrentPrice { get; private set; }   // the only place "current price" is writable
+        public void ChangePrice(Money newPrice) { /* validation, price-change event raised here */ }
+    }
+}
+```
+
+**Step 3 — Ordering and Billing each keep only a locally-relevant, point-in-time snapshot, never a live reference.** This is the same principle Scenario Q2 already applied to `OrderLine`'s `UnitPriceSnapshot` — an order or invoice should reflect the price that was actually agreed at that moment, immune to later catalog changes, which is correct domain behavior, not just a performance shortcut:
+
+```csharp
+namespace Ordering.Domain
+{
+    public class OrderLine
+    {
+        public ProductId ProductId { get; }         // reference by ID
+        public Money PriceAtOrderTime { get; }       // snapshot, captured once, never re-queried from Catalog
+    }
+}
+
+namespace Billing.Domain
+{
+    public class InvoiceLine
+    {
+        public ProductId ProductId { get; }
+        public Money PriceAtInvoiceTime { get; }      // Billing's own snapshot — may legitimately differ from
+    }                                                  // Ordering's if the invoice reflects a later re-price
+}
+```
+
+Naming the field `PriceAtOrderTime`/`PriceAtInvoiceTime` rather than `Price` makes the snapshot nature explicit in the Ubiquitous Language itself — nobody misreads it as a live lookup.
+
+**Why the "occasional inconsistency" symptom disappears:** it wasn't really an inconsistency bug — it was two undeclared, uncoordinated write paths to the same concept. Once `Catalog`/`Pricing` is the only writer and both consumers hold snapshots, there's exactly one place a price can change, and both downstream copies are honestly labeled as point-in-time, not silently stale duplicates of an ambiguous "current" value.
+
+**Practical guidance:** the general pattern — two contexts fighting over ownership of a concept usually means the concept doesn't belong to either of them — recurs throughout this file (Scenario Q4's `Customer`, Scenario Q5's `Subscription`); the fix is always the same shape: find or create the context that actually owns the concept, and let every consumer hold an ID reference plus a snapshot of whatever value they need to be locally correct at a point in time, never a live cross-context reference.
+
+---
+
+## Beginner — Question 10
+
+**Q10: What is Domain-Driven Design (DDD)?**
+
+Domain-Driven Design (DDD) is a software engineering approach that focuses on modeling software to match a complex domain. It emphasizes collaboration between technical experts (developers) and domain experts (business stakeholders) to create a shared understanding and a conceptual model of the business, translating that model directly into the software's structure and code.
+
+---
+
+## Beginner — Question 11
+
+**Q11: What is the Ubiquitous Language?**
+
+The Ubiquitous Language is a core concept in DDD: a common, rigorous language developed collaboratively by developers and domain experts. 
+
+Instead of developers using technical jargon and business experts using business jargon, both groups agree on a single, shared vocabulary. This exact vocabulary is then used everywhere: in spoken conversations, in documentation, and most importantly, directly in the source code (class names, variable names, method names).
+
+---
+
+## Beginner — Question 12
+
+**Q12: What is a Bounded Context?**
+
+A Bounded Context defines a specific, explicit boundary within a larger system where a particular domain model and its Ubiquitous Language apply strictly. 
+
+Because the same term can mean different things in different parts of a business (e.g., a "Customer" to the Billing department is different from a "Customer" to the Shipping department), Bounded Contexts ensure that terms remain unambiguous within their specific boundaries, preventing giant, confused models.
+
+---
+
+## Beginner — Question 13
+
+**Q13: Explain what an Entity is in DDD.**
+
+An Entity is a domain object that has a distinct identity that runs through time and different states. 
+
+It is not defined primarily by its attributes, but by its unique identity (like a User ID or Order Number). Even if two Entities have exactly the same attributes (two users with the same name and age), they are considered different if their IDs are different.
+
+---
+
+## Beginner — Question 14
+
+**Q14: What is a Value Object?**
+
+A Value Object is a domain object that represents a descriptive aspect of the domain with no conceptual identity. 
+
+It is defined entirely by its attributes (e.g., an Address, a Money amount, or a Color). If two Value Objects have exactly the same attributes, they are considered identical. They should always be designed to be immutable; if a value changes, the entire object is replaced with a new one rather than modifying the existing one.
+
+---

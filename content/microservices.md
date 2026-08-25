@@ -2621,6 +2621,74 @@ Because an orchestrator process crashing mid-saga is a genuinely expected failur
 
 ---
 
+## Intermediate — Question 27
+
+**Q27: What is the difference between an API Gateway and a Reverse Proxy?**
+
+While an API Gateway acts as a reverse proxy, it performs a fundamentally richer set of duties tailored for microservices.
+
+A **Reverse Proxy** (like NGINX or HAProxy) sits in front of backend servers and forwards requests to them. Its primary concerns are load balancing, SSL termination, and caching. It treats the backend as a black box.
+
+An **API Gateway** (like Ocelot, Kong, or Azure API Management) sits between the client and the microservices. It deeply understands the API surface. In addition to routing, it handles cross-cutting concerns like:
+- Request aggregation (calling 3 microservices and merging the result for the client)
+- Authentication and authorization validation
+- Rate limiting and throttling
+- Request/Response transformation
+
+---
+
+## Intermediate — Question 28
+
+**Q28: Why is the "Database-per-Service" pattern considered a strict requirement for a true Microservices architecture?**
+
+If multiple microservices read and write to the exact same database tables, they are tightly coupled at the data tier. 
+1. **Schema Coupling:** A change to a table schema required by Service A might break Service B.
+2. **Performance Coupling:** A heavy query in Service B can lock tables or exhaust DB resources, bringing down Service A.
+3. **Technology Lock-in:** Both services are forced to use the same database technology.
+
+The "Database-per-Service" pattern dictates that a service's data can *only* be accessed via its API. If Service B needs Service A's data, it must ask Service A for it. This allows each service to evolve its schema independently, choose the best DB for the job (SQL vs NoSQL), and scale without impacting others.
+
+---
+
+## Intermediate — Question 29
+
+**Q29: What is the Outbox Pattern, and what distributed data problem does it solve?**
+
+When a microservice needs to update its local database *and* publish an event to a message broker (like RabbitMQ or Kafka), it faces a distributed transaction problem: "Dual Write." If the DB commit succeeds but the message broker goes down before the event is sent, the system is left in an inconsistent state.
+
+The **Outbox Pattern** solves this using a single local transaction. 
+Instead of sending the message to the broker directly, the service writes the business entity (e.g., `Order`) AND the event (e.g., `OrderCreatedMessage`) into a local `Outbox` table within the same database transaction. 
+
+Because they are in the same database, it is 100% atomic. A separate background worker then constantly polls the `Outbox` table and publishes those messages to the message broker, marking them as processed.
+
+---
+
+## Intermediate — Question 30
+
+**Q30: What is the difference between Choreography and Orchestration in Microservice communication?**
+
+These are the two primary ways to manage a business process (Saga) that spans multiple services.
+
+- **Orchestration (Command-driven):** A central "orchestrator" service acts as a controller. It explicitly tells other services what to do (e.g., "PaymentService, charge the card", "InventoryService, reserve the item"). It is easier to trace the workflow, but creates a single point of failure and tight coupling, as the orchestrator must know about everyone else.
+- **Choreography (Event-driven):** There is no central controller. Services just announce what happened by publishing events (e.g., `OrderCreated`). Other services subscribe to these events and react accordingly. It promotes loose coupling, but makes it much harder to track the overall status of the business process.
+
+---
+
+## Intermediate — Question 31
+
+**Q31: Why is Two-Phase Commit (2PC) generally avoided in Microservices, and what is used instead?**
+
+Two-Phase Commit (2PC) is a distributed transaction protocol where a coordinator asks all participating databases to "prepare" a transaction (locking their rows), and if they all agree, it tells them to "commit." 
+
+It is avoided in microservices because:
+1. It violates the independent autonomy of services.
+2. It is highly synchronous and blocking; if one service or database is slow or down, the entire transaction (and locks in other databases) halts, killing scalability.
+3. Many modern NoSQL databases and message brokers don't support it.
+
+Instead, microservices use **Sagas** and **Eventual Consistency**. Rather than a single ACID transaction, a Saga executes local transactions sequentially. If a step fails, the Saga runs compensating transactions (undo operations) to revert the previous steps.
+
+---
+
 ## Advanced — Question 24
 
 **Q24: What is the difference between Head-Based and Tail-Based distributed tracing sampling, and how can Tail-Based sampling preferentially keep traces containing errors even though that decision happens after the entire trace has already completed?**
@@ -2644,5 +2712,77 @@ Tail-Based sampling: WAITS until the ENTIRE trace, across every SERVICE
 Because Tail-Based sampling's decision genuinely depends on information (the trace's final outcome) that simply doesn't exist yet at the moment Head-Based sampling must decide, Tail-Based sampling requires buffering every trace's complete span data somewhere (typically at a collector layer) until the trace finishes — a real infrastructure and latency cost, but one that pays off by dramatically increasing the odds that exactly the traces most valuable for debugging (errors, outliers) are the ones actually retained, rather than being randomly discarded at the same rate as routine, uninteresting traffic.
 
 **Common Pitfall:** using Head-Based sampling at a low percentage for a system where rare, hard-to-reproduce errors are the primary debugging concern — a 1% random sample means a rare error occurring in roughly 1% of requests has only a 1-in-10,000 chance of actually being captured, potentially leaving exactly the traces most needed for debugging entirely unsampled; Tail-Based sampling directly addresses this specific gap by deferring the decision until the outcome is actually known.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is a Microservices Architecture?**
+
+A Microservices Architecture is a software development approach where a large, complex application is built as a suite of small, independent services. 
+
+Each microservice:
+- Runs in its own process.
+- Is organized around a specific business capability (e.g., Billing, Shipping, User Management).
+- Can be developed, deployed, and scaled independently.
+- Communicates with other services using lightweight mechanisms, typically HTTP/REST APIs or asynchronous messaging.
+
+---
+
+## Beginner — Question 26
+
+**Q26: How does a Microservice differ from a Monolith?**
+
+**Monolithic Architecture:**
+- All components of the application (UI, business logic, data access) are packaged and deployed together as a single unit (e.g., one large `.exe` or `.dll`).
+- **Pros:** Simpler to develop initially, easier to test end-to-end, straightforward deployment.
+- **Cons:** Hard to scale specific parts, any small change requires redeploying the whole app, and it can become a "big ball of mud" as it grows.
+
+**Microservices Architecture:**
+- The application is broken down into separate, independent services.
+- **Pros:** Independent scaling (scale only the heavy-traffic service), technology flexibility (use different languages for different services), independent deployments.
+- **Cons:** Significantly higher operational complexity, harder to debug across services, requires robust DevOps and network management.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is an API Gateway?**
+
+An API Gateway is a server that acts as a single entry point for all clients into a microservices-based system. 
+
+Instead of a mobile app or web frontend making requests directly to dozens of different microservices (which requires knowing all their IP addresses and handling multiple network hops), the client makes one request to the API Gateway. The Gateway then routes the request to the appropriate internal microservice(s).
+
+**Key Responsibilities:**
+- **Routing:** Directing `/api/users` to the User Service and `/api/orders` to the Order Service.
+- **Cross-cutting concerns:** Handling authentication, SSL termination, rate limiting, and logging in one central place.
+- **Aggregation:** Fetching data from multiple services and combining it into a single response for the client to reduce network chatter.
+
+---
+
+## Beginner — Question 28
+
+**Q28: Explain the concept of "Independent Deployability" in microservices.**
+
+Independent deployability is arguably the defining characteristic of a true microservice. It means you can make a change to a single service, test it, and deploy it to production without needing to deploy or coordinate with any other service in the system.
+
+**Why it matters:**
+If updating the "Billing Service" requires you to simultaneously update and deploy the "Shipping Service" because they share a database or have tightly coupled code, you do not have microservices; you have a **Distributed Monolith** (all the complexity of microservices with none of the benefits). 
+
+True independent deployability usually requires each microservice to own its own database and communicate via stable, versioned contracts.
+
+---
+
+## Beginner — Question 29
+
+**Q29: What is Service Discovery?**
+
+In a microservices architecture, services are dynamically scaling up and down, and instances can fail or be moved to different IP addresses at any time. Because IP addresses are volatile, services cannot rely on hardcoded IPs to find each other.
+
+**Service Discovery** is the mechanism that allows services to find each other dynamically.
+1. When a service instance starts, it registers itself (its IP and port) with a central Service Registry.
+2. When Service A needs to call Service B, it asks the Service Registry for the current location of Service B.
+
+In modern environments like Kubernetes, Service Discovery is built into the platform (using internal DNS) so developers don't usually need to write custom code for it.
 
 ---

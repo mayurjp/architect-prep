@@ -2246,3 +2246,67 @@ Because a controller's entire job typically involves continuously observing actu
 **Common Pitfall:** building a custom controller against a CRD without enabling the `status` subresource, then writing both spec and status fields through the same generic update call — this recreates exactly the race condition the subresource split exists to prevent, and can produce confusing, intermittent data loss when a user's edit and the controller's own reconciliation loop happen to overlap in time.
 
 ---
+
+## Beginner — Question 24
+
+**Q24: What is the difference between a Deployment and a StatefulSet?**
+
+Both controllers manage groups of Pods, but they are designed for fundamentally different types of workloads.
+
+- **Deployment:** Designed for **stateless** applications (like web APIs). It assumes all Pods are identical and interchangeable. If a Pod dies, it is replaced by a brand new one with a random name. There is no guaranteed order for scaling up or down.
+- **StatefulSet:** Designed for **stateful** applications (like databases). It guarantees the ordering and uniqueness of Pods. Each Pod gets a sticky, persistent identity (e.g., `db-0`, `db-1`) and a stable persistent storage volume that stays with it even if the Pod is rescheduled to another node. It also guarantees that `db-1` will not start until `db-0` is ready.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is a `ConfigMap` used for?**
+
+A `ConfigMap` is an API object used to store non-confidential configuration data in key-value pairs. 
+
+It allows you to decouple environment-specific configuration (like database connection strings, feature flags, or plain-text config files) from your container images. This means you can build a single Docker image and use different ConfigMaps to run it in Dev, Staging, and Production environments.
+
+Pods can consume ConfigMaps in two main ways:
+1. As environment variables injected into the container.
+2. Mounted as physical configuration files inside the container's filesystem.
+
+---
+
+## Beginner — Question 26
+
+**Q26: Explain the purpose of a Kubernetes `Secret`.**
+
+A `Secret` is identical in purpose and usage to a `ConfigMap`, but it is specifically designed to hold **sensitive** data, such as passwords, OAuth tokens, and SSH keys.
+
+While ConfigMaps store data in plain text, Secrets are intended to be handled more securely:
+- They are stored base64-encoded in the API (and ideally encrypted at rest in etcd).
+- They can be restricted using Role-Based Access Control (RBAC).
+- They are only sent to the specific Nodes that are running Pods which explicitly request them, and they are stored in `tmpfs` (memory) on the Node, never written to physical disk.
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is a `ReplicaSet` and how does it relate to a Deployment?**
+
+A `ReplicaSet`'s sole purpose is to maintain a stable set of identical replica Pods running at any given time. If you tell a ReplicaSet to maintain 3 replicas, and one Pod crashes, the ReplicaSet immediately spins up a new one to replace it.
+
+**Relationship to a Deployment:**
+You almost never create or manage ReplicaSets directly. Instead, you create a `Deployment`, and the Deployment automatically creates and manages the `ReplicaSets` under the hood. 
+
+When you update a Deployment with a new container image, it creates a *new* ReplicaSet, scales it up, and simultaneously scales down the *old* ReplicaSet. This is how Kubernetes achieves zero-downtime rolling updates.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is a Namespace in Kubernetes?**
+
+A Namespace provides a mechanism for isolating groups of resources within a single Kubernetes cluster. It acts as a virtual cluster.
+
+**Why use them?**
+- **Logical Separation:** You can separate different environments (e.g., `dev`, `staging`, `prod`) or different teams within the same physical cluster.
+- **Name Collisions:** Resources (like a Service named `database`) only need to be unique *within* a Namespace, allowing multiple teams to use the same names safely.
+- **Access Control & Quotas:** You can apply RBAC permissions and Resource Quotas to an entire Namespace to restrict what a specific team can do or how much CPU/Memory they can consume.
+
+---

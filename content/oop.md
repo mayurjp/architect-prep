@@ -2357,6 +2357,77 @@ Because Open Recursion is precisely the mechanism the Template Method pattern (c
 
 ---
 
+## Intermediate — Question 25
+
+**Q25: What is the difference between an Anemic Domain Model and a Rich Domain Model in OOP?**
+
+An **Anemic Domain Model** is one where the domain objects (entities) contain only data (properties with public getters and setters) and absolutely no behavior or business logic. The logic is instead scattered across "Service" classes that manipulate these dumb data containers. This is often considered an anti-pattern in OOP because it violates encapsulation and resembles procedural programming.
+
+A **Rich Domain Model** encapsulates both data and behavior. The entity itself enforces its own invariants and rules. You cannot just change its state arbitrarily from the outside; you must call meaningful business methods on the object (e.g., `account.Withdraw(amount)` instead of `account.Balance -= amount`).
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What is the Law of Demeter (Principle of Least Knowledge), and how does violating it create fragile code?**
+
+The Law of Demeter (LoD) states that an object should only talk to its immediate friends, not to strangers. In practice, this means a method should only invoke methods on:
+- Itself
+- Its parameters
+- Objects it instantiates
+- Its direct fields/properties
+
+Violating it usually looks like "train wrecks": `order.Customer.Address.ZipCode.Validate()`. 
+If you do this, the caller is tightly coupled to the entire internal navigation structure of `Order`. If `Customer` is refactored to support multiple addresses, the caller's code breaks. Instead, `Order` should expose a method that delegates appropriately, hiding its internal structure from the outside world.
+
+---
+
+## Intermediate — Question 27
+
+**Q27: What is the difference between Mutable and Immutable objects in OOP, and why is immutability often preferred for complex systems?**
+
+- **Mutable Objects:** Their internal state (fields/properties) can be changed after the object is created.
+- **Immutable Objects:** Their state is fixed at creation time (via the constructor). If you need to "change" a value, you create and return a brand-new instance with the updated value (like `System.String` or `System.DateTime` in C#).
+
+**Why it's preferred:** Immutability eliminates an entire class of bugs related to shared state. Since the object cannot change, it is inherently thread-safe (no locking required), and you can pass it to other methods without worrying that they might alter it unexpectedly.
+
+---
+
+## Intermediate — Question 28
+
+**Q28: What is the "Tell, Don't Ask" principle in Object-Oriented Design?**
+
+"Tell, Don't Ask" is a principle that reminds developers to bundle data and the functions that operate on that data together (Encapsulation). 
+
+Instead of **asking** an object for its data, performing a calculation in the calling code, and then updating the object, you should **tell** the object what to do.
+
+**Violating the principle (Asking):**
+```csharp
+if (user.IsPremium && user.Balance > cost) {
+    user.Balance -= cost;
+}
+```
+
+**Following the principle (Telling):**
+```csharp
+user.Purchase(cost); // The User class handles its own logic and invariants internally
+```
+
+---
+
+## Intermediate — Question 29
+
+**Q29: What is the difference between Inversion of Control (IoC) and Dependency Injection (DI)?**
+
+They are deeply related but not the same thing.
+
+- **Inversion of Control (IoC)** is a broad design *principle*. It means reversing the traditional flow of control. Instead of your custom code calling into a library to execute steps, a framework calls into your custom code (the "Hollywood Principle: Don't call us, we'll call you").
+- **Dependency Injection (DI)** is a specific *pattern* used to implement IoC for resolving dependencies. Instead of an object using `new` to create its dependencies, the dependencies are injected into it from the outside (usually via the constructor).
+
+DI is one way to achieve IoC. (Other ways include the Template Method pattern, events/delegates, or Service Locator).
+
+---
+
 ## Advanced — Question 24
 
 **Q24: What is the difference between "Inheritance for Implementation Reuse" and "Inheritance for Type Hierarchy" as two genuinely different motivations sometimes conflated under the single term "inheritance," and why does using inheritance purely to reuse code tend to produce a fragile design?**
@@ -2379,5 +2450,128 @@ public class Stack<T> : List<T> { public void Push(T item) => Add(item); }
 Because Implementation-Reuse inheritance exposes the *entire* base class's public API — including members that make no sense for, or actively violate, the subclass's own intended abstraction — it tends to produce a "leaky" type whose public surface doesn't actually match its intended contract, directly the reason the Composite Reuse Principle (covered earlier) recommends composition specifically for pure code-reuse motivations, reserving inheritance itself for genuine type-hierarchy relationships that need actual polymorphic substitutability.
 
 **Common Pitfall:** inheriting from a concrete class purely because it "already has the method I need," without asking whether the resulting subclass genuinely satisfies an "is-a" relationship with the base type — this conflation is precisely how classes like a hypothetical `Stack : List<T>` end up exposing operations (arbitrary insertion, indexed removal) that actively undermine the very abstraction the subclass was meant to represent.
+
+---
+
+## Beginner — Question 25
+
+**Q25: Can you inherit from multiple classes in C#? Why or why not?**
+
+No, C# does not support multiple class inheritance. A class can inherit from only one base class. 
+
+However, a class can implement **multiple interfaces**. 
+
+**Why it matters (The Diamond Problem):** If Class B and Class C both inherit from Class A and override a method `Print()`, and Class D inherits from both B and C, which `Print()` method should D inherit if it doesn't override it itself? This ambiguity is known as the "Diamond Problem." By restricting inheritance to a single base class, C# avoids this complexity and ambiguity entirely. 
+
+```csharp
+// This is illegal in C#
+// public class FlyingCar : Car, Airplane { }
+
+// This is perfectly fine (one base class, multiple interfaces)
+public class FlyingCar : Vehicle, IDrivable, IFlyable { }
+```
+
+---
+
+## Beginner — Question 26
+
+**Q26: What does the `sealed` keyword do on a class and on a method?**
+
+The `sealed` keyword restricts inheritance or overriding.
+
+1. **On a class:** It prevents other classes from inheriting from it. This is often used for security reasons, performance optimization (the compiler can make assumptions), or when a class is not designed to be extended (like `System.String`).
+2. **On a method (or property):** It prevents derived classes from further overriding a virtual method that has already been overridden.
+
+```csharp
+public sealed class SecuritySystem {
+    // No class can inherit from SecuritySystem
+}
+
+public class BaseClass {
+    public virtual void DoWork() { }
+}
+
+public class DerivedClass : BaseClass {
+    // Overriding the virtual method, but sealing it to prevent further overrides
+    public sealed override void DoWork() { } 
+}
+```
+
+---
+
+## Beginner — Question 27
+
+**Q27: What is the purpose of a constructor, and can a class have multiple constructors?**
+
+A constructor is a special method that is called automatically when an instance of a class is created (using the `new` keyword). Its primary purpose is to initialize the object's fields or properties to valid starting states.
+
+Yes, a class can have multiple constructors. This is known as **Constructor Overloading**. The constructors must have different signatures (different number, types, or order of parameters).
+
+```csharp
+public class Person {
+    public string Name { get; set; }
+    public int Age { get; set; }
+
+    // Parameterless (default) constructor
+    public Person() {
+        Name = "Unknown";
+        Age = 0;
+    }
+
+    // Overloaded constructor with parameters
+    public Person(string name, int age) {
+        Name = name;
+        Age = age;
+    }
+}
+```
+
+---
+
+## Beginner — Question 28
+
+**Q28: Explain the concept of "Data Hiding". Is it the same as Encapsulation?**
+
+While often used interchangeably, they represent slightly different concepts that work together:
+
+- **Data Hiding** is the act of restricting direct access to the internal state of an object (making fields `private`). It prevents outside code from putting the object into an invalid state.
+- **Encapsulation** is the broader concept of bundling the data (fields) and the behavior (methods/properties) that operates on that data into a single unit (the class). It also provides a controlled public interface to interact with the hidden data.
+
+Data hiding is the *mechanism* used to achieve the *goal* of encapsulation. 
+
+```csharp
+public class BankAccount {
+    // Data Hiding: Balance cannot be directly altered from the outside
+    private decimal _balance;
+
+    // Encapsulation: We provide a safe, controlled way to interact with the data
+    public void Deposit(decimal amount) {
+        if (amount > 0) _balance += amount;
+    }
+}
+```
+
+---
+
+## Beginner — Question 29
+
+**Q29: What is an Object Initializer and how does it relate to constructors?**
+
+An Object Initializer is a syntactic feature in C# that allows you to assign values to accessible fields or properties of an object at the time of creation, without needing to invoke a specific constructor containing those parameters.
+
+```csharp
+// Using a constructor:
+// Requires a specific Person(string, int) constructor to exist
+Person p1 = new Person("Alice", 30); 
+
+// Using an Object Initializer:
+// Only requires a parameterless constructor, and public setters on the properties
+Person p2 = new Person { 
+    Name = "Bob", 
+    Age = 25 
+};
+```
+
+**How they interact:** Under the hood, the compiler first calls the parameterless constructor (or whichever constructor you specify before the `{}`), and *then* assigns the values to the properties one by one. If a property is required for the object to be valid, you should require it in the constructor rather than relying on an object initializer.
 
 ---

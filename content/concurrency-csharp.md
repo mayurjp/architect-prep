@@ -1229,3 +1229,266 @@ This pattern is actually correct — `ChannelReader<T>.ReadAllAsync()` and `TryR
 **The correct multi-consumer pattern:** share one `Channel<T>` instance and one `ChannelReader<T>` across all consumer tasks exactly as shown above — that part is safe by design. Make `ProcessAsync` itself idempotent (safe to run twice on the same item, e.g., via an upsert instead of an insert, or a processed-IDs check) wherever the upstream source can plausibly redeliver, and ensure any retry logic only re-queues on genuine failure, with the success path never both completing *and* retrying the same item.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What are `Task.CompletedTask` and `Task.FromResult(...)` for, and when should a method return one instead of actually going async?**
+
+Both are ways to hand back an **already-completed** `Task`/`Task<T>` from a method whose signature commits it to the async-friendly `Task`-returning shape, without paying the cost of an actual `async` state machine when there's genuinely nothing to wait for.
+
+`Task.CompletedTask` is a cached, singleton `Task` instance representing "done, no value" — the async equivalent of `void` for a synchronous fast path. `Task.FromResult<T>(value)` does the same but wraps a value, producing an already-completed `Task<T>` as if an `async Task<T>` method had run to completion and returned `value` instantly.
+
+```csharp
+public interface ICache
+{
+    Task<string?> GetAsync(string key);
+}
+
+public class MemoryCache : ICache
+{
+    private readonly Dictionary<string, string> _store = new();
+
+    public Task<string?> GetAsync(string key)
+    {
+        // Cache hit is purely synchronous — no I/O, no reason to await anything.
+        if (_store.TryGetValue(key, out var value))
+            return Task.FromResult<string?>(value);   // no state machine allocated
+
+        return Task.FromResult<string?>(null);
+    }
+}
+
+public Task LogNoOpAsync() => Task.CompletedTask; // "did nothing, but I'm done" — no work at all
+```
+
+**Why not just mark the method `async` and `return value;`?** An `async` method, even one that never actually awaits anything, still gets compiled into a full async state machine (a heap-allocated object in most cases, extra bookkeeping to schedule continuations) purely to satisfy the compiler's transformation — wasted overhead when the result is already known synchronously. Returning `Task.FromResult`/`Task.CompletedTask` directly from a plain (non-`async`) method sidesteps that allocation entirely for the fast, already-known-value path.
+
+**Common pitfall:** using this pattern inside a method that *sometimes* needs to await real asynchronous work — mixing an early `return Task.FromResult(x);` fast path with an `async` body elsewhere in the same method isn't possible (a method is either `async` or not), so this pattern is specifically for methods, or one branch factored into a separate non-`async` method, that are *entirely* synchronous internally but need to satisfy an async-shaped interface.
+
+**Practical guidance:** reach for `Task.CompletedTask`/`Task.FromResult` when implementing an async interface (like a cache, repository, or test double) where a given code path is genuinely synchronous — cache hits, in-memory fast paths, stub/mock implementations in tests. Don't use it to fake asynchrony for genuinely blocking work; that just hides a synchronous call behind an async-looking signature without any of the real benefits.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: `Task.Run` vs `Task.Factory.StartNew` — why is `Task.Run` the recommended default, and what extra options does `StartNew` expose that make it easy to misuse?**
+
+Both schedule work to run on the thread pool, and `Task.Run` is, by design, essentially a simplified wrapper around `Task.Factory.StartNew` with a set of safe defaults baked in — it's not a different mechanism, just a narrower, harder-to-misuse entry point to the same one.
+
+```csharp
+Task t1 = Task.Run(() => DoWork());                                         // safe defaults
+Task t2 = Task.Factory.StartNew(() => DoWork());                            // more knobs, more footguns
+
+// The classic StartNew trap — nested Task, not auto-unwrapped:
+Task<Task<int>> nested = Task.Factory.StartNew(() => ComputeAsync());       // ComputeAsync() returns Task<int>
+// nested is Task<Task<int>> — awaiting it gives you the INNER Task, not the result!
+int result = await await nested;                                            // easy to forget the double-await
+
+Task<int> correct = Task.Run(() => ComputeAsync());                         // Task.Run auto-UNWRAPS nested Tasks
+int r2 = await correct;                                                      // works as expected, single await
+```
+
+**Why `StartNew` is the sharper-edged tool:** `StartNew` exposes `TaskCreationOptions`, a custom `TaskScheduler`, and `TaskContinuationOptions` — powerful for genuinely specialized scheduling scenarios (custom schedulers, `LongRunning` hints for dedicated threads), but it does **not** automatically unwrap a delegate that itself returns a `Task`. Passing an `async` lambda or a method returning `Task<T>` into `StartNew` silently produces a `Task<Task<T>>`, and awaiting that once only waits for the outer task to *schedule and start* the inner one — a common, hard-to-spot bug where code appears to run but returns before the real async work has finished. `Task.Run` calls `Unwrap()` internally, so passing an async delegate "just works" and produces a properly flattened `Task`/`Task<T>`.
+
+`Task.Run` also defaults to `TaskScheduler.Default` (the thread pool) unconditionally, while `StartNew` without an explicit scheduler captures `TaskScheduler.Current` — meaning `StartNew` called from inside another task can silently inherit a custom (e.g., UI-affinity) scheduler instead of the thread pool, a subtle context-capture surprise `Task.Run` avoids.
+
+**Practical guidance:** default to `Task.Run` for "run this on the thread pool" — including for `async` delegates. Reach for `Task.Factory.StartNew` only when you specifically need `TaskCreationOptions.LongRunning` (to hint for a dedicated, non-pool thread) or a custom `TaskScheduler`, and even then, remember to call `.Unwrap()` explicitly if the delegate returns a `Task`.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: What does `Parallel.ForEachAsync` do, and how does it compare to manually combining `SemaphoreSlim` with `Task.WhenAll` for bounded concurrent async work over a collection?**
+
+`Parallel.ForEachAsync` (.NET 6+) is the modern, purpose-built answer to "run async work over a collection, but cap how many run at once" — it combines `Parallel`'s work-partitioning approach with genuine `async`/`await`, unlike the older `Parallel.ForEach`, whose body delegate is synchronous and would otherwise force blocking (`.Wait()`/`.Result`) to call async code from inside it.
+
+```csharp
+var urls = GetThousandsOfUrls();
+
+var options = new ParallelOptions
+{
+    MaxDegreeOfParallelism = 10,     // at most 10 concurrent downloads
+    CancellationToken = ct
+};
+
+await Parallel.ForEachAsync(urls, options, async (url, token) =>
+{
+    var response = await httpClient.GetAsync(url, token);
+    await ProcessAsync(response, token);
+});
+```
+
+**The manual equivalent it replaces:**
+
+```csharp
+var semaphore = new SemaphoreSlim(10);
+var tasks = urls.Select(async url =>
+{
+    await semaphore.WaitAsync(ct);
+    try
+    {
+        var response = await httpClient.GetAsync(url, ct);
+        await ProcessAsync(response, ct);
+    }
+    finally { semaphore.Release(); }
+});
+await Task.WhenAll(tasks);
+```
+
+Both achieve the same outcome — bounded concurrent async fan-out — but `Parallel.ForEachAsync` handles the semaphore-equivalent throttling, cancellation propagation, and exception aggregation (`AggregateException` from failures across iterations) internally, without hand-writing the acquire/release/`try`/`finally` boilerplate, and it partitions work more efficiently than materializing a full `IEnumerable<Task>` up front via `Select`, which matters when the source collection is very large or itself an `IAsyncEnumerable<T>` (which `Parallel.ForEachAsync` also accepts directly).
+
+**Common pitfall:** forgetting that `MaxDegreeOfParallelism` bounds *logical* concurrency, not thread count — the body still runs asynchronously, so it doesn't consume a dedicated thread per iteration; setting it too high assuming it "guards" thread-pool usage misunderstands what it's throttling (concurrent in-flight operations, not threads).
+
+**Practical guidance:** prefer `Parallel.ForEachAsync` for new code needing bounded concurrent async iteration over a collection — it's more directly expressive of the intent and less error-prone than the `SemaphoreSlim` + `Task.WhenAll` pattern. That manual pattern remains valid and sometimes necessary for scenarios that don't map cleanly onto a single collection iteration (e.g., throttling concurrency across work submitted from multiple call sites sharing one semaphore).
+
+---
+
+## Intermediate — Question 16
+
+**Q16: How do you build async-safe lazy initialization, and what's the specific pitfall with using `Lazy<Task<T>>` alone?**
+
+The synchronous `Lazy<T>` pattern (ensuring expensive initialization runs exactly once, on first access, thread-safely) extends naturally to async work by having the factory produce a `Task<T>` instead of a `T` — commonly wrapped as an `AsyncLazy<T>`-style helper:
+
+```csharp
+public class AsyncLazy<T>
+{
+    private readonly Lazy<Task<T>> _lazy;
+
+    public AsyncLazy(Func<Task<T>> factory) =>
+        _lazy = new Lazy<Task<T>>(factory); // factory only invoked once, thread-safely, by Lazy<T> itself
+
+    public Task<T> Value => _lazy.Value;
+}
+
+private static readonly AsyncLazy<Config> _config =
+    new(() => LoadConfigFromRemoteAsync());
+
+public static Task<Config> GetConfigAsync() => _config.Value; // awaited by callers
+```
+
+`Lazy<T>`'s built-in thread safety guarantees the factory delegate itself only *starts* once, no matter how many threads call `.Value` concurrently — that part works correctly even when `T` is `Task<TResult>`, since starting the factory just means kicking off the async operation and returning its `Task`, which every caller can then await.
+
+**The specific pitfall:** `Lazy<T>`'s default caching mode caches whatever the factory returns — including a **faulted** `Task`. If the async factory's `Task` completes in a Faulted state (e.g., a transient network failure while loading remote config), that same failed `Task` is permanently cached by `_lazy.Value`, and every subsequent call to `GetConfigAsync()` re-awaits and re-throws the *same* original exception forever, even though the underlying failure (like a network blip) may have been purely transient and long since recovered.
+
+```csharp
+// Naive AsyncLazy<T> after ONE transient failure — permanently broken:
+await GetConfigAsync(); // throws HttpRequestException (transient network failure)
+await GetConfigAsync(); // throws the SAME cached exception — forever, even after network recovers
+```
+
+**Practical guidance:** plain `Lazy<Task<T>>` is fine for initialization that's expected to always succeed once retried elsewhere (or where a permanent failure genuinely should stick), but for anything that can transiently fail — remote calls, first-use network/database initialization — use a retry-on-failure variant that only caches a *successfully completed* Task, discarding and re-attempting the factory on the next access after a fault. See the Scenario question on `Lazy<Task<T>>` caching a fault for the concrete fix.
+
+---
+
+## Advanced — Question 12
+
+**Q12: How does heavily async code interact with the GC, and why does `ValueTask` exist partly to address this?**
+
+Every `async` method that actually suspends (hits an incomplete `await`) is compiled into a state machine that, in the general case, is allocated on the **heap** — it needs to survive across the suspension point, outliving the original call stack frame that's now unwound while the awaited operation completes elsewhere. Each `Task`/`Task<T>` returned is also, itself, a reference-type heap allocation. In a high-throughput async workload — a web API handling many requests per second, each involving several chained `await`s — this adds up to a steady stream of small, short-lived object allocations: state machine objects, boxed results, and `Task<T>` wrapper instances.
+
+**Why this matters for the GC specifically:** these objects are typically short-lived (created, awaited, discarded within microseconds to milliseconds), which is exactly the profile that drives **Gen 0 collections**. Gen 0 GCs are individually cheap, but under sustained high request volume, a large enough allocation rate from async machinery can still contribute meaningfully to overall GC pause frequency and CPU overhead — not usually catastrophic on its own, but measurable in latency-sensitive, high-throughput hot paths where every allocation counts.
+
+**Where `ValueTask<T>` fits in:** as covered in the `Task` vs `ValueTask` discussion, `ValueTask<T>` is a struct that can represent an already-completed result *without* allocating a `Task<T>` at all — directly addressing exactly this Gen 0 pressure for the common case where an async-shaped method frequently completes synchronously (a cache hit, a buffered read). It doesn't eliminate the state machine allocation for methods that genuinely suspend, but it removes the extra `Task<T>` wrapper allocation on the synchronous-completion fast path, which is often the hottest path in practice.
+
+**Common pitfall:** assuming this means all async code needs manual optimization — for the vast majority of application code, the JIT's async state machine allocations are not a meaningful bottleneck, and reaching for `ValueTask` everywhere adds real complexity (its stricter single-await, single-consumption rules) for no measurable benefit outside genuinely hot, allocation-sensitive paths.
+
+**Practical guidance:** don't pre-optimize regular application code around this; profile first (allocation rate, Gen 0 collection frequency under load) and reserve `ValueTask` and other allocation-reduction tactics for identified hot paths — library-level APIs called extremely frequently, or request-processing code in the innermost loop of a high-throughput service.
+
+---
+
+## Advanced — Question 13
+
+**Q13: How does `TaskCompletionSource<T>` bridge a callback-based/event-based API into `async`/`await`, and what's a concrete example?**
+
+`TaskCompletionSource<T>` (TCS) is the manual, low-level primitive for producing an awaitable `Task<T>` whose completion you control explicitly, rather than one that's driven by `async`/`await` machinery or `Task.Run`. It's the standard tool for wrapping legacy or third-party APIs that signal completion via a callback or event, rather than by returning a `Task`, into something `await`-able.
+
+```csharp
+public class LegacyFileWatcher
+{
+    // Old-style API: fires an event when a file operation finishes; no Task anywhere.
+    public event Action<string, bool> OperationCompleted; // (filePath, success)
+
+    public void StartCopyAsync(string source, string dest) { /* fires OperationCompleted eventually */ }
+}
+
+public static Task<bool> CopyFileAsync(LegacyFileWatcher watcher, string source, string dest)
+{
+    var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    void Handler(string filePath, bool success)
+    {
+        if (filePath == dest)
+        {
+            watcher.OperationCompleted -= Handler;  // unsubscribe — avoid leaking the handler
+            tcs.SetResult(success);                 // completes the Task; awaiters resume
+        }
+    }
+
+    watcher.OperationCompleted += Handler;
+    watcher.StartCopyAsync(source, dest);
+    return tcs.Task; // caller awaits this like any other Task<bool>
+}
+
+// Usage:
+bool ok = await CopyFileAsync(watcher, "a.txt", "b.txt"); // reads naturally, hides the event plumbing
+```
+
+**The mechanism:** `tcs.Task` is a normal, awaitable `Task<T>` from the caller's point of view — it just never runs any code itself. Calling `SetResult`, `SetException`, or `SetCanceled` on the TCS is what transitions `tcs.Task` to a completed state and resumes anyone awaiting it, entirely decoupled from thread-pool scheduling. `SetException` is the direct equivalent for wrapping an error callback, turning it into a properly faulted `Task` that `await` rethrows.
+
+**Common pitfall:** forgetting `TaskCreationOptions.RunContinuationsAsynchronously`. Without it, continuations (the code after your `await`) can run **synchronously on the thread that calls `SetResult`** — often the event-raising thread deep inside a third-party library — which can cause deadlocks (if that thread later needs a lock your continuation also touches) or unexpectedly move UI-thread-sensitive continuation code onto a background thread. Also easy to forget: unsubscribing the event handler, and never calling `SetResult`/`SetException` at all if the event might never fire (leaving the `Task` hanging forever) — always pair with a timeout or cancellation registration in production code.
+
+**Practical guidance:** reach for `TaskCompletionSource<T>` specifically at the boundary between old-style callback/event APIs and modern `async`/`await` code; don't use it to wrap something that's already `Task`-based (that's what `async`/`await` composition is for) or as a general-purpose signaling mechanism where a `SemaphoreSlim` or `Channel<T>` would fit better.
+
+---
+
+## Scenario — Question 7
+
+**Q7: A service uses `Lazy<Task<T>>` to cache an expensive async initialization (e.g., loading a large config from a remote source). It works fine normally, but after a single transient network failure during startup, every subsequent request permanently fails too — even though the network recovered seconds later. Diagnose and fix.**
+
+**Diagnosis:** this is the `Lazy<Task<T>>` caching-a-fault pitfall covered in the async-lazy-initialization question. `Lazy<T>`'s default caching mode (`LazyThreadSafetyMode.ExecutionAndPublication`) caches whatever value or exception the factory produces on its first successful *invocation* — and for `Lazy<Task<T>>`, "successful invocation" only means the factory returned a `Task` object without throwing synchronously; it says nothing about whether that `Task` later completes successfully. When `LoadConfigFromRemoteAsync()` starts, returns a `Task`, and that `Task` later faults (transient network blip), `Lazy<T>` has already committed to caching that exact `Task` instance forever — every subsequent `.Value` access returns the same faulted `Task`, and `await`ing it rethrows the same original exception indefinitely, regardless of whether the network has since recovered.
+
+```csharp
+// THE BUG:
+private static readonly Lazy<Task<Config>> _config =
+    new(() => LoadConfigFromRemoteAsync());   // one transient failure -> cached forever
+
+public static Task<Config> GetConfigAsync() => _config.Value;
+```
+
+**The fix:** only cache a *successfully completed* Task; on fault, discard the cached attempt so the next access retries the factory instead of replaying the old failure. A common pattern wraps the factory to detect faulting and resets the `Lazy<T>` itself:
+
+```csharp
+public class AsyncLazyRetry<T>
+{
+    private readonly Func<Task<T>> _factory;
+    private Lazy<Task<T>> _lazy;
+
+    public AsyncLazyRetry(Func<Task<T>> factory)
+    {
+        _factory = factory;
+        _lazy = CreateLazy();
+    }
+
+    private Lazy<Task<T>> CreateLazy() => new(async () =>
+    {
+        try { return await _factory(); }
+        catch
+        {
+            // Reset so the NEXT caller gets a fresh Lazy<T> (and fresh factory attempt) instead of the cached fault.
+            Interlocked.Exchange(ref _lazy, CreateLazy());
+            throw; // still propagate this attempt's failure to whoever's currently awaiting it
+        }
+    });
+
+    public Task<T> Value => _lazy.Value;
+}
+
+private static readonly AsyncLazyRetry<Config> _config = new(() => LoadConfigFromRemoteAsync());
+public static Task<Config> GetConfigAsync() => _config.Value;
+```
+
+**Why this works:** the first failing attempt still correctly fails (and reports the real error) for whoever was waiting on it, but the `Lazy<T>` backing field is atomically swapped out for a brand-new, not-yet-invoked `Lazy<Task<T>>` before the exception propagates — so the *next* call to `GetConfigAsync()` triggers a fresh factory invocation and a genuine retry against the (by then) recovered network, rather than replaying history.
+
+**Practical guidance:** never use plain `Lazy<Task<T>>` for async initialization that can transiently fail (network, remote config, first-touch database connections) without this retry-on-fault wrapper, or an equivalent library-provided one (e.g., the `Nito.AsyncEx` `AsyncLazy<T>` combined with a manual reset, or a `SemaphoreSlim`-guarded manual re-check pattern). Reserve plain caching-including-faults behavior for initialization where a failure genuinely indicates a permanent, non-retryable condition.
+
+---

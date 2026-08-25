@@ -2177,6 +2177,74 @@ Because an owned collection's items have no meaningful identity or lifecycle out
 
 ---
 
+## Intermediate — Question 25
+
+**Q25: What is the crucial difference between `IQueryable<T>` and `IEnumerable<T>` in EF Core?**
+
+This is one of the most critical performance concepts in EF Core.
+
+- **`IQueryable<T>`** represents a query that has *not yet been executed* against the database. When you chain LINQ methods (like `.Where()` or `.Select()`) onto an `IQueryable`, EF Core translates them into SQL. The query is only sent to the database when you iterate over it (e.g., calling `.ToList()` or `.FirstOrDefault()`).
+- **`IEnumerable<T>`** represents an in-memory collection. If you call `.ToList()` (converting to `IEnumerable`) and *then* call `.Where()`, EF Core fetches the *entire* table from the database into memory, and the filtering happens in C#. This can cause catastrophic performance and memory issues.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: What are Global Query Filters, and how do you bypass them?**
+
+Global Query Filters allow you to apply a LINQ filter to an entity type globally, directly inside `OnModelCreating`. This is commonly used for **Soft Deletes** (filtering out records where `IsDeleted == true`) and **Multi-Tenancy** (filtering records by `TenantId`).
+
+Once applied, every query against that entity will automatically include the filter in its SQL `WHERE` clause.
+
+```csharp
+modelBuilder.Entity<Blog>().HasQueryFilter(b => !b.IsDeleted);
+```
+
+To bypass the filter (e.g., if an admin needs to see deleted records or restore them), you use the `.IgnoreQueryFilters()` extension method in your LINQ query:
+```csharp
+var allBlogsIncludingDeleted = _context.Blogs.IgnoreQueryFilters().ToList();
+```
+
+---
+
+## Intermediate — Question 27
+
+**Q27: How does EF Core handle Optimistic Concurrency, and what is a Concurrency Token?**
+
+Optimistic concurrency assumes that multiple users rarely try to update the exact same row at the exact same time, so it doesn't place locks on the database rows when reading them. Instead, it checks for conflicts right before saving.
+
+You enable this by configuring a property as a **Concurrency Token** (often a `byte[]` timestamp/rowversion).
+1. User A and User B both fetch the same record (RowVersion = 1).
+2. User A updates it and calls `SaveChanges`. EF Core issues: `UPDATE ... WHERE Id = 1 AND RowVersion = 1`. It succeeds. The database updates the RowVersion to 2.
+3. User B tries to update it and calls `SaveChanges`. EF Core issues: `UPDATE ... WHERE Id = 1 AND RowVersion = 1`. Because the RowVersion is now 2, zero rows are updated.
+4. EF Core detects that zero rows were updated and throws a `DbUpdateConcurrencyException`. You can then catch this exception and decide how to resolve the conflict.
+
+---
+
+## Intermediate — Question 28
+
+**Q28: What is `AsSplitQuery()`, and when should you use it to prevent Cartesian Explosions?**
+
+When you use `.Include()` to fetch multiple one-to-many relationships, EF Core (by default) generates a single massive SQL query using `JOIN`s. If you include multiple collections, the database returns a Cartesian product — duplicating the parent row's data for every child row combination. This can result in gigabytes of redundant data being transferred over the network.
+
+`.AsSplitQuery()` tells EF Core to execute multiple, separate SQL queries instead (one for the parent, and one for each included collection) and stitch them together in memory.
+
+Use it when you are including multiple collections and the single query is transferring too much duplicated data. The tradeoff is that split queries require multiple network round-trips and do not guarantee transactional consistency across the separate queries (unless wrapped in an explicit transaction).
+
+---
+
+## Intermediate — Question 29
+
+**Q29: What is `AsNoTracking()` and how does it improve performance?**
+
+By default, when EF Core fetches entities from the database, it tracks them in memory (via the `ChangeTracker`). It takes a snapshot of their state so that if you modify them and call `SaveChanges()`, it knows exactly what `UPDATE` statements to generate. 
+
+Tracking objects requires memory allocation and CPU overhead to create the snapshots.
+
+If you are querying data strictly for read-only purposes (e.g., returning a list of products to display on a webpage) and have no intention of calling `SaveChanges()`, you should append `.AsNoTracking()` to the query. This tells EF Core to skip setting up the tracking snapshots, making the query significantly faster and drastically reducing memory usage.
+
+---
+
 ## Advanced — Question 24
 
 **Q24: What does `Metadata.SetIsTableExcludedFromMigrations(true)` do for an entity, and how does excluding it from Migrations let a table be managed by an entirely separate process while EF Core still queries it normally?**
@@ -2208,5 +2276,80 @@ WITH SetIsTableExcludedFromMigrations(true): EF Core NEVER touches this
 Because this setting cleanly separates "EF Core can read/write this table's *data*" from "EF Core owns this table's *schema*," it's the correct tool for integrating with a table genuinely managed elsewhere (a legacy system, a separate microservice's own migrations, a reporting view) without EF Core's own migration tooling ever attempting a conflicting schema change against it.
 
 **Common Pitfall:** excluding a table from Migrations without also ensuring some *other* process actually keeps that table's schema in sync with EF Core's expected entity shape — excluding it from Migrations only stops EF Core from *generating* schema changes; it does nothing to prevent a genuine mismatch between EF Core's expected column shape and the table's actual, externally-managed schema, which would still cause runtime query failures if the two drift out of sync.
+
+---
+
+## Beginner — Question 24
+
+**Q24: What is Entity Framework Core (EF Core)?**
+
+Entity Framework Core (EF Core) is a lightweight, extensible, open-source, and cross-platform Object-Relational Mapper (O/RM) for .NET.
+
+It allows .NET developers to work with a database using .NET objects, eliminating the need for most of the data-access code that developers usually need to write (like ADO.NET `SqlConnection` and `SqlCommand`). Instead of writing SQL queries as strings, developers can use LINQ (Language Integrated Query) to query data in a strongly-typed manner.
+
+---
+
+## Beginner — Question 25
+
+**Q25: What is a `DbContext` and what is its role?**
+
+The `DbContext` is the most important class in Entity Framework Core. It acts as a bridge between your domain or entity classes and the database.
+
+**Primary roles of `DbContext`:**
+1. **Database Connection:** It holds the connection configuration (e.g., connection string) and coordinates the connection to the database.
+2. **DbSets:** It contains properties of type `DbSet<TEntity>`, representing the tables in the database.
+3. **Change Tracking:** It keeps track of changes made to entities (Added, Modified, Deleted) during its lifetime so it knows what SQL to generate when saving.
+4. **Saving Data:** Its `SaveChanges()` or `SaveChangesAsync()` method executes the generated SQL commands against the database.
+
+---
+
+## Beginner — Question 26
+
+**Q26: Explain the difference between Code-First and Database-First approaches in EF Core.**
+
+These are the two primary workflows for using EF Core:
+
+**Code-First:**
+- You define your C# classes (Entities) and your `DbContext` first.
+- EF Core uses these classes to generate a database schema.
+- As you change your classes, you use EF Core Migrations to update the database schema to match your code.
+- *Best when starting a new project where you have control over the database schema.*
+
+**Database-First (Reverse Engineering):**
+- The database already exists.
+- You use the `Scaffold-DbContext` command (or `dotnet ef dbcontext scaffold`) to generate the C# entity classes and `DbContext` directly from the existing database schema.
+- *Best when dealing with a legacy database or when DBAs control the schema design.*
+
+---
+
+## Beginner — Question 27
+
+**Q27: What are EF Core Migrations?**
+
+Migrations are a feature in EF Core that allows you to evolve your database schema in sync with changes to your C# model (Code-First approach) over time.
+
+Instead of dropping and recreating the database every time you add a property to a class, a migration generates a snapshot of the changes as a C# file.
+
+**Common Commands:**
+- `Add-Migration AddUserEmail` (or `dotnet ef migrations add AddUserEmail`): Compares the current C# model against the last migration and generates code to add the new `Email` column.
+- `Update-Database` (or `dotnet ef database update`): Applies pending migrations to the actual database by executing the generated SQL.
+
+---
+
+## Beginner — Question 28
+
+**Q28: What is a `DbSet<T>`?**
+
+A `DbSet<T>` property on a `DbContext` represents a collection of entities of type `T` that can be queried from and saved to a specific table in the database.
+
+```csharp
+public class ApplicationDbContext : DbContext {
+    // This tells EF Core to create a 'Products' table 
+    // and map it to the 'Product' class.
+    public DbSet<Product> Products { get; set; }
+}
+```
+
+When you write a LINQ query against a `DbSet`, EF Core translates that query into a SQL `SELECT` statement against the underlying table. You also use `DbSet` to add (`Products.Add(newProduct)`) or remove entities before calling `SaveChanges()`.
 
 ---
