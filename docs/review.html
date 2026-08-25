@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Learning — Review</title>
+<link rel="icon" type="image/jpeg" href="assets/icon.jpg" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/style.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/dockerfile.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/http.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/protobuf.min.js"></script>
+<script>
+  hljs.registerAliases(["cshtml", "razor"], { languageName: "xml" });
+  hljs.registerAliases(["bicep"], { languageName: "json" });
+  hljs.registerAliases(["hcl"], { languageName: "ini" });
+</script>
+<script src="assets/js/theme.js"></script>
+<style>
+  .review-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    margin-bottom: 1.5rem;
+  }
+  .review-controls select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.6rem 1rem;
+    border-radius: 999px;
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .scope-toggle { display: flex; gap: 0.5rem; }
+  .scope-toggle button {
+    background: var(--surface-2);
+    border: 1px solid transparent;
+    color: var(--text-dim);
+    padding: 0.6rem 1.1rem;
+    border-radius: 999px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-family: 'Outfit', sans-serif;
+    transition: all 0.2s ease;
+  }
+  .scope-toggle button.active {
+    background: var(--accent-gradient);
+    color: #fff;
+    box-shadow: 0 4px 15px rgba(139, 92, 246, 0.4);
+  }
+  .deck-meta { margin-left: auto; color: var(--text-dim); font-size: 0.9rem; }
+
+  .deck-progress { margin-bottom: 1.5rem; }
+
+  .flashcard {
+    background: var(--surface);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2.5rem;
+    box-shadow: var(--shadow);
+    min-height: 220px;
+  }
+  .flashcard .question-text { font-size: 1.4rem; }
+  .reveal-btn, .action-btn {
+    font-family: 'Outfit', sans-serif;
+    font-weight: 700;
+    border: none;
+    border-radius: 999px;
+    padding: 0.85rem 1.75rem;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .reveal-btn {
+    margin-top: 1rem;
+    background: var(--accent-gradient);
+    color: #fff;
+    box-shadow: 0 4px 15px rgba(139, 92, 246, 0.35);
+  }
+  .reveal-btn:hover { transform: translateY(-2px); }
+  .action-row { display: flex; flex-wrap: wrap; gap: 0.9rem; margin-top: 2rem; }
+  .action-btn.got-it {
+    background: linear-gradient(135deg, #10b981, #0ea5e9);
+    color: #fff;
+    box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+  }
+  .action-btn.keep-practicing {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .action-btn:hover { transform: translateY(-2px); }
+  .kbd-hint { color: var(--text-dim); font-size: 0.8rem; margin-top: 1.25rem; }
+  .kbd-hint kbd {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.1rem 0.45rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.75rem;
+  }
+  .done-state { text-align: center; padding: 3rem 1rem; }
+  .done-state .emoji { font-size: 3rem; display: block; margin-bottom: 1rem; }
+  .done-state .action-row { justify-content: center; }
+</style>
+</head>
+<body>
+<div id="focus-modal">
+  <button id="focus-close">Close</button>
+  <div id="focus-content" class="focus-content"></div>
+</div>
+<header class="site">
+  <div class="brand">
+    <a href="index.html" style="color:inherit;text-decoration:none;display:flex;align-items:center;gap:0.75rem;">
+      <img src="assets/icon.jpg" alt="Logo" style="width:2.2rem;height:2.2rem;border-radius:6px;object-fit:cover;">
+      Learning
+    </a>
+  </div>
+  <nav>
+    <a href="topics.html">Topics</a>
+    <a href="search.html">Search</a>
+    <a href="review.html">Review</a>
+    <button id="theme-toggle" type="button" aria-label="Toggle theme"></button>
+  </nav>
+</header>
+<main>
+  <h1>Review</h1>
+  <p class="muted" style="margin-top:-1.5rem;margin-bottom:2rem">Flip through flashcards. Mark each one <strong>Got it</strong> to mark it mastered, or <strong>Keep practicing</strong> to see it again this session.</p>
+
+  <div class="review-controls">
+    <select id="topic-select"></select>
+    <div class="scope-toggle">
+      <button id="scope-unmastered" class="active">Unmastered only</button>
+      <button id="scope-all">All questions</button>
+    </div>
+    <span class="deck-meta" id="deck-meta"></span>
+  </div>
+
+  <div class="progress-bar deck-progress"><span id="deck-progress-bar" style="width:0%"></span></div>
+
+  <div id="card-area"></div>
+
+  <p class="kbd-hint">Keyboard: <kbd>Space</kbd> reveal &middot; <kbd>&rarr;</kbd> got it &middot; <kbd>&larr;</kbd> keep practicing</p>
+</main>
+<script>
+const MASTERED_KEY = "architect_mastered";
+
+let topics = [];
+let questionIds = {};
+let deck = [];
+let cursor = 0;
+let revealed = false;
+let scope = "unmastered"; // or "all"
+let selectedTopic = "all";
+let cache = {}; // topicId -> questions array, lazily fetched
+
+function getMastered() {
+  return new Set(JSON.parse(localStorage.getItem(MASTERED_KEY) || "[]"));
+}
+function setMastered(set) {
+  localStorage.setItem(MASTERED_KEY, JSON.stringify([...set]));
+}
+
+async function fetchTopicQuestions(topicId) {
+  if (cache[topicId]) return cache[topicId];
+  const qs = await fetch(`data/questions/${topicId}.json`).then((r) => (r.ok ? r.json() : []));
+  cache[topicId] = qs;
+  return qs;
+}
+
+async function init() {
+  const [t, ids] = await Promise.all([
+    fetch("data/topics.json").then((r) => r.json()),
+    fetch("data/question-ids.json").then((r) => r.json()),
+  ]);
+  topics = t.slice().sort((a, b) => a.order - b.order);
+  questionIds = ids;
+
+  const select = document.getElementById("topic-select");
+  select.innerHTML = `<option value="all">All topics</option>` +
+    topics.map((tp) => `<option value="${tp.id}">${tp.title}</option>`).join("");
+  select.value = selectedTopic;
+  select.addEventListener("change", () => {
+    selectedTopic = select.value;
+    buildDeck();
+  });
+
+  document.getElementById("scope-unmastered").onclick = () => setScope("unmastered");
+  document.getElementById("scope-all").onclick = () => setScope("all");
+
+  document.getElementById("focus-close").onclick = () => {
+    document.getElementById("focus-modal").classList.remove("active");
+    document.body.style.overflow = "";
+  };
+
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "SELECT") return;
+    if (e.code === "Space") { e.preventDefault(); if (!revealed) reveal(); }
+    else if (e.key === "ArrowRight" && revealed) markGotIt();
+    else if (e.key === "ArrowLeft" && revealed) markKeepPracticing();
+  });
+
+  await buildDeck();
+}
+
+function setScope(next) {
+  scope = next;
+  document.getElementById("scope-unmastered").classList.toggle("active", scope === "unmastered");
+  document.getElementById("scope-all").classList.toggle("active", scope === "all");
+  buildDeck();
+}
+
+async function buildDeck() {
+  document.getElementById("card-area").innerHTML = `<p class="empty-state">Loading deck…</p>`;
+  const mastered = getMastered();
+
+  const topicIdsToLoad = selectedTopic === "all" ? topics.map((t) => t.id) : [selectedTopic];
+  const results = await Promise.all(topicIdsToLoad.map(fetchTopicQuestions));
+  let pool = results.flat().filter((q) => q.status === "answered");
+  if (scope === "unmastered") pool = pool.filter((q) => !mastered.has(q.id));
+
+  deck = shuffle(pool);
+  cursor = 0;
+  revealed = false;
+  renderMeta();
+  renderCard();
+}
+
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function renderMeta() {
+  document.getElementById("deck-meta").textContent = deck.length
+    ? `${deck.length} card${deck.length === 1 ? "" : "s"} in this deck`
+    : "";
+  const pct = deck.length ? Math.round((cursor / deck.length) * 100) : 0;
+  document.getElementById("deck-progress-bar").style.width = `${pct}%`;
+}
+
+function reveal() {
+  revealed = true;
+  renderCard();
+  document.querySelectorAll("#card-area .answer-body pre code").forEach((el) => hljs.highlightElement(el));
+}
+
+function markGotIt() {
+  const q = deck[cursor];
+  if (q) {
+    const m = getMastered();
+    m.add(q.id);
+    setMastered(m);
+  }
+  advance();
+}
+
+function markKeepPracticing() {
+  advance();
+}
+
+function advance() {
+  cursor += 1;
+  revealed = false;
+  renderMeta();
+  renderCard();
+}
+
+function restart() {
+  buildDeck();
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function renderCard() {
+  const area = document.getElementById("card-area");
+
+  if (deck.length === 0) {
+    area.innerHTML = `<div class="empty-state">No questions match this deck. Try "All questions" or a different topic.</div>`;
+    return;
+  }
+
+  if (cursor >= deck.length) {
+    area.innerHTML = `
+      <div class="flashcard done-state">
+        <span class="emoji">🎉</span>
+        <p class="question-text">Deck complete!</p>
+        <p class="muted">You went through ${deck.length} card${deck.length === 1 ? "" : "s"}.</p>
+        <div class="action-row">
+          <button class="action-btn got-it" onclick="restart()">Start another round</button>
+          <a class="action-btn keep-practicing" style="display:inline-flex;align-items:center;text-decoration:none" href="topics.html">Back to Topics</a>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const q = deck[cursor];
+  const topic = topics.find((t) => t.id === q.topic);
+  const followUpsHtml = revealed
+    ? (q.followUps || [])
+        .map((f) => `<div class="followup"><p class="question-text">${escapeHtml(f.question)}</p><div class="answer-body">${f.answerHtml}</div></div>`)
+        .join("")
+    : "";
+
+  area.innerHTML = `
+    <div class="flashcard">
+      <span class="badge ${q.level}">${q.level}</span>
+      <span class="muted" style="margin-left:0.5rem">${topic ? topic.title : q.topic}</span>
+      <p class="question-text">${escapeHtml(q.question)}</p>
+      ${revealed
+        ? `<div class="answer-body">${q.answerHtml}</div>${followUpsHtml}
+           <div class="action-row">
+             <button class="action-btn got-it" onclick="markGotIt()">✅ Got it</button>
+             <button class="action-btn keep-practicing" onclick="markKeepPracticing()">🔁 Keep practicing</button>
+           </div>`
+        : `<button class="reveal-btn" onclick="reveal()">Show Answer</button>`}
+    </div>`;
+}
+
+init();
+</script>
+</body>
+</html>
