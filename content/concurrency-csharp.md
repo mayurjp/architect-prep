@@ -1492,3 +1492,778 @@ public static Task<Config> GetConfigAsync() => _config.Value;
 **Practical guidance:** never use plain `Lazy<Task<T>>` for async initialization that can transiently fail (network, remote config, first-touch database connections) without this retry-on-fault wrapper, or an equivalent library-provided one (e.g., the `Nito.AsyncEx` `AsyncLazy<T>` combined with a manual reset, or a `SemaphoreSlim`-guarded manual re-check pattern). Reserve plain caching-including-faults behavior for initialization where a failure genuinely indicates a permanent, non-retryable condition.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is `SynchronizationContext`, and how does its behavior differ between a console app, a WPF/WinForms app, and an ASP.NET Core app?**
+
+`SynchronizationContext` is an abstraction representing "a place to run code" — a way of saying "post this piece of work back to the right place" without the poster needing to know exactly what that place is. `async`/`await` uses it automatically: by default, when an `await` completes, the continuation (the rest of your method) tries to resume on the `SynchronizationContext` that was current when the `await` started, via `SynchronizationContext.Current`.
+
+```csharp
+async Task ShowMessageAsync()
+{
+    await Task.Delay(1000);       // suspends here
+    MessageBox.Show("Done!");     // resumes — WHERE, depends on the host
+}
+```
+
+**Console app:** there is no `SynchronizationContext` installed by default (`SynchronizationContext.Current` is `null`). After the `await`, the continuation simply runs on whatever thread-pool thread happens to be free — there's no single "main thread" concept to marshal back to.
+
+**WPF/WinForms:** the framework installs a UI-affinity context (`DispatcherSynchronizationContext` for WPF, `WindowsFormsSynchronizationContext` for WinForms) on startup. It allows only one thread — the UI thread — to run code "in" it, so posted continuations are queued onto the UI message loop. This is precisely what lets `MessageBox.Show(...)` above run safely on the UI thread after the `await`, without you writing an explicit `Dispatcher.Invoke` call yourself.
+
+**ASP.NET Core:** deliberately installs **no** `SynchronizationContext` at all for request handling (unlike classic ASP.NET's `AspNetSynchronizationContext`). Continuations resume on any available thread-pool thread, the same as a console app — there is no "the UI thread" equivalent to marshal back to, and no per-request thread affinity to preserve.
+
+**Common pitfalls:** assuming `await` always "comes back to the same thread" — it depends entirely on which host you're in, and even within WPF, that guarantee is about the *context*, not literally the identical OS thread, though in practice the UI context only ever runs on the one UI thread. Also assuming console/ASP.NET Core code needs `ConfigureAwait(false)` for correctness — with no context to capture, marshaling is a no-op there already; `ConfigureAwait(false)` mainly matters in hosts that *do* install a context, plus in library code that might be called from one.
+
+#### Follow-up: What's the practical difference between `SynchronizationContext.Post` and `Send`?
+
+`Post` queues the callback asynchronously and returns immediately — the caller doesn't wait for the callback to actually run. `Send` is synchronous: it blocks the calling thread until the callback has finished executing on the target context. `async`/`await`'s continuation scheduling always uses `Post`-style asynchronous marshaling, never `Send` — using `Send` from a thread that the target context also needs (e.g., calling `Send` targeting the UI context from the UI thread itself) is a classic way to self-deadlock, since the UI thread would be blocked waiting for a callback that needs the UI thread to run.
+
+---
+
+## Beginner — Question 10
+
+**Q10: What are `ManualResetEventSlim` and `AutoResetEvent`, and how do they differ?**
+
+Both are signaling primitives: one thread can `Set()` them to signal "something happened," and other threads call `Wait()` to block until that signal arrives. They differ in exactly one behavior — what happens to the signal once a waiter is released.
+
+```csharp
+private readonly ManualResetEventSlim _ready = new(initialState: false);
+
+void Producer()
+{
+    PrepareData();
+    _ready.Set(); // stays signaled — every future Wait() returns immediately, until Reset() is called
+}
+
+void Consumer()
+{
+    _ready.Wait();  // blocks until Set() is called
+    UseData();
+}
+```
+
+**`ManualResetEventSlim`** stays signaled once `Set()` is called — every thread that calls `Wait()`, whether it was already waiting or arrives later, returns immediately, until something explicitly calls `Reset()` to put it back to the unsignaled state. It models a durable "this has happened" flag — e.g., "initialization is complete," which every future check should see as true.
+
+**`AutoResetEvent`** automatically resets itself back to unsignaled the instant it releases **exactly one** waiting thread — `Set()` wakes up at most one waiter, then the gate closes again immediately. It models a one-at-a-time hand-off, closer in spirit to releasing a single permit than announcing a durable fact.
+
+```csharp
+private readonly AutoResetEvent _signal = new(initialState: false);
+
+void Worker() // several of these running concurrently
+{
+    _signal.WaitOne();  // only ONE waiting thread is released per Set() call
+    ProcessOneItem();
+}
+
+void Notifier() => _signal.Set(); // wakes exactly one Worker, then re-closes
+```
+
+**Common pitfalls:** calling `Set()` on an `AutoResetEvent` multiple times in a row with no thread currently waiting does **not** queue up multiple releases — the extra `Set()` calls are effectively lost, since the event can only hold one pending signal at a time; this is the "lost wakeup" trap covered in more depth in the Scenario tier. Also, both types are thread-blocking (`Wait()`/`WaitOne()` park the calling thread, consuming a thread for the duration) — for `async` code that needs to wait without blocking a thread, `SemaphoreSlim.WaitAsync()` or a `TaskCompletionSource` is the better fit; `ManualResetEventSlim`/`AutoResetEvent` are for synchronous, thread-based waiting.
+
+---
+
+## Beginner — Question 11
+
+**Q11: What is the `Interlocked` class, and why is `Interlocked.Increment` preferred over `lock` for a simple counter?**
+
+`System.Threading.Interlocked` exposes a small set of operations (`Increment`, `Decrement`, `Add`, `Exchange`, `CompareExchange`) that the CPU can perform as a single, indivisible hardware instruction on a shared field — no other thread can ever observe the operation "half done."
+
+```csharp
+private long _requestCount;
+
+// Naive and unsafe: read, add, write — three separate steps, can lose updates under a race.
+public void RecordBad() => _requestCount = _requestCount + 1;
+
+// Safe via a lock, but pays for a full mutual-exclusion mechanism for one field.
+private readonly object _sync = new();
+public void RecordWithLock() { lock (_sync) { _requestCount++; } }
+
+// Safe via Interlocked — a single atomic CPU instruction, no lock object, no blocking.
+public void RecordWithInterlocked() => Interlocked.Increment(ref _requestCount);
+```
+
+**Why `Interlocked` wins for this specific case:** `lock` involves acquiring a `Monitor` — even in the uncontended fast path this is meaningfully more expensive than a bare atomic CPU instruction, and under contention it can involve a full kernel-level wait. `Interlocked.Increment` compiles down to something like a hardware `LOCK XADD` instruction — the CPU itself guarantees the read-modify-write happens atomically, with no lock object to allocate, no thread ever blocking, and dramatically lower overhead, especially under high contention from many threads incrementing the same counter.
+
+**Common pitfalls:** `Interlocked` only works for the narrow set of operations it exposes on a single field — it cannot atomically update two related fields together, or run arbitrary logic atomically; for anything beyond a single primitive value's simple arithmetic/exchange, you need `lock` or a concurrent collection instead. Also, `ref _requestCount` means the field must be directly addressable — you can't use `Interlocked` on a property, only a field (or array element/local passed by `ref`).
+
+#### Follow-up: What does `Interlocked.CompareExchange` do, and why is it the building block for lock-free code?
+
+`CompareExchange(ref location, newValue, comparand)` atomically checks whether `location` currently equals `comparand`, and if so, replaces it with `newValue`, all as one indivisible operation — always returning the value that was in `location` before the attempt. This is the fundamental primitive lock-free algorithms are built on: read the current value, compute a new value based on it, then try to swap it in only if nothing else changed it in the meantime; if the swap fails (another thread got there first), retry the whole read-compute-swap cycle. The Advanced tier covers a concrete lock-free data structure built this way.
+
+---
+
+## Beginner — Question 12
+
+**Q12: If you have a list of independent async operations, what's wrong with awaiting each one inside a `foreach` loop, and how does `Task.WhenAll` fix it?**
+
+```csharp
+// BAD: each operation only STARTS after the previous one has fully finished.
+async Task<List<string>> FetchAllSequentialAsync(HttpClient client, List<string> urls)
+{
+    var results = new List<string>();
+    foreach (var url in urls)
+    {
+        results.Add(await client.GetStringAsync(url)); // waits here before starting the next one
+    }
+    return results;
+}
+```
+
+**Why this is slow:** `await`ing inside the loop means the second request isn't even *started* until the first one has completely finished, the third isn't started until the second finishes, and so on — for 10 independent HTTP calls each taking ~200ms, this takes roughly 2 seconds total, even though none of the requests actually depend on each other's results. The requests are individually asynchronous (no thread is blocked during any single wait), but the overall structure is still purely sequential — one operation strictly follows the next.
+
+**The fix — start every operation first, then await them all together:**
+
+```csharp
+async Task<string[]> FetchAllConcurrentAsync(HttpClient client, List<string> urls)
+{
+    var tasks = urls.Select(url => client.GetStringAsync(url)).ToList(); // ALL requests start here, immediately
+    return await Task.WhenAll(tasks); // then wait for all of them together
+}
+```
+
+Calling `client.GetStringAsync(url)` without `await`ing it immediately returns a `Task` representing work that has already begun — `.Select(...)` here kicks off every request back-to-back, essentially simultaneously, before any single `await` happens. `Task.WhenAll` then asynchronously waits for the whole batch to finish. For the same 10 requests at ~200ms each, this completes in roughly 200ms total (limited by the slowest single request), not 2 seconds — because the requests genuinely overlap in time instead of running one after another.
+
+**Common pitfall:** writing `await client.GetStringAsync(url)` inside a loop out of habit, because it "looks" like the natural way to process a collection — the code compiles and works, it's just needlessly slow, and the bug is structural rather than a crash, so it's easy to ship without noticing until someone measures latency. Reach for `Task.WhenAll` (optionally bounded by a `SemaphoreSlim` or `Parallel.ForEachAsync`, covered in the Intermediate tier, if unbounded fan-out is a concern) any time the operations in a loop are independent of each other.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: `Interlocked.CompareExchange` is the building block for lock-free code — walk through using it to implement a thread-safe "set only if not already set" initialization without a `lock`.**
+
+A common pattern is: multiple threads might race to initialize some shared state, but exactly one should "win," and everyone else should recognize they lost and move on — without ever blocking on a `lock`.
+
+```csharp
+private static SomeResource? _cachedResource;
+
+public static SomeResource GetOrCreate()
+{
+    var newResource = new SomeResource(); // build a candidate BEFORE trying to publish it
+
+    // Atomically: if _cachedResource is still null, set it to newResource; either way,
+    // return whatever was actually in _cachedResource at that instant.
+    var winner = Interlocked.CompareExchange(ref _cachedResource, newResource, comparand: null);
+
+    if (winner is not null)
+    {
+        // Someone else already published a value first — discard our candidate, use theirs.
+        return winner;
+    }
+
+    return newResource; // we were first — our candidate is now the published value
+}
+```
+
+**Why this needs no `lock`:** `CompareExchange` is a single hardware atomic instruction — there is no window where two threads could both observe `_cachedResource == null` and both "win," because the check-and-set happens indivisibly. Multiple threads may all construct a `SomeResource` speculatively and race to publish it, but only one `CompareExchange` call actually succeeds in changing the field from `null`; every other thread's call sees a non-`null` `comparand` mismatch, learns it lost, and discards its own candidate in favor of the winner's.
+
+**The trade-off versus `Lazy<T>`:** this pattern allows the factory (`new SomeResource()`) to run more than once under contention — the losing threads' work is wasted, just constructed and thrown away. That's the right trade when construction is cheap and lock-free progress matters more than avoiding duplicate work; when construction is expensive or has side effects, `Lazy<T>` with `ExecutionAndPublication` (covered earlier) is the better choice, since it blocks losing threads instead of letting them race and waste work.
+
+**Common pitfalls:** forgetting that `CompareExchange`-based patterns are only genuinely safe when the "loser" correctly discards its own work and defers to the winner — code that assumes *its own* candidate was published, without checking the return value, silently uses a stale local reference instead of the actually-shared one. This general read-compute-try-swap-retry shape (the **ABA problem** aside, covered in the Advanced tier) is the foundation of every lock-free data structure.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: Under what conditions can a single coarse-grained `lock` around a plain `Dictionary<TKey,TValue>` actually outperform `ConcurrentDictionary<TKey,TValue>`?**
+
+`ConcurrentDictionary` isn't unconditionally faster than a locked `Dictionary` — it wins specifically when contention across *different* keys is common, because its internal lock-striping (multiple internal locks, each covering a subset of hash buckets) lets unrelated-key operations proceed genuinely in parallel. That benefit doesn't materialize, and can even become a net cost, outside that specific access pattern.
+
+```csharp
+// Locked Dictionary — one coarse lock, but it's CHEAP when contention is low or all
+// access is effectively single-threaded (e.g., a background thread, or protected by a
+// higher-level exclusive phase of the app's lifecycle).
+private readonly Dictionary<string, int> _map = new();
+private readonly object _sync = new();
+public void Update(string key, int value) { lock (_sync) { _map[key] = value; } }
+```
+
+**Conditions where the locked `Dictionary` wins:**
+- **Low or no real contention.** If access is mostly from one thread, or concurrent access is rare, `lock`'s uncontended fast path (a cheap `Monitor.Enter`/`Exit` pair) is lower overhead than `ConcurrentDictionary`'s more elaborate internal bookkeeping (its per-bucket locking structures, and for `TryUpdate`-style operations, retry loops).
+- **Operations that must be atomic across *multiple* dictionary calls together**, e.g., "check three different keys and update two of them consistently, as one unit." `ConcurrentDictionary` only guarantees atomicity for its own single-call operations (`AddOrUpdate`, `GetOrAdd` on a *given* key) — coordinating several keys/steps together still needs an external `lock` regardless of which collection type you use, at which point the coarse `Dictionary` + `lock` is simpler and no less correct.
+- **Heavy full-dictionary enumeration mixed with writes**, where you need a true consistent point-in-time snapshot rather than `ConcurrentDictionary`'s weakly-consistent, "may reflect concurrent mutations mid-enumeration" iteration semantics — a `lock` around a copy-then-release read path gives a real snapshot; `ConcurrentDictionary`'s enumeration explicitly does not.
+- **Memory footprint matters and the dictionary is small/rarely accessed concurrently** — `ConcurrentDictionary`'s internal striping structures carry more overhead per instance than a plain `Dictionary`, which matters if you have very many small dictionary instances rather than one large shared one.
+
+**Common pitfall:** reaching for `ConcurrentDictionary` reflexively as "the thread-safe one" without checking whether the actual access pattern (contention level, cross-key atomicity needs, enumeration consistency requirements) is one it's actually built to help with — measuring under realistic concurrency, not assuming, is the only reliable way to know which wins for a given workload.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: How does linking `CancellationTokenSource`s work (`CreateLinkedTokenSource`), and what's a common propagation mistake when combining a caller's token with a local timeout?**
+
+A method often needs to respect both a caller-supplied `CancellationToken` (e.g., "the HTTP request was aborted") and its own internal timeout (e.g., "give up after 5 seconds regardless"). `CancellationTokenSource.CreateLinkedTokenSource` combines multiple tokens into one new token that's canceled the moment **any** of its source tokens is canceled.
+
+```csharp
+public async Task<string> FetchWithTimeoutAsync(HttpClient client, string url, CancellationToken callerToken)
+{
+    using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(callerToken, timeoutCts.Token);
+
+    return await client.GetStringAsync(url, linkedCts.Token); // canceled by EITHER source
+}
+```
+
+`linkedCts.Token` is canceled if the caller cancels `callerToken`, or if 5 seconds elapse and `timeoutCts` fires — whichever happens first. Both source `CancellationTokenSource`s must stay alive (not be disposed) for at least as long as the linked token might still be observed, which is why they're scoped with `using` around the whole operation rather than disposed early.
+
+**A common propagation mistake — passing the wrong token deeper into the call:**
+
+```csharp
+// BUG: passes the ORIGINAL caller token into the downstream call, not the linked one —
+// the 5-second local timeout silently never applies to this specific call.
+public async Task<string> FetchWithTimeoutBuggyAsync(HttpClient client, string url, CancellationToken callerToken)
+{
+    using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(callerToken, timeoutCts.Token);
+
+    return await client.GetStringAsync(url, callerToken); // should be linkedCts.Token!
+}
+```
+
+This compiles cleanly and mostly "works" — cancellation from the caller still functions — which is exactly what makes it easy to miss in review: the bug only manifests as "the timeout doesn't actually time out," discovered later when a hung downstream call runs far longer than the intended 5 seconds.
+
+**Common pitfalls:** disposing a linked or source `CancellationTokenSource` too early (e.g., at the end of a `using` block that exits before an in-flight operation using its token has actually finished, especially with fire-and-forget work) causes `ObjectDisposedException` the next time that token is checked; forgetting that a linked token source must itself be disposed once no longer needed, or it leaks a small amount of internal registration state for as long as the underlying tokens' sources remain alive.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How does `Parallel.ForEach` partition work across threads, and how do you control that when the default partitioning is a poor fit?**
+
+By default, `Parallel.ForEach` over an `IEnumerable<T>`/array doesn't hand out one item per thread at a time — it uses a `Partitioner` that chunks the source into ranges and assigns whole chunks to worker threads, specifically to reduce the per-item coordination overhead of repeatedly synchronizing on "what's the next item." For an indexable source like an array or `List<T>`, this typically means contiguous **range partitioning** (thread A gets items 0–999, thread B gets 1000–1999, etc., with dynamic rebalancing if one thread finishes its range early).
+
+```csharp
+// Default partitioning: fine when each item costs roughly the same amount of work.
+Parallel.ForEach(items, item => Process(item));
+```
+
+**Where default partitioning falls short — highly uneven per-item cost:**
+
+```csharp
+// If early items are cheap and later items are expensive (or vice versa), a naive static
+// range split can leave some threads idle early while others are still grinding through
+// their expensive range — .NET's partitioner does rebalance dynamically to reduce this,
+// but very skewed workloads can still benefit from an explicit strategy.
+Parallel.ForEach(items, item => ProcessVariableCost(item));
+```
+
+**Controlling it explicitly with a custom `Partitioner`:**
+
+```csharp
+// Chunk size 1: hands out items one at a time, maximizing load-balance at the cost of
+// more coordination overhead per item — appropriate when per-item cost varies a lot.
+var partitioner = Partitioner.Create(items, EnumerablePartitionerOptions.NoBuffering);
+Parallel.ForEach(partitioner, item => ProcessVariableCost(item));
+
+// Or tune degree of parallelism directly when you need to cap core usage:
+Parallel.ForEach(items, new ParallelOptions { MaxDegreeOfParallelism = 4 }, item => Process(item));
+```
+
+**Practical guidance:** for roughly uniform per-item cost, the default partitioner's chunking is a good, low-overhead default — don't reach for a custom `Partitioner` prematurely. When work is highly skewed (a few items dominate the total time, or cost is unpredictable), a finer-grained or load-balancing partitioner reduces the risk of a handful of threads finishing early and sitting idle while one thread finishes a disproportionately expensive chunk alone; measure actual thread utilization (e.g., via a profiler or simple stopwatch-per-partition logging) before assuming the default is the bottleneck.
+
+**Common pitfall:** assuming `Parallel.ForEach` distributes work one item at a time round-robin across threads by default — it doesn't, and that chunking behavior (not just raw thread count) is often the actual explanation when parallel throughput doesn't scale the way a naive per-item cost estimate predicted.
+
+---
+
+## Advanced — Question 14
+
+**Q14: How does `ManualResetEventSlim` achieve better performance than the older `ManualResetEvent` for short waits, and when does it fall back to a real kernel wait?**
+
+`ManualResetEvent` (and `AutoResetEvent`) are thin wrappers around a genuine OS kernel synchronization object — every `WaitOne()` call, even one that's satisfied almost instantly, involves a transition into kernel mode, which is comparatively expensive (hundreds of nanoseconds to low microseconds of pure overhead, before any actual waiting begins).
+
+`ManualResetEventSlim` is a hybrid: for the common case where the wait is expected to be short, it first **spins** in user mode — busy-checking the signaled flag in a tight loop (optionally backing off, yielding the timeslice periodically) — entirely avoiding the kernel transition if the signal arrives quickly. Only if the spin phase exceeds a threshold (configurable via the constructor's `spinCount` parameter) does it fall back to allocating and waiting on a real kernel event object, exactly like `ManualResetEvent` does unconditionally.
+
+```csharp
+// Spins in user mode for up to ~10 iterations before falling back to a kernel wait —
+// tuned for scenarios where the signal is expected almost immediately.
+private readonly ManualResetEventSlim _ready = new(initialState: false, spinCount: 10);
+```
+
+**Why this matters:** if the signaled condition is typically met within microseconds (e.g., a fast producer/consumer hand-off, or a lock-free flag being flipped by another core), spinning briefly avoids the kernel round-trip entirely for the overwhelmingly common case, while still correctly falling back to a real, CPU-idle kernel wait (not burning a core indefinitely) if the wait turns out to be longer than expected. This is the same general spin-then-block strategy `SpinWait`/`SpinLock` and, internally, `Monitor` itself use for short critical sections.
+
+**When it doesn't help — or actively hurts:** if waits are typically long (milliseconds or more), the spin phase is pure wasted CPU before falling back to the same kernel wait `ManualResetEvent` would have used immediately — for genuinely long or unpredictable waits, `ManualResetEvent`/kernel-native waiting (or better, an async-first primitive like `SemaphoreSlim`/`TaskCompletionSource` if the waiting thread doesn't need to block synchronously at all) is more appropriate. On a heavily loaded machine with more runnable threads than cores, aggressive spinning by many waiters can also directly steal CPU time from the very thread that's supposed to produce the signal.
+
+**Common pitfall:** using `ManualResetEventSlim` (or any of the "Slim" primitives) for waits that are routinely long — the spin-then-block hybrid is a targeted optimization for short waits specifically, not a strictly-better replacement for every use of the non-Slim types.
+
+---
+
+## Advanced — Question 15
+
+**Q15: Go deeper on `SynchronizationContext.Post` versus `Send`, and how the WPF `Dispatcher`/WinForms message pump actually implement "run this on the UI thread."**
+
+`SynchronizationContext` is an abstract base with two virtual methods: `Post(SendOrPostCallback, state)` — schedule the callback to run on the target context asynchronously, don't wait — and `Send(SendOrPostCallback, state)` — run the callback on the target context and **block the calling thread** until it completes. `async`/`await`'s default continuation-marshaling always uses `Post`; nothing in the standard `async` machinery uses `Send`.
+
+**How the UI-thread implementations actually work:** `DispatcherSynchronizationContext` (WPF) and `WindowsFormsSynchronizationContext` (WinForms) don't implement "run on the UI thread" via any special OS thread-affinity mechanism — the UI thread is just an ordinary thread running an ordinary **message loop**: a `while` loop that pulls messages/work items off a queue and executes them, one at a time, forever, until the application exits. `Post` on these contexts translates into posting a message (WPF: a `Dispatcher` operation; WinForms: a Win32 window message) onto that same queue. The UI thread's message loop eventually dequeues it and invokes your callback — which is why work posted to the UI thread only actually runs when the UI thread's loop gets around to it; a UI thread stuck in a long synchronous operation (or itself blocked on `Send`/`.Wait()`) leaves posted work queued and undelivered, which is exactly why UI responsiveness dies when you block that thread.
+
+```csharp
+// Illustrative shape of what the UI thread is actually doing, conceptually:
+while (applicationRunning)
+{
+    var message = messageQueue.Dequeue(); // blocks here when idle — not busy-spinning
+    message.Invoke();                      // runs a posted callback, a paint event, an input event, etc.
+}
+```
+
+**Why `Send` is dangerous on a UI context specifically:** calling `Send` from a non-UI thread targeting the UI `SynchronizationContext` blocks the caller until the UI thread's message loop gets around to running the callback — fine, if slow. But calling `Send` **from the UI thread itself**, targeting its own context, deadlocks immediately: the UI thread is now blocked waiting for its own message loop to process an item, but that same thread is the one that would need to be free to run the loop and process it. This is a structurally identical deadlock to the `.Result`/`await` deadlock covered earlier, just via `Send` instead of a blocked `Task`.
+
+**Common pitfall:** assuming `Post`ed work runs "soon" in any bounded sense — it runs whenever the target message loop next drains its queue, which under a busy or blocked UI thread can be arbitrarily delayed; this is why heavy synchronous work should never run directly on the UI thread even without any explicit blocking call, since it starves the same queue that `async` continuations, input events, and repaints all depend on.
+
+---
+
+## Advanced — Question 16
+
+**Q16: Walk through implementing a lock-free stack using `Interlocked.CompareExchange`, and explain the ABA problem it's vulnerable to.**
+
+A lock-free stack maintains a singly-linked list of nodes and a `head` pointer, using `CompareExchange` to atomically swap the head only if it hasn't changed since it was last read — the same read-compute-try-swap-retry loop from the Intermediate tier's `CompareExchange` question, applied to a real data structure.
+
+```csharp
+public class LockFreeStack<T>
+{
+    private class Node { public T Value = default!; public Node? Next; }
+    private Node? _head;
+
+    public void Push(T value)
+    {
+        var newNode = new Node { Value = value };
+        Node? currentHead;
+        do
+        {
+            currentHead = _head;
+            newNode.Next = currentHead;
+            // Try to swap _head from currentHead to newNode; retry if another thread beat us to it.
+        } while (Interlocked.CompareExchange(ref _head, newNode, currentHead) != currentHead);
+    }
+
+    public bool TryPop(out T value)
+    {
+        Node? currentHead;
+        do
+        {
+            currentHead = _head;
+            if (currentHead is null) { value = default!; return false; }
+        } while (Interlocked.CompareExchange(ref _head, currentHead.Next, currentHead) != currentHead);
+        value = currentHead.Value;
+        return true;
+    }
+}
+```
+
+**Why this needs no `lock`:** every `Push`/`TryPop` optimistically reads `_head`, computes the new value it wants to install, then atomically installs it only if `_head` is still exactly what was read — if another thread modified `_head` in between (won the race), the `CompareExchange` fails, the loop retries with the now-current `_head`, and eventually one thread succeeds without ever blocking.
+
+**The ABA problem:** `CompareExchange` only checks that `_head` currently **equals** `currentHead` by reference — it cannot detect that `_head` was changed to something else and then changed back to the *same* value in between. Concretely: thread 1 reads `_head == A`, intending to pop it; before it retries its `CompareExchange`, thread 2 pops `A` (head becomes `B`), then pops `B` too, then pushes `A` back (head becomes `A` again, but now `A.Next` points somewhere entirely different than what thread 1 originally saw). Thread 1's `CompareExchange` succeeds — `_head` is still `A` — but it installs `A.Next` from thread 1's stale view, potentially reintroducing an already-popped or already-freed node into the stack and corrupting it, even though every individual `CompareExchange` "succeeded" correctly by its own local logic.
+
+**Why it's easy to miss:** the ABA problem produces no exception and no observable failure at the moment it happens — corruption surfaces later, arbitrarily far from the actual race, making it one of the hardest classes of concurrency bug to reproduce or diagnose. Real-world mitigations include tagging each pointer with a version/generation counter updated on every change (so "the same reference" with a different generation is detected as different), which is exactly what .NET's own `ConcurrentStack<T>` does internally rather than a naive `CompareExchange`-only implementation.
+
+**Practical guidance:** hand-rolling lock-free data structures is rarely justified in application code — `System.Collections.Concurrent`'s types (`ConcurrentStack<T>`, `ConcurrentQueue<T>`, `ConcurrentBag<T>`) already handle ABA-safety and other lock-free subtleties correctly; this exercise is valuable for understanding *why* those types exist and what they're protecting against, not as a template to copy into production.
+
+---
+
+## Advanced — Question 17
+
+**Q17: How does cancellation interact with `IAsyncEnumerable<T>`/`await foreach` mid-stream, and what's the `WithCancellation`/`[EnumeratorCancellation]` pitfall that silently breaks it?**
+
+An `async` iterator method can accept a `CancellationToken` parameter, but for `await foreach` to actually forward the token the *consumer* passes into `GetAsyncEnumerator`, the parameter must be annotated `[EnumeratorCancellation]` — without it, the token passed by the consumer via `WithCancellation(...)` never reaches the iterator body at all.
+
+```csharp
+// BUG: token parameter looks right, but without [EnumeratorCancellation], WithCancellation's
+// token is silently ignored — this parameter only ever sees its own default value.
+public async IAsyncEnumerable<Order> GetOrdersAsync(CancellationToken ct = default)
+{
+    while (await MoreDataAvailableAsync())
+    {
+        ct.ThrowIfCancellationRequested(); // ct here is ALWAYS default(CancellationToken) if
+                                            // the caller used WithCancellation instead of
+                                            // calling this method with an explicit token directly
+        yield return await ReadNextOrderAsync(ct);
+    }
+}
+```
+
+```csharp
+// Consumer expecting cancellation to work:
+await foreach (var order in GetOrdersAsync().WithCancellation(cancellationToken))
+{
+    Process(order); // the loop DOES stop on cancellation (await foreach checks the token itself),
+                     // but ReadNextOrderAsync's own internal I/O never sees the cancellation —
+                     // in-flight work isn't actually interrupted, only the loop's outer wrapper
+}
+```
+
+**The fix:**
+
+```csharp
+public async IAsyncEnumerable<Order> GetOrdersAsync(
+    [EnumeratorCancellation] CancellationToken ct = default) // now WithCancellation's token flows in
+{
+    while (await MoreDataAvailableAsync())
+    {
+        ct.ThrowIfCancellationRequested();
+        yield return await ReadNextOrderAsync(ct); // genuinely cancels the in-flight read too
+    }
+}
+```
+
+**Why the bug is subtle:** `await foreach` itself still honors `WithCancellation`'s token at the loop level — the iteration visibly stops when canceled, so a superficial test ("does cancelling stop the loop?") passes. What's silently broken is that the *iterator method's own internal awaits* (`ReadNextOrderAsync`, a real database call in flight) never receive the token, so genuinely expensive in-flight work keeps running to completion in the background even though the consumer believes it's been canceled — the same wasted-work class of bug as the CancellationToken-propagation Scenario question, just specific to async iterators.
+
+**Common pitfalls:** assuming `[EnumeratorCancellation]` is optional boilerplate rather than functionally required for `WithCancellation` to do anything inside the method body; forgetting that `ConfigureAwait(false)` can be applied to `await foreach` itself (`.ConfigureAwait(false)` after `WithCancellation`, or via `.ConfigureAwait(false)` on an `IAsyncEnumerable` directly in newer C# versions) for library code that shouldn't marshal each iteration step back to a captured context, exactly mirroring the single-`await` `ConfigureAwait(false)` guidance extended across every step of the stream.
+
+---
+
+## Scenario — Question 8
+
+**Q8: An ASP.NET Core endpoint accepts a `CancellationToken` (via the standard `HttpContext.RequestAborted` model-binding parameter) so that if the client disconnects, work stops promptly. Under load, `dotnet-counters`/APM traces show that expensive downstream database queries keep running to completion for seconds after the client has already disconnected, wasting database capacity on results nobody will ever receive. The code:**
+
+```csharp
+[HttpGet]
+public async Task<IActionResult> Search(string query, CancellationToken cancellationToken)
+{
+    var results = await _searchService.SearchAsync(query);
+    return Ok(results);
+}
+
+public async Task<List<Result>> SearchAsync(string query)
+{
+    // no CancellationToken parameter at all
+    return await _dbContext.Products
+        .Where(p => p.Name.Contains(query))
+        .ToListAsync();
+}
+```
+
+**Diagnose the root cause and provide the fix.**
+
+**Root cause:** the controller action correctly receives `cancellationToken` (ASP.NET Core automatically binds it to `HttpContext.RequestAborted`, which fires when the client disconnects), but it's never **forwarded** into `_searchService.SearchAsync(query)` — that method has no `CancellationToken` parameter at all, so `ToListAsync()` runs with no way to know the request was aborted. Cooperative cancellation, as covered earlier, only works if the token is threaded all the way down through every layer that does the actual awaiting; a token that dead-ends at the outermost layer protects nothing below it. The controller method returning/faulting due to disconnection doesn't retroactively stop work already in flight further down — the database query keeps running on its own schedule, fully decoupled from the fact that nobody will ever read its result.
+
+**The fix — propagate the token through every layer down to the actual I/O call:**
+
+```csharp
+[HttpGet]
+public async Task<IActionResult> Search(string query, CancellationToken cancellationToken)
+{
+    var results = await _searchService.SearchAsync(query, cancellationToken);
+    return Ok(results);
+}
+
+public async Task<List<Result>> SearchAsync(string query, CancellationToken cancellationToken)
+{
+    return await _dbContext.Products
+        .Where(p => p.Name.Contains(query))
+        .ToListAsync(cancellationToken); // EF Core honors this — cancels the underlying DB command
+}
+```
+
+`ToListAsync(cancellationToken)` genuinely cancels the in-flight database command when the token fires (EF Core propagates it down to the underlying `DbCommand`/ADO.NET provider, which can cancel the executing query on the server side, not just stop waiting for it locally) — so a client disconnect now actually frees the database connection and aborts server-side query execution, instead of merely abandoning a result the ASP.NET Core layer no longer cares about.
+
+**How this class of bug is found in practice:** the symptom — client-observed latency looks fine, but backend resource usage (DB connections held, CPU on the DB server, query duration metrics) doesn't drop when clients cancel/navigate away — is the signature. Auditing points to check: every method signature between the controller's token and the innermost awaited I/O call, confirming each one both accepts *and actually passes down* a `CancellationToken` rather than silently dropping it partway through the call chain (a method that accepts a token but never uses it anywhere in its body is the same bug wearing a disguise).
+
+**Common pitfalls:** adding a `CancellationToken` parameter to a method's signature "for completeness" without actually passing it into every awaited call inside that method — the parameter existing is not the same as it being honored; every single `await` on an I/O-bound API should receive the token if that API accepts one.
+
+---
+
+## Scenario — Question 9
+
+**Q9: A Windows Service (not a UI app) subscribes an `async void` handler to a third-party message-queue library's `MessageReceived` event, which is raised from a background thread pool the library manages internally. The service works correctly for hours, then suddenly the entire process crashes with no application-level error logged anywhere. Diagnose and fix.**
+
+```csharp
+public class MessageProcessor
+{
+    public void Start(IMessageQueueClient client)
+    {
+        client.MessageReceived += OnMessageReceivedAsync; // subscribing an async void handler
+    }
+
+    private async void OnMessageReceivedAsync(object sender, MessageEventArgs e)
+    {
+        var data = await DeserializeAsync(e.RawMessage);
+        await ProcessAsync(data); // if this throws, where does the exception go?
+    }
+}
+```
+
+**Root cause:** `OnMessageReceivedAsync` is `async void`. As covered in the Advanced tier, an exception thrown inside an `async void` method has no `Task` to be captured on — it is instead raised directly, synchronously, on whatever `SynchronizationContext` (or, absent one, directly on the thread pool) was current when the method's execution resumed after its last `await`. In a Windows Service — with no UI `SynchronizationContext` installed, much like a console app — that means the exception surfaces as a genuinely **unhandled exception on a thread-pool thread**. By default, an unhandled exception on any thread in a .NET process terminates the entire process, not just that one operation — there's no `try`/`catch` anywhere in the call stack because the exception isn't propagating through any `Task` that something is awaiting; it's raised fresh, directly, with no caller to catch it. The "no application-level error logged" symptom fits exactly: nothing in the app's own logging code ever runs, because the exception never reaches any of the app's own `catch` blocks — it goes straight to the CLR's unhandled-exception termination path.
+
+**Why it worked for hours before crashing:** the crash only happens on whatever message eventually causes `DeserializeAsync` or `ProcessAsync` to actually throw — a malformed message, a transient downstream failure, an edge case in the payload — which may be rare enough not to show up immediately under normal traffic.
+
+**The fix — never let an `async void` method's body run without its own top-level `try`/`catch`, and prefer `async Task` wherever the framework contract allows it:**
+
+```csharp
+public class MessageProcessor
+{
+    public void Start(IMessageQueueClient client)
+    {
+        client.MessageReceived += OnMessageReceived; // still void, if the event forces it
+    }
+
+    private void OnMessageReceived(object sender, MessageEventArgs e)
+    {
+        // Fire-and-forget deliberately, but through a Task-returning method with its own
+        // exhaustive exception handling — the "async void" boundary is now this thin
+        // synchronous wrapper, not the code that can actually throw.
+        _ = HandleMessageAsync(e);
+    }
+
+    private async Task HandleMessageAsync(MessageEventArgs e)
+    {
+        try
+        {
+            var data = await DeserializeAsync(e.RawMessage);
+            await ProcessAsync(data);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process message {MessageId}", e.MessageId);
+            // handled here — does not propagate, does not crash the process
+        }
+    }
+}
+```
+
+Now any exception is caught locally inside `HandleMessageAsync` and logged properly; nothing escapes to crash the process, and the message-processing loop for subsequent messages is unaffected by one bad message.
+
+**Common pitfalls:** assuming `async void` is only dangerous in UI contexts because "that's where the examples always are" — it is, if anything, *more* dangerous in a non-UI host like a service or console app, because there's no framework-level top-level exception boundary catching and logging the crash the way some UI hosts' message loops sometimes do; the process just dies. Also, wrapping the body in `try`/`catch` but forgetting to actually log/observe the caught exception silently hides real failures — a caught exception in a fire-and-forget handler is often the *only* place that failure will ever be visible, so it must be logged, not just swallowed.
+
+---
+
+## Scenario — Question 10
+
+**Q10: A nightly batch job processes 500 customer records concurrently via `Task.WhenAll`. The job log shows "Batch completed successfully" every night, but a monthly audit discovers dozens of records were silently never actually updated over the past few weeks. The code:**
+
+```csharp
+public async Task RunBatchAsync(List<Customer> customers)
+{
+    var tasks = customers.Select(c => UpdateCustomerAsync(c)).ToList();
+
+    try
+    {
+        await Task.WhenAll(tasks);
+        _logger.LogInformation("Batch completed successfully");
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Batch failed");
+    }
+}
+```
+
+**Diagnose why failures are going unnoticed, and fix the job so partial failures are surfaced and don't get logged as a clean success.**
+
+**Root cause:** this is the `Task.WhenAll` exception-aggregation gap from the Intermediate tier, now causing a real silent-data-loss incident. When multiple tasks in a `Task.WhenAll` batch fault, `await`ing the combined task rethrows only the **first** exception it encounters — the `catch` block does run when at least one task fails, which looks like correct error handling at a glance. But the log message in the success path never actually distinguishes "some tasks failed" from "zero tasks failed," and more importantly: if only *some* of the 500 tasks fail while most succeed, the `await Task.WhenAll(tasks)` line does throw (triggering the `catch`, logging "Batch failed") — but every other batch run where failures happen to be masked, retried internally by a lower layer, or where the failing subset changes night to night, could easily be misread from logs alone as "mostly fine." Worse, the deeper issue in code shaped like this is teams frequently "fixing" the visible alarm fatigue from `Task.WhenAll` throwing nightly by wrapping the *individual* `UpdateCustomerAsync` calls in their own silent `try`/`catch`-and-swallow, at which point `Task.WhenAll` sees no faulted tasks at all and the outer log genuinely, incorrectly, says "completed successfully" while individual records were dropped with no record anywhere of which ones or why.
+
+```csharp
+// The actual shape usually found upon investigation — swallowed per-item failures:
+private async Task UpdateCustomerAsync(Customer c)
+{
+    try
+    {
+        await _repository.UpdateAsync(c);
+    }
+    catch
+    {
+        // silently swallowed — added earlier to stop the whole batch from failing on one bad record
+    }
+}
+```
+
+**The fix — make every individual outcome observable, and report partial failure explicitly instead of collapsing to true/false:**
+
+```csharp
+public async Task RunBatchAsync(List<Customer> customers)
+{
+    var tasks = customers.Select(c => UpdateOneAsync(c)).ToList();
+    var results = await Task.WhenAll(tasks); // never throws itself now — each item reports its own outcome
+
+    var failures = results.Where(r => !r.Success).ToList();
+    if (failures.Count > 0)
+    {
+        foreach (var f in failures)
+            _logger.LogError(f.Exception, "Failed to update customer {CustomerId}", f.CustomerId);
+
+        _logger.LogWarning("Batch completed with {FailureCount}/{Total} failures", failures.Count, customers.Count);
+    }
+    else
+    {
+        _logger.LogInformation("Batch completed successfully — {Total} customers updated", customers.Count);
+    }
+}
+
+private async Task<(int CustomerId, bool Success, Exception? Exception)> UpdateOneAsync(Customer c)
+{
+    try
+    {
+        await _repository.UpdateAsync(c);
+        return (c.Id, true, null);
+    }
+    catch (Exception ex)
+    {
+        return (c.Id, false, ex); // observed and reported, never silently dropped
+    }
+}
+```
+
+Every record's outcome is now captured explicitly rather than relying on `Task.WhenAll`'s exception surfacing (which only ever reveals the first failure and collapses everything else into a binary pass/fail at the batch level). The log line itself can no longer say "completed successfully" while failures happened, because success is computed from the actual per-item results, not inferred from the absence of a caught exception.
+
+**Common pitfalls:** treating "the `catch` block around `Task.WhenAll` didn't fire" as proof nothing failed — it only proves nothing *threw*, which per-item `try`/`catch`-and-swallow can trivially defeat; any batch operation processing many independent units needs per-unit outcome tracking, not just an outer try/catch, if partial failure is a real possibility and silent data loss is unacceptable.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A `ConfigCache` class exposes cached configuration via a `ReaderWriterLockSlim` (reads are extremely frequent — thousands per second across many request-handling threads — writes happen roughly once a minute when config is refreshed from a remote source). After a production incident, an on-call engineer notices a config refresh took over four minutes to actually take effect, even though the refresh call itself completed and logged success in under a second. Diagnose the delay, and propose a fix that removes the risk entirely rather than just tuning it.**
+
+```csharp
+public class ConfigCache
+{
+    private readonly ReaderWriterLockSlim _rwLock = new();
+    private Dictionary<string, string> _config = new();
+
+    public string? Get(string key)
+    {
+        _rwLock.EnterReadLock();
+        try { return _config.GetValueOrDefault(key); }
+        finally { _rwLock.ExitReadLock(); }
+    }
+
+    public void Refresh(Dictionary<string, string> newConfig)
+    {
+        _rwLock.EnterWriteLock(); // can wait a long time under sustained read load
+        try { _config = newConfig; }
+        finally { _rwLock.ExitWriteLock(); }
+    }
+}
+```
+
+**Root cause: writer starvation**, the exact pitfall flagged in the Advanced tier's `ReaderWriterLockSlim` question, now manifesting as a real incident. `Get(...)` is called thousands of times per second from many concurrent request threads, and because any number of readers can hold the read lock simultaneously with no gap between one reader releasing and the next acquiring, under sustained heavy read traffic the read lock can, in practice, stay continuously held — there is effectively never a moment with zero active readers for the writer to claim exclusive access. `ReaderWriterLockSlim` does queue new readers behind an already-waiting writer to reduce (not eliminate) this risk, but under high enough sustained read concurrency, the writer can still end up waiting for an extended, production-incident-worthy amount of time for a truly reader-free window — explaining exactly the symptom: `Refresh(...)` itself (building `newConfig` and calling this method) completed and logged quickly, but the actual `EnterWriteLock()` call inside it blocked for minutes waiting for exclusive access.
+
+**The fix that removes the risk entirely — replace `ReaderWriterLockSlim` with an immutable snapshot swapped via `Interlocked.Exchange` (or `CompareExchange`), so readers and writers never contend on a lock at all:**
+
+```csharp
+public class ConfigCache
+{
+    // The reference itself is what's swapped — readers never take any lock at all.
+    private volatile Dictionary<string, string> _config = new();
+
+    public string? Get(string key) => _config.GetValueOrDefault(key); // no lock, ever
+
+    public void Refresh(Dictionary<string, string> newConfig)
+    {
+        Interlocked.Exchange(ref _config, newConfig); // atomic pointer swap — instantaneous, no waiting
+    }
+}
+```
+
+**Why this eliminates the problem rather than just reducing it:** readers never acquire anything — `Get` just dereferences whatever `_config` currently points to, and because `Dictionary<TKey,TValue>` is never *mutated* in place (only ever wholesale-replaced), a reader mid-read of the old dictionary is completely unaffected by a concurrent `Refresh` swapping in a new one; there is no shared mutable state being read and written at the same time, only an atomic reference swap. `volatile` on the field ensures every thread's read of `_config` observes the latest published reference promptly (the memory-visibility guarantee from the Advanced tier's `volatile` question) rather than a stale, register-cached one. A writer can never be starved, because a writer never waits on readers at all — the swap either happens or it doesn't, in one atomic instruction, regardless of how many reads are in flight.
+
+**Trade-off to note:** a reader that started reading just before a `Refresh` may finish its lookup against the *old* dictionary (a reader that already captured `_config` into a local before the swap keeps using that snapshot) — this is a deliberate, acceptable eventual-consistency trade for config caching (a request seeing config that's a few milliseconds stale is fine), not a correctness bug; it would be inappropriate for a use case that genuinely needs read-after-write consistency for every reader instantly.
+
+**Common pitfalls:** reaching for `ReaderWriterLockSlim` for the "read-heavy, write-rare" shape by default without noticing that the specific workload — where the whole value is atomically replaceable rather than needing in-place mutation — has a strictly better, contention-free alternative; `ReaderWriterLockSlim` is the right tool when readers need to inspect a data structure that's genuinely mutated in place (not wholesale swapped), where an immutable-snapshot-swap pattern doesn't apply.
+
+---
+
+## Scenario — Question 12
+
+**Q12: A high-throughput trading/analytics service processes millions of events per second across 8 worker threads, each maintaining its own running counters in a shared array (`long[] counters`, one slot per worker index). After a routine refactor that changed `counters` from a `long[8]` to a `long[8]` inside a class with a couple of extra fields added before it, throughput dropped by roughly 40% with no logic changes and no increase in reported CPU usage per operation. Diagnose the regression and fix it.**
+
+```csharp
+public class WorkerCounters
+{
+    // BEFORE the refactor: counters was the only field — implicitly well-isolated by
+    // being the entire object's backing allocation.
+    // AFTER: a few new fields were added ahead of it for an unrelated feature.
+    public string ServiceName = "trading-engine";
+    public DateTime StartedAt = DateTime.UtcNow;
+    public long[] Counters = new long[8]; // one long per worker thread
+
+    public void Increment(int workerIndex) => Counters[workerIndex]++; // not the actual bug — illustrative
+}
+```
+
+Actually, the real trigger here is subtler than the object's own fields — the eight `long` elements of `Counters` are laid out contiguously in the array's own backing memory, one after another, and eight adjacent 8-byte `long`s comfortably fit inside just one or two 64-byte CPU cache lines. Each worker thread hammering `Counters[workerIndex]++` on its own dedicated index, correctly, with each thread's writes going to a logically distinct element — no race condition, no wrong answers.
+
+**Root cause: false sharing.** Because all 8 workers' counters sit inside the same one or two cache lines, every worker's write invalidates that cache line in every other core's cache, forcing the other 7 workers' next read/write of *their own, entirely unrelated* counter to pay a cross-core cache-coherency round-trip instead of a cheap local cache hit. With 8 threads all hammering adjacent memory simultaneously at millions of operations per second, this cache-line ping-pong dominates the actual cost of the increments themselves — explaining the throughput collapse with **no** increase in reported per-operation CPU work (the CPU is "busy," but stalled waiting on cache-coherency traffic, which doesn't show up as extra instructions executed, just as wasted cycles). The seemingly-irrelevant refactor (adding fields before `Counters`) is a plausible real-world trigger only in the sense that memory layout changes (including ones from unrelated refactors, GC compaction, or even a different .NET version's allocator behavior) can shift whether hot fields land on the same or different cache lines — the underlying vulnerability (adjacent per-thread hot counters) was there all along, waiting to be exposed.
+
+**The fix — pad each counter out to its own cache line:**
+
+```csharp
+[StructLayout(LayoutKind.Explicit, Size = 64)] // pad the whole struct to one full cache line (64 bytes)
+public struct PaddedCounter
+{
+    [FieldOffset(0)] public long Value;
+}
+
+public class WorkerCounters
+{
+    public string ServiceName = "trading-engine";
+    public DateTime StartedAt = DateTime.UtcNow;
+    private readonly PaddedCounter[] _counters = new PaddedCounter[8];
+
+    public void Increment(int workerIndex) => Interlocked.Increment(ref _counters[workerIndex].Value);
+    public long Read(int workerIndex) => Interlocked.Read(ref _counters[workerIndex].Value);
+}
+```
+
+Each `PaddedCounter` now occupies a full 64-byte cache line by itself, so worker 0's writes and worker 1's writes land on physically different cache lines — no cross-core invalidation traffic between unrelated workers, restoring each thread's ability to hit its own value in local cache.
+
+**How this was actually diagnosed in practice:** CPU-level profiling (hardware performance counters — cache-miss rate, cache-line-invalidation events, available via tools like Intel VTune, `perf c2c` on Linux, or Windows Performance Analyzer) showed abnormally high cross-core cache-coherency traffic concentrated exactly on the `Counters` array's memory region, with otherwise unremarkable instruction counts — the classic false-sharing fingerprint of "CPU busy, work not increasing, cache traffic through the roof," which ordinary application-level profiling (method timings, allocation counts) does not surface at all, since nothing is allocating, blocking, or throwing.
+
+**Common pitfalls:** assuming a throughput regression with flat CPU/instruction metrics must be I/O-related or externally caused, since "the code didn't get slower, the machine must be" is a natural but wrong first read; false sharing is specifically the failure mode that produces exactly that confusing signature, and it only shows up in hardware-level cache metrics, not in typical application profiling.
+
+---
+
+## Scenario — Question 13
+
+**Q13: A polling worker uses an `AutoResetEvent` so a background thread can be woken immediately when new work arrives instead of polling on a fixed interval. Under bursty load — many `Notify()` calls arriving in rapid succession while the worker is busy processing a previous item — the team observes that some notifications appear to just vanish: work that was signaled never gets picked up until the *next* unrelated notification arrives, sometimes minutes later. Diagnose and fix.**
+
+```csharp
+public class PollingWorker
+{
+    private readonly AutoResetEvent _signal = new(initialState: false);
+    private readonly ConcurrentQueue<WorkItem> _pending = new(); // actually unused in the buggy version — see below
+
+    public void Notify() => _signal.Set(); // producer calls this whenever new work exists
+
+    public void RunLoop()
+    {
+        while (true)
+        {
+            _signal.WaitOne();     // wait for a signal...
+            ProcessNextBatch();    // ...then go fetch and process whatever's available RIGHT NOW
+        }
+    }
+}
+```
+
+**Root cause: `AutoResetEvent`'s lost-wakeup behavior**, foreshadowed in the Beginner tier. `AutoResetEvent` holds **at most one** pending signal at a time — calling `Set()` when the event is already signaled (nobody has consumed the previous signal yet) is a no-op; the extra signal is simply discarded, not queued or counted. Concretely: while `RunLoop` is inside `ProcessNextBatch()` (not currently waiting), suppose `Notify()` is called five times in quick succession as five separate pieces of work arrive — the *first* `Set()` puts the event into the signaled state; the next four `Set()` calls all find it already signaled and do nothing. When `ProcessNextBatch()` finishes and the loop calls `WaitOne()` again, it returns immediately (consuming the one pending signal) and processes whatever's currently available — but if `ProcessNextBatch()`'s definition of "available" is narrower than "everything that was ever signaled" (e.g., it only looks at one specific queue that a caller was supposed to have separately populated per-notification, and some of those population calls raced awkwardly with the processing logic), the extra four signals are gone forever with no trace, and their corresponding work is only ever picked up incidentally, whenever some later, unrelated signal happens to trigger a loop iteration that circles back and finds it.
+
+**The fix — separate "is there work" (a boolean gate) from "what is the work" (a genuine, unbounded queue), so no work item's existence depends on a signal count that can be silently collapsed:**
+
+```csharp
+public class PollingWorker
+{
+    private readonly ConcurrentQueue<WorkItem> _pending = new();
+    private readonly AutoResetEvent _signal = new(initialState: false);
+
+    public void Notify(WorkItem item)
+    {
+        _pending.Enqueue(item);   // the work itself is durably queued — never lost
+        _signal.Set();            // just a "go check the queue" nudge; losing extra Set() calls is now harmless
+    }
+
+    public void RunLoop()
+    {
+        while (true)
+        {
+            _signal.WaitOne();
+            while (_pending.TryDequeue(out var item)) // drain EVERYTHING currently queued, not just "one batch"
+            {
+                Process(item);
+            }
+        }
+    }
+}
+```
+
+**Why this fixes it:** the actual work items now live in a `ConcurrentQueue<T>`, which never drops anything — `AutoResetEvent`'s coalescing behavior is completely fine once the signal's only job is "there might be something to check," not "here is exactly one unit of work." Even if four `Set()` calls collapse into one wakeup, the inner `while (_pending.TryDequeue(...))` loop drains every item that accumulated during that time, so nothing is lost; a stray "extra" wakeup that finds an empty queue is harmless and cheap.
+
+**Common pitfalls:** using `AutoResetEvent` (or any single-slot signal) as if it were a counting semaphore that queues up one wakeup per `Set()` call — it explicitly does not, by design; when the number of times "wake up" is called matters (as opposed to just "is there work right now"), either use `SemaphoreSlim` (which does maintain a genuine count of available permits/signals up to its `maxCount`) as the signal, or — as shown here — decouple the signal from the work entirely by making the work durable in its own collection and using the signal purely as a stateless "go look" nudge.
+
+---

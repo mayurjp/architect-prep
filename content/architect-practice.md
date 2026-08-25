@@ -725,3 +725,380 @@ The trap here runs in both directions: ignoring the mismatch indefinitely becaus
 **Practical guidance:** write the whole thing up as an ADR (Beginner Q1) documenting the quantified case, the rejected big-bang alternative, and the slice sequence — this converts "we should really migrate off this someday" from a recurring complaint into a funded, trackable roadmap with a first concrete step, the same move used in Intermediate Q11 for any large architectural ask.
 
 ---
+
+## Beginner — Question 8
+
+**Q8: What is event storming, and why do architects use it for domain discovery instead of just reading existing documentation or code?**
+
+Event storming (created by Alberto Brandolini) is a collaborative workshop technique for discovering how a business domain actually works, run by covering a wall (physical or digital) with orange sticky notes, each naming one **domain event** — something that happened, written in past tense: "Order Placed," "Payment Declined," "Refund Approved." Domain experts, developers, and product people build the timeline together, in the same room, arguing over the sequence and the edge cases live — the output is a shared, event-ordered map of the business process, not a diagram one person drew alone and circulated for approval.
+
+**Why this beats reading documentation or existing code:** documentation describes what someone *intended* the system to do, and code describes what it *currently* does — neither reliably captures what the business actually needs, especially for a domain nobody has modeled carefully yet. Reading code alone is worse for domain discovery specifically because code answers "how," not "why," and the actual business rules are often scattered across validation logic, database constraints, and tribal knowledge in three different developers' heads, each holding a partial and sometimes contradictory picture. Event storming forces disagreement to surface in the room, in real time — when the fulfillment lead says "Order Shipped" happens before "Payment Captured" and the finance lead insists the opposite, that's not a scheduling detail, it's a previously invisible modeling conflict that would otherwise have been discovered as a production bug.
+
+**How a session typically unfolds:**
+1. **Chaotic exploration** — everyone writes domain events they know about, no filtering, no ordering yet; duplicates and gaps are expected and fine at this stage.
+2. **Enforce the timeline** — the group physically arranges events left to right in the order they occur, which is where the real disagreements (and real learning) happen.
+3. **Add commands, actors, and aggregates** — who or what triggers each event ("Customer submits Place Order"), and which entity owns the invariant behind it — this is where the eventual service or module boundaries start to emerge organically from the domain's own shape, rather than being imposed by an org chart or a technology preference.
+4. **Mark pain points and hotspots** — places where the group genuinely disagrees or nobody's sure what happens; these become the highest-priority questions to resolve before design starts, not after.
+
+**Common pitfalls:** running the session without the actual domain experts in the room (developers alone will model their assumptions, not the real business rules); treating the resulting wall as a permanent artifact instead of the discovery tool it is — the value was largely in the conversation itself, not the sticky notes; and stopping at step 1, generating a pile of events with no enforced timeline, which skips the step that actually surfaces disagreement.
+
+**Practical guidance:** run event storming early, before any service boundaries or database schemas are proposed — the emergent groupings of events and their owning aggregates are a strong, evidence-based starting point for bounded contexts, which is far cheaper to get right before code exists than to re-derive from a tangled implementation later.
+
+---
+
+## Beginner — Question 9
+
+**Q9: What's the difference between scaling a system vertically and horizontally, and how does that choice factor into basic capacity planning?**
+
+**Vertical scaling** ("scaling up") means giving a single machine more resources — more CPU, more RAM, a faster disk — to handle more load. **Horizontal scaling** ("scaling out") means adding more machines running the same workload, and distributing load across all of them, typically behind a load balancer. Both increase the system's total capacity; they differ in *how*, and that difference carries very different constraints and costs.
+
+**Why the distinction matters practically, not just semantically:**
+
+| Dimension | Vertical scaling | Horizontal scaling |
+|---|---|---|
+| Implementation effort | Usually trivial — resize the instance, restart | Often requires real design work — statelessness, session handling, data partitioning |
+| Ceiling | Hard limit — the biggest machine available, eventually | Practically unbounded — add more machines |
+| Cost curve | Increasingly expensive per unit of extra capacity near the top end (the biggest instances carry a steep price premium) | Roughly linear — ten small machines cost close to ten times one small machine |
+| Downtime to scale | Often requires a restart or brief outage | Can typically add capacity with zero downtime |
+| Failure characteristics | Single point of failure — that one (bigger) machine going down still takes everything with it | Naturally more resilient — losing one of many machines degrades capacity rather than taking the system down |
+| Prerequisite | None — works on almost anything as-is | The application must support running multiple instances correctly (no reliance on local, in-memory state that other instances can't see) |
+
+**Why horizontal scaling isn't automatically "the better default":** it requires the application to actually be built for it — a system holding user sessions in an in-process memory cache breaks the moment a second instance is added, because half of requests land on an instance that's never heard of that session. Making an application horizontally scalable (externalizing session state, ensuring any instance can serve any request, handling data partitioning) is real, deliberate engineering work, not a free switch you flip later — which is why it's a decision worth making consciously early rather than discovering the gap under a traffic spike.
+
+**A simple way to think about capacity planning with this in mind:** start by estimating expected peak load (not average — the number that matters is the worst realistic moment, like a holiday sale or a marketing launch) and how far past today's load that peak needs headroom for. A system with a modest, predictable load and a low peak-to-average ratio may never need to scale past a single, periodically-resized machine — reaching for horizontal scaling there is solving a problem the system doesn't have. A system expecting unpredictable, large traffic spikes needs horizontal scaling designed in from the start, because vertical scaling's ceiling and restart-to-resize characteristics make it a poor fit for sudden, large jumps in demand.
+
+**Common pitfalls:** treating "just scale it up" as a permanent strategy without noticing the cost curve steepening or the single-point-of-failure risk it quietly accepts; and over-engineering for horizontal scale on a system with genuinely low, stable load, paying the statelessness and partitioning tax for a scaling need that will never materialize.
+
+**Practical guidance:** default to vertical scaling for simplicity while load is modest and predictable, but design the application to *tolerate* horizontal scaling (avoid local in-memory state as a load-bearing dependency) well before you actually need it — retrofitting statelessness under production pressure, during an actual capacity crisis, is far more painful than building it in from day one.
+
+---
+
+## Beginner — Question 10
+
+**Q10: How does the practice of architecture actually differ between a startup and an enterprise — is it the same skill applied at different scale, or does the calculus genuinely change?**
+
+It's not the same skill turned up or down — the two contexts optimize for different things, and an architectural instinct that's correct in one is often actively wrong in the other. A startup's central constraint is usually survival and speed of learning: the biggest risk isn't that the architecture won't scale, it's that the company runs out of runway before it learns whether the product is worth building at all. An enterprise's central constraint is usually the opposite: the product's viability is already proven, and the risk shifts to coordination cost across many teams, regulatory and compliance exposure, and the blast radius of a mistake affecting existing paying customers at scale.
+
+**How the calculus actually changes, concretely:**
+
+| Consideration | Startup default | Enterprise default |
+|---|---|---|
+| Biggest risk | Building the wrong thing before funding runs out | Breaking something that already works, at scale, for existing customers |
+| Reversibility bar | Very low — almost everything should be a cheap, fast, two-way-door decision, because the whole product might pivot next quarter | Higher stakes — many decisions genuinely are one-way doors (see Advanced Q12) because of scale, contracts, and integration surface area |
+| Team coordination | Minimal — often one team, sometimes one person, making most decisions | Significant — Conway's Law (Advanced Q4) and cross-team governance (Advanced Q11) become first-order concerns |
+| Appropriate documentation | Light — an ADR for the rare genuinely hard-to-reverse call; most things live in people's heads because there are few people | Necessary — tribal knowledge doesn't survive at headcount, and undocumented decisions become expensive to reconstruct (see Scenario Q6) |
+| Build vs buy default | Strongly favor buy for anything non-differentiating — engineering time is the scarcest resource | Still favor buy for commodities, but security/compliance and long-term TCO get real scrutiny buy decisions can't skip |
+| Appropriate process (reviews, RFCs) | Minimal — a two-person conversation often *is* the review | Real process earns its cost — a design affecting many teams needs the review and RFC discipline (Intermediate Q4, Q8) to avoid silent, costly divergence |
+
+**Why applying enterprise instincts at a startup is a real failure mode, not just "being careful":** a startup that insists on a full architecture review board, exhaustive ADRs for every decision, and a reference architecture before the product has found real users isn't being disciplined — it's spending its scarcest resource (time before the runway runs out) on process built for a problem (coordinating hundreds of engineers) it doesn't have yet. The opposite failure — an enterprise team making fast, undocumented, individually-reversible-feeling decisions on a system that's actually deeply integrated with a dozen other teams — is equally real, and tends to produce exactly the untracked, tribal-knowledge debt this material keeps returning to (Beginner Q3, Intermediate Q9).
+
+**Practical guidance:** calibrate process and rigor to the actual current risk profile, not to what "good engineering" is supposed to look like in the abstract — and revisit the calibration explicitly as a company grows, because the instincts that were correct at 10 engineers become actively harmful at 500, and the transition rarely announces itself; it has to be noticed and adjusted for on purpose.
+
+---
+
+## Intermediate — Question 13
+
+**Q13: What is an Architecture Review Board (ARB), what value does it genuinely provide, and how does it become an organizational bottleneck?**
+
+An Architecture Review Board is a standing group — typically senior architects, sometimes with security, data, and platform representation — that reviews significant technical decisions before (or shortly after) teams commit to them, with the authority to approve, block, or send a proposal back for revision. Where an individual architecture review (Intermediate Q4) is one architect or team examining one design, an ARB is a formal, recurring, cross-organizational governance mechanism — it exists specifically to catch the class of risk that no single team is positioned to see: duplicated investment across teams, decisions that quietly violate enterprise-wide standards, and cross-cutting risk (security, compliance, vendor concentration) that a team focused on its own delivery has no reason to notice on its own.
+
+**What it genuinely provides, when it's working:** a forcing function for decisions that would otherwise never get a second, independent look — a team deep in its own delivery pressure is structurally biased toward shipping its own proposal, and an ARB with no stake in that team's deadline can ask the uncomfortable questions a team under pressure won't ask itself. It also creates a single point of institutional memory across the organization's portfolio of architecturally significant decisions (Beginner Q5), which no individual team-level review can provide.
+
+**How it becomes a bottleneck, and why this failure mode is so common:** an ARB that reviews everything, meets infrequently (say, biweekly), and requires a full submission package before a slot is even granted turns "get an architecturally significant decision approved" into a multi-week detour that teams learn to route around — either by shrinking their proposal until it no longer looks significant enough to require review (gaming the trigger), or by quietly shipping first and asking forgiveness later, which defeats the entire purpose of having proactive review at all. The board's own incentives often make this worse: a board that's graded on "how many risky decisions did we catch" tends toward excessive caution and scope creep in what it reviews, while a board with no clear scope drifts into reviewing everything, including decisions far below the bar that actually needs governance (Beginner Q5's reversibility filter applies here too, at the org level).
+
+**How to keep it valuable instead of becoming the thing teams dread:**
+1. **Scope it tightly to genuinely architecturally significant decisions** — the same reversibility filter used for any architect's attention (Beginner Q5), applied at the org level: a new vendor with security implications, a decision creating a new de facto enterprise standard, cross-team API contracts. Routine team-level decisions never reach the board.
+2. **Make the cadence match the business's speed**, or make async/lightweight review the default with synchronous meetings reserved for genuine disagreement — a two-week wait for a routine approval is what pushes teams toward routing around the board entirely.
+3. **Publish clear, written criteria for what needs review**, so teams can self-serve the answer to "do I need the board" instead of guessing or escalating everything defensively.
+4. **Track and report on how much the board actually catches vs. how much friction it adds** — an ARB that hasn't changed a decision's outcome in a year is pure overhead; one that's catching real, expensive mistakes is earning its cost, and that data should drive whether to loosen or tighten its scope.
+
+**Practical guidance:** treat the ARB's own scope and process as an architectural decision subject to the same scrutiny as anything else it reviews — if teams are visibly routing around it, that's a direct, measurable signal the board's cost has exceeded its value for the decisions it's currently scoped to catch, and the fix is narrowing scope and speeding cadence, not adding more enforcement.
+
+---
+
+## Intermediate — Question 14
+
+**Q14: Beyond translating a single trade-off (Intermediate Q2), how do you quantify and communicate architectural risk across an entire program to executives who need to compare it against other business risks?**
+
+Translating one trade-off into plain language (Intermediate Q2) works for a single decision in a single conversation. A program with dozens of open architectural risks — some serious, some minor, competing for the same limited remediation budget — needs something executives can actually compare and prioritize against every other risk on their plate (financial, market, legal), not a series of one-off explanations. The tool for this is a **quantified risk register**, using the same likelihood-times-impact discipline used in risk storming (Advanced Q5), but rolled up to a level executives can act on.
+
+**How to build one that executives actually trust and use:**
+1. **Name each risk as a specific, concrete failure**, not a vague worry — "the payments service has no redundancy; a single instance failure causes a full checkout outage," not "the payments architecture feels fragile."
+2. **Estimate likelihood and impact in terms the business already uses.** Likelihood as a rough frequency (once a quarter, once a year, once in five years) grounded in actual history where available (past incident rate) rather than gut feel. Impact in the business's own units — revenue at risk per hour of outage, customers affected, compliance exposure in dollars or regulatory terms — not "high/medium/low" alone, which different readers interpret inconsistently.
+3. **Compute or estimate an expected cost** (roughly, likelihood × impact, annualized) so risks of very different character become comparable on one axis — a rare but catastrophic risk and a frequent but minor one can now sit on the same list and be honestly weighed against each other, and against the cost of the fix.
+4. **Pair every risk with a remediation cost and a mitigation status**, so the register isn't just a list of scary things but an actual decision aid: fix now, accept and monitor, or insure against (some risks are cheaper to accept and handle operationally than to engineer away entirely).
+5. **Keep the register alive and reviewed on a cadence**, not a one-time slide for a single budget meeting — risk profiles shift as the system and its load change, and a stale register loses trust the same way stale documentation does (Intermediate Q9).
+
+**A simplified example row:**
+
+| Risk | Likelihood | Impact | Annualized expected cost | Remediation cost | Status |
+|---|---|---|---|---|---|
+| Payments service single point of failure | ~1x/year, based on last 3 years' incident data | ~$180k (avg. 3hr outage × revenue/hr) | ~$180k/yr | ~$60k, one quarter of engineering time | Recommended: fix this quarter |
+| Legacy reporting DB on unsupported OS version | ~1x/5 years (unpatched vulnerability exploited) | ~$40k (breach response, limited data exposure) | ~$8k/yr | ~$15k to migrate | Accept and monitor for now; revisit after payments fix |
+
+**Why this format works where prose alone doesn't:** it puts architectural risk on the same footing executives already use for every other kind of business risk — expected cost against remediation cost — so a request for engineering budget to fix an architectural risk competes honestly against a marketing budget request or a legal risk mitigation, instead of being dismissed as abstract technical anxiety or approved reflexively because it sounds alarming.
+
+**Common pitfall:** inflating likelihood or impact estimates to make a pet technical concern win the prioritization fight — this works exactly once; the first time an executive discovers a padded number, every future register from that architect is read with suspicion, which is a far more expensive loss than losing one budget argument honestly.
+
+**Practical guidance:** be as rigorous and conservative with these estimates as you'd want a finance team to be with theirs, cite the actual data behind each number when it exists, and be explicit about which numbers are estimates versus measured — a risk register's entire value rests on being trusted more than a gut-feeling opinion, and that trust is earned by honesty about uncertainty, not by confident-sounding numbers.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: How do you evaluate vendor lock-in risk before adopting a dependency, and how much lock-in is actually acceptable?**
+
+Vendor lock-in is the cost of leaving a dependency once you're using it — and the mistake most teams make is evaluating a vendor purely on its capability and price today, without pricing in how expensive it will be to leave later if the relationship sours, the pricing changes, or a better option appears. Some lock-in is unavoidable and even fine; the discipline is evaluating it explicitly rather than discovering the exit cost only when you actually need to leave.
+
+**A practical framework for evaluating lock-in before committing:**
+
+1. **How proprietary is the interface?** A vendor accessed through a standard, widely-supported protocol (SQL, S3-compatible object storage, OAuth) is far cheaper to leave than one requiring a proprietary SDK with no equivalent elsewhere — the standard-interface case means competitors can be swapped in behind the same integration code; the proprietary case means the integration code itself has to be rewritten.
+2. **Can you get your data out, in a usable form, on your own schedule?** A vendor that supports full data export in an open format (CSV, standard SQL dump, documented API) is fundamentally different from one where your data effectively lives only inside their platform — data portability is usually the single biggest driver of actual exit cost, bigger than API differences.
+3. **How deeply is the dependency woven through the codebase?** A vendor accessed behind a clean abstraction layer (an interface your application calls, with the vendor SDK hidden behind it — see Advanced Q6 on option value) is swappable with contained, estimable effort. A vendor whose specific concepts (their query language, their proprietary event model) leak directly into application logic throughout the codebase means leaving requires touching that logic everywhere it appears.
+4. **What's the realistic alternative, and how many are there?** Lock-in to the only viable provider in a category (there's effectively one company that does what a specific compliance-certified provider does) is a different risk profile than lock-in to one of many interchangeable providers of a commodity capability, even if the technical switching cost looks similar on paper.
+5. **What's the business's actual sensitivity to this vendor's failure modes?** A pricing increase is usually survivable with negotiation leverage or a slow migration; a vendor going out of business, having a major outage, or failing a compliance audit your business depends on can be existential — weight the evaluation by how catastrophic, not just how likely, the vendor's failure would be.
+
+**How much lock-in is actually acceptable:** this isn't a call for zero lock-in — building your own version of every commodity capability specifically to avoid lock-in is usually a worse trade than the lock-in itself (see Build vs Buy, Intermediate Q1), and some amount of lock-in is simply the cost of using any vendor at all. The right target is *proportional* lock-in: accept significant, harder-to-reverse lock-in for capabilities that are genuinely commodity, low-risk to switch away from later, or where the vendor's alternative would cost more than the lock-in risk is worth insuring against — and actively minimize lock-in (via abstraction layers, open standards, verified data export) specifically for the dependencies where the business's actual exposure to that vendor's failure is high.
+
+**Common pitfall:** evaluating lock-in only at adoption time and never revisiting it — a vendor that was a reasonable, low-risk choice at a small scale can become a genuinely dangerous concentration risk once the business has grown to depend on it for something now load-bearing and hard to leave, and nobody re-runs the evaluation until a crisis (see Scenario Q11) forces it.
+
+**Practical guidance:** write the lock-in evaluation into the same ADR that documents the vendor decision (Beginner Q1) — name the exit cost explicitly, alongside the capability and price being evaluated, so a future team deciding whether to deepen or reduce the dependency inherits a real assessment instead of having to reconstruct one under pressure.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What does it mean to evaluate an architecture decision through a "total cost of ownership" (TCO) lens, beyond the build-vs-buy comparison it's most often associated with?**
+
+Total cost of ownership is the discipline of pricing a decision across its *entire* lifecycle — build, run, maintain, secure, staff, and eventually retire — rather than just its upfront cost. It's introduced in this material as one factor within build vs buy (Intermediate Q1), but TCO is a broader lens that applies to nearly every architecturally significant decision, not only "should we buy this or build it": the same discipline applies to choosing a database, a hosting model, a programming language for a new service, or an architecture style.
+
+**The categories TCO forces you to price out, using a new database technology choice as the running example:**
+
+| Cost category | What it includes | Easy to underestimate because... |
+|---|---|---|
+| Acquisition | License fees, initial infrastructure | This is the number everyone naturally compares upfront |
+| Build/integration | Engineering time to adopt it, migrate existing data, build tooling around it | The estimate is made before the real integration surprises are known |
+| Operational | Hosting, scaling costs as data grows, monitoring/alerting setup | Scales with success — cheap at launch, expensive once real traffic arrives |
+| Maintenance | Patching, version upgrades, schema evolution over years | Invisible day to day; shows up as a recurring tax nobody budgeted for |
+| Staffing | Hiring and training people who can operate it well (see Advanced Q10) | Rarely modeled as a cost at all, treated as a fixed headcount that "just exists" |
+| Risk/incident cost | On-call burden, expected incident frequency and severity for this technology at this team's maturity with it | Only visible in hindsight, after the incidents happen |
+| Exit/retirement | Cost to migrate away or decommission eventually (see Advanced Q14 on sunsetting) | Nobody's thinking about the exit at adoption time — but everything gets replaced eventually |
+
+**Why the upfront-cost comparison alone is systematically misleading:** the categories most often skipped — maintenance, staffing, and eventual exit — tend to be the largest over a multi-year horizon, precisely because they're the least visible at decision time. A "free," self-hosted open-source database looks cheaper than a managed, paid alternative until the staffing and on-call cost of running it reliably at 2am is priced in; a managed vendor's subscription fee looks expensive next to that same open-source option until the same accounting is applied honestly to both sides.
+
+**How to use TCO without turning every decision into a research project:** the rigor should scale with the decision's significance (Beginner Q5) — a routine internal tool doesn't need a five-year TCO model, but a decision that will be expensive to reverse and will run for years deserves at least a rough pass through every category above, even if some numbers are honest estimates rather than precise figures. The point isn't spreadsheet precision; it's forcing the categories that are easy to forget into the comparison before the decision is made, not after the maintenance burden has already been paid for a year.
+
+**Common pitfall:** running a TCO comparison that's honest about the option being rejected but generous about the option being favored — the same discipline of presenting both sides fairly that applies to translating any trade-off (Intermediate Q2) applies here; a TCO model that's quietly built to justify a decision already made isn't TCO, it's motivated reasoning with a spreadsheet.
+
+**Practical guidance:** for any architecturally significant decision, spend one page walking through each TCO category above with real numbers or explicit estimates, attach it to the ADR, and revisit it if the assumptions behind it (scale, team size, usage pattern) change materially — a TCO estimate is a snapshot of assumptions at a point in time, not a permanent verdict.
+
+---
+
+## Advanced — Question 11
+
+**Q11: How do you balance centralized architectural governance against team autonomy, and what determines where a given organization should sit on that spectrum?**
+
+Every organization with more than one team building software sits somewhere on a spectrum between two failure modes, and the healthy zone is neither extreme. Full centralized governance — every technology choice, every schema, every deployment pattern approved by a central authority — produces consistency but kills the speed and ownership that made small, empowered teams valuable in the first place; teams stop innovating because every deviation requires permission, and the center becomes a bottleneck (the same failure mode examined for review boards specifically in Intermediate Q13). Full autonomy — every team choosing its own stack, patterns, and standards with no coordination — produces speed locally but chaos organizationally: duplicated effort, inconsistent security posture, and an operability nightmare when a platform team tries to support a dozen teams' worth of divergent choices, discovered exactly the way Conway's Law predicts (Advanced Q4).
+
+**The framework that resolves this isn't "pick a point on the spectrum" — it's applying different governance levels to different classes of decision, deliberately:**
+
+| Decision class | Appropriate governance level | Why |
+|---|---|---|
+| Decisions with organization-wide blast radius (auth, core data platform, network/security boundaries) | Centralized — a shared standard, enforced | Divergence here is expensive for everyone, not just the deciding team, and mistakes propagate broadly |
+| Decisions affecting only the deciding team, cheap to reverse | Full team autonomy | Central review adds cost with no corresponding risk reduction — this is exactly Beginner Q5's reversibility filter applied at the governance-model level |
+| Decisions that are team-local today but could become de facto organizational standards if copied (a novel technology choice, an unusual pattern) | Autonomous, but visible — teams decide, but publish the decision (an ADR, a lightweight notification) so it's discoverable, not centrally gated | Balances speed with the option to intervene before an accidental pattern spreads uncontrolled |
+
+This is often called **federated governance**: a small set of genuinely cross-cutting standards set and enforced centrally (ideally via fitness functions, Intermediate Q3, so enforcement is automatic rather than a person's approval bottleneck), with everything else left to team judgment, inside guardrails rather than gates.
+
+**Why getting this classification right matters more than picking "more" or "less" governance in the abstract:** an organization that centralizes the wrong decisions (say, requiring central approval for internal library choices, which is low-risk and team-local) pays the coordination tax without buying real risk reduction, and teams predictably route around it — the exact review-board bottleneck pattern (Intermediate Q13). An organization that leaves the wrong decisions fully autonomous (say, each team independently deciding its own authentication approach) buys speed today at the cost of a security and operability mess that a platform team inherits later, at a much higher cost to fix than it would have cost to govern upfront.
+
+**Common pitfall:** treating the governance level as a fixed, permanent org design rather than something that should shift as the organization matures — a five-team startup can often run almost everything on autonomy with light, informal coordination; the same posture at fifty teams silently accumulates the fragmentation costs Conway's Law predicts, and the transition to more deliberate federated governance needs to be a conscious redesign, not something that happens automatically.
+
+**Practical guidance:** make the classification explicit and written down — which decisions require central alignment, which are team-local, and which need visibility without a gate — and revisit it at deliberate intervals as headcount and team count grow, rather than letting the governance model calcify around whatever informally worked at a smaller scale.
+
+---
+
+## Advanced — Question 12
+
+**Q12: What's the difference between a "one-way door" and a "two-way door" decision, and how should that distinction change how fast — and by whom — a decision gets made?**
+
+The one-way door / two-way door framing (popularized by Amazon) sorts decisions by a different axis than significance alone (Beginner Q5): a **two-way door** decision is one you can walk back through — reverse cheaply, quickly, with limited cost, if it turns out wrong. A **one-way door** decision is one you can't easily walk back through — reversing it is slow, expensive, or in the extreme, effectively impossible. The insight this framing adds beyond "is this architecturally significant" is prescriptive: it says the *process* used to make a decision should match which kind of door it is, not just that the decision deserves attention.
+
+**Why this changes process, not just risk-awareness:** a two-way door decision made slowly, with a full review cycle, a design doc, and a committee sign-off, wastes the organization's speed for no corresponding safety benefit — if it's wrong, you just walk back through the door and try again at low cost, so the expensive process bought nothing. Applying heavy process uniformly to every decision, regardless of door type, is a subtler version of the same waste examined in review-board bottlenecks (Intermediate Q13): process that doesn't discriminate by actual risk becomes a tax on everything, including the decisions that never needed it.
+
+**How to actually classify a decision as one-way or two-way, concretely:**
+
+| Question | One-way door signal | Two-way door signal |
+|---|---|---|
+| Does reversing it require a data migration? | Yes | No — a config change or code deploy suffices |
+| Does it lock in a public commitment (a versioned public API, a contractual SLA)? | Yes | No — purely internal |
+| Would reversing it require coordinating multiple teams, not just the deciding one? | Yes | No |
+| Can it be shipped behind a flag, to a subset of traffic, and rolled back instantly if wrong? | No | Yes |
+
+This overlaps heavily with the reversibility filter from Beginner Q5, but adds a crucial operating-model conclusion: **two-way doors should be delegated and decided fast, by the people closest to the work, without waiting for architect or committee sign-off** — the cost of a wrong two-way-door decision is walking back through it, which is cheap, while the cost of *slow* two-way-door decisions, multiplied across every team, every week, is a real and compounding organizational tax that dwarfs the occasional wrong call.
+
+**The corresponding discipline for one-way doors:** these deserve the full weight of this material's other tools precisely because the reversal cost is real — risk storming (Advanced Q5) to surface what could go wrong before committing, a proper architecture review (Intermediate Q4), and an ADR (Beginner Q1) recording the reasoning, because a bad one-way-door decision is exactly the kind of mistake that's expensive to discover late and impossible to walk back cheaply.
+
+**Common pitfall — misclassifying a decision in either direction:** treating a decision as two-way when it's actually one-way (shipping a public API field "we can always change it later," discovering external consumers depend on it within weeks — see Advanced Q8) causes real damage. The opposite error — treating an actually-reversible, team-local decision as if it needs one-way-door scrutiny — is the more common failure in mature organizations, and it's what quietly produces an organization full of people afraid to decide anything without permission, because nobody has clearly named which doors are actually one-way.
+
+**Practical guidance:** make "which kind of door is this" an explicit, fast first question before any decision-making process begins, not an afterthought — and design the organization's default process for the common case (most decisions genuinely are two-way doors) to be fast and delegated, reserving the heavier machinery specifically for the minority that are truly one-way.
+
+---
+
+## Advanced — Question 13
+
+**Q13: Under what circumstances is a big-bang rewrite actually the right call, given that incremental modernization via Strangler Fig (Advanced Q3) is the strongly preferred default?**
+
+The default answer throughout this material, for good reason, is incremental: Strangler Fig lets you reverse course, learn as you go, and never bets the whole business on a single cutover. But treating "incremental, always" as an absolute rule rather than a strong default is itself a mistake — there's a real, if narrow, set of conditions under which a big-bang rewrite (or at least a much larger, less incremental cutover than Strangler Fig typically implies) is genuinely the correct call, and an architect needs to be able to recognize those conditions rather than dogmatically defaulting to incrementalism when it doesn't actually fit.
+
+**The conditions under which big-bang becomes the right call, not just the tempting one:**
+
+1. **A hard external forcing function with a fixed, non-negotiable date** — a vendor is discontinuing a platform you depend on entirely (an end-of-life mainframe, a deprecated cloud service with a hard shutdown date), a regulatory change mandates a specific new capability by law, or a critical security vulnerability in unsupported infrastructure has no incremental patch path. Here, "incremental, taking longer but lower risk per step" isn't actually available as an option, because the clock doesn't negotiate.
+2. **The old and new systems genuinely cannot coexist**, technically or operationally — sometimes the old architecture's fundamental assumptions (a data model, a consistency guarantee, a security boundary) are incompatible with the new one in a way that makes a synchronized dual-running period (the core mechanism Strangler Fig depends on) infeasible to build safely, not just expensive.
+3. **The system is small and low-risk enough that "big bang" doesn't actually carry big-bang-scale risk** — a genuinely small, low-traffic, low-criticality system with a handful of well-understood integration points can sometimes be safely replaced wholesale in a way that would be reckless for anything larger; the label "big bang" is really about risk concentration, and a small system concentrates very little risk even in a single cutover.
+4. **The cost of running two systems in parallel (Strangler Fig's own well-documented tax, Advanced Q3) exceeds the cost of the risk being avoided** — for a system with a simple, well-bounded scope, building and maintaining a synchronization layer between old and new for months can genuinely cost more, in both money and risk surface, than a well-tested, well-rehearsed single cutover with a solid rollback plan.
+
+**How to make a big-bang decision responsibly, when one of these genuinely applies:** treat it with *more* upfront risk assessment, not less — risk storming (Advanced Q5) specifically focused on the cutover itself, a rehearsed rollback plan tested before the real cutover (not designed on paper and never exercised), and the heaviest possible investment in pre-cutover verification (shadow traffic, parallel-run validation of outputs) precisely because there's no gradual, low-stakes way to discover a mistake after the fact.
+
+**Common pitfall:** rationalizing a big-bang rewrite under the label of one of these conditions when the real reason is impatience with Strangler Fig's slower pace, or a team's preference for a clean-slate rewrite over the harder work of untangling an existing system incrementally — the conditions above are genuinely narrow, and "we didn't want to do the incremental work" is not the same claim as "incremental modernization was not technically available to us."
+
+**Practical guidance:** require an explicit, written justification against these specific conditions — not general dissatisfaction with the current system — before approving a big-bang approach, and hold that justification to the same scrutiny Scenario Q1 applies to a team proposing a rewrite for "the old code is bad" alone; the bar for skipping the strongly-preferred default should be genuinely high and specific, not a matter of preference.
+
+---
+
+## Advanced — Question 14
+
+**Q14: How should an architect approach sunsetting or deprecating a system that active stakeholders still depend on, as a designed process rather than an afterthought?**
+
+Systems get built, but architecture rarely treats their retirement with the same deliberate design attention given to their construction — deprecation tends to be handled ad hoc, as a scramble, once someone finally notices a system is costing more to keep than it's worth. That asymmetry is backwards: a system that's expensive or risky to retire safely is exactly the kind of situation this material keeps returning to — an undocumented dependency (Scenario Q6), a load-bearing "temporary" fixture (Scenario Q4), a vendor or technology nobody planned an exit from (Intermediate Q15). Treating sunsetting as a first-class architectural discipline, planned as deliberately as a migration, is what prevents deprecation from becoming its own crisis.
+
+**The discipline, as a sequence:**
+
+1. **Map actual current dependents, not assumed ones.** The same blast-radius exercise used for any load-bearing workaround (Scenario Q4) — instrument the system to find out who's actually calling it, reading its output, or relying on its side effects today, because the answer is reliably different (and larger) than whoever originally scoped its users.
+2. **Classify dependents by how hard they are to migrate**, not just how many there are — a handful of internal consumers you can coordinate directly with is a very different problem than a long tail of external partners you can't force onto a timeline, which is the same asymmetry that makes public API changes expensive to reverse (Advanced Q8).
+3. **Build and communicate a genuine migration path, not just a shutoff date.** A deprecation notice with a date and no replacement, or no help getting there, reads to dependents as abandonment rather than a plan — provide the equivalent capability, migration tooling or documentation, and a realistic timeline informed by how long dependents actually need, not how fast the owning team wants to be done with it.
+4. **Run the deprecation itself incrementally, using the same Strangler-Fig-style discipline used for building new systems (Advanced Q3), in reverse** — redirect or migrate the easiest, most cooperative dependents first, monitor usage of the old system as it shrinks, and use dropping real usage as the evidence that it's actually safe to remove, rather than trusting an announcement alone.
+5. **Keep a hard, communicated final date and hold it**, once genuine migration support has been offered — an indefinitely extended deprecation, granted every time a stakeholder pushes back, teaches the organization that deprecation dates are theoretical, and the old system never actually gets removed, compounding its cost indefinitely.
+
+**Why stakeholder resistance to sunsetting is often legitimate, not just inertia:** a stakeholder who resists losing a system isn't automatically being obstinate — they may be depending on a specific behavior (an undocumented report format, a timing guarantee) that the deprecation plan hasn't accounted for, in which case the resistance is surfacing a real gap in the migration plan, the same way pushback in an architecture review sometimes surfaces a real requirement the reviewer missed (Intermediate Q4). The right response is to investigate the specific dependency before assuming the resistance is unreasonable.
+
+**Practical guidance:** treat "how will this eventually be retired" as a question worth at least a brief answer at the time a system is *built*, not only when retirement finally becomes urgent — a system designed with clean boundaries, documented dependents, and no deeply-buried implicit behavior is dramatically cheaper to sunset later than one that accreted undocumented dependents for years with no owner ever tracking who relied on what.
+
+---
+
+## Scenario — Question 8
+
+**Q8: A legacy internal reporting system is expensive to maintain and clearly should be retired, but a small group of power users — including a VP who built their team's workflow around it — actively resist losing it. How do you navigate the sunsetting?**
+
+This is Advanced Q14's framework under real organizational pressure, and the trap is treating the VP's resistance as a political obstacle to be overcome rather than a signal that might be pointing at a real gap in the sunsetting plan. Architects who've internalized "legacy systems should be retired" as a general truth sometimes stop investigating the *specific* reasons for resistance once they've decided the system is obviously a liability — which is exactly how a technically sound decision turns into an unnecessary organizational fight.
+
+**How to work through it:**
+
+1. **Find out precisely what the power users actually depend on, not the system in the abstract.** Sit with them and their workflow directly — is it a specific report format nothing else replicates, a timing guarantee (data available by 6am, which a newer system's batch schedule doesn't match), or genuinely just familiarity and resistance to change? Each answer changes the plan completely, and guessing instead of asking is how deprecation plans miss the one dependency that actually matters.
+2. **Quantify the cost of keeping it, the same way any staying-cost case gets built (Scenario Q7).** Maintenance burden, security exposure of unpatched legacy infrastructure, the engineering time it consumes that could go toward the replacement, and the opportunity cost of the team that has to keep it alive — put a real number on it so "we should retire this" isn't just an aesthetic preference against old technology.
+3. **If the dependency is real and specific (say, an exact report format the VP's team built quarterly planning around), treat that as a genuine requirement for the replacement, not an obstacle to argue past.** Build that specific capability into the migration path deliberately, the same way Advanced Q14 calls for a real migration path rather than a bare shutoff date — this converts the VP from an opponent of the plan into a validated requirement the new system has to meet.
+4. **If the dependency turns out to be pure inertia rather than a functional gap, don't let that alone become the case for keeping the system** — familiarity is real, but it's not the same category of cost as a genuine functional gap, and it doesn't compound the way the legacy system's maintenance burden does. Address it with training, a clear migration date, and direct support during the transition rather than an indefinite extension.
+5. **Escalate the trade-off explicitly to whoever has authority over both the VP and the maintaining team**, using the same quantified framing as any executive risk communication (Intermediate Q14) — "keeping this costs $X per year in maintenance and security exposure; the identified functional gap costs $Y to close in the replacement; here's the recommended path and timeline" — rather than letting the VP's seniority alone settle a technical question that has a real, calculable answer.
+
+**Why this works better than either overriding the VP or indefinitely delaying the retirement:** overriding a legitimate functional dependency without addressing it doesn't make the dependency disappear — it just means the retirement breaks something real, damages trust in the next migration, and often forces the old system to be quietly resurrected under worse conditions than a planned migration would have offered. Indefinitely delaying to avoid the conflict lets the maintenance cost compound (Beginner Q3) with no plan to ever actually stop paying it. Investigating the specific dependency, building the real gap into the migration, and holding a firm date once that gap is closed gets the system retired without an unforced political fight.
+
+---
+
+## Scenario — Question 9
+
+**Q9: Your Architecture Review Board has become a two-week bottleneck, and teams have started quietly shipping first and asking forgiveness later rather than submitting proposals. How do you fix the governance model without losing the risk oversight the board was created to provide?**
+
+This is Intermediate Q13's bottleneck failure mode fully realized, and the instinct to respond by tightening enforcement — mandating the board be consulted, adding audit checks to catch teams who skip it — treats the symptom, not the cause, and will make the underlying problem worse: teams already routing around a slow process will get better at hiding it, not more compliant, and the board's actual purpose (catching real cross-cutting risk before it ships) gets further from being served, not closer. The real fix is diagnosing why teams found bypassing the board rational in the first place, and redesigning the governance model so following it is actually the faster path.
+
+**How to diagnose and fix it:**
+
+1. **Find out what teams are actually shipping without review, and whether any of it has caused real problems.** This tells you two critical things at once: whether the board's current scope is genuinely too broad (catching low-risk decisions that never needed review, which is why teams don't bother) or whether real risk is slipping through unreviewed (which makes this urgent to fix, not just annoying).
+2. **Re-scope what actually requires the board, using the same reversibility filter (Beginner Q5) applied at the governance level (Advanced Q11).** In most cases that have reached this point, the board has quietly scope-crept into reviewing decisions that were never architecturally significant enough to justify a two-week wait — narrowing scope to genuinely one-way-door, cross-cutting decisions (Advanced Q12) usually removes the majority of submissions and the majority of the backlog in one move.
+3. **Separate the board's two functions — review and enforcement — and speed up review specifically.** Move routine, lower-ambiguity approvals to an async written process (a short proposal, a defined SLA for written feedback, escalate to a live meeting only on genuine disagreement) rather than requiring every submission to wait for a scheduled synchronous slot; reserve the meeting for the small number of proposals that actually need debate.
+4. **Publish the new criteria and cadence clearly, and make the case explicitly to teams that this is a real change, not a promise** — teams that have already learned the board is a bottleneck to route around won't trust a policy update alone; they need to see submissions actually turn around fast a few times before behavior shifts back.
+5. **Instrument the new process the way you'd instrument any fitness function (Intermediate Q3)** — track submission volume, turnaround time, and how often review actually changes a decision's outcome, so the board's scope and speed can keep being tuned against real data rather than drifting back into the same failure mode unnoticed.
+
+**Why enforcement alone would have failed here:** the underlying incentive — the board is slower than shipping without it, and teams are optimizing for their own delivery pressure exactly as any team under deadline pressure would (see Scenario Q3) — doesn't change just because bypassing it now carries a compliance risk on top of the time cost; it just pushes the workaround further underground, and the architect loses visibility into real risk instead of gaining oversight of it.
+
+**Practical guidance:** treat "teams are routing around governance" as data about the governance model's design, not about the teams' discipline — a bottleneck is a design flaw in the process, and the fix that actually restores oversight is making the compliant path the fast path, not making the fast path riskier to take.
+
+---
+
+## Scenario — Question 10
+
+**Q10: During a seasonal traffic spike, a core service starts timing out under load with no time to redesign it properly. Do you scale it vertically to survive the spike, or is this the moment to force through horizontal scaling — and how do you decide under pressure?**
+
+This is capacity planning (Beginner Q9) under the worst possible conditions — no time, real customer impact accumulating by the minute, and a decision that has to be made now, not researched carefully over a week. The instinct to treat this as "we should have built this horizontally scalable already, let's fix that now" is understandable but dangerous in the moment: retrofitting statelessness and horizontal scaling into a service that wasn't built for it, live, during an active incident, is exactly the kind of change most likely to introduce a second, worse failure on top of the first.
+
+**How to actually decide, in the moment:**
+
+1. **Ask the only question that matters right now: can this service run more than one instance safely, today, as it's currently built?** If it holds in-memory session state, relies on local file writes other instances can't see, or has any other single-instance assumption baked in, horizontal scaling right now isn't a faster fix — it's a second incident waiting to happen, because you'd be shipping an unvalidated architectural change under the worst possible testing conditions.
+2. **If vertical scaling is available and the current instance genuinely has room to grow, take it — it's almost always the safer, faster stopgap during an active incident.** Resizing an instance is a well-understood, low-risk operation compared to introducing multi-instance behavior for the first time under load; the goal during an active incident is stabilizing the system with the least novel risk, not architecting the ideal long-term solution.
+3. **If vertical scaling has already hit its ceiling (the biggest available instance is already running and still can't keep up), horizontal scaling becomes necessary, not optional — but scope it as narrowly as possible.** Don't attempt a full redesign live; look for the minimal, safe way to run a second instance (a read replica behind a load balancer for read-only traffic, for instance, if writes are the part that isn't safely parallel) rather than solving the general case under pressure.
+4. **Use every other lever before or alongside scaling** — shedding non-critical load (turning off a non-essential feature consuming the same capacity), adding caching in front of the hot path, or rate-limiting lower-priority traffic can buy meaningful headroom without touching the scaling model at all, and these are typically lower-risk than either scaling path during an active incident.
+
+**After the spike passes — the part that actually matters for next time:** this incident is the risk-storming exercise (Advanced Q5) the team should have run before the season started, arriving instead as a live production event. Run the retrospective honestly (Advanced Q9): was hitting this ceiling reasonable given what was known, or was it avoidable — did anyone flag the capacity risk before the season and get deprioritized under other work? Either way, the corrective action is the same: before the next known seasonal peak, deliberately decide and build for the vertical-vs-horizontal question in advance, with load testing against realistic peak numbers, so the next spike is handled by capacity already designed for it rather than another live, high-stakes improvisation.
+
+**Practical guidance:** during the incident, optimize for the least novel, most reversible mitigation available, even if it's not the "correct" long-term architecture — an incident is exactly the wrong moment to introduce untested architectural changes, and the discipline of choosing the safest stopgap now, then treating the underlying capacity gap as a real, funded piece of follow-up work, is what actually prevents a repeat next season.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A key vendor your platform depends on heavily suddenly triples its pricing at renewal, and it becomes clear during the scramble that nobody had ever assessed how locked in you actually were. How do you respond, and what do you fix so this doesn't happen again?**
+
+This is vendor lock-in risk (Intermediate Q15) discovered the expensive way — under negotiating pressure, with no prior assessment to draw on, which is the worst possible time to be evaluating exit cost for the first time. The immediate temptation is to either capitulate to the new pricing because leaving looks too risky to even consider on this timeline, or to announce an emergency migration without actually knowing what that migration costs — both are decisions made blind, and blind decisions under pressure tend to be expensive ones.
+
+**How to respond in the moment:**
+
+1. **Do the lock-in assessment now that should have existed already, as fast as honestly possible** — how proprietary is the integration, can the data actually be exported in usable form, how deeply does the vendor's specific model leak into application code, and what would a realistic (not optimistic) migration timeline and cost actually look like. This is the Intermediate Q15 framework, compressed into days instead of the calm evaluation it should have had at adoption time.
+2. **Use the assessment to establish real negotiating leverage, even if leaving isn't ultimately the right call.** A vendor that knows you have a costed, credible exit path negotiates very differently than one that knows you have no alternative — even a partial migration plan, credibly presented, often moves the pricing conversation more than pure appeal to the relationship.
+3. **Run the TCO comparison (Intermediate Q16) honestly for both staying at the new price and migrating**, including the categories that are easy to skip under pressure — the migration's own engineering cost, the risk of the migration itself going wrong on a compressed timeline, and the ongoing operational cost of whatever replacement is being considered — rather than reflexively choosing the path that feels less scary in the moment.
+4. **If staying is the right near-term call (often true, given how expensive a rushed migration's own risk can be), negotiate a bridge, not a permanent acceptance** — a shorter contract term, a price freeze while a deliberate, properly-sequenced migration (via Strangler Fig, Advanced Q3, not a rushed cutover) is planned and executed on a realistic timeline.
+5. **If migrating is the right call, sequence it the way any large de-risked change should be sequenced** (Scenario Q7's pattern) — quantify the case, pick the lowest-risk slice first, and avoid compounding the original mistake (no lock-in assessment) with a new one (a rushed, unplanned cutover).
+
+**What to actually fix afterward, so this doesn't recur:** the root cause here isn't the vendor's price increase — vendors are entitled to reprice, and a business relying entirely on a vendor's goodwill not to do so was always exposed. The root cause is that no lock-in evaluation existed for a dependency that turned out to be load-bearing, discovered only under crisis pressure. Fix that specifically: require a lock-in assessment (Intermediate Q15) as a standard part of adopting any vendor above a defined significance threshold, and periodically re-run the assessment for existing critical vendors as the business's dependency on them deepens over time — the same "revisit, don't just evaluate once" discipline this material applies to technical debt (Beginner Q3) and reference architectures alike.
+
+**Practical guidance:** treat every vendor renewal for a significant dependency as a scheduled trigger to re-check the lock-in assessment before the negotiation starts, not after a shock forces it — the entire value of doing this work is having it ready before you need the leverage, not scrambling to produce it under a deadline the vendor set, not you.
+
+---
+
+## Scenario — Question 12
+
+**Q12: Your company is legally required to migrate off an end-of-life platform within six months due to a vendor-mandated shutdown — there's no time for an incremental Strangler Fig migration. How do you run a responsible big-bang cutover under a genuinely fixed deadline?**
+
+This is Advanced Q13's narrow big-bang justification arriving for real: a hard external forcing function with a fixed date the business doesn't control. The mistake to avoid here is treating "we have to move fast" as license to skip the risk discipline that normally comes from Strangler Fig's incremental pace — a compressed timeline is exactly when that discipline matters most, it just has to be compressed and reordered to fit inside a single cutover instead of spread across many small ones.
+
+**How to run it responsibly under real time pressure:**
+
+1. **Confirm the constraint is actually as fixed as it's being presented, and understand its exact shape.** Is the six-month date the platform's genuine hard shutdown, or a vendor's initial announcement with historical precedent for extension? Get this confirmed in writing rather than assumed — the entire plan depends on how real and how immovable the deadline actually is, and this is worth spending real effort to verify before committing to big-bang risk on the strength of an assumption.
+2. **Compress the risk-assessment work Strangler Fig would normally spread over months into an intensive upfront pass.** Run risk storming (Advanced Q5) specifically on the cutover itself — every integration point, every single point of failure, every unverified assumption about how the new platform will behave under real production load — and prioritize ruthlessly by what's most likely to fail and most expensive if it does, because there's no time to catch everything with equal depth.
+3. **Build and rehearse the rollback plan before the real cutover, not as a theoretical fallback.** A rollback plan that's never been exercised is not a real safety net — schedule an actual rehearsal, on a realistic environment, with the team that will execute the real cutover, so the rollback path is proven rather than assumed.
+4. **Use every low-cost verification technique available even without full Strangler Fig, to avoid cutting over blind.** Shadow traffic to the new platform in parallel with the old one for as much of the timeline as possible, parallel-run output comparison on real data, and a staged internal-only or limited-blast-radius rehearsal before the full cutover — none of these require the months Strangler Fig normally takes, but they meaningfully reduce the risk of the single cutover itself.
+5. **Communicate the constraint and the plan honestly up the chain**, using the same translation discipline as any trade-off (Intermediate Q2) — "we have a legally fixed date, here's the compressed risk plan we're running instead of our normal incremental approach, and here specifically is the residual risk that compression leaves us carrying" — so leadership understands this is a deliberately elevated-risk path taken because the alternative (missing a legal deadline) is worse, not because the team skipped the normal discipline out of convenience.
+
+**Why documenting the justification matters here specifically:** this is exactly the scenario Advanced Q13 warns needs a genuinely high, specific bar — a legally mandated platform shutdown clears that bar cleanly, and writing the ADR (Beginner Q1) that states the constraint, the compressed risk process used, and the residual risk accepted protects the decision from being second-guessed later as recklessness, when it was in fact the disciplined response to a constraint nobody on the team chose.
+
+**Practical guidance:** a forced big-bang deadline is not permission to skip risk management — it's a demand to compress it, prioritize ruthlessly, and rehearse relentlessly, because the absence of Strangler Fig's gradual, self-correcting rollout means every other risk-reduction technique available has to carry more weight than it would normally need to.
+
+---
+
+## Scenario — Question 13
+
+**Q13: A product team, operating under a genuinely autonomous "two-way door" mandate, independently adopted a data model that turns out to have been a one-way door — it's now deeply embedded in customer-facing contracts and can't be cheaply reversed. Whose failure is this, and how do you fix the governance without crushing the autonomy that made the team fast in the first place?**
+
+This is Advanced Q12's classification framework failing in the one direction that actually causes damage — a decision was treated as reversible and delegated accordingly, but turned out to be a one-way door, and the mistake surfaces only after the cost of reversing it has already become real. The instinct to respond by clawing back autonomy broadly — requiring central review for every data model decision going forward — punishes the entire organization for a misclassification in one instance, and reproduces the exact governance-bottleneck failure mode (Intermediate Q13, Scenario Q9) this material keeps warning against.
+
+**How to work through it without overcorrecting:**
+
+1. **Diagnose whether this was a misclassification or a process failure, because the fix is different for each.** Did the team have the information needed to recognize this was actually a one-way door (customer contracts were already being negotiated against this data model when the decision was made) and miss it — a training and judgment gap? Or was the door-type genuinely ambiguous at decision time, and it only became one-way *after* other teams and contracts built on top of it — a case that was reasonable at the time (Advanced Q9's distinction) and became irreversible through nobody's fault?
+2. **Fix the specific gap in the classification criteria that let this slip through, rather than removing autonomy generally.** If the actual failure was "the team didn't know that anything touching customer contract terms is automatically a one-way-door signal regardless of how reversible it looks technically," that's a concrete, narrow addition to the shared classification checklist (Advanced Q12) — not a reason to require central review of every team-local decision going forward.
+3. **Address the immediate damage using the same rigor as any expensive-to-reverse mistake** — assess the actual cost and blast radius of the data model now (who depends on it, what would it take to migrate), build the case with real numbers (Scenario Q7's staying-cost/migrating-cost framing), and treat it as a real, funded piece of remediation work rather than either ignoring it or demanding an emergency fix that introduces new risk under pressure.
+4. **Run the retrospective the way Advanced Q9 prescribes** — reasonable-at-the-time versus avoidably-wrong, without turning it into blame, because a team that gets punished for a genuinely reasonable judgment call under a real autonomy mandate will stop making autonomous decisions at all, which defeats the entire point of the governance model they were operating under.
+5. **Reinforce, explicitly, that the autonomy model itself isn't being reversed** — the team's authority to make two-way-door decisions fast, without central sign-off, remains the default; what's changing is a sharper, shared understanding of which signals reliably mean a decision that looks two-way is actually one-way, applied going forward by every team operating under the same autonomy, not just the one that got burned.
+
+**Why overcorrecting toward central control is the more common and more costly mistake here:** the organization adopted federated governance (Advanced Q11) specifically because full central review was too slow to sustain the pace it needed — one painful misclassification, however costly, is a single data point, and reflexively reversing the entire operating model in response is a much larger, permanent cost traded against a single incident's cost, which rarely holds up under the same expected-value scrutiny (Intermediate Q14) applied to any other risk decision.
+
+**Practical guidance:** treat this the way a mature engineering organization treats a production incident — a blameless retrospective that produces a specific, narrow fix to the actual gap in judgment or process, not a broad rollback of the autonomy that was working correctly everywhere else it was applied.
+
+---
