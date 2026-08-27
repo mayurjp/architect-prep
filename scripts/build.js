@@ -267,6 +267,11 @@ function main() {
     JSON.stringify(topicsWithCounts, null, 2)
   );
 
+  fs.writeFileSync(
+    path.join(DATA_DIR, "build-info.json"),
+    JSON.stringify({ publishedAt: new Date().toISOString() }, null, 2)
+  );
+
   const totalAnswered = allQuestions.filter((q) => q.status === "answered").length;
   console.log(
     `Built ${allQuestions.length} questions (${totalAnswered} answered, ${
