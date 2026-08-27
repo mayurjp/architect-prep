@@ -1933,3 +1933,572 @@ A Value Object is a domain object that represents a descriptive aspect of the do
 It is defined entirely by its attributes (e.g., an Address, a Money amount, or a Color). If two Value Objects have exactly the same attributes, they are considered identical. They should always be designed to be immutable; if a value changes, the entire object is replaced with a new one rather than modifying the existing one.
 
 ---
+
+## Beginner — Question 15
+
+**Q15: What is "Tell, Don't Ask," and how does it explain why a rich domain model looks the way it does?**
+
+"Tell, Don't Ask" is an object-oriented design principle: instead of asking an object for its internal state and then making a decision about it from the outside, you tell the object what you want to happen and let it decide, internally, whether and how to do it. It's not a DDD-specific term — it predates DDD — but it's the everyday design habit that produces exactly the kind of aggregate methods this file uses throughout (`order.Submit()`, `account.Withdraw(amount)`), and naming it explicitly makes it easier to catch violations in review.
+
+**Asking (violates the principle):**
+
+```csharp
+// Caller pulls out state, makes the decision itself, then pushes state back in
+if (order.Status == OrderStatus.Draft && order.Lines.Count > 0)
+{
+    order.Status = OrderStatus.Submitted;
+}
+```
+
+This only works if `Status` and `Lines` are both publicly readable *and* writable from outside — which is precisely the anemic-model shape Beginner Q4 objects to. The rule "can't submit with no lines" now lives in whatever code happened to write this `if`, and nothing stops a second call site from writing a different, inconsistent version of the same check.
+
+**Telling (the rich-model version):**
+
+```csharp
+order.Submit();   // Order decides internally whether this is allowed; caller doesn't ask first
+```
+
+The caller expresses *intent* ("I want this order submitted") and the object owns the rule about whether that intent can be satisfied right now. This is exactly why aggregate methods are named as domain verbs (`Submit`, `Withdraw`, `Lapse`) rather than the object exposing a `CanSubmit` getter plus a `Status` setter for the caller to orchestrate itself.
+
+**Common pitfall:** adding a `CanSubmit()` query method *alongside* a public `Status` setter "just so the UI can show a disabled button" — this looks harmless but reintroduces the asking pattern the moment any code calls `CanSubmit()` and then sets `Status` directly instead of calling `Submit()`. A query method for display purposes is fine; a query method paired with a public setter for the same state is a loophole back to anemic behavior.
+
+**Practical guidance:** when reviewing a new domain method, check whether the caller needed to read any of the object's internal state before deciding to call it. If the answer is "no, it just told the object what it wanted," that's Tell, Don't Ask in practice — and it's the same underlying discipline as Beginner Q8's "no public path that mutates state without going through a guarded method."
+
+---
+
+## Beginner — Question 16
+
+**Q16: Why do DDD-modeled aggregates usually generate their own identity (e.g., a client-side `Guid.NewGuid()`) rather than relying on a database identity column?**
+
+An Aggregate Root's identity (Intermediate Q1) needs to exist and be stable from the moment the aggregate is *conceptually* created — not from the moment a row happens to be inserted into a table. A database identity/auto-increment column only produces a value after `INSERT` succeeds, which creates an awkward gap: the aggregate exists as a fully valid domain object (it can have invariants checked, domain events raised, even be passed around in memory) before it has any identity at all.
+
+**Why that gap causes real problems:**
+
+```csharp
+public class Order
+{
+    public int Id { get; private set; }   // 0 until the database assigns a real value
+    public void Submit()
+    {
+        if (!Lines.Any()) throw new DomainException("Cannot submit an order with no lines.");
+        Status = OrderStatus.Submitted;
+        _domainEvents.Add(new OrderPlaced(Id, ...));   // Id is still 0 here if not yet persisted!
+    }
+}
+```
+
+If a domain event is raised before the entity has been saved, an identity-column design either raises the event with a meaningless placeholder ID, or forces the code to save first and raise the event second — coupling domain behavior to persistence sequencing, which is exactly what persistence ignorance (Intermediate Q11) says to avoid.
+
+**Client-generated identity avoids the gap entirely:**
+
+```csharp
+public class Order
+{
+    public OrderId Id { get; }   // assigned the moment the object is constructed, e.g. OrderId.New() -> Guid
+    public Order(OrderId id, CustomerId customerId) { Id = id; /* ... */ }
+}
+```
+
+Now `Order` has a real, final identity from the instant it's created in memory — domain events can safely carry it, equality comparisons work before the first `SaveChanges`, and the aggregate never passes through a state where its own identity is undefined.
+
+**Common pitfall:** assuming client-generated GUIDs are "worse for the database" and reverting to identity columns for performance reasons without checking — sequential GUID generation strategies (e.g., `NEWSEQUENTIALID()` in SQL Server, or a `Guid`-generation library that produces roughly time-ordered values) largely close the index-fragmentation gap that made random GUIDs a real concern for primary keys, without giving up client-side ID assignment.
+
+**Practical guidance:** default to a strongly-typed ID Value Object (`OrderId` wrapping a `Guid`, per Beginner Q3) generated at construction time for any Aggregate Root that raises domain events or needs to be referenced before its first save; a plain identity column is a reasonable simplification only for Generic-subdomain entities (Advanced Q7) with no domain events and no cross-aggregate references to worry about.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: A Factory (Beginner Q6) and a Repository (Intermediate Q2) can both "hand you" an Order object — what's the actual difference, and why do both exist?**
+
+They sit on opposite ends of an aggregate's lifecycle and answer different questions, even though from a call site both can look like `var order = something.GetOrder(...)`.
+
+**A Factory answers "how does a brand-new, valid aggregate come into existence?"** It's invoked when there is no aggregate yet — only the raw inputs needed to construct one (a `Cart`, a `CustomerId`). Its job is to satisfy whatever invariants apply *at creation time* and produce a fully valid aggregate that has never been persisted.
+
+**A Repository answers "how do I get back an aggregate that already exists?"** It's invoked when the aggregate already has an identity and a persisted history — `GetByIdAsync` reconstitutes it from storage into the same in-memory shape it would have had if it had never left memory at all, invariants and all.
+
+```csharp
+// Factory: brings a new Order into existence — no prior persisted state
+var order = _orderFactory.CreateFromCart(cart, customerId);
+await _orderRepository.AddAsync(order);      // now, for the first time, it's persisted
+
+// Repository: retrieves an Order that already has a persisted history
+var existingOrder = await _orderRepository.GetByIdAsync(orderId);
+existingOrder.Submit();                       // mutate the retrieved aggregate
+await _orderRepository.SaveChangesAsync(ct);
+```
+
+**Why both are needed rather than folding creation into the repository:** a repository's job (Intermediate Q2) is specifically to give the illusion of an in-memory collection of *already-existing* aggregates — `Add`, `GetById`, `Remove` — none of which involve deciding whether a set of raw inputs is enough to construct a valid new object. Mixing creation logic (cart validation, price-snapshotting) into `IOrderRepository.Add(Cart cart, CustomerId id)` would make the repository responsible for a domain decision it has no business making, and would make it impossible to construct an `Order` in a unit test (Intermediate Q12) without an `IOrderRepository` implementation to call.
+
+**Common pitfall:** implementing "reconstitution from the database" (turning rows back into an aggregate) as if it were the same operation as "creating a new aggregate from business inputs" — they often *look* similar (both end with `new Order(...)`) but reconstitution must skip creation-time invariants that only make sense for brand-new aggregates (e.g., "a cart must not be empty" doesn't apply when rehydrating an `Order` that was already validly submitted years ago), which is why reconstitution is usually a dedicated internal factory method (`Order.Reconstitute(...)`, as used in Advanced Q12) rather than the same path a fresh `OrderFactory.CreateFromCart` uses.
+
+**Practical guidance:** if a piece of code is deciding whether inputs are *sufficient and valid to bring a new aggregate into being*, that's Factory territory; if it's retrieving something that already has a lifecycle and an identity, that's Repository territory — conflating them tends to produce a repository interface cluttered with creation parameters that have nothing to do with data access.
+
+---
+
+## Intermediate — Question 22
+
+**Q22: Do domain and integration events need to be processed in the order they were raised, and what breaks if that assumption is silently relied on?**
+
+Most messaging infrastructure (a broker, an outbox-poller, even in-process `INotificationHandler` dispatch under concurrent processing) makes no strict, end-to-end ordering guarantee once more than one message is in flight — it guarantees *delivery* (per Intermediate Q14's at-least-once discussion), not necessarily the *order* two independently-published events arrive in, especially across partitions, retries, or multiple consumer instances processing in parallel for throughput.
+
+**Where an unspoken ordering assumption breaks:**
+
+```csharp
+// Handler assumes OrderPlaced always arrives before OrderCancelled for the same order
+public class InventoryProjectionHandler :
+    INotificationHandler<OrderPlaced>, INotificationHandler<OrderCancelled>
+{
+    public Task Handle(OrderPlaced e, CancellationToken ct) =>
+        _readModel.UpsertAsync(new OrderProjection(e.OrderId, "Placed"));
+
+    public Task Handle(OrderCancelled e, CancellationToken ct) =>
+        _readModel.UpsertAsync(new OrderProjection(e.OrderId, "Cancelled"));
+}
+```
+
+If `OrderCancelled` is redelivered after a transient failure and happens to be processed *after* a later `OrderPlaced` retry for an unrelated reprocessing pass, the read model can end up showing "Placed" for an order that was actually cancelled — not because either handler has a bug in isolation, but because the code implicitly assumed events for the same aggregate always arrive in raise-order, which nothing in the pipeline promised.
+
+**Making the handler order-safe rather than order-dependent:**
+
+```csharp
+public Task Handle(OrderCancelled e, CancellationToken ct) =>
+    _readModel.UpsertIfNewerAsync(e.OrderId, "Cancelled", e.OccurredOn);   // compares timestamps/sequence, not arrival order
+
+public Task Handle(OrderPlaced e, CancellationToken ct) =>
+    _readModel.UpsertIfNewerAsync(e.OrderId, "Placed", e.OccurredOn);
+```
+
+Carrying a sequence number or `OccurredOn` timestamp on the event itself, and having the projection compare it against whatever it currently holds before overwriting, makes the outcome correct regardless of arrival order — the same defensive habit as Intermediate Q14's idempotency, extended from "did I already apply this" to "is this the most recent thing I should apply."
+
+**Common pitfall:** reaching for a single global ordered queue "to make this simpler" — that trades away the whole point of scaling consumers horizontally (Kafka's per-partition ordering guarantee is the realistic middle ground many systems use: order is guaranteed *within* a partition key, typically the aggregate's ID, but not across the whole topic).
+
+**Practical guidance:** design each handler to be correct under out-of-order *and* duplicate delivery from the start (timestamp/sequence comparisons, last-write-wins or explicit conflict rules) rather than relying on infrastructure to preserve an order it was never contractually promising — and where true ordering matters for one aggregate's stream specifically, key the partitioning/routing on that aggregate's ID so at least same-aggregate events stay ordered relative to each other.
+
+---
+
+## Advanced — Question 14
+
+**Q14: An Aggregate Root enforces its invariants in memory before any write happens — so why do systems still add optimistic concurrency control (a `RowVersion`/`xmin`-style column) on top of that?**
+
+In-memory invariant checks (Beginner Q8, Intermediate Q1) guarantee that *the object the code is holding* never transitions to an invalid state. They say nothing about whether that object still reflects the *current* row in the database at the moment `SaveChanges` runs — and in any system with more than one concurrent writer, it might not.
+
+**The gap optimistic concurrency closes:**
+
+```csharp
+// Two requests load the same Order concurrently, both pass their own in-memory invariant checks
+var orderA = await _repository.GetByIdAsync(orderId);   // Lines.Count == 2
+var orderB = await _repository.GetByIdAsync(orderId);   // also loaded with Lines.Count == 2, same DB row
+
+orderA.AddLine(productX, 1, price);   // valid in memory: still Draft, adding a line is fine
+orderB.Submit();                      // also valid in memory: Lines.Any() was true when orderB was loaded
+
+// Without concurrency control: whichever SaveChanges runs second silently overwrites the first's effect —
+// orderA's new line may vanish, or orderB may "submit" an order that, by the time it commits,
+// no longer matches what was actually checked.
+```
+
+Each aggregate instance is internally consistent by itself — the problem is that two different in-memory snapshots of the *same* underlying row were mutated independently, and nothing forces either save to notice the other happened.
+
+**How a version column resolves it:**
+
+```csharp
+public class Order
+{
+    public OrderId Id { get; }
+    public uint Version { get; private set; }   // mapped to a RowVersion/rowversion column via EF Core's IsRowVersion()
+}
+```
+
+```csharp
+builder.Property(o => o.Version).IsRowVersion();
+```
+
+EF Core includes the originally-loaded `Version` value in the `UPDATE ... WHERE Id = @id AND Version = @originalVersion` statement. If another transaction already committed a change to that row, zero rows match the `WHERE` clause, EF Core throws `DbUpdateConcurrencyException`, and the second writer is forced to reload the aggregate, re-run its behavior method against the *current* state, and retry — rather than silently clobbering the first writer's committed change.
+
+**Why this doesn't contradict "the aggregate is the consistency boundary" (Intermediate Q1):** the aggregate boundary defines *what must be checked together* (the invariant); optimistic concurrency defends *when* that check is still valid — specifically, that the state the invariant was checked against hasn't been superseded by another transaction between load and save. Without it, the aggregate's invariant enforcement is only as good as the assumption that nobody else touched the row in between, which concurrent load in a multi-user system routinely violates.
+
+**Practical guidance:** add a version/concurrency token to every Aggregate Root that can be loaded and mutated by more than one concurrent request path (which, in practice, is nearly all of them) — it's cheap (one extra column, one EF Core mapping line) relative to the class of silent-lost-update bugs it prevents, and unlike a pessimistic lock, it doesn't hold a database lock for the duration of a request, only detects the conflict at commit time.
+
+---
+
+## Advanced — Question 15
+
+**Q15: Intermediate Q5 mentions Open Host Service / Published Language in passing — worked out in full, what does it actually look like, and how is it different from just "publishing an API"?**
+
+Every service exposes *some* API, so "Open Host Service" only earns its name when the exposed contract is treated as a deliberately designed, versioned **Published Language** — a shared vocabulary meant for many independent consumers, decoupled from the provider's internal model, with an explicit compatibility contract — rather than an incidental byproduct of whatever the internal domain model happens to look like this week.
+
+**What it's replacing — an internal model exposed directly, one integration at a time:**
+
+```csharp
+// Catalog's internal Product entity, serialized straight onto the wire — no translation, no contract
+public class Product
+{
+    public ProductId Id { get; private set; }
+    public InternalPricingStrategy PricingStrategy { get; private set; }   // internal concept leaks straight out
+    public CategoryTree Category { get; private set; }                     // internal shape leaks straight out
+}
+```
+
+Every consumer of this endpoint is now coupled to `Catalog`'s internal refactoring decisions — renaming `InternalPricingStrategy` or restructuring `CategoryTree` breaks every consumer simultaneously, with no seam to absorb the change. This is the Conformist relationship (Intermediate Q5) forced onto *every* consumer of `Catalog`, whether or not any of them individually has the leverage or the interest to negotiate a change.
+
+**Open Host Service / Published Language — a stable, intentionally-designed contract sitting in front of the internal model:**
+
+```csharp
+// Published Language: a small, deliberately stable DTO shape — versioned, documented, decoupled from internals
+public record ProductV1(string Sku, string DisplayName, decimal CurrentPrice, string CategoryPath);
+
+public class CatalogOpenHostService
+{
+    public ProductV1 GetProduct(ProductId id)
+    {
+        var product = _repository.GetById(id);   // internal aggregate, free to change shape
+        return new ProductV1(product.Sku.Value, product.DisplayName, product.CurrentPrice.Amount, product.Category.FullPath);
+    }
+}
+```
+
+```yaml
+# The "Published" half: an OpenAPI contract, checked into a shared/versioned location,
+# that consumers code against instead of Catalog's internal types.
+openapi: 3.0.0
+paths:
+  /products/{id}:
+    get:
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductV1' }
+```
+
+Now `Catalog`'s team can restructure `InternalPricingStrategy` or `CategoryTree` freely — as long as `CatalogOpenHostService` keeps producing a `ProductV1` shape that satisfies the published contract, every consumer is unaffected. A breaking change to the *published* shape becomes `ProductV2`, introduced alongside `V1` and deprecated on a schedule, rather than an unannounced break.
+
+**Why this is a strategic-design decision, not just API hygiene:** choosing to invest in an Open Host Service is choosing to absorb translation cost centrally (one team designs and maintains the Published Language) instead of leaving each consumer to build its own Conformist adapter against a moving internal target — worth it specifically when a context has many independent consumers, which is exactly the situation where negotiating a bespoke Customer-Supplier relationship (Intermediate Q5) with each one doesn't scale.
+
+**Practical guidance:** version the Published Language explicitly (a path segment, a media-type parameter, or a schema version field) from the very first release, even before a second version is needed — retrofitting versioning onto a contract that consumers already depend on unversioned is far more disruptive than starting with `V1` in the name.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What is Event Sourcing, and how does it relate to — without being required by — Domain-Driven Design's tactical patterns?**
+
+Event Sourcing is a persistence strategy: instead of storing an aggregate's *current* state as a row that gets overwritten on each change, you store the complete, ordered sequence of domain events that ever happened to it, and derive current state by replaying those events from the beginning (or from the last snapshot) whenever the aggregate needs to be loaded. It's a persistence choice, not a DDD requirement — the vast majority of this file's examples use conventional "store current state" persistence with domain events used only for decoupling (Intermediate Q3), and that's a completely valid, arguably more common way to do DDD.
+
+**Conventional persistence — the row *is* the state:**
+
+```csharp
+// Loading: SELECT current columns, done. History of how it got here is gone.
+var order = await _db.Orders.FindAsync(id);   // Status = Submitted; no record of the Draft state that preceded it
+```
+
+**Event-sourced persistence — the events *are* the state; current state is a derived projection:**
+
+```csharp
+public class Order
+{
+    public OrderId Id { get; private set; }
+    public OrderStatus Status { get; private set; }
+    private readonly List<OrderLine> _lines = new();
+
+    // Replays recorded events to arrive at current state — no "current row" is ever stored directly
+    public static Order LoadFromHistory(IEnumerable<IDomainEvent> history)
+    {
+        var order = new Order();
+        foreach (var e in history) order.Apply(e);
+        return order;
+    }
+
+    private void Apply(IDomainEvent e)
+    {
+        switch (e)
+        {
+            case OrderLineAdded lineAdded: _lines.Add(new OrderLine(lineAdded.ProductId, lineAdded.Quantity, lineAdded.UnitPrice)); break;
+            case OrderSubmitted: Status = OrderStatus.Submitted; break;
+        }
+    }
+
+    // Behavior methods still enforce invariants against current (replayed) state, then record a new event
+    public void Submit()
+    {
+        if (!_lines.Any()) throw new DomainException("Cannot submit an order with no lines.");
+        _domainEvents.Add(new OrderSubmitted(Id));
+        Apply(_domainEvents.Last());   // apply immediately so in-memory state reflects the new event too
+    }
+}
+```
+
+**Where it genuinely reinforces DDD tactical patterns:** event sourcing takes the domain event (Intermediate Q3) — already a first-class concept in DDD — and makes it the *only* thing persisted, rather than a side artifact. It also makes the Aggregate boundary even more load-bearing than usual: because events are the unit of storage and an aggregate is loaded by replaying only its own event stream, the aggregate boundary must exactly match the event stream boundary, or replay pulls in (or leaves out) the wrong events entirely.
+
+**What it costs, and why it's not a default choice:** every query that isn't "give me current state by ID" (a list of overdue orders, a report joining several orders) needs a separately-maintained read projection, because the event stream alone is a poor shape to query — this is CQRS's read-model split (Advanced Q8), but now mandatory rather than optional. Schema evolution is harder too: an old event type recorded years ago must still be replayable by current code, which usually means versioned event types and upcasting logic, a maintenance burden a conventional current-state table never has.
+
+**Practical guidance:** reach for event sourcing when the audit trail/history *is* a real business requirement (financial ledgers, insurance claim histories, anything where "what did this look like on March 3rd, and why" is a genuine question the business asks) — not merely because domain events are already being used for decoupling. Using domain events for pub/sub between aggregates (Intermediate Q3, Q9) is valuable on its own and doesn't obligate a team to also adopt event sourcing as the storage mechanism.
+
+---
+
+## Scenario — Question 8
+
+**Q8: Eight months into building a `Fulfillment` service, the team notices that roughly a third of its code exists purely to ask the `Ordering` service detailed questions about order contents, discounts, and payment status — logic that conceptually belongs to Ordering, not Fulfillment. The Bounded Context boundary was drawn wrong at the start. How do you diagnose this precisely, and what's the safe path to correct it now that both services are live and have their own databases?**
+
+**Diagnosing precisely, not just "it feels wrong":** the concrete tell is the one from Advanced Q5 and Q1 — count how often `Fulfillment` has to synchronously call back into `Ordering` to answer questions that are really about *order* concepts (was this line discounted, has payment cleared) rather than *fulfillment* concepts (has this shipped, which carrier). A high ratio of "calls back to ask" versus "acts on data it actually owns" means the boundary split a single business capability down the middle instead of separating two genuinely different ones — `Fulfillment` never got a complete-enough model to act alone, which is precisely Advanced Q1's distributed-monolith symptom.
+
+**Why this can't be fixed by adding an ACL or more caching:** an Anti-Corruption Layer (Advanced Q4) protects a context from a *foreign* model's vocabulary leaking in — it's the right tool when the upstream genuinely belongs to someone else's problem space. Here the problem is the opposite: `Fulfillment` is repeatedly asking about concepts that *are* its own problem space, just modeled on the wrong side of the line. Wrapping the cross-service calls in a nicer-looking client doesn't change which service should own the data.
+
+**Safe correction path — treat it as a boundary move, not a rewrite:**
+
+1. **Re-run Event Storming (Intermediate Q8) on the actual observed behavior**, not the original design intent, to find where the real seam is. Often the finding is narrower than "merge the services" — e.g., "which line items were discounted" genuinely belongs with `Ordering`, but "which carrier and tracking number" genuinely belongs with `Fulfillment`; the boundary needs to move, not disappear.
+2. **Introduce the corrected model as a new, parallel slice inside `Fulfillment`,** populated via a domain/integration event from `Ordering` (`OrderPlaced` carrying the discount-adjusted line totals `Fulfillment` actually needs) rather than a synchronous query — this is the "strangler fig at the Bounded Context level" approach from Advanced Q12, just applied to correcting a boundary rather than introducing DDD for the first time.
+3. **Cut over call sites one at a time**, from "ask `Ordering` synchronously" to "read the locally-maintained projection kept current by events," verifying against production traffic before removing the old synchronous path.
+4. **Only after every call site is migrated, remove the now-dead synchronous query capability** from `Ordering`'s public API — removing it earlier breaks `Fulfillment` mid-migration.
+
+**Why not do a "big bang" boundary redraw:** both services have their own databases and live consumers; a single cutover risks an all-or-nothing outage if the new event-driven data path has a gap the old synchronous path didn't. The incremental version keeps both paths correct simultaneously until the migration is verified complete.
+
+**Practical guidance:** treat "how often does this service call back to its neighbor to answer questions about its neighbor's data" as a standing, monitorable signal, not a one-time design review question — a boundary that's correct at launch can still be revealed as wrong months later purely from how usage patterns actually settled, and catching the ratio climbing is cheaper than discovering it from a postmortem.
+
+---
+
+## Scenario — Question 9
+
+**Q9: `Fulfillment` and `Returns` are two correctly-separated Bounded Contexts, but their teams have started arguing: `Fulfillment` considers an order "Complete" the moment it's delivered, while `Returns` considers an order "Complete" only after the 30-day return window closes with no return filed. Both teams insist their definition is the only correct one, and a shared status field keeps getting flipped back and forth by each side's logic. How do you resolve this without forcing one team to be "wrong"?**
+
+**This is not an ownership dispute like Scenario Q4 or Q7 — it's a Ubiquitous Language collision.** Both teams are using the identical word, "Complete," and both are internally consistent and correct *within their own context* — this is exactly what Intermediate Q4 predicts: the same term is not guaranteed to mean the same thing across Bounded Contexts, and here it demonstrably doesn't. The bug isn't either team's logic; it's the shared field itself, which assumes one boolean can answer two different questions.
+
+**Why a shared status field actively causes the flip-flopping:** whichever team's process runs last overwrites the other's meaning of "Complete" into the same column, because the column has no way to represent "delivered-complete" and "return-window-complete" as two distinct facts — it was modeled as if there were one universal lifecycle stage both contexts walk through together, when there are actually two independent lifecycles that happen to share a word.
+
+**Resolution — stop sharing the field, let each context name its own concept explicitly:**
+
+```csharp
+// Fulfillment's own concept — deliberately not named "Complete"
+namespace Fulfillment.Domain
+{
+    public class Shipment
+    {
+        public ShipmentId Id { get; }
+        public OrderId OrderId { get; }                 // correlates to the order, doesn't own its lifecycle
+        public DeliveryStatus DeliveryStatus { get; private set; }   // Delivered, InTransit, etc.
+    }
+}
+
+// Returns' own concept — a different lifecycle, different name, same correlation ID
+namespace Returns.Domain
+{
+    public class ReturnWindow
+    {
+        public OrderId OrderId { get; }
+        public ReturnEligibility Eligibility { get; private set; }   // Open, Expired, ReturnFiled
+    }
+}
+```
+
+Neither team's word gets forced onto the other. `Fulfillment` publishes `ShipmentDelivered`; `Returns` subscribes to it to *start* its own 30-day clock, but `Returns.ReturnWindow.Eligibility` reaching `Expired` is Returns' own fact, computed on its own timeline, never written back into a shared "Complete" column that `Fulfillment` also touches.
+
+**If a consuming team (say, a customer-facing order-status page) genuinely needs a single "is this order fully done" answer,** that's a new, distinct concept belonging to whichever context serves that page (or a dedicated read model composing both), explicitly defined as its own thing — e.g., `OrderLifecycleSummary.FullyResolved = DeliveryStatus == Delivered && ReturnEligibility == Expired` — rather than reusing either team's internal vocabulary for a third meaning.
+
+**Practical guidance:** when two teams are arguing that the *same word* means different things and both are right, the fix is almost never "vote on the one true definition" — that produces a definition neither team's process actually implements correctly. Give each context's meaning its own name, correlate via a shared ID, and if a unified view is genuinely needed, model it as an explicit new concept rather than smuggling a second meaning into an existing field.
+
+---
+
+## Scenario — Question 10
+
+**Q10: You've been asked to introduce DDD into one painful corner of a five-year-old codebase — a `Shipment` class with 40 public getters/setters and all its business logic scattered across six different `ShipmentService` methods — without a rewrite and without breaking the (extensive but slow) existing test suite that tests those services. Walk through the incremental refactor.**
+
+This is Advanced Q12's strategic roadmap (map contexts, wrap with an ACL, apply tactical patterns inside one context at a time) applied at the scale of a single anemic class, where the immediate goal is tactical, not strategic — the Bounded Context boundary here is already accepted as correct; the problem is purely that `Shipment` is an anemic model (Beginner Q4) and the fix has to happen without a stop-the-world rewrite.
+
+**Step 1 — pin current behavior with characterization tests before changing anything.** Before moving a single line of logic, write tests against the *existing* `ShipmentService` methods that lock in current behavior, including any behavior that looks accidental — these are the safety net for every subsequent step, independent of whether the existing slow test suite already covers it well.
+
+**Step 2 — move one invariant at a time, starting with the one causing the most bugs.** Pick a single rule currently enforced (inconsistently) across multiple `ShipmentService` methods — say, "can't mark a shipment `Delivered` if it was already `Cancelled`" — and move it onto `Shipment` itself as a guarded method, without touching any other rule yet:
+
+```csharp
+// Before: rule checked (or forgotten) independently in ShipmentService.MarkDelivered,
+// ShipmentService.BulkUpdateStatus, and a background job — three chances to get it wrong
+public class Shipment
+{
+    public string Status { get; set; }   // still public — everything else still works exactly as before
+}
+
+// After, step 2: one rule moved, everything else untouched
+public class Shipment
+{
+    public string Status { get; private set; }   // now private-set for THIS field only
+    public void MarkDelivered()
+    {
+        if (Status == "Cancelled")
+            throw new DomainException("Cannot mark a cancelled shipment as delivered.");
+        Status = "Delivered";
+    }
+    // other 39 properties: still public getters/setters, untouched, for now
+}
+```
+
+`ShipmentService.MarkDelivered` is updated to call `shipment.MarkDelivered()` instead of setting `Status` directly; the other five service methods are left exactly as they were. The characterization tests from Step 1 confirm nothing else broke.
+
+**Step 3 — repeat, one invariant and one property at a time, verified by the growing test suite at each step.** Each iteration converts one more public setter into a private one backed by a guarded method, and each iteration is small enough to review and revert independently if something regresses — there is no "flip the whole class over" commit.
+
+**Step 4 — once enough of `Shipment`'s state is behind guarded methods, the six `ShipmentService` methods shrink to orchestration** (load, call one behavior method, save) rather than housing business rules themselves, converging naturally toward the Application-Service shape from Intermediate Q7 — without that convergence ever being a discrete, risky step of its own.
+
+**Why this order (tests first, one invariant at a time, service shrinks last) matters:** reversing it — refactoring `Shipment` broadly first and writing tests after — means the refactor has no safety net while it's happening, which is precisely the risk that makes teams avoid touching anemic legacy code at all. Making each step both small and independently testable is what makes the incremental path actually safer than leaving the anemic model alone.
+
+**Practical guidance:** resist the urge to "finish" `Shipment` in one sitting once the pattern feels obvious — a half-converted class (some properties private-set and guarded, others still open) is a perfectly good intermediate state to leave in production between iterations, and is strictly safer than a single large, hard-to-review commit that converts all 40 properties at once.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A `PaymentReceived` domain event is supposed to trigger an `InventoryReserved` update in a separate service via an integration event, but a production incident review reveals that during a broker outage last month, several `PaymentReceived` events were never published at all — the payments were processed successfully, but the corresponding inventory was never reserved, and nobody noticed until customers started reporting oversells. Diagnose the architectural gap and fix it.**
+
+**Diagnosis — the gap is between "the transaction committed" and "the event is guaranteed to be published," and nothing was closing it.** Intermediate Q3 states the correct lifecycle (events dispatched only after the originating transaction commits) but that's necessary, not sufficient — if publishing to the broker is just a method call made *after* `SaveChanges()` in the same request, a crash or broker outage between those two steps means the payment is durably committed but the event is silently lost forever, with no record that it was ever supposed to have gone out.
+
+```csharp
+// The gap: SaveChanges succeeds, but the process crashes or the broker is unreachable
+// before the next line runs — PaymentReceived is gone, with no trace it should have existed
+public async Task Handle(ProcessPaymentCommand cmd, CancellationToken ct)
+{
+    payment.MarkReceived();               // raises PaymentReceived in memory
+    await _db.SaveChangesAsync(ct);       // COMMITTED — the payment is real and paid
+    await _bus.PublishAsync(payment.DomainEvents, ct);   // <- outage here = event lost forever, silently
+}
+```
+
+**The fix — an Outbox: persist the event to be published in the *same* transaction as the business change, then publish it separately with retry.**
+
+```csharp
+public async Task Handle(ProcessPaymentCommand cmd, CancellationToken ct)
+{
+    payment.MarkReceived();
+    _db.OutboxMessages.Add(new OutboxMessage(payment.DomainEvents));   // same DbContext, same transaction
+    await _db.SaveChangesAsync(ct);        // payment state AND the "must publish this" record commit atomically
+}
+
+// Separate background process — polls the outbox table and publishes, retrying until it succeeds
+public class OutboxPublisher : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var pending = await _db.OutboxMessages.Where(m => !m.Published).ToListAsync(ct);
+            foreach (var msg in pending)
+            {
+                await _bus.PublishAsync(msg.Payload, ct);   // if the broker is down, this loop just retries later
+                msg.Published = true;
+                await _db.SaveChangesAsync(ct);
+            }
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+        }
+    }
+}
+```
+
+Because the outbox row is written in the *same* database transaction as `payment.MarkReceived()`, there is no window where the payment is committed but the record of "this event still needs publishing" doesn't exist — a crash after `SaveChanges` still leaves the outbox row there for the publisher to pick up once the process (or the broker) recovers. This directly closes the gap the incident exposed.
+
+**This also reintroduces Intermediate Q14's idempotency requirement, deliberately:** because the outbox publisher retries until it confirms success, `InventoryReserved`'s handler on the receiving side may now see the same event more than once (if publish succeeds but the "mark published" write fails) — which is exactly why the fix isn't complete without also confirming the downstream handler is idempotent, not just that publishing is now reliable.
+
+**Practical guidance:** treat "what happens to this domain event if the process crashes or the broker is unreachable between commit and publish" as a standing design question for every event that triggers a cross-service side effect, not a hypothetical — this is precisely the failure mode outbox exists for, and it's cheap to add proactively but expensive to discover for the first time via a customer-facing oversell incident.
+
+---
+
+## Scenario — Question 12
+
+**Q12: You're designing the `Order`/`Invoice` boundary for a B2B billing system. Finance requires that once an invoice is issued, its total must never silently drift from what was actually invoiced — a hard, always-consistent invariant. Sales requires that orders remain editable after invoicing, to record post-delivery corrections (a damaged item, a quantity dispute) without waiting for a formal credit-note process. These two requirements look contradictory: how can an order be editable while an invoice derived from it stays permanently fixed?**
+
+**The apparent contradiction dissolves once "editable" and "fixed" are recognized as applying to two different aggregates with two different jobs — the mistake to avoid is modeling `Order` and `Invoice` as one aggregate (or as a live parent/computed-child relationship) just because an invoice is "derived from" an order.**
+
+**Why forcing them into one aggregate fails both requirements at once:** if `Invoice.Total` were computed live from `Order.Lines` every time it's read, then editing the order *after* invoicing would silently change the invoice's total — violating Finance's hard invariant the moment Sales exercises the flexibility they asked for. If, instead, `Order` were locked immutable the moment it's invoiced to protect the invoice, Sales loses the post-delivery correction workflow entirely. There's no single aggregate design that satisfies both requirements, because they're not actually requirements about the same object.
+
+**The resolution — `Invoice` is its own Aggregate Root, snapshotting what it needs from `Order` at issuance, exactly like Scenario Q2's `OrderLine` price snapshot and Scenario Q7's pricing ownership pattern:**
+
+```csharp
+public class Invoice   // Aggregate Root — Finance's context, its own consistency boundary
+{
+    public InvoiceId Id { get; }
+    public OrderId OrderId { get; }                          // reference by ID — correlation only, not a live link
+    private readonly List<InvoiceLine> _lines = new();        // snapshot, captured once at issuance
+    public Money Total => _lines.Sum(l => l.LineTotal);
+    public InvoiceStatus Status { get; private set; }
+
+    public static Invoice IssueFrom(Order order)
+    {
+        if (order.Status != OrderStatus.Delivered)
+            throw new DomainException("Cannot invoice an order that hasn't been delivered.");
+
+        var invoice = new Invoice(InvoiceId.New(), order.Id);
+        foreach (var line in order.Lines)
+            invoice.AddLine(line.ProductId, line.Quantity, line.UnitPriceSnapshot);   // copied, not referenced
+        invoice.Status = InvoiceStatus.Issued;
+        return invoice;
+    }
+    // No method exists that re-reads Order after issuance — Invoice has everything it needs, permanently.
+}
+
+public class Order   // Aggregate Root — Sales' context, remains freely editable after invoicing
+{
+    public OrderId Id { get; }
+    public InvoiceId? InvoiceId { get; private set; }         // reference only — knows an invoice exists, not its contents
+
+    public void RecordDeliveryCorrection(OrderLineId lineId, int correctedQuantity)
+    {
+        // Order can still be corrected after invoicing — this never touches the already-issued Invoice at all
+        var line = _lines.Single(l => l.Id == lineId);
+        line.Correct(correctedQuantity);
+        _domainEvents.Add(new OrderCorrectedPostInvoice(Id, InvoiceId, lineId, correctedQuantity));
+    }
+}
+```
+
+Finance's invariant holds absolutely: once `Invoice.IssueFrom(order)` returns, nothing in the system has a method that mutates that `Invoice`'s lines or total — it's permanently fixed by construction, not by convention. Sales' requirement holds too: `Order.RecordDeliveryCorrection` is unrestricted by anything invoice-related, because `Order` genuinely doesn't reference `Invoice`'s internals, only its ID.
+
+**Reconciling the two facts (order changed, invoice didn't) is a deliberate, visible business process, not a data-consistency bug:** `OrderCorrectedPostInvoice` is exactly the domain event that should trigger Finance's own explicit workflow — typically issuing a credit note or a supplementary invoice — which is itself a new `Invoice`-like aggregate, not a mutation of the original one. The two aggregates staying independently truthful about their own facts, plus an explicit event connecting them, *is* the correct model — not a compromise between the two teams' requirements.
+
+**Practical guidance:** when two stakeholders' requirements for "the same" business object seem to contradict, check whether they're actually describing two different aggregates correlated by an ID (as here) before assuming one requirement has to lose — the contradiction is often an artifact of assuming there's only one object in the first place, the same root cause as Scenario Q4, Q5, Q7, and Q9.
+
+---
+
+## Scenario — Question 13
+
+**Q13: A `Policy` aggregate in an insurance system has grown to expose 30+ public methods — `Underwrite`, `AdjustRiskScore`, `Endorse`, `FileClaim`, `AdjustClaimReserve`, `SettleClaim`, `DenyClaim`, `RenewPolicy`, `CancelPolicy`, `ApplyDiscount`, `RecalculatePremium`, and more — and the team has learned to dread touching it: a change to claims-handling logic has twice broken renewal behavior in ways nobody predicted. Unlike a "too large" aggregate bloated with embedded data, this one is lean on data but bloated on behavior. What's actually wrong, and how do you split it?**
+
+**This is a different flavor of the "god aggregate" failure than Scenario Q2/Q5's data-embedding version — here the aggregate's *data* is reasonably sized, but it has accumulated the behavior of several genuinely separate lifecycles that happen to all reference "a policy."** Underwriting (deciding whether and at what price to insure), Claims handling (processing an individual claim from filing to settlement), and Renewal (the periodic re-evaluation cycle) are three business processes with their own state machines, their own invariants, and — critically — their own rates and reasons for change. A change to claims-handling logic breaking renewal behavior is the tell: two unrelated concerns are close enough in the same class that a change to one can ripple into the other purely through shared internal state, exactly the single-responsibility violation the "one reason to change" heuristic exists to catch, applied to an aggregate instead of an ordinary class.
+
+**Diagnosing which methods actually share an invariant versus which merely share the word "Policy":** ask, for each pair of methods, "does a change made by one need to be atomically consistent with the other, right now, in the same transaction?" `FileClaim` and `SettleClaim` clearly do — a claim's reserve amount and its settlement status must never be inconsistent with each other. `FileClaim` and `RenewPolicy` almost certainly don't — filing a claim on Tuesday has no invariant requiring it to be atomically consistent with a renewal decision made the following month.
+
+**Splitting along true lifecycle boundaries, correlated by a shared `PolicyId`:**
+
+```csharp
+// Underwriting context — its own aggregate, its own invariants around risk and pricing
+public class PolicyUnderwriting
+{
+    public PolicyId Id { get; }
+    public RiskScore RiskScore { get; private set; }
+    public Money Premium { get; private set; }
+    public void Underwrite(RiskAssessment assessment) { /* ... */ }
+    public void RecalculatePremium() { /* ... */ }
+}
+
+// Claims context — a genuinely separate aggregate per claim, not folded into Policy at all
+public class Claim
+{
+    public ClaimId Id { get; }
+    public PolicyId PolicyId { get; }                 // reference, correlates back — doesn't embed underwriting data
+    public ClaimStatus Status { get; private set; }
+    public Money ReserveAmount { get; private set; }
+    public void AdjustReserve(Money amount) { /* ... */ }
+    public void Settle(Money finalAmount) { /* ... */ }
+}
+
+// Renewal context — its own lifecycle, its own cadence, reacts to events rather than sharing state directly
+public class PolicyRenewal
+{
+    public PolicyId Id { get; }
+    public DateTime RenewalDate { get; private set; }
+    public void Renew(RiskScore currentRiskScore) { /* reads underwriting's current risk score by reference, not by embedding it */ }
+}
+```
+
+Each piece now changes for exactly one reason: a claims-handling bug fix touches only `Claim`, and cannot ripple into `PolicyRenewal`'s behavior because `PolicyRenewal` no longer shares a class, a transaction, or even necessarily a service with `Claim` — the two are connected only via `PolicyId` and, where genuinely needed, domain events (a settled claim affecting future risk scoring is a `ClaimSettled` event that `PolicyUnderwriting` can react to on its own schedule, not a same-transaction side effect).
+
+**Why this is a stronger fix than "just refactor the class into smaller private methods":** breaking `Policy`'s 30 public methods into smaller private helpers inside the same class would improve readability but leaves the actual coupling intact — claims logic and renewal logic would still live in one aggregate, sharing one transaction boundary and one set of fields, so a claims change could still ripple into renewal behavior through shared state, just through fewer, tidier-looking methods.
+
+**Practical guidance:** "this aggregate has many methods, and changes to one area keep unexpectedly affecting another" is the behavioral-bloat counterpart to Scenario Q2's data-bloat symptom — both point to the same root cause (a class doing the job of several aggregates) and the same fix (split along true invariant/lifecycle boundaries, correlate by ID, coordinate via events), just discovered from a different angle: one from lock contention on shared data, this one from unpredictable cross-feature regressions in shared behavior.
+
+---

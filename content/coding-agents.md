@@ -834,3 +834,365 @@ The core principle to hold onto: once a change has passed the same review, testi
 **Practical guidance:** the general lesson from both this scenario and Q-Scenario-1 is the same: any instruction combining a destructive action with an ambiguous or broad scope should route through preview-then-confirm, regardless of how mundane the task sounds — "temp file cleanup" and "build artifact cleanup" fail the same way, for the same underlying reason, and are prevented by the same standing discipline.
 
 ---
+
+## Beginner — Question 12
+
+**Q12: What is "prompt caching," and why does it matter for the cost and speed of an agentic coding session?**
+
+Prompt caching is a mechanism where an LLM provider stores the internal computation for a prefix of a prompt (the part that doesn't change between requests) so that a later request sharing that same prefix can reuse the cached computation instead of reprocessing it from scratch. In an agentic session, a huge portion of what's sent to the model on every single turn is identical to the previous turn: the system prompt, the tool definitions, the instructions file (Q-Beginner-3), and most of the accumulated conversation history — only the newest tool result or message is actually new. Without caching, the model would reprocess all of that repeated material, in full, on every single step of the loop.
+
+**Why this matters concretely:** a long agentic session might make dozens of tool calls, and each one triggers another full model request. If every request pays full price and full latency to reprocess an ever-growing, mostly-unchanged prefix, both the dollar cost and the time-to-next-action grow roughly linearly with session length just from re-reading the same text repeatedly. Prompt caching cuts both: cached tokens are typically billed at a steep discount versus fresh tokens, and skipping redundant processing of the cached prefix reduces latency per step — which matters a lot across a session with many sequential tool calls, since that latency is paid over and over.
+
+**Example (conceptual):**
+```json
+{
+  "system_prompt": "You are a coding agent with tools: read_file, edit_file, bash...",
+  "cache_control": { "type": "ephemeral" },
+  "messages": [ "... 40 prior turns of tool calls and results ..." ]
+}
+```
+
+**Common pitfall:** assuming caching happens automatically with no thought to prompt structure — if content that changes every turn (like a timestamp, or a summary that gets rewritten each step) is placed *before* the stable system prompt and tool definitions, it invalidates the cache for everything after it, defeating the purpose. Stable content belongs first; volatile content belongs last.
+
+**Practical guidance:** this is mostly invisible to a developer just using a coding agent day to day — the harness manages cache boundaries — but it's worth knowing it's the reason long agentic sessions with large, stable instructions files are far cheaper per step than the raw token count would suggest, and why a well-structured instructions file (stable, rarely-edited content) is cheap to keep loaded across an entire session.
+
+---
+
+## Beginner — Question 13
+
+**Q13: As a developer, what practical habits help keep an agent's context window usable during a long session, beyond relying on the harness's automatic compaction?**
+
+Automatic compaction (Q-Beginner-8) is a safety net, not a substitute for good habits — a session that manages its own context deliberately stays sharper for longer than one that just runs until the harness is forced to summarize.
+
+**Practical habits that help:**
+1. **Start a fresh session per distinct task** rather than continuing one long-running session across unrelated work. A session that's accumulated context from an earlier, finished task carries dead weight into the next one — none of that history is relevant, but it still occupies space and can subtly bias the model's attention.
+2. **Scope each request narrowly** (Q-Intermediate-3) so the agent doesn't read more of the codebase than the task requires — every unnecessary file read is context spent that could have stayed available for the actual problem.
+3. **Periodically ask the agent to summarize progress explicitly** on a genuinely long task, and consider starting the next phase from that summary in a new session rather than letting the original session's raw exploration history keep growing untouched.
+4. **Close out finished sub-problems before starting new ones** — asking an agent to work three unrelated bugs in one continuous session means all three bugs' exploration and back-and-forth compete for the same context, when three short, separate sessions would each stay focused.
+
+**Why this matters even with compaction available:** compaction is lossy (Q-Beginner-8) — it trades fidelity for headroom, and it only triggers once a session is already large. A developer who keeps sessions naturally scoped avoids relying on that trade-off at all, which tends to produce more reliable results than a sprawling session that's been repeatedly compacted.
+
+**Practical guidance:** think of context window management the way you'd think of keeping a single terminal window focused on one task rather than running everything in one giant, ever-scrolling pane — the discipline of starting fresh and scoping narrowly is cheap and pays off directly in the quality of what the agent produces.
+
+---
+
+## Beginner — Question 14
+
+**Q14: What does it mean to run a coding agent "headlessly" or "non-interactively" in a CI/CD pipeline, and how is that different from the normal interactive terminal/IDE usage described elsewhere in this file?**
+
+Everywhere else in this file, an agent runs **interactively**: a developer types a task, watches the agent work, and is available to approve actions per the permission model (Q-Intermediate-5) as they come up. Running an agent **headlessly** means invoking it from an automated pipeline step — a CI job, a scheduled task — with no human present to respond to a prompt in real time. The agent is given a task description up front (often via a command-line flag or a config file) and must run its entire loop to completion, or fail, without ever pausing to ask a question a human would otherwise answer live.
+
+**Why the permission model has to change for this to work:** an approval gate that blocks on human input (Q-Intermediate-5) simply hangs forever in a pipeline with nobody watching. Headless invocations are typically configured with a pre-approved, narrower permission scope decided in advance — e.g. "auto-approve everything within this sandboxed checkout, but never push, never touch secrets beyond what's explicitly provided" — so the agent can complete the entire task unattended within a deliberately bounded blast radius (Q-Advanced-4's sandboxing discussion) rather than needing a live approver.
+
+**Example (conceptual CI step):**
+```yaml
+- name: Auto-fix lint failures
+  run: |
+    claude-code run --headless \
+      --permission-mode "sandboxed-auto" \
+      --task "Fix all lint errors reported by 'npm run lint'; do not change test files."
+```
+
+**Pitfall:** treating headless mode as identical to interactive mode minus the human — it isn't, because every ambiguous judgment call an interactive session would normally resolve by asking has to instead be resolved by a pre-set policy or simply left unresolved (and the task fails or the agent guesses). A headless task description needs to be more completely specified up front (Q-Intermediate-3) than an interactive one, precisely because there's no one there to fill a gap mid-session.
+
+**Practical guidance:** headless agent runs are best reserved for narrow, well-bounded, low-ambiguity tasks (exactly the "verifiable, bounded scope" category from Q-Intermediate-10) — the same task shape that would already be a good candidate for full autonomy in an interactive session, just with the added constraint that nothing can be asked mid-flight.
+
+---
+
+## Intermediate — Question 15
+
+**Q15: Mechanically, how does prompt caching actually work — what determines a "cache hit," how long does a cached prefix live, and what design choices in an agentic harness maximize the hit rate?**
+
+A prompt cache works on **prefix matching**: the provider hashes (or otherwise fingerprints) a designated portion of the input — typically everything up to an explicit cache boundary marker — and checks whether an identical prefix was processed recently. If it matches, the provider reuses the already-computed internal representation for that prefix instead of recomputing it, and only processes the genuinely new tokens that follow. A cache hit requires the prefix to match **exactly**, token for token — even a single inserted or reordered token anywhere before the cache boundary invalidates the match for everything after that point, because the internal representation being reused is specific to that exact sequence.
+
+**Why this makes prompt structure a real design decision, not an implementation detail:** in an agentic loop, each new turn appends the previous turn's tool result to the conversation and sends the whole thing again. If the harness structures the request as `[stable system prompt + tool definitions] + [stable earlier conversation] + [newest tool result]`, everything before the newest addition can hit the cache on every subsequent turn — only the delta needs fresh processing. If instead something volatile (a live timestamp, a dynamically reordered tool list, a summary that gets rewritten each turn) sits early in the prompt, it invalidates the cache for the entire, much larger remainder that follows it, even though that remainder didn't actually change.
+
+**Cache lifetime is short and provider-specific** — typically minutes, not hours — because it's an in-memory optimization tied to the provider's serving infrastructure, not a durable store. A session with tool calls spaced far apart in wall-clock time (e.g., waiting on a long-running test suite between turns) can fall outside the cache's lifetime window and lose the discount on that turn, even though the content itself hasn't changed.
+
+```json
+{
+  "messages": [
+    { "role": "system", "content": "...", "cache_control": { "type": "ephemeral" } },
+    { "role": "user", "content": "Fix the failing test in auth_test.py" },
+    { "role": "assistant", "content": "...tool call..." },
+    { "role": "tool", "content": "...test output..." }
+  ]
+}
+```
+
+**Design choices that maximize hit rate:** keep the system prompt and tool definitions completely static across a session (never regenerate them per turn even if trivially), place any per-turn-variable content strictly at the end, and avoid unnecessary reordering of message history during compaction (Q-Beginner-8) — a compaction step that rewrites earlier history invalidates the cache for the entire rewritten portion, trading a caching benefit for a context-size benefit, which is sometimes the right trade but should be a deliberate one.
+
+**Practical guidance:** most of this is the harness's responsibility, not something a developer using an agent day-to-day configures directly — but understanding it explains a real, observable phenomenon: sessions with a large, stable instructions file and steady turn cadence are markedly cheaper and faster per step than sessions with volatile early context or long gaps between turns.
+
+---
+
+## Intermediate — Question 16
+
+**Q16: What does it look like to integrate an AI coding agent as an automated step inside a CI/CD pipeline — for example, having it auto-fix a category of failure — and what guardrails does that specific setup need?**
+
+Beyond an agent authoring a PR that then goes through normal CI (Q-Intermediate-4), a further step some teams adopt is having CI **invoke an agent as a pipeline stage itself** — e.g., a build fails on lint errors, and instead of failing the pipeline outright, a step runs a headless agent (Q-Beginner-14) scoped narrowly to fixing exactly that category of failure, then re-runs the check.
+
+**A representative pipeline shape:**
+```yaml
+- name: Run lint
+  id: lint
+  run: npm run lint
+  continue-on-error: true
+
+- name: Auto-fix lint failures if lint failed
+  if: steps.lint.outcome == 'failure'
+  run: |
+    claude-code run --headless --permission-mode "sandboxed-auto" \
+      --task "Fix the lint errors from 'npm run lint'. Do not change logic, only formatting/style. Do not touch test files."
+
+- name: Re-run lint to confirm
+  run: npm run lint
+
+- name: Run full test suite
+  run: npm test
+```
+
+**Guardrails this specific setup needs, beyond a normal agent-authored PR:**
+1. **A narrow, mechanically-verifiable failure category.** Lint/formatting fixes are a good fit because "did it work" is objectively checkable by re-running the same tool (Q-Intermediate-14) — a category like "fix this failing integration test" is a much worse fit for unattended CI auto-fix, because a agent might satisfy the test's letter while violating its intent (Q-Scenario-3's looping-agent diagnosis applies here too).
+2. **Re-verification, not trust in the agent's own report.** The pipeline re-runs the actual check (lint, full test suite) after the fix rather than accepting the agent's claim that it fixed the issue — the same "verify, don't trust self-reported success" principle from Q-Advanced-4's irreversible-actions mitigation.
+3. **A bounded diff scope** (path allowlist, no touching test files) so an "auto-fix lint" step can't quietly widen into unrelated changes — mirroring the path-allowlist guardrail from the autonomous-merge policy in Q-Scenario-5.
+4. **Still gated by human review before merge**, even though the fix itself ran unattended — the CI step saves a human from manually fixing mechanical failures, it doesn't remove the review checkpoint on the resulting diff (Q-Intermediate-4).
+
+**Pitfall:** using this pattern for a failure category where "fixed" is subjective or only partially checkable (e.g., "fix flaky tests") tends to produce diffs that pass the immediate check by accident (a retry-happy test, a loosened assertion) rather than by genuinely fixing the underlying issue — exactly the test-weakening risk flagged in Q-Intermediate-9.
+
+**Practical guidance:** reserve pipeline-embedded agent auto-fix for failure categories with a fast, objective, automatically re-checkable definition of "fixed" — it's a natural extension of running linters/type-checkers in the agent's own loop (Q-Intermediate-14), just triggered by CI instead of by the developer's interactive session.
+
+---
+
+## Intermediate — Question 17
+
+**Q17: Within the agentic loop, how does an agent recover from a *tool execution* failure — the tool call itself erroring out (a malformed argument, a permission error, a network failure) — as distinct from recovering from a failing test result?**
+
+A failing test (Q-Intermediate-9) is a signal about the *code under test* — the tool call itself (running the test command) succeeded; its output just reported a failure the agent needs to fix. A **tool execution failure** is different: the tool call itself didn't complete normally — the harness couldn't run the requested action at all, or the environment refused it. Examples: `edit_file` fails because the file path doesn't exist, `bash` returns a permission-denied error because the sandbox restricts that operation (Q-Advanced-12), a network-backed tool times out, or the model emits a tool call with an argument the tool's schema rejects outright before the action is even attempted.
+
+**How the loop handles this:** the harness returns the error itself — not a business-logic failure, but a structural one — as the tool result, and the model reasons over that error the same way it reasons over any other observation (Q-Advanced-1). The key difference in the *kind* of reasoning needed: a failing test calls for changing the code; a tool execution error calls for changing the *approach* — trying a different file path, requesting a narrower or differently-shaped action, or recognizing the action is disallowed entirely and needs a different strategy (or a human) rather than a retry.
+
+```json
+{"tool": "edit_file", "input": {"path": "src/legacy/ordr.py", "old_text": "...", "new_text": "..."}}
+```
+```json
+{"error": "FileNotFoundError: src/legacy/ordr.py does not exist"}
+```
+
+The agent's next step, given that observation, is typically to search for the correctly-spelled file (`ordr.py` was a typo for `order.py`) rather than blindly retrying the identical failing call — exactly the self-correction pattern described in Q-Beginner-10 for hallucinated APIs, applied to tool paths/arguments instead of library calls.
+
+**Where this goes wrong:** an agent that doesn't distinguish "the action was refused because it's not allowed" from "the action failed because of a typo" can loop unproductively — retrying a permission-denied `bash` command with slightly different phrasing will never succeed no matter how it's rephrased, since the constraint is structural (sandboxing, Q-Advanced-12), not a matter of getting the syntax right. This is a specific instance of the general looping failure mode in Q-Scenario-3, but with a distinct root cause worth naming separately: a *tooling/permission* constraint rather than a *missing information* constraint.
+
+**Practical guidance:** a well-designed harness returns tool errors with enough specificity (a clear error type/message, not just "failed") for the model to tell these cases apart — vague tool-error reporting is exactly the kind of "broken feedback signal" problem flagged in Q-Scenario-3, just one layer lower, at the level of the tool call itself rather than the business-logic check it was trying to run.
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What quick, practical heuristics help a developer spot "plausible but wrong" agent output *during* an active session, before it ever reaches a formal code review?**
+
+Formal code review practices for agent-authored diffs (Q-Intermediate-8) apply once a PR is opened, but a developer actively driving a session can catch a meaningful fraction of correctness problems earlier and cheaper, in the moment, by watching for specific signals rather than reading every line of generated code with equal scrutiny.
+
+**Heuristics worth applying live:**
+1. **Did the agent actually run something, or just assert success?** An agent that says "this should work" without having executed a test or the actual code is making a text-to-text-shaped claim (Q-Advanced-7) — treat that phrasing itself as a signal to ask it to verify, rather than trusting the sentence.
+2. **Is the fix suspiciously narrow relative to the bug description?** A fix that only changes the exact literal case mentioned (e.g., special-cases one specific input value) rather than addressing the underlying condition is a common shape of over-fit, plausible-looking-but-wrong output — worth a follow-up question like "does this handle the general case, or just the example I gave?"
+3. **Did a test get weakened rather than the code fixed?** A green test suite that's green because an assertion got loosened or a test got skipped, rather than because the behavior was actually corrected, is exactly the failure mode flagged in Q-Intermediate-9 — diffing the test files specifically, not just skimming for "tests pass," catches this quickly.
+4. **Does an unfamiliar API call look almost-but-not-quite right?** A function name, argument name, or flag that's close to what you'd expect from a library you know reasonably well is worth a fast sanity check against real docs — this is the hallucination pattern from Q-Beginner-9, and catching it by eye (rather than waiting for a runtime error) saves a full loop iteration.
+5. **Did the diff touch more files than the task implied?** Scope creep beyond what a well-specified task (Q-Intermediate-3) called for is often the first visible symptom of the agent misreading intent broadly, even when each individual changed file looks reasonable in isolation.
+
+**Why "in the moment" heuristics matter alongside formal review:** the earlier a plausible-but-wrong pattern is caught, the cheaper it is to correct — redirecting the agent mid-session costs one more turn; catching the same issue at PR review costs a review round-trip; catching it in production costs much more. These heuristics are not a replacement for the deeper review practices in Q-Intermediate-8 — they're a fast first pass a driving developer can run continuously, at effectively no extra cost, while the session is still live.
+
+**Practical guidance:** the common thread across all five heuristics is treating fluency and polish as weak evidence of correctness (Q-Intermediate-8's central warning) — the moment output looks unusually clean or unusually narrowly targeted, that's precisely when a quick verification question pays off most.
+
+---
+
+## Advanced — Question 14
+
+**Q14: Beyond feature checklists, what deeper technical criteria should actually drive choosing among competing agentic coding tools (Claude Code, Copilot, Codex, Gemini CLI, etc.) for a specific engineering workflow?**
+
+Marketing feature lists change monthly and converge across vendors (Q-Beginner-2), so a durable evaluation has to look at architectural properties that are harder to copy overnight and that map directly onto how much a given workflow actually needs.
+
+**Criteria worth weighing, with what each one actually predicts:**
+1. **Permission/sandboxing model granularity (Q-Intermediate-5, Q-Advanced-12).** Does the tool offer real, OS/container-level sandboxing, or only prompt-level "please don't do X" guidance? For a workflow with elevated blast radius (broad shell access, production-adjacent environments), this is a harder requirement than raw model quality.
+2. **Tool/MCP extensibility (Q-Beginner-7).** Can the tool connect to your team's actual internal systems (issue tracker, internal APIs, deployment tooling) via a standard protocol, or only through whatever integrations the vendor has built in-house? A workflow that needs deep internal-tool access benefits disproportionately from open extensibility versus a closed set of built-in tools.
+3. **Context handling strategy (Q-Advanced-5).** Does the tool lean on a very large context window, aggressive retrieval/search, or some blend — and does that match your codebase's actual size and structure? A monorepo with millions of lines needs a fundamentally different context strategy than a handful of medium-sized services.
+4. **Sub-agent/orchestration support (Q-Intermediate-7).** For workflows involving genuinely decomposable, parallelizable work (a large migration, a broad audit), native support for delegation is a real capability gap between tools, not a cosmetic feature.
+5. **CI/headless invocation support (Q-Beginner-14, Q-Intermediate-16).** A tool with a well-supported non-interactive mode is a structural requirement for pipeline integration; one that's fundamentally interactive-only rules out that entire class of use case regardless of model quality.
+6. **Observability/audit surface (Q-Advanced-13).** For a regulated environment, does the tool expose what it did and why in a form that satisfies audit requirements, or only a transient interactive transcript?
+
+**Why this differs from the Scenario Q4 adoption framework:** Q-Scenario-4 is about *whether to adopt a second tool* for a specific class of work; this is about the *technical criteria* to compare specific products against once you've decided a class of work needs a tool at all — the former is a decision-process question, this is an architecture-comparison question, and both matter at different points in an adoption decision.
+
+**Practical guidance:** weight these criteria by which one is actually the binding constraint for your workflow — a team whose primary need is deep internal-tool integration should weight MCP/extensibility heavily even if a competing tool tests slightly better on a generic benchmark (Q-Advanced-3), because the benchmark doesn't measure the criterion that actually determines whether the tool fits.
+
+---
+
+## Advanced — Question 15
+
+**Q15: When multiple sub-agents work in parallel on genuinely related (not fully independent) parts of a codebase, what race conditions and conflicts can arise, and how are they typically prevented or resolved?**
+
+Q-Intermediate-7 describes the benefit of parallelism when sub-tasks are independent; the harder case is when an orchestrator decomposes work that's *related* — sub-agents touching the same file, the same shared interface, or files with a real dependency between them — where naive parallel execution can produce conflicts a purely sequential process wouldn't.
+
+**Concrete failure modes:**
+- **Same-file conflicting edits.** Two sub-agents each independently editing `OrderService.cs` — one adding a new method, one refactoring an existing one — can produce edits that are individually sensible but textually conflict, or worse, one silently overwrites the other if the harness doesn't detect the collision, with neither sub-agent aware the other touched the same file.
+- **Interface drift mid-flight.** A sub-agent updating a shared interface's signature while another sub-agent is simultaneously writing code against the *old* signature (because it read the file before the change landed) produces code that compiles against a version of the interface that no longer exists by the time both finish.
+- **Inconsistent assumptions from stale reads.** A sub-agent that reads a file early in its run and reasons from that snapshot can miss a change another sub-agent made to a related file moments later, producing a change that's locally correct against what it saw but inconsistent with the current, actual state of the codebase.
+
+**Mitigations, layered:**
+1. **Non-overlapping scope by design, wherever genuinely possible.** The orchestrator should partition work along real seams (separate modules, separate files) rather than splitting an inherently entangled change across sub-agents — the pitfall flagged in Q-Intermediate-7 is exactly this: forcing decomposition onto a task that isn't cleanly separable.
+2. **File-level locking or a claim mechanism**, analogous to how a build system serializes writes to a shared artifact — a sub-agent that needs to touch a file another sub-agent has claimed either waits or the orchestrator resequences the work rather than letting both proceed blind.
+3. **Serialize genuinely coupled steps, parallelize only the rest.** If sub-task B depends on sub-task A's interface change, run A to completion and verified first, then hand B a fresh read of the *actual* post-A state rather than letting both run concurrently against stale assumptions.
+4. **Merge-time verification as the final backstop**, the same as any team of humans working in parallel branches — run the full test suite against the combined result of all sub-agents' work before considering the overall task done, since even careful scoping can miss an interaction a test suite catches directly.
+
+**Practical guidance:** treat sub-agent parallelism with the same discipline as parallel human development on a shared codebase — clear ownership boundaries, explicit handoff points for genuinely coupled work, and integration-level verification at the end — rather than assuming decomposition alone eliminates the coordination problem it's meant to reduce.
+
+---
+
+## Advanced — Question 16
+
+**Q16: Beyond the basic prompt-injection mitigation described in Q-Advanced-4, what does a genuine defense-in-depth architecture against untrusted-content injection actually look like for an agent that regularly processes external content?**
+
+A single mitigation — "treat fetched content as data, not instructions" — is necessary but not sufficient on its own, because it depends entirely on the model correctly making that distinction every time, for every piece of content, with no external enforcement if it fails once. A defense-in-depth architecture layers multiple independent controls so that one layer failing doesn't mean the whole defense fails.
+
+**Layers worth building, each catching what the others might miss:**
+1. **Content provenance tagging.** Content originating from an untrusted source (a fetched webpage, an external issue, a third-party file) is explicitly marked as such in the context the model sees — not just conceptually "known" to the harness, but visibly delineated (e.g., wrapped in clear markers) so the model has an explicit signal to weigh, rather than relying on it inferring trust level from context alone.
+2. **Tool availability scoping by trust context.** While processing untrusted content, the set of tools available to the model is narrowed — no network/exfiltration-capable tools active, no ability to run arbitrary shell commands — so that even if the model is successfully manipulated into "wanting" to take a malicious action, the concrete capability to do so isn't present in that moment (mirroring the sandboxing principle in Q-Advanced-12: a technical restriction beats a prompted request).
+3. **Human confirmation gate before any action derived from untrusted content executes with elevated permissions.** Even after the model has processed untrusted content and proposes an action, anything beyond a narrow, pre-approved category routes through the same confirmation tiering as any other consequential action (Q-Intermediate-5, Q-Advanced-10) — the untrusted-content path doesn't get to skip the gate just because it originated from "just reading a file."
+4. **Output filtering/anomaly detection on what the agent produces after processing untrusted content** — a downstream check that flags unusual patterns (e.g., an unexpected attempt to include what looks like a credential or internal path in output destined for an external destination) as a last-resort catch, independent of whether the model itself recognized anything was wrong.
+
+**Why layering matters specifically here:** prompt injection is fundamentally a manipulation of the model's own judgment (Q-Advanced-4), and any single defense that relies solely on the model's judgment inherits that same weakness. Layers 2–4 above don't depend on the model correctly resisting manipulation at all — they constrain what's possible or catchable regardless of whether the model was fooled, the same "backstop that doesn't depend on compliance" principle underlying sandboxing generally (Q-Advanced-12).
+
+**Practical guidance:** for any agent workflow that regularly ingests external, untrusted content (summarizing web pages, processing inbound issues/PRs from outside contributors, reading third-party data), budget for this as real infrastructure work, not a prompt-wording fix — the single-mitigation version gives a false sense of security proportional to how rarely it's actually tested against a genuinely adversarial input.
+
+---
+
+## Advanced — Question 17
+
+**Q17: How does prompt caching's requirement for an exact-match prefix interact with the agentic loop's inherently mutating context (compaction, sub-agent summaries, dynamically-appended tool results), and what tension does that create in harness design?**
+
+Prompt caching (Q-Intermediate-15) rewards keeping a prefix byte-for-byte identical across requests; the agentic loop's core mechanisms for staying within context limits — compaction (Q-Beginner-8, Q-Advanced-2) and sub-agent delegation — both work by *rewriting* or *replacing* portions of the conversation history that would otherwise just keep accumulating. These two forces pull in opposite directions, and a harness has to make a deliberate trade-off between them rather than getting both for free.
+
+**Where the tension shows up concretely:**
+- **Compaction invalidates the cache for everything it rewrites.** The moment a harness compresses the last 30 turns into a shorter summary, that summary is new text — any cached computation tied to the original 30 turns' exact token sequence is now useless, and the *next* request has to fully reprocess the new, shorter prefix before a fresh cache can build up again from that point forward. A harness that compacts aggressively and frequently to save context space pays a caching cost every time it does so.
+- **Sub-agent results returning to the orchestrator insert new content mid-stream**, similarly breaking the cached prefix at that point even though the orchestrator's *earlier* history is unchanged — everything before the sub-agent's result can still be cached, but everything after it has to be freshly processed on the very next turn until a new stable prefix accumulates again.
+- **The trade-off is real, not just an implementation annoyance:** compacting less often preserves more cache-hit benefit (cheaper, faster steps) but risks running into the hard context ceiling sooner; compacting more eagerly protects headroom but resets caching benefit more often, adding cost precisely at the moments the harness is already working to manage a large, expensive context.
+
+**How harnesses typically balance this:** compact only when genuinely necessary (approaching a real budget threshold) rather than on a fixed schedule, since every unnecessary compaction is a caching benefit given up for no headroom gain; structure summaries to themselves become a new stable prefix immediately (so caching resumes building from the very next turn rather than staying broken across several subsequent compactions); and keep the *system prompt and tool definitions* — the largest stable chunk — completely outside whatever gets touched by compaction, so at minimum that portion's cache benefit survives every compaction event regardless of how the conversation history itself is being managed.
+
+**Practical guidance:** this is invisible to a developer using the tool, but it explains a real, sometimes-confusing observed pattern — a session's per-step cost/latency can spike right after a compaction event and then gradually improve again as a new stable prefix rebuilds, rather than staying uniformly cheap throughout a long session.
+
+---
+
+## Scenario — Question 8
+
+**Q8: A code-review pass on an agent-generated PR catches, just before merge, that the agent's "fix" for a slow database query introduced a SQL injection vulnerability by building the query with string concatenation instead of the parameterized approach the rest of the codebase uses. Walk through why this happened, what caught it, and what should change so this class of issue is caught earlier or prevented outright.**
+
+**Why this happened:** the agent was almost certainly focused on the stated goal — "make this query faster" — and produced code that's plausible, fluent, and achieves that narrow goal, exactly the pattern flagged in Q-Intermediate-8: an agent optimizes for the immediate task passing, not for properties (like injection-safety) that weren't stated as part of the task and that it has no innate, codebase-specific sense of unless made explicit (Q-Beginner-3). String-concatenated SQL is a common, statistically plausible pattern from general training exposure, and nothing about "make it faster" would have surfaced the codebase's specific, non-negotiable convention of always parameterizing queries — that convention lived only as tribal knowledge or as a pattern in other files the agent didn't necessarily read or weight as a hard constraint.
+
+**What caught it:** human code review specifically applying the heightened scrutiny Q-Intermediate-8 calls for on security-sensitive code — precisely the category where review should not lighten just because the diff looks clean and the query does run faster. This is also the scenario that most concretely justifies why Q-Advanced-4's mitigation list treats "hallucinated/plausible-but-wrong code" and "security-sensitive code" as separate, both-required scrutiny categories, not one substituting for the other: a passing benchmark of "the query is now faster" said nothing about whether it's still safe.
+
+**What should change, layered:**
+1. **Make the constraint explicit and machine-checkable, not just documented.** Add the parameterized-query requirement to the instructions file (Q-Beginner-3) as a stated "do not" — cheap, but only as reliable as the model reading and weighting it correctly on every task, so it shouldn't be the only layer.
+2. **Add a static-analysis/security-linter gate to the agent's own loop and to CI**, matching the discipline in Q-Intermediate-14 for mechanical checks generally — a SQL-injection-detecting static analyzer catching this *before* a human ever needs to notice it in review is strictly better than relying on review alone, the same "mechanical checks free up human attention for what actually needs judgment" argument made there.
+3. **Treat this as exactly the kind of finding that should never be silently waved through** even under time pressure to ship the performance fix — and use the specific incident to update the instructions file with a concrete example (mirroring Q-Scenario-2's "iterate from real failures" rollout approach) rather than a generic reminder.
+4. **Don't over-correct into distrust of agent output generally.** The lesson isn't "agents can't be trusted with database code" — it's that security-sensitive code needs the same non-negotiable scrutiny (human or automated) regardless of who or what authored it, and that scrutiny had a gap here that a linter would close far more reliably than hoping every future review catches it by eye.
+
+**Practical guidance:** the actual fix that prevents recurrence is the static-analysis gate, not a stronger reminder to reviewers — reviewer vigilance is valuable as a backstop, but a mechanical check that runs on every diff, every time, is what actually scales past the next time a reviewer is tired, rushed, or new.
+
+---
+
+## Scenario — Question 9
+
+**Q9: A team wants to use an AI coding agent to help migrate a large, 10-year-old legacy monolith to a new framework version, but is worried about the agent making sweeping, hard-to-verify changes across code nobody fully understands anymore. Design a safe approach.**
+
+The risk here compounds two separate hard problems: migrations are inherently wide-reaching (touching code across the whole system) and this specific codebase's original intent is partly lost (undocumented behavior, "don't touch that, we don't remember why" landmines) — an agent turned loose on "migrate this to the new framework" with no further structure inherits both risks at once, at agent speed.
+
+**A safe approach, structured around bounding blast radius and maximizing verifiability at each step:**
+
+1. **Establish a strong verification baseline before any migration work starts.** If test coverage is thin (common in a 10-year-old codebase), invest in characterization tests first — tests that pin down current, actual behavior (not necessarily "correct" behavior, just *current* behavior) so that any migration step has something concrete to check itself against. Without this, "did the migration break anything" has no answer better than a human's guess.
+2. **Use the strangler-fig approach: migrate in isolated, independently-shippable slices**, not the whole monolith in one pass. Identify a genuinely separable module or subsystem, migrate it completely (agent-assisted, verified against its characterization tests), ship it, and only then move to the next slice — mirroring the batching discipline from Q-Scenario-6's large-refactor strategy, but at the level of whole subsystems rather than call sites.
+3. **Feed the agent explicit, hard-won context about the codebase's landmines up front** (Q-Scenario-2's "known landmines" section) — anything the team already knows is fragile, undocumented, or intentionally weird should be stated explicitly rather than left for the agent to discover by breaking it.
+4. **Keep the agent's task narrowly scoped per slice**, with named entry points (Q-Intermediate-12) rather than "figure out what needs to change" — for legacy code specifically, unscoped exploration risks the agent confidently "fixing" something that looks wrong but is actually load-bearing behavior nobody documented.
+5. **Verify each slice with both the characterization tests and a human who has domain context**, before moving to the next — an agent's own test-passing signal (Q-Intermediate-9) is necessary but not sufficient here, because thin legacy test coverage means "tests pass" is weaker evidence of correctness than it would be in a well-tested modern codebase.
+6. **Keep each slice's change small enough to revert cleanly** (Q-Intermediate-4's incremental-commit discipline) — for a codebase nobody fully understands, the ability to cheaply undo one slice's migration if it surfaces an unexpected regression weeks later matters more than usual.
+
+**Why "just point the agent at the whole migration" fails here specifically:** it's the large-refactor context problem (Q-Scenario-6) compounded by the evaluation problem — a codebase with thin test coverage and lost tribal knowledge gives an agent (and a human reviewer) far less signal to verify against per unit of change, so the same batch size that's safe in a well-tested modern codebase is meaningfully riskier here.
+
+**Practical guidance:** treat "improve verifiability" (characterization tests, explicit landmine documentation) as a prerequisite phase of the migration, not overhead competing with it — an agent's speed advantage is only safely usable in proportion to how well each of its changes can actually be checked.
+
+---
+
+## Scenario — Question 10
+
+**Q10: An agent's tool-call loop goes off the rails: it repeatedly calls the same `search_codebase` tool with near-identical queries, dozens of times in a row, without ever proceeding to read or edit a file — clearly not converging toward the task. This is a different shape of stuck than the failing-test loop in Q-Scenario-3. Diagnose and fix.**
+
+**Diagnosis — this is a tool-use loop malfunction, not a reasoning-about-code failure**, and it's worth distinguishing precisely from Q-Scenario-3's pattern: there, the agent was making real edits and observing real test failures, just not converging on the right fix. Here, the agent isn't getting far enough to attempt a fix at all — it's stuck in the *orientation* phase, repeatedly searching without ever acting on what it finds. Likely root causes:
+
+1. **The search tool is returning unhelpful or malformed results the agent can't act on.** If `search_codebase` returns results with no usable file paths, truncated context, or a format the model struggles to parse into a concrete next action, the agent may be reasonably trying alternate phrasings hoping for a more useful result — this is the "broken feedback signal" failure mode from Q-Scenario-3, but manifesting at the search-tool layer specifically rather than the test-runner layer. **Fix:** run the exact same search manually and inspect the raw tool output — if it's genuinely unhelpful (empty, truncated, badly formatted), that's a tooling bug, and no amount of prompt tuning fixes it.
+2. **The target genuinely isn't findable by the search terms being tried**, and the agent lacks a fallback strategy (e.g., trying a different search mechanism, listing directories structurally instead of keyword-searching) — it's stuck iterating on variations of a search strategy that was never going to work, rather than recognizing the strategy itself needs to change.
+3. **A malformed or hallucinated tool call is being silently retried.** If the model is emitting a `search_codebase` call with a parameter the tool schema doesn't actually support, and the harness's error reporting is vague (Q-Intermediate-17), the model may not have enough information to recognize *why* each attempt isn't producing a useful result, and keeps trying superficially different queries against the same underlying structural problem.
+4. **The task itself under-specifies where to look** (Q-Intermediate-12) — a vague task on a large, unfamiliar codebase can genuinely require more search than expected, and what looks like "stuck in a loop" from the outside might be an agent legitimately exhausting a large search space with no better strategy available, because it was never given a starting point.
+
+**General fix, applied to this specific shape of stuck:** read the actual sequence of search queries and their raw results (not just "it searched a lot") to distinguish which of the above is happening — a tooling bug (fix the tool), a missing fallback strategy (the harness should escalate to a different search approach after N unproductive attempts, or ask for help), or a missing starting point (supply one, per Q-Intermediate-12). As in Q-Scenario-3, the underlying discipline is the same: treat a stuck agent as raising the question "what information or capability would resolve this," not as evidence the model itself is incapable.
+
+**Practical guidance:** a well-designed harness should itself detect this specific pattern — many near-identical tool calls with no state progress — and either surface it to a human or force a strategy change automatically, rather than letting the loop run indefinitely on unproductive repetition; this is a case where a hard, tool-side loop-detection guard is more reliable than hoping the model notices its own lack of progress.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A team asks an agent to rename a widely-used type across a large monorepo — hundreds of usages across dozens of services — and decides to speed this up by running three separate sub-agent instances in parallel, each assigned a different service directory. Midway through, two of the sub-agents' changes conflict: one renamed a shared interface the type implements, and the other, working in a different service, had already generated code against the interface's old name before the rename landed. Diagnose and redesign the approach.**
+
+**Diagnosis — a coupled task was decomposed as if it were independent, exactly the risk flagged in Q-Advanced-15.** Renaming a type is not actually parallelizable across arbitrary service boundaries when that type's *shared interface* is itself part of what's being renamed — every consumer of that interface has a real dependency on the rename landing before it can safely be touched, even if the consuming services otherwise look independent by directory structure. Splitting by directory (a proxy for "looks independent") isn't the same as splitting by actual dependency structure, and the orchestrator here used the former without checking the latter.
+
+**Redesigning the approach:**
+
+1. **Separate the shared, structural change from the many independent, mechanical ones.** The interface/type definition itself is a single, small, high-impact change with real downstream dependents — it should be done *once*, first, by one agent (or the orchestrator itself), fully verified (build passes for the defining module) before anything else proceeds.
+2. **Enumerate all consumers before assigning any parallel work** (mirroring Q-Scenario-6's "enumerate first" discipline) — a search across the whole monorepo for every usage of the old type/interface name, done once, up front, gives the orchestrator the actual dependency graph rather than an assumed one based on directory boundaries.
+3. **Only parallelize the consumer updates, and only after the shared definition has landed and been verified.** Once the interface's new name is the single source of truth, updating each service's usages to match is now a genuinely independent, mechanical, per-service task — safe to hand to parallel sub-agents, because none of them are racing against a still-changing shared dependency.
+4. **Give each sub-agent a fresh read of the current (post-rename) state, not a stale snapshot from before the shared change landed** — the conflict in this scenario partly stems from a sub-agent reasoning from what it saw before the interface rename actually completed; sequencing the shared change first and only then dispatching parallel work eliminates that race entirely rather than trying to patch around it after the fact.
+5. **Verify with a full monorepo build/test pass at the end**, not just each sub-agent's own service-level checks — a genuinely cross-cutting rename can have interactions (a reflection-based lookup by name, a serialized config referencing the old name) that no single service's local verification would catch.
+
+**Why this is a different lesson from Q-Advanced-15's general guidance:** that question covers the general principle (partition along real seams, serialize coupled steps); this scenario is the concrete trap of *directory boundaries looking like real seams when they aren't*, specifically for a rename that touches a shared contract — the fix isn't "don't parallelize," it's "correctly identify what's actually shared before deciding what's independent."
+
+**Practical guidance:** before parallelizing any large refactor across sub-agents, explicitly ask "is there a shared definition, contract, or resource that more than one of these parallel slices depends on" — if yes, that shared piece is a required sequential prerequisite, not one more slice to hand off alongside the rest.
+
+---
+
+## Scenario — Question 12
+
+**Q12: A mid-sized engineering organization has one enthusiastic early-adopter team using agentic coding tools heavily and safely, while most other teams either avoid the tools entirely (fearing the risks in this file) or use them carelessly (broad auto-approve permissions, no review changes). Leadership wants to roll out safe agentic workflows organization-wide. Design the rollout.**
+
+The core problem isn't technical — the early-adopter team has presumably already worked out reasonable individual practices — it's that safe practice hasn't propagated, and the two failure modes on the other teams (avoidance and carelessness) both stem from the same root cause: nobody has translated "how to use this safely" into something a team can adopt without reinventing it independently.
+
+**A rollout design addressing both failure modes:**
+
+1. **Codify the early adopters' practices into shared, concrete standards, not abstract principles.** "Be careful with agents" doesn't transfer; "auto-approve read-only actions, require confirmation for anything destructive, always work on a branch, keep human review mandatory" (synthesizing Q-Intermediate-4, Q-Intermediate-5, Q-Advanced-4's mitigations) is a checklist a new team can actually apply immediately.
+2. **Provide a baseline permission-model configuration as a starting default**, not a blank slate every team configures from scratch — most teams under-invest in getting a sandboxing/permission setup right on their own (Q-Advanced-12), so a vetted, sensible default lowers the barrier to using the tool safely from day one rather than leaving each team to discover the same lessons the hard way.
+3. **Require the same non-negotiable review discipline everywhere, regardless of team, tool, or perceived task simplicity** — explicitly counter the "carelessness" failure mode by making clear that heavier scrutiny on security/architecture-sensitive agent output (Q-Intermediate-8) and never auto-merging outside a narrow, audited category (Q-Scenario-5) are organization-wide policy, not something each team decides independently.
+4. **Address the avoidance failure mode with a low-risk on-ramp, not a mandate.** Teams avoiding the tool out of (reasonable) caution about the risks in this file benefit more from a guided pilot on genuinely low-stakes, well-scoped tasks (mirroring the pilot approach in Q-Advanced-3 and Q-Scenario-2) than from a top-down mandate to adopt immediately on high-stakes work — early wins on safe, bounded tasks build the calibrated trust that makes broader adoption sustainable rather than reactive.
+5. **Build in an instructions-file culture from the start** (Q-Beginner-3) — teams that skip this tend to get generic, foreign-looking output (Q-Scenario-2) and conclude the tool "doesn't work well here," when the actual gap was missing project-specific grounding; making a good instructions file part of the onboarding checklist, not an optional afterthought, heads this off.
+6. **Create a shared channel for incidents and near-misses across teams**, not just within the early-adopter team — a destructive-command near-miss (Q-Scenario-1, Q-Scenario-7) discovered by one team is exactly the kind of lesson that should update the org-wide standard, not stay siloed as one team's private lesson learned.
+
+**Why this differs from Q-Scenario-2's rollout guidance:** that scenario addresses rolling out to get *good, codebase-consistent output* from one team's tool usage; this is about propagating *safe practice itself* across an organization with genuinely divergent starting points (over-cautious and under-cautious) — the goal here is convergence on a shared safety baseline, not primarily output quality.
+
+**Practical guidance:** the rollout succeeds when the standard practices are concrete enough that a team new to agentic tools can follow them without having independently discovered the same failure modes the early adopters already learned the hard way — the whole point of institutional rollout is not re-paying that discovery cost per team.
+
+---
+
+## Scenario — Question 13
+
+**Q13: A developer, working with an agent that has broad git permissions, asks it to "clean up our commit history before we open the PR" on a shared feature branch several teammates have already pulled and built on top of locally. The agent interprets this as an interactive rebase and force-push, rewriting history that teammates' local branches now diverge from. Diagnose the damage and design the guardrail that should have prevented it.**
+
+**Diagnosis — a destructive git operation applied to a shared resource, distinct from the working-tree-deletion failure in Q-Scenario-1 and the wildcard-deletion failure in Q-Scenario-7.** Those scenarios involved deleting *local, uncommitted* work; this one is worse in a specific way — the branch already exists on a shared remote and other people have already built real work on top of the commits being rewritten. "Clean up commit history" is a genuinely ambiguous instruction (squash a few WIP commits? full interactive rebase? reword messages only?), and the agent picked the most aggressive interpretation — an interactive rebase followed by a force-push — without recognizing that *this specific branch* was no longer safe to rewrite, because rewriting shared history invalidates every other clone's relationship to it: teammates' local branches now have commits with no path back to the new remote history, and their next `git pull` either fails outright or, worse, silently creates a confusing merge of old and new history.
+
+**The guardrail that should have prevented it:**
+1. **Treat "rewrite history" (rebase, force-push, `commit --amend` on an already-pushed commit) as a distinct, higher-severity category of destructive action**, separate from ordinary file deletion — the confirmation-gate tiering from Q-Intermediate-5 and Q-Advanced-4 needs a specific, explicit entry for history-rewriting git operations, not just "destructive shell commands" generically, because the blast radius here extends to *other people's machines*, not just the local working tree or repo.
+2. **Check whether a branch is shared before treating a history-rewrite request as safe to execute.** A simple, cheap check — does this branch exist on the remote, and does it show signs other contributors have based work on it (multiple distinct authors, a `git log` showing pulls/merges from others) — is a strong signal that rewriting is categorically different from cleaning up a purely local, unpushed branch. An agent (or its harness) encountering that signal should stop and ask, not proceed with the most literal interpretation of an ambiguous instruction.
+3. **Scope the instruction precisely on the human side**, echoing Q-Intermediate-3's discipline: "squash my last 3 WIP commits into one, don't touch anything before that, and don't force-push — I'll push manually after you show me the result" leaves no room for the agent to reach for a full rebase-and-force-push on its own initiative.
+4. **Prefer non-destructive alternatives by default for shared branches** — a squash-merge at merge time (which doesn't rewrite the shared branch's existing history at all, just how it's combined into the target branch) achieves "clean commit history in the final PR" without ever force-pushing over commits others have already built on.
+
+**Recovering from the actual incident:** teammates' local branches need their base updated to the new rewritten history (`git rebase --onto` against the new base, or, in the worst case, re-cloning and manually reapplying uncommitted local work) — there is no clean automatic fix once history has diverged this way, which is exactly why prevention matters more than recovery here.
+
+**Practical guidance:** the general lesson connecting this to Q-Scenario-1 and Q-Scenario-7 holds — ambiguous, broadly-phrased instructions combined with a destructive action class should always route through a confirmation checkpoint — but this scenario adds a specific, important refinement: for git specifically, *history rewriting on a shared branch* deserves its own explicit, non-negotiable confirmation gate, separate from and in addition to the general "destructive command" gate, because its blast radius reaches machines the agent never touched directly.
+
+---

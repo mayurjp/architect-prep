@@ -1289,3 +1289,533 @@ if (dlqCount > 0)
 **Verification:** confirm the queue's `MaxDeliveryCount` is set to a value that bounds worst-case blocking time to something acceptable (a few failed deliveries, not thousands), and manually publish a deliberately malformed test message in staging to verify it dead-letters and alerts as designed rather than looping indefinitely — the same fault-injection discipline as the CI resiliency tests in Advanced Q9.
 
 ---
+
+## Beginner — Question 9
+
+**Q9: What is an idempotency key, at a basic level, and why does a client need to generate one instead of just relying on the server to detect duplicates?**
+
+An idempotency key is a unique identifier — typically a GUID — that a client attaches to a request representing one specific logical operation attempt (e.g., "this one checkout"), and reuses on any automatic retry of that exact same attempt. The server uses the key to recognize "I've already handled this" and returns the original result instead of repeating the underlying work a second time.
+
+**Why the client has to generate it, not the server:** the server has no way to tell, purely from an incoming request's contents, whether it's seeing a brand-new operation or a retry of one it already processed — two "create an order for these items" requests can look byte-for-byte identical whether they're a genuine duplicate order or the exact same logical checkout attempt arriving twice because of a network blip. Only the client knows which case it's in, because only the client knows whether it intentionally issued a second request or is retrying because it never got a clear answer about the first one.
+
+```csharp
+// The client decides, once, "this is one checkout attempt" — and keeps
+// using the same key for any retry of that same attempt.
+var idempotencyKey = Guid.NewGuid().ToString();
+await httpClient.PostAsJsonAsync("/api/orders", request,
+    headers: new() { ["Idempotency-Key"] = idempotencyKey });
+```
+
+**Common pitfall:** generating a fresh key on every HTTP attempt instead of once per logical operation — if the client's retry logic creates a new GUID each time it re-sends the request, the server sees what looks like a brand-new operation every time and the whole mechanism does nothing, even though the header is technically present.
+
+**Practical guidance:** think of the key as representing the user's *intent* ("place this order"), not the specific network request that carries it — the same intent, retried, should always carry the same key; a genuinely different intent (the user clicking "place order" a second time on purpose, after the first one visibly succeeded) should get a new one. This basic concept underlies the deeper mechanics covered in Advanced Q2.
+
+---
+
+## Beginner — Question 10
+
+**Q10: What does "deadline propagation" mean in the context of a chain of service calls, and why does a single fixed timeout per call fall short?**
+
+Deadline propagation means passing along *how much time is actually left* for an overall operation as that operation flows through a chain of service calls, so that each downstream service knows the real remaining budget rather than assuming it has its own full, independent timeout window.
+
+**Why a fixed per-call timeout alone falls short:** imagine a user-facing request with an overall 5-second budget, calling Service A (which itself calls Service B). If A simply uses its own fixed 4-second timeout for its call to B, but the outer request already spent 3 of its 5 seconds getting to A, A's 4-second call to B is going to blow the outer deadline even if B responds within A's own generous window — the user's request fails not because any individual hop was slow by its own standard, but because nobody accounted for time already spent upstream.
+
+```csharp
+// Deadline propagation: the remaining budget, not a fixed constant, sets each hop's timeout.
+async Task<Result> CallDownstreamAsync(HttpClient client, DateTime overallDeadlineUtc)
+{
+    var remaining = overallDeadlineUtc - DateTime.UtcNow;
+    if (remaining <= TimeSpan.Zero)
+        throw new TimeoutException("Overall deadline already exceeded before this call started.");
+
+    using var cts = new CancellationTokenSource(remaining);
+    return await client.GetFromJsonAsync<Result>("/api/data", cts.Token);
+}
+```
+
+**Common pitfall:** each layer of a call chain picking its own timeout in isolation, with no shared notion of the end-to-end budget — this produces exactly the kind of mismatch the pitfall in Beginner Q3 warns about (an outer timeout shorter than what inner calls assume they have), just spread across service boundaries instead of within one client's own retry sequence.
+
+**Practical guidance:** propagate the remaining deadline (as a timestamp or a remaining-duration value) through request headers or context objects across service boundaries, and have every hop derive its own local timeout from that shared budget rather than from a locally-chosen constant — this is also what lets an inner service decide it's not even worth attempting a call if the deadline has already effectively passed, directly supporting the retry-amplification mitigation described in Advanced Q3.
+
+---
+
+## Beginner — Question 11
+
+**Q11: What is a "hedge request" at a basic level, and how is it different from a retry?**
+
+A hedge request is a second, duplicate attempt sent to another instance of the same service *before* the first attempt has failed — triggered by the first attempt simply being slower than expected, not by an actual error. Whichever of the two responses comes back first is used; the other is discarded.
+
+**The key distinction from retry:** a retry (Beginner Q2) only fires *after* a failure or a timeout has already been observed — it reacts to something having gone wrong. A hedge fires proactively, while the first attempt is still technically in flight and might still succeed — it's a bet that, given how long the first attempt has already taken, a second attempt to a different instance has a decent chance of finishing first, aimed specifically at controlling how slow the *worst* responses feel rather than recovering from outright failures.
+
+```csharp
+// Simplified: if the first call hasn't returned within the hedge delay,
+// fire a second one to a different instance and take whichever finishes first.
+var firstAttempt = client.GetFromJsonAsync<T>(primaryUrl);
+var completed = await Task.WhenAny(firstAttempt, Task.Delay(hedgeDelay));
+if (completed != firstAttempt)
+{
+    var hedgeAttempt = client.GetFromJsonAsync<T>(secondaryUrl);
+    return await await Task.WhenAny(firstAttempt, hedgeAttempt);
+}
+return await firstAttempt;
+```
+
+**Common pitfall:** confusing hedging with plain retry-on-timeout — retrying only after a full timeout has elapsed still pays the entire timeout's worth of latency before even starting the second attempt, which does nothing for tail latency; hedging's whole point is starting the second attempt *before* giving up on the first, so the two race rather than run sequentially.
+
+**Practical guidance:** this is a basic introduction to the concept — the trade-offs (extra load, when it's worth it, and how to size the hedge delay) are covered in more depth in Intermediate Q6, which is where this pattern is explored fully.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What is the distinction between a liveness check and a readiness check in more operational depth than the basic definition, and what's a concrete failure that results from configuring one as if it were the other?**
+
+Beginner Q6 introduces the basic definitions: liveness asks "is this process alive," readiness asks "can this instance currently serve traffic correctly." The operational distinction that matters in practice is what infrastructure *does* in response to each failing, and getting that response wrong for the wrong check is a common, costly misconfiguration.
+
+**The concrete failure — configuring a dependency check as liveness instead of readiness:** suppose a service's liveness probe checks database connectivity (instead of just "is the process responsive"). If the database has a brief, transient outage, every instance of the service simultaneously fails its liveness check and gets **restarted** by the orchestrator — even though the process itself was perfectly healthy and would have recovered the moment the database came back. Restarting doesn't fix a database outage; it just adds cold-start latency and disruption on top of an already-ongoing outage, and if all replicas restart at once, the service briefly has zero capacity precisely when the database issue resolves and traffic would otherwise recover cleanly.
+
+```csharp
+// WRONG: dependency check wired to liveness — a DB blip triggers pod restarts, not just traffic rerouting.
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("db") // dependency check should NOT gate liveness
+});
+
+// RIGHT: liveness stays process-only; the DB check gates readiness instead.
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("db")
+});
+```
+
+**Why the correct wiring matters:** with the database check on readiness instead, the same transient outage pulls affected instances out of load-balancer rotation (no new traffic routed to them) without restarting anything — the process keeps running, in-flight state is undisturbed, and the instance rejoins rotation automatically the moment the check passes again, with no cold start needed. The failure is handled at the right granularity: "don't send this instance traffic right now" instead of "kill and recreate this instance."
+
+**Practical guidance:** liveness should check only what a *restart* would actually fix (the process is deadlocked, hung, or in a state only a fresh start resolves) — anything that reflects a transient, external, non-process condition (a dependency being briefly unavailable) belongs on readiness, where the response is rerouting, not restarting. When designing a new check, ask "if this fails, is restarting the process the right response, or is 'stop sending traffic here for now' the right response" — the answer determines which probe it belongs on.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: What does an idempotency key's interaction with concurrent requests for the *same* key look like mechanically, and why is a naive "check then insert" implementation unsafe?**
+
+Advanced Q2 establishes that the check-and-store around an idempotency key must be atomic; this question focuses on exactly *why* a naive, non-atomic version fails, and what atomic actually requires in practice.
+
+**The naive, unsafe version:**
+```csharp
+// UNSAFE — a classic time-of-check-to-time-of-use (TOCTOU) race.
+var existing = await _idempotencyStore.TryGetAsync(idempotencyKey); // Step 1: check
+if (existing is not null) return existing.Result;
+
+var result = await _orderService.CreateOrderAsync(request);          // Step 2: do the work
+await _idempotencyStore.SaveAsync(idempotencyKey, result);           // Step 3: record it
+return result;
+```
+
+**Why it's unsafe:** if two requests carrying the *same* idempotency key arrive close enough together — a genuinely realistic scenario, since the whole point of the mechanism is handling near-simultaneous retries — both can pass Step 1's check before either has reached Step 3, because neither has recorded anything yet at the moment the other checks. Both then proceed to Step 2 and perform the underlying operation independently, producing exactly the duplicate-execution outcome (a double charge, a duplicate order) the mechanism exists to prevent. The window between "check" and "record" is where the race lives, and it doesn't need to be large — near-simultaneous retries are common precisely because they're triggered by the same network condition (a timeout) affecting the same client's automatic retry logic.
+
+**The atomic fix:** use a single database operation that combines the check and the reservation, typically a unique constraint on the idempotency key column enforced by the database itself, in the same transaction as the business write:
+
+```csharp
+// SAFE — the database enforces uniqueness atomically; only one caller can win the insert.
+try
+{
+    await _dbContext.Database.BeginTransactionAsync();
+    _dbContext.IdempotencyKeys.Add(new IdempotencyKeyRecord { Key = idempotencyKey }); // unique index on Key
+    var order = CreateOrder(request);
+    _dbContext.Orders.Add(order);
+    await _dbContext.SaveChangesAsync(); // both inserts succeed together, or both fail together
+    await _dbContext.Database.CommitTransactionAsync();
+    return order;
+}
+catch (DbUpdateException) when (IsUniqueConstraintViolation())
+{
+    // Someone else already reserved this key — fetch and return their result instead.
+    return await _idempotencyStore.GetCompletedResultAsync(idempotencyKey);
+}
+```
+
+**Why the database's own uniqueness enforcement is what closes the gap:** a unique constraint makes "insert this key" an atomic, all-or-nothing operation from the database's point of view — exactly one concurrent attempt can successfully insert a given key value; every other simultaneous attempt fails the constraint immediately and can be handled by fetching the winner's result, with no window where both could believe they were first.
+
+**Practical guidance:** never implement the check-then-act sequence as two separate application-level operations against a general-purpose key-value store without a real atomicity guarantee from the store itself — "check-then-insert" is only as safe as the storage layer's actual concurrency guarantees, not the application code wrapping it.
+
+---
+
+## Intermediate — Question 21
+
+**Q21: What is a "retry budget," and how does it act as a complementary, coarser-grained control alongside per-call retry policies like the ones covered elsewhere in this file?**
+
+A retry budget caps the *aggregate* fraction of a service's total outbound traffic that's allowed to be retries, independent of any individual call's own retry count — e.g., "retries may never exceed 10% of total requests to this dependency in any rolling window." Where a per-call retry policy (Beginner Q2, Intermediate Q2) governs how a single logical operation behaves on failure, a retry budget governs the *system-wide* volume of retries across every operation combined, and rejects (fails fast on) additional retries once the budget is exhausted, regardless of how many attempts any individual call has left under its own policy.
+
+**Why this is needed even with well-configured per-call policies:** Advanced Q3 shows how retry amplification compounds multiplicatively across layers of a call chain — even if every individual layer's retry policy looks reasonable in isolation (3 attempts, exponential backoff, jitter), the *combination* across a multi-hop chain, or simply a large number of concurrent calls each independently retrying during a widespread degraded period, can still produce an aggregate retry volume that overwhelms a struggling dependency. A retry budget is the direct, aggregate-level backstop for exactly this: it doesn't care how any single call arrived at wanting to retry, it just enforces that the *total* retry volume across the service stays bounded no matter how many individual, locally-reasonable retry policies are contributing to it.
+
+```csharp
+// Conceptual: a shared budget tracker consulted before each retry attempt,
+// independent of and in addition to the per-call retry policy's own attempt count.
+public class RetryBudget
+{
+    private readonly SlidingWindowCounter _totalRequests = new(TimeSpan.FromSeconds(10));
+    private readonly SlidingWindowCounter _retries = new(TimeSpan.FromSeconds(10));
+    private readonly double _maxRetryRatio = 0.10;
+
+    public bool TryConsumeRetry()
+    {
+        if (_retries.Count / (double)Math.Max(_totalRequests.Count, 1) >= _maxRetryRatio)
+            return false; // budget exhausted — fail fast instead of retrying, even if the call's own policy allows more
+        _retries.Increment();
+        return true;
+    }
+}
+```
+
+**How it complements, rather than replaces, per-call policy:** a per-call retry policy answers "should *this* call retry, and how" (backoff shape, max attempts, which errors qualify); a retry budget answers "given everything else happening right now, is the system as a whole retrying too much" — the two operate at different scopes and are meant to be checked together, with the budget acting as a circuit-breaker-like override that can say "no" to an individual retry attempt that its own local policy would otherwise allow.
+
+**Practical guidance:** a retry budget is especially valuable during a widespread degraded period affecting many concurrent operations simultaneously — exactly when uncoordinated per-call policies, each individually reasonable, are most likely to compound into the kind of amplified load that prevents the very recovery everyone's retries are hoping for.
+
+---
+
+## Advanced — Question 14
+
+**Q14: What is a "circuit breaker that never trips" — a breaker configured such that it provides no real protection despite technically being present in the code — and what specific misconfigurations produce this?**
+
+A circuit breaker that "never trips" isn't necessarily missing from the code at all — it's present, wired up, and visible in a code review, but configured in a way that its trip condition is never actually satisfied under the failure patterns the service actually experiences, so it provides none of the protection described in Intermediate Q1 despite looking correctly implemented.
+
+**Misconfigurations that produce this, each independently:**
+
+1. **`MinimumThroughput` set too high relative to real traffic volume.** If the breaker requires, say, 100 calls in the sampling window before it will even evaluate the failure ratio, but the actual call volume to that dependency is only 10–20 calls in the same window (a legitimately lower-traffic internal dependency), the breaker mathematically can never trip — it never reaches the sample size needed to compute a ratio at all, regardless of how badly the dependency is failing.
+2. **`SamplingDuration` too short relative to failure patterns.** A very short window (say, 1 second) can reset the failure count before a slower-developing but still serious degradation (a dependency that's failing 60% of calls, but calls only arrive every few hundred milliseconds) accumulates enough samples within any single window to cross the threshold — the failures are real and sustained, but the counting window keeps resetting before enough of them land in the same window to trip.
+3. **`FailureRatio` threshold set unreasonably high** (e.g., 0.95) as an overcautious attempt to avoid false trips on noise — this backfires by requiring the dependency to be almost completely down before the breaker reacts at all, missing the entire "significantly degraded but not fully dead" range where a breaker provides the most value (a dependency at 70% failure is already causing serious cascading damage per Scenario Q1's mechanism, but a 0.95 threshold ignores it entirely).
+4. **The exception/result predicate (`ShouldHandle`) not actually matching the failures occurring in production.** If the breaker is configured to count only specific exception types as failures, but the real failure mode manifests as, say, a slow-but-technically-200-status response or a different exception type than the one the predicate checks for, every real failure sails past the breaker's counting logic uncounted — from the breaker's point of view, nothing is failing at all.
+
+```csharp
+// Looks reasonable in isolation, but combined, these can mean the breaker
+// essentially never trips against this dependency's actual traffic pattern.
+var pipeline = new ResiliencePipelineBuilder()
+    .AddCircuitBreaker(new CircuitBreakerStrategyOptions
+    {
+        FailureRatio = 0.95,                        // requires near-total failure
+        SamplingDuration = TimeSpan.FromSeconds(1),   // resets before failures accumulate
+        MinimumThroughput = 100                       // this dependency sees ~15 calls/sec
+    })
+    .Build();
+```
+
+**Why this is worse than having no breaker at all, in one specific sense:** a missing breaker is at least visibly absent in a design review — someone auditing resilience posture can see the gap. A breaker that's present but silently mis-tuned creates false confidence: dashboards and code reviews show "circuit breaker: configured" and the actual protection is close to zero, and nobody discovers the gap until a real incident where the breaker's state, checked in the postmortem, shows it never opened despite a clearly failing dependency.
+
+**Practical guidance:** validate breaker configuration against *actual observed traffic volume and failure patterns* for the specific dependency, not generic defaults copy-pasted across every `AddCircuitBreaker` call in a codebase — this is exactly the kind of thing a fault-injection CI test (Advanced Q9) or a periodic chaos experiment (Advanced Q8) should verify directly, by asserting the breaker actually opens under a simulated failure, rather than trusting that the configuration values are individually reasonable-looking.
+
+---
+
+## Advanced — Question 15
+
+**Q15: What is a "bulkhead that starves a critical path," and how does over-isolating one dependency's resource pool paradoxically create the same kind of resource-exhaustion problem bulkheads are meant to prevent?**
+
+Intermediate Q3 frames bulkheads as isolating a *failing* dependency so it can't starve the rest of the system. The less-discussed failure mode is the reverse: a bulkhead sized to protect against a low-priority or rarely-used dependency can itself become a bottleneck that starves a genuinely critical operation, if the sizing decision didn't account for which paths actually need priority access to shared underlying resources.
+
+**How this happens concretely:** suppose a service configures separate concurrency-limited bulkheads for calls to an Inventory service (business-critical, on the checkout path) and an Analytics-logging service (best-effort, non-critical) — but both draw from the same underlying, smaller total thread pool, and the Analytics bulkhead is generously sized (say, 50 permits) while Inventory's is conservatively sized (say, 10 permits), perhaps because Inventory calls were assumed to be fast and rarely concurrent. Under real peak load, if Inventory experiences a genuine slowdown, its 10 permits fill up fast and checkout requests start queuing or failing *specifically because of Inventory's own bulkhead limit* — a limit that was supposed to protect the rest of the system from Inventory, but which is now the very thing throttling Inventory's own critical-path traffic below what checkout actually needs.
+
+```csharp
+// The bulkhead meant to protect the system FROM Inventory is undersized
+// relative to Inventory's own legitimate peak concurrency needs on the checkout path.
+var inventoryPipeline = new ResiliencePipelineBuilder()
+    .AddConcurrencyLimiter(new ConcurrencyLimiterOptions { PermitLimit = 10, QueueLimit = 0 })
+    .Build();
+// Checkout throughput is now capped at 10 concurrent Inventory calls,
+// even when Inventory itself is perfectly healthy and could serve more.
+```
+
+**Why this is paradoxical relative to the bulkhead's purpose:** the pattern exists to stop one dependency's problems from starving unrelated capacity (Intermediate Q3) — but a bulkhead sized without reference to the *actual* peak legitimate concurrency of the path it's protecting becomes an artificial ceiling that starves that same path even when nothing is actually failing. The isolation mechanism itself becomes the bottleneck, indistinguishable in symptom (queued/rejected requests, degraded throughput) from the connection-pool-exhaustion problem covered in Intermediate Q13, just self-inflicted by a deliberate isolation boundary rather than an accidental sizing oversight.
+
+**The fix:** size each bulkhead from *measured peak legitimate concurrency* for that specific path, not a uniform or arbitrarily conservative number applied across all dependencies — and explicitly prioritize sizing for paths that are business-critical (checkout) over paths that are best-effort (analytics), rather than sizing everything the same "to be safe." Monitor bulkhead rejection/queue-depth metrics in production the same way you'd monitor connection-pool wait time (Intermediate Q13) — a critical-path bulkhead that's frequently at capacity under normal peak traffic (not during an incident) is a sizing bug, not evidence the bulkhead is "working."
+
+**Practical guidance:** a bulkhead's size is a capacity-planning decision tied to the specific path's real traffic, not a blanket safety margin — treat "how many concurrent calls does this path legitimately need at peak" as the sizing question, and revisit it as traffic patterns and priorities shift, the same discipline Intermediate Q3's original pitfall already gestures at but which deserves explicit attention as its own failure mode.
+
+---
+
+## Advanced — Question 16
+
+**Q16: What happens when a timeout is set too aggressively — shorter than the dependency's genuine, healthy p99 latency — and how does this differ in symptom from a timeout set too loosely?**
+
+Beginner Q3 frames timeout sizing as a trade-off between "too short" and "too long," but the "too short" failure mode deserves its own deeper treatment because its symptoms are easy to misdiagnose as a dependency health problem when the actual bug is entirely on the calling side.
+
+**The mechanism:** if a timeout is set below the dependency's genuine, healthy p99 (or even p95) latency, then a meaningful, predictable fraction of *completely normal, non-degraded* calls will exceed the timeout purely due to natural latency variance — not because anything is actually wrong with the dependency. Every one of those calls is treated as a failure by the caller: it triggers a retry (adding load for no real reason), potentially contributes to a circuit breaker's failure count (risking tripping the breaker against a dependency that's actually healthy), and surfaces as an error to whatever depends on that call succeeding — all while the dependency itself, if you checked its own metrics, would show normal, healthy response times for the vast majority of those "failed" calls; they simply weren't given long enough to finish.
+
+```csharp
+// If PaymentService's genuine healthy p99 is 2.5s, this timeout guarantees
+// roughly 1%+ of completely healthy calls are treated as failures.
+pipeline.AddTimeout(TimeSpan.FromSeconds(1)); // too aggressive relative to real p99
+```
+
+**How this differs in symptom from a timeout set too loosely:** a too-loose timeout (the more commonly discussed failure) causes real, ongoing dependency problems to be detected *slowly* — resources stay tied up longer than necessary before a hung call is finally abandoned, worsening the resource-exhaustion dynamics in Scenario Q1. A too-aggressive timeout, by contrast, manufactures failures out of a healthy dependency's normal variance — the operational signature is a baseline error/retry rate that never goes to zero even when every real health metric for the dependency looks fine, often misattributed to "that dependency is flaky" when the dependency's own telemetry shows nothing wrong. Teams chasing this symptom by investigating the dependency itself can spend a long time looking in the wrong place.
+
+**Diagnosing it:** compare the caller's timeout value directly against the dependency's own measured p99/p999 latency (from the dependency's own metrics, not the caller's error logs) — if the timeout sits below or very close to the dependency's normal tail latency, that gap alone is very likely the source of the baseline failure rate, independent of any genuine incident.
+
+**The fix and the trade-off it doesn't escape:** widen the timeout to comfortably exceed the dependency's genuine p99 (Beginner Q3's guidance), accepting that this means a truly hung call now ties up resources slightly longer before being abandoned — this is the same fundamental trade-off Beginner Q3 describes, just approached from having already landed on the wrong side of it. Where the margin is tight, request hedging (Intermediate Q6) is often a better lever than shortening the timeout further — it addresses the same tail-latency concern without manufacturing false failures out of normal variance.
+
+**Practical guidance:** validate a timeout value against real, measured dependency latency data before deploying it, and re-validate periodically as the dependency's own latency profile shifts (a dependency that got slower over time can turn a previously-fine timeout into a too-aggressive one without any code change on the caller's side).
+
+---
+
+## Advanced — Question 17
+
+**Q17: When a saga's compensating transaction itself fails, what does a robust design do, and why can't compensation failure simply be treated the same as forward-step failure?**
+
+Advanced Q1's follow-up establishes that a compensating transaction isn't a database rollback, it's its own real operation — and being a real operation means it can fail for all the same reasons any operation can: the compensation-target service is down, a network call times out, the compensation itself hits a business-rule conflict (e.g., trying to release an inventory reservation that's already been consumed by another process). A saga design that only handles "forward step failed, so run the compensation" and stops there has an unhandled gap the moment the compensation step is the one that fails.
+
+**Why forward-failure and compensation-failure aren't symmetric:** when a forward step fails, the saga has a clear, well-defined response — run the compensations for whatever already succeeded, in reverse order. When a *compensation* fails, there's no equivalent clean next step: you can't "compensate the compensation" in general (undoing an undo often isn't a meaningful operation), and simply giving up leaves the system in the exact inconsistent state the compensation existed to prevent — the scenario in Scenario Q3 (phantom reserved inventory) but now with the fix itself having failed rather than never having run at all.
+
+**What a robust design does instead — retry, then escalate, never silently drop:**
+
+```csharp
+public async Task CompensateReservationAsync(string reservationId)
+{
+    var pipeline = new ResiliencePipelineBuilder()
+        .AddRetry(new RetryStrategyOptions { MaxRetryAttempts = 5, UseJitter = true })
+        .Build();
+
+    try
+    {
+        await pipeline.ExecuteAsync(async token =>
+            await _inventoryClient.ReleaseReservationAsync(reservationId, token));
+    }
+    catch (Exception ex)
+    {
+        // Compensation retries exhausted — this must NOT be silently swallowed.
+        await _compensationFailureQueue.EnqueueAsync(new FailedCompensation
+        {
+            SagaId = reservationId, Step = "ReleaseReservation", LastError = ex.Message
+        });
+        _logger.LogCritical(ex, "Compensation failed after retries for reservation {Id} — escalating.", reservationId);
+    }
+}
+```
+
+1. **Retry the compensation itself, with its own backoff/jitter policy** — a compensation failing due to a transient blip should simply succeed on a subsequent attempt, the same as any other operation.
+2. **If retries are exhausted, escalate to a durable, monitored failure queue — never let the failure disappear silently.** This mirrors the dead-letter-queue discipline from Advanced Q5: a failed compensation is exactly the kind of event that must be visible to a human or an automated remediation process, because the alternative is data quietly drifting out of consistency with nobody aware.
+3. **Pair this with the reconciliation-job backstop already recommended in Scenario Q3** — a periodic job that independently scans for orphaned reservations past a TTL provides a safety net that catches the inconsistency even if the compensation-failure escalation path itself has a bug, giving the design defense in depth rather than a single point of reliance.
+
+**Why "just log an error and move on" is not sufficient:** an unaddressed failed compensation is functionally identical to the original scenario in Scenario Q3 — real, uncorrected inconsistent state (money not refunded, inventory not released) — the only difference is that this time the team believed they'd handled it, which delays discovery even further than the original gap.
+
+**Practical guidance:** design every compensating transaction with the explicit assumption that it can fail, give it its own retry policy, and always terminate a failed compensation in a durable, alertable state rather than a caught-and-logged exception that requires someone to be actively watching logs to ever notice.
+
+---
+
+## Scenario — Question 8
+
+**Q8: A payment service adds a retry policy to its calls to a fraud-check dependency: 5 attempts, exponential backoff, no jitter, applied uniformly across all 200 service instances. The fraud-check dependency has a brief GC pause that slows it down for about 8 seconds. What happens next, and how do you fix it — both the immediate incident and the underlying configuration choice?**
+
+**Diagnosis — a synchronized retry storm compounding on top of a legitimately transient, self-resolving blip, the exact mechanism from Intermediate Q2 and Scenario Q2.** During the 8-second GC pause, calls from all 200 instances that happen to be in flight start timing out at roughly the same time, since they're all experiencing the same underlying slowdown simultaneously. Because the retry policy has no jitter, every instance computes the identical backoff delay sequence, so all 200 instances' retries land back on the fraud-check dependency in synchronized waves — at the same computed offset, again, and again — for as many attempts as the policy allows. The dependency, which was only ever briefly slow due to a normal GC pause and would have recovered within the original 8 seconds on its own, instead gets hit with five synchronized waves of 200-instance-wide retry traffic layered on top of its already-elevated (from the GC pause) response times — extending and potentially worsening what should have been a minor, self-resolving blip into a much longer, more visible incident, precisely because retries piled on load exactly when the dependency needed load removed, not added.
+
+**The immediate fix — add jitter to stop the synchronization:**
+
+```csharp
+var pipeline = new ResiliencePipelineBuilder()
+    .AddRetry(new RetryStrategyOptions
+    {
+        MaxRetryAttempts = 5,
+        Delay = TimeSpan.FromMilliseconds(200),
+        BackoffType = DelayBackoffType.Exponential,
+        UseJitter = true   // breaks the cross-instance synchronization
+    })
+    .Build();
+```
+
+With jitter applied, the 200 instances' retries spread out across the backoff window instead of landing in synchronized spikes — the fraud-check dependency sees a smoothed trickle of retry traffic instead of five sharp waves, giving the original 8-second blip room to actually resolve on its own timeline rather than being extended by retry-induced load.
+
+**The deeper configuration fix — reconsider whether 5 attempts is the right number for this dependency's failure profile at all.** A GC pause lasting single-digit seconds is exactly the kind of transient condition where a shorter retry sequence with tighter spacing (or, given fraud-check's likely latency sensitivity, hedging per Intermediate Q6 rather than reactive retry at all) might resolve faster with less aggregate load than 5 full exponential-backoff attempts — worth revisiting once the immediate jitter fix is in place, since jitter fixes the synchronization but doesn't address whether the retry count/spacing itself is well-matched to this dependency's actual failure characteristics.
+
+**Why this specific scenario matters beyond "add jitter":** it illustrates that even a *correctly transient*, genuinely self-resolving failure (a GC pause is about as textbook-transient as failures get) can be turned into a real incident purely by an uncoordinated, unjittered retry policy — the underlying fault here was never the problem; the retry configuration was.
+
+**Verification:** replay the scenario in a controlled fault-injection test (Advanced Q9) that simulates an 8-second dependency slowdown across many simulated concurrent callers, and confirm the jittered retry traffic profile stays smooth rather than spiking — this is a good candidate for a recurring chaos experiment (Advanced Q8) specifically because GC-pause-shaped blips are common and easy to simulate.
+
+---
+
+## Scenario — Question 9
+
+**Q9: An architect reviews a service's resilience configuration and finds a circuit breaker on its calls to a critical downstream dependency — but a review of six months of incident history shows the breaker has never once opened, despite three separate incidents where the dependency was clearly degraded for extended periods. Diagnose and fix.**
+
+**Diagnosis — this is the "circuit breaker that never trips" misconfiguration pattern from Advanced Q14, now confirmed against real incident history rather than suspected from code review alone.** The breaker being present and never having opened despite three genuine, extended-degradation incidents is strong evidence its trip condition is mismatched to how this specific dependency actually fails in production — the code isn't broken in the sense of throwing errors or being obviously wrong; it's configured with threshold values that simply don't match reality. Pulling the actual configuration and comparing it against the dependency's real traffic volume and failure shape during those three incidents is the concrete next step, rather than guessing which of Advanced Q14's misconfiguration categories applies.
+
+**Working through the likely causes, checked against real data:**
+
+1. **Check `MinimumThroughput` against actual call volume during the incidents.** If this dependency sees, say, 5 calls per second in the relevant sampling window, but `MinimumThroughput` is set to 50, the breaker mathematically never had enough samples to evaluate — this is checkable directly from request logs/metrics for the incident windows.
+2. **Check whether the failure mode during those incidents actually matched the breaker's `ShouldHandle` predicate.** If the incidents manifested as elevated latency crossing a timeout (a `TimeoutRejectedException`) but the breaker's predicate only counts a specific set of HTTP status codes as failures, the breaker was structurally blind to exactly the failure mode that occurred — it wasn't "almost tripping," it was never even counting these events as failures at all.
+3. **Check `FailureRatio` against the actual observed failure percentage during the incidents.** If incident data shows the dependency was failing 40–60% of calls during degradation, but the threshold is set to 0.9, the breaker was configured for a "total outage" scenario, not the "significantly degraded" scenario that actually occurred three times.
+
+**The fix — reconfigure from the real incident data, then verify with a targeted test rather than trusting the new numbers on faith:**
+
+```csharp
+// Retuned against actual incident data: this dependency sees ~8 req/s normally,
+// and past incidents showed 40-60% failure rates lasting several minutes each.
+var pipeline = new ResiliencePipelineBuilder()
+    .AddCircuitBreaker(new CircuitBreakerStrategyOptions
+    {
+        FailureRatio = 0.4,                          // trips well before near-total failure
+        SamplingDuration = TimeSpan.FromSeconds(15),  // wide enough to accumulate samples at real volume
+        MinimumThroughput = 5,                        // matches actual traffic, not a copy-pasted default
+        BreakDuration = TimeSpan.FromSeconds(30)
+    })
+    .Build();
+```
+
+**Verification, not just retuning:** add a fault-injection CI test (Advanced Q9) that simulates this dependency returning the same failure shape seen in the historical incidents (same rough failure ratio, same rough call volume) and asserts the breaker actually transitions to Open within an expected time window — this closes the loop the original configuration never had: a way to confirm the breaker works *before* the next real incident, rather than discovering its effectiveness (or lack of it) only in a postmortem, a third time.
+
+**Practical guidance:** treat "the breaker exists in the code" and "the breaker actually provides protection" as two separate claims requiring separate verification — a code review confirms the first; only incident data or a fault-injection test confirms the second, and this scenario is exactly the gap between them going unnoticed for three incidents in a row.
+
+---
+
+## Scenario — Question 10
+
+**Q10: A checkout service imposes a strict per-dependency bulkhead: the Inventory client gets 15 concurrent-call permits. During a flash sale, legitimate checkout traffic regularly needs 40+ concurrent Inventory calls, and the bulkhead itself — not any actual Inventory failure — becomes the bottleneck, queuing and eventually rejecting checkout requests while Inventory sits healthy and underutilized. Diagnose and fix.**
+
+**Diagnosis — a bulkhead sized below the critical path's genuine peak legitimate concurrency, the exact failure mode from Advanced Q15, now manifesting under real flash-sale load rather than as a theoretical risk.** The bulkhead is doing exactly what it was configured to do — capping concurrent Inventory calls at 15 — but 15 was evidently sized against normal-day traffic assumptions, not flash-sale peak demand, so during the flash sale it throttles Inventory access on the checkout path even though Inventory itself has plenty of healthy capacity to serve more. The symptom (checkout requests queuing/rejecting) looks identical to what a genuine Inventory outage would produce, which risks a misdiagnosis — someone investigating might reasonably start by checking Inventory's own health and find nothing wrong there, because nothing is actually wrong with Inventory; the artificial ceiling is self-inflicted.
+
+**Confirming the diagnosis before changing anything:** check Inventory's own service-side metrics (CPU, response latency, error rate) during the flash sale window — if Inventory shows healthy, low-latency responses throughout while the bulkhead's own rejection/queue-depth metric spikes, that's the confirming signal this is a sizing problem, not a real Inventory degradation, and rules out the alternative diagnosis (Inventory genuinely struggling under flash-sale load, which would call for a very different fix — scaling Inventory, not resizing the bulkhead).
+
+**The fix — resize the bulkhead from measured peak legitimate demand, not the original conservative estimate:**
+
+```csharp
+// Resized from flash-sale traffic data: Inventory itself handles 40-50 concurrent
+// calls comfortably; the bulkhead was the artificial ceiling, not Inventory's real capacity.
+var inventoryPipeline = new ResiliencePipelineBuilder()
+    .AddConcurrencyLimiter(new ConcurrencyLimiterOptions
+    {
+        PermitLimit = 60,   // headroom above observed 40+ peak, not a round number picked in the abstract
+        QueueLimit = 20     // absorb brief bursts above even the new limit without instantly rejecting
+    })
+    .Build();
+```
+
+**Why simply raising the limit isn't reckless here, unlike loosening a circuit breaker's threshold:** a bulkhead's purpose is capping *this dependency's* consumption of a *shared* resource pool to protect *other* dependencies sharing that pool (Intermediate Q3) — raising Inventory's permit limit to match its own genuine, confirmed-healthy capacity doesn't remove protection for other dependencies as long as the total across all bulkheads still stays within the shared pool's real capacity. The fix here is recalibration to reality, not loosening a safety margin that was actually doing useful work.
+
+**Preventing recurrence:** monitor bulkhead rejection/queue-depth as a first-class metric year-round, not just during a postmortem — a bulkhead frequently near capacity *during normal peak, not during an incident* is the leading indicator that should trigger a resizing conversation before the next flash sale, rather than discovering the mismatch live during the event itself. Load-test critical paths against realistic peak-event traffic (not just average-day traffic) specifically to surface bulkhead and connection-pool (Intermediate Q13) sizing gaps before they're exposed by real customers during a high-stakes traffic event.
+
+**Practical guidance:** size every bulkhead from an explicit, documented peak-traffic assumption for the path it protects, and revisit that assumption whenever the business introduces a new class of traffic spike (flash sales, marketing pushes) that the original sizing didn't anticipate — a bulkhead's correctness is relative to the traffic it actually needs to carry, not a fixed number chosen once.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A checkout saga (reserve inventory → charge payment → confirm order) fails at the payment step, and the compensation ("release inventory reservation") is triggered correctly — but the release call itself times out because the Inventory service is having its own unrelated brief outage at that exact moment. The saga's error handling catches the compensation's exception, logs it, and returns an error to the user. Three weeks later, the same phantom-reservation problem from an earlier incident resurfaces. Diagnose and fix.**
+
+**Diagnosis — the saga has a compensation-failure gap, exactly the unhandled case described in Advanced Q17.** The team evidently fixed the original phantom-reservation bug (Scenario Q3) by adding a compensating transaction for the payment-failure case — but that fix assumed the compensation itself would succeed. When the compensation's own call fails (here, due to a coincidental, unrelated Inventory outage), the current error handling — catch, log, return an error to the user — silently drops the fact that inventory is now in exactly the same phantom-reserved state as the original bug, just reached via a different path (compensation failure, not missing compensation). From the user's perspective, the checkout failed and they walked away; from the system's perspective, the reservation was never released, and nothing durable recorded that this specific reservation needs attention. This is a coincidence of two independent failures (payment declined, Inventory blipped at the same moment) producing the same visible symptom as the original, structurally different bug — which is exactly why "we already fixed this" was a reasonable but incorrect conclusion after the first incident.
+
+**The fix — apply Advanced Q17's compensation-failure handling explicitly, not just the original compensation logic:**
+
+```csharp
+public async Task RunOrderSagaAsync(OrderRequest request)
+{
+    var reservation = await _inventoryClient.ReserveAsync(request.Items);
+    try
+    {
+        await _paymentClient.ChargeAsync(request.PaymentDetails, idempotencyKey: request.OrderId);
+        await _orderClient.ConfirmAsync(request.OrderId);
+    }
+    catch (PaymentDeclinedException)
+    {
+        try
+        {
+            var releasePipeline = new ResiliencePipelineBuilder()
+                .AddRetry(new RetryStrategyOptions { MaxRetryAttempts = 5, UseJitter = true })
+                .Build();
+            await releasePipeline.ExecuteAsync(async token =>
+                await _inventoryClient.ReleaseReservationAsync(reservation.ReservationId, token));
+        }
+        catch (Exception compensationEx)
+        {
+            // Compensation itself failed after retries — this must be durable and alertable,
+            // not just logged alongside the original payment failure.
+            await _compensationFailureQueue.EnqueueAsync(new FailedCompensation
+            {
+                ReservationId = reservation.ReservationId,
+                SagaStep = "ReleaseReservation",
+                LastError = compensationEx.Message
+            });
+            _logger.LogCritical(compensationEx,
+                "Compensation failed for reservation {Id} — enqueued for remediation.", reservation.ReservationId);
+        }
+        await _orderClient.MarkFailedAsync(request.OrderId, reason: "payment_declined");
+        throw;
+    }
+}
+```
+
+**Two layers, matching Advanced Q17's guidance:** retry the compensation itself first (a brief Inventory outage is likely to resolve within a few retries, closing the gap without any durable escalation needed most of the time), and only escalate to a durable, monitored queue if retries are exhausted — ensuring that even the rarer case (Inventory down long enough to exhaust retries) surfaces to a human rather than disappearing into a log line alongside an unrelated payment-decline message that nobody is watching for this specific signal.
+
+**The backstop that would have caught this regardless:** the periodic reconciliation job recommended as hardening in Scenario Q3 — a job that independently scans for reservations older than some TTL with no corresponding confirmed order — remains valuable precisely because it catches this exact class of gap (a compensation-failure path with a bug or a missing escalation) without depending on that specific code path being correct. Confirm this backstop actually exists and is running; if it does, ask why it didn't catch the phantom reservation within its expected TTL window, since that's a second, independent gap worth investigating.
+
+**Practical guidance:** "we added a compensating transaction" and "our saga correctly handles compensation failure" are two different claims — this incident is the direct, real-world consequence of only the first one being true, and the fix requires treating compensation as an operation that itself needs failure handling, exactly as Advanced Q17 describes in the abstract.
+
+---
+
+## Scenario — Question 12
+
+**Q12: A caching layer sits in front of a database, and every cache entry across the entire product catalog was written with the exact same 10-minute TTL during a bulk cache-warming job that ran at deploy time. Every ten minutes, for a few seconds, database load spikes sharply as a large fraction of the catalog's cache entries expire at once. Diagnose and design the fix, distinguishing this from the popular-single-key stampede covered elsewhere.**
+
+**Diagnosis — a mass-synchronized-expiry thundering herd across many keys at once, a variant of the mechanism in Advanced Q6 and Scenario Q5 but with an important structural difference worth calling out explicitly.** Advanced Q6 and Scenario Q5 describe the stampede caused by many *concurrent requests* missing the *same* popular key at the same instant. This incident's root cause is different in shape, even though the database-load-spike symptom looks similar: here, many *different* keys across the catalog all happen to share the identical expiry moment, because they were all written with the same fixed TTL during the same bulk warm-up event — so even without any single key being especially "popular," the sheer number of *distinct* keys expiring in the same few-second window produces an aggregate spike of cache misses across the whole catalog, each for a different product, hitting the database all at once.
+
+**Why request coalescing (Advanced Q6's primary fix) doesn't fully address this variant:** coalescing prevents *redundant* concurrent requests for the *same* key from each separately hitting the database — but here, the simultaneous misses are largely for *different* keys (different products), each needing its own distinct database fetch regardless of how well single-key coalescing works. Coalescing still helps for whichever individual keys do have multiple concurrent requesters, but it doesn't reduce the *number of distinct keys* all expiring at once — that's a TTL-distribution problem, not a per-key concurrency problem, and needs its own fix.
+
+**The fix — jitter the TTL at write time, systematically, not as an afterthought:**
+
+```csharp
+// Every cache write during warm-up (and in steady-state) gets an individually
+// jittered TTL, so the population of keys de-synchronizes over time instead
+// of all sharing one bulk-warm-up's exact expiry moment.
+TimeSpan JitteredTtl(TimeSpan baseTtl, double jitterFraction = 0.3)
+{
+    var jitterRange = baseTtl.TotalSeconds * jitterFraction;
+    var jitter = Random.Shared.NextDouble() * jitterRange - (jitterRange / 2);
+    return TimeSpan.FromSeconds(baseTtl.TotalSeconds + jitter);
+}
+
+async Task WarmCacheEntryAsync(string key, Product product)
+{
+    await _cache.SetAsync(key, product, JitteredTtl(TimeSpan.FromMinutes(10)));
+    // Each entry now expires somewhere in an 8.5-11.5 minute window instead of
+    // exactly 10 minutes from a shared warm-up timestamp.
+}
+```
+
+**Why this is the correct primary fix here, in contrast to Scenario Q5 where coalescing was called the more fundamental fix:** in Scenario Q5, the damage mechanism was many redundant requests for *one* key, which coalescing eliminates directly regardless of TTL. Here, the damage mechanism is many *distinct* keys' database fetches all needing to happen in the same window — jittering the TTL directly attacks the actual root cause (synchronized expiry across the population) rather than being defense-in-depth on top of a different primary fix. Request coalescing remains worth having as a secondary layer (for whichever individual products do get simultaneous requesters), but it's not sufficient alone for this variant the way it was for the single-key case.
+
+**Preventing recurrence structurally:** apply TTL jitter as a standard property of the cache-write helper used everywhere (including future bulk warm-up jobs), not as a one-off fix applied only to the entries involved in this incident — any future bulk operation that writes many keys with an unjittered, uniform TTL will reproduce the identical failure shape.
+
+**Practical guidance:** when diagnosing a periodic, cyclical load spike against a cache-backed database, check whether the spike correlates with many *different* keys sharing an expiry pattern (points to TTL jitter as the fix) versus repeated misses on the *same* key (points to coalescing as the fix, per Scenario Q5) — the two variants of thundering herd look similar in their database-load symptom but need different primary remedies.
+
+---
+
+## Scenario — Question 13
+
+**Q13: A downstream payment-processing dependency goes down for 20 minutes during a partial outage. All 300 upstream service instances have circuit breakers that correctly opened and stayed open throughout the outage — no cascading failure occurred, which is a genuine resilience success. The moment the dependency comes back online, all 300 breakers move to half-open within the same few-second window and immediately send their probe traffic simultaneously, and the freshly-recovered dependency falls back over within seconds of coming back up. Diagnose and fix.**
+
+**Diagnosis — a thundering herd triggered by synchronized circuit-breaker recovery, a failure mode distinct from (and, in a specific sense, caused by) the very mechanism that correctly prevented the original cascading failure.** Because all 300 breakers opened at roughly the same time (reasonably, since they all detected the same outage at roughly the same time) and were configured with the same fixed `BreakDuration`, they all become eligible to transition to half-open at essentially the same moment — and each independently sends its allotted probe traffic the instant it becomes eligible. Even though half-open is designed to send only a *small* number of trial calls per breaker (Intermediate Q1) rather than flooding with full traffic, "small per breaker, times 300 simultaneously-recovering breakers" can still add up to a load spike the freshly-recovered dependency — which has had zero real traffic for 20 minutes and may itself still be warming up caches, reestablishing connections, or otherwise not yet at full capacity — cannot absorb. The dependency, barely back online, immediately looks unhealthy again to a large fraction of the simultaneously-probing breakers, which then reopen in near-lockstep, potentially repeating the same synchronized-probe pattern on the next recovery attempt.
+
+**Why this is a genuinely different problem from the retry-storm and thundering-herd scenarios elsewhere in this file, even though the load-spike symptom rhymes with them:** Scenario Q2's retry storm and Scenario Q5/Q12's cache stampedes both arise from client-side retry or cache-expiry behavior; this one arises specifically from *circuit breaker state-transition timing* — the very control that successfully prevented a worse outage during the initial 20 minutes is what synchronizes the herd at the moment of recovery, because all 300 breakers experienced the same fault and are on the same clock.
+
+**The fix — jitter the break duration and/or stagger half-open eligibility across instances:**
+
+```csharp
+// Add jitter to the break duration itself so 300 breakers, even having opened
+// at the same moment, become eligible for half-open at staggered times.
+var breakDurationBase = TimeSpan.FromSeconds(30);
+var jitteredBreakDuration = breakDurationBase + TimeSpan.FromSeconds(Random.Shared.Next(0, 20));
+
+var pipeline = new ResiliencePipelineBuilder()
+    .AddCircuitBreaker(new CircuitBreakerStrategyOptions
+    {
+        FailureRatio = 0.5,
+        SamplingDuration = TimeSpan.FromSeconds(10),
+        MinimumThroughput = 8,
+        BreakDuration = jitteredBreakDuration   // each instance's breaker recovers on a slightly different clock
+    })
+    .Build();
+```
+
+**A complementary fix at the dependency's own admission layer:** pair breaker-side jitter with load shedding or rate limiting (Advanced Q4, Intermediate Q9) on the recovering dependency itself, so that even if probe traffic does arrive somewhat clustered, the dependency can shed the excess rather than falling back over entirely — giving it a controlled ramp-up instead of an all-or-nothing exposure to however much probe traffic happens to arrive in the first few seconds after recovery.
+
+**Why jittering `BreakDuration` doesn't undermine the breaker's original protective value:** the jitter window (a handful of seconds spread across 300 instances) is small relative to the 20-minute outage itself — the breakers still open promptly and stay open for a genuinely protective duration; the change only affects the precise recovery moment, spreading it across a short window instead of one synchronized instant, which is exactly the same principle as jittering retry backoff (Intermediate Q2) applied to breaker recovery timing instead.
+
+**Practical guidance:** any mechanism that reacts to a shared, simultaneously-observed event (many instances detecting the same outage, many cache entries written in the same warm-up job, many clients retrying the same failure) tends to recover in a synchronized way unless something deliberately de-synchronizes it — jitter is the general-purpose tool for breaking that synchronization, and this scenario is a reminder to apply the same thinking to circuit-breaker recovery, not just to retry backoff and TTL expiry where it's more commonly discussed.
+
+---

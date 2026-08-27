@@ -2006,3 +2006,574 @@ Beyond being shorter, arrow functions do not have their own `this` binding—the
 JSON (JavaScript Object Notation) is a lightweight data-interchange format. It is easy for humans to read and write, and easy for machines to parse and generate. Although derived from JavaScript object literal syntax, it is language-independent and is the standard format for exchanging data between web clients and servers.
 
 ---
+
+## Beginner — Question 20
+
+**Q20: What is an IIFE (Immediately Invoked Function Expression), and why was it so common before ES modules and `let`/`const` existed?**
+
+An IIFE is a function expression that is defined and **called in the same statement**, so it runs exactly once, immediately, and is never referenced again by name:
+
+```javascript
+(function () {
+  console.log('runs immediately');
+})();
+
+// Arrow-function version
+(() => {
+  console.log('also runs immediately');
+})();
+```
+
+The outer parentheses around the function are required syntactically — without them, `function () { ... }()` at the start of a statement is parsed as a function *declaration*, which needs a name, followed by an unrelated, invalid `()`. Wrapping it in parentheses forces the parser to treat it as an expression instead, which can be invoked immediately.
+
+**Why it mattered before `let`/`const`/modules existed:** with only `var` and function-scoping available, any variable declared at the top level of a script became a **global**, visible to (and overwritable by) every other script on the page — a serious problem once pages started loading many third-party scripts and libraries. Wrapping a whole script in an IIFE gave it its own private function scope: everything declared inside stayed invisible from the outside, and only whatever the IIFE explicitly returned or attached to a shared object leaked out.
+
+```javascript
+var myLibrary = (function () {
+  var privateCounter = 0;              // invisible outside this IIFE
+  function increment() { privateCounter++; }
+  return { increment, getCount: () => privateCounter }; // only this is exposed
+})();
+
+myLibrary.increment();
+console.log(myLibrary.getCount()); // 1
+console.log(privateCounter);       // ReferenceError — never leaked to the global scope
+```
+
+This is the **module pattern** — encapsulation and a public API built entirely out of closures (Intermediate Q1), predating native ES modules by many years, and it's still exactly the mechanism a closure-returning factory function relies on today.
+
+**Common pitfall:** forgetting that `let`/`const` already provide block scope, so an IIFE isn't needed just to keep a `for` loop's variable private (see Scenario Q1) — using an IIFE purely for scoping in modern code where a `{}` block or a `let` would do is unnecessary ceremony carried over from `var`-only habits.
+
+**Practical guidance:** in modern code, ES modules (Intermediate Q7) provide file-level privacy automatically — anything not explicitly `export`ed is invisible to other modules — which is why IIFEs are rarely needed for scoping today. They still show up in bundler output (wrapping each module) and in scripts meant to run standalone in a browser with no module system at all (a widget's embed script, for instance).
+
+---
+
+## Beginner — Question 21
+
+**Q21: What's the difference between `Object.assign()` and object spread (`{...obj}`) for merging objects — do they behave identically?**
+
+Both **shallow**-merge one or more source objects' own enumerable properties into a target, with later sources overwriting earlier ones for the same key — but they differ in one concrete, easy-to-miss way: **what happens to the first/target object itself.**
+
+```javascript
+const defaults = { theme: 'light', fontSize: 12 };
+const overrides = { fontSize: 16 };
+
+// Object.assign MUTATES its first argument and also returns it
+const merged1 = Object.assign(defaults, overrides);
+console.log(defaults);        // { theme: 'light', fontSize: 16 } — defaults itself was changed!
+console.log(merged1 === defaults); // true — same reference
+
+// Spread always creates a BRAND NEW object; no source object is touched
+const merged2 = { ...defaults, ...overrides };
+console.log(defaults);        // unchanged (assuming Object.assign wasn't run above)
+console.log(merged2 === defaults); // false — a new object
+```
+
+`Object.assign(target, ...sources)` copies properties from every `sources` argument *onto* `target`, mutating `target` in place and also returning it — a caller who only looks at the return value and never notices `target` is the first argument can easily miss that the original object they passed in was just modified. `{ ...a, ...b }` never mutates `a` or `b`; it always allocates a fresh object, copying properties in left-to-right order with later keys winning, exactly as `Object.assign` does for the copying order itself.
+
+**The safe way to use `Object.assign` for merging without mutation** is to pass an empty object literal as the target, so there's nothing pre-existing to accidentally mutate:
+
+```javascript
+const merged3 = Object.assign({}, defaults, overrides); // equivalent to { ...defaults, ...overrides }
+```
+
+**Common pitfall:** calling `Object.assign(config, updates)` intending to produce a merged *copy*, while actually mutating the shared `config` object that other code may still be holding a reference to — this is a frequent source of "why did an unrelated part of the app change" bugs, since the mutation happens silently and the return value looks correct in isolation.
+
+**Both share the same shallow-copy limitation as spread (Beginner Q2/Q7):** nested objects are copied by reference, not cloned, in either approach — merging two configs whose values are themselves objects still leaves those nested objects shared between the original and the merged result.
+
+**Practical guidance:** default to spread syntax (`{ ...a, ...b }`) for merging in modern code — it can never accidentally mutate a source object, since there's no "target" argument to mutate in the first place. Reserve `Object.assign` for the rare case where mutating a specific existing object on purpose is exactly the intended behavior (and make that intent obvious at the call site).
+
+---
+
+## Intermediate — Question 18
+
+**Q18: What is event bubbling and capturing in the DOM, and how does event delegation exploit it to handle events for many elements with a single listener?**
+
+When an event fires on a DOM element, it doesn't just run listeners on that element — it travels through the DOM tree in three phases: **capturing** (from the document root down to the target, running any listener registered with `{ capture: true }`), **target** (the element the event actually occurred on), and **bubbling** (back up from the target to the root, running any listener registered the default way). Most listeners are registered for the bubbling phase, which is why "an event on a child also triggers listeners on its ancestors" is the behavior developers encounter by default.
+
+```javascript
+document.getElementById('outer').addEventListener('click', () => console.log('outer'));
+document.getElementById('inner').addEventListener('click', () => console.log('inner'));
+// clicking #inner (nested inside #outer) logs: 'inner', then 'outer' — bubbling upward
+```
+
+**Event delegation** exploits bubbling deliberately: instead of attaching a listener to every individual child element (expensive to set up, and broken for children added later), attach **one** listener to a stable ancestor, and inspect `event.target` inside it to determine which actual child was interacted with:
+
+```javascript
+// Without delegation — one listener per row, and new rows added later have NO listener at all
+document.querySelectorAll('.list-item').forEach(item => {
+  item.addEventListener('click', () => handleItemClick(item));
+});
+
+// With delegation — one listener, works for every current AND future .list-item, including ones added after this line runs
+document.getElementById('list').addEventListener('click', (event) => {
+  const item = event.target.closest('.list-item');
+  if (item) handleItemClick(item);
+});
+```
+
+`event.target` is always the actual element the event originated on (the innermost one), which may be a child *of* `.list-item` (an icon or a span inside it) rather than `.list-item` itself — `.closest('.list-item')` walks up from `event.target` to find the actual item being delegated for, which is why delegation code almost always uses `.closest()` rather than checking `event.target` directly.
+
+**Why this matters practically:** a delegated listener automatically covers elements added to the DOM *after* the listener was registered — no need to re-attach anything when a new row is appended — and it avoids the memory and setup cost of hundreds or thousands of individual listeners for something like a large table or a virtualized list.
+
+**Common pitfall:** calling `event.stopPropagation()` inside an ancestor's listener without realizing it also silently prevents any *other* listener further up the chain (including ones from unrelated libraries also using delegation on a shared ancestor) from ever running — this is a common source of "why did my analytics/tracking script stop firing" bugs once a new feature adds an unrelated `stopPropagation()` call somewhere in the bubble path.
+
+**Practical guidance:** use event delegation by default for lists of similar, dynamically-changing elements (table rows, list items, menu entries); reserve individual per-element listeners for elements with genuinely distinct behavior that won't scale by count, and always use `.closest()` rather than an exact `event.target ===` check when delegating, since the actual click target is often a descendant of the element you care about.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: What are "array-like" objects (`arguments`, a `NodeList`, a `FormData` entry iterator), and how do you convert one into a real array to use `map`/`filter`/`reduce` on it?**
+
+An array-like object has indexed properties (`obj[0]`, `obj[1]`, ...) and a `.length`, which makes it *look* like an array at a glance, but it doesn't inherit from `Array.prototype` — so none of the familiar array methods (`.map`, `.filter`, `.reduce`, `.forEach`) exist on it directly, and `Array.isArray()` correctly returns `false` for it (Beginner Q12).
+
+```javascript
+function logArgs() {
+  console.log(arguments.length);   // works — arguments has a .length
+  console.log(arguments[0]);       // works — indexed access works
+  console.log(Array.isArray(arguments)); // false — it's array-LIKE, not an array
+  arguments.map(x => x);           // TypeError: arguments.map is not a function
+}
+logArgs(1, 2, 3);
+
+const items = document.querySelectorAll('.item'); // returns a NodeList — also array-like (and iterable)
+items.map(el => el.textContent); // TypeError in older engines' NodeList — map isn't guaranteed on every array-like
+```
+
+**Two ways to convert an array-like into a real array:**
+
+```javascript
+// Array.from() — the general-purpose converter; works on anything with .length + indices,
+// OR anything iterable (has Symbol.iterator) — and accepts an optional mapping function as a second argument
+Array.from(arguments);                       // [1, 2, 3] — a real array now
+Array.from(arguments, x => x * 2);           // [2, 4, 6] — mapped in the same pass
+
+// Spread — only works on values that are ITERABLE (implement Symbol.iterator);
+// arguments and NodeList both happen to be iterable, but not every array-like object is
+[...arguments];                               // [1, 2, 3]
+```
+
+The distinction that trips people up: `Array.from()` accepts *any* array-like (just `.length` plus numeric keys, no `Symbol.iterator` required) as well as any iterable, while spread strictly requires `Symbol.iterator` to be implemented. Something can be array-like without being iterable (a plain object someone manually gave a `.length` and numeric keys to, or certain older host-object collections) — spread throws `TypeError: object is not iterable` on those, while `Array.from()` still works correctly by walking the indices directly.
+
+```javascript
+const fakeArrayLike = { 0: 'a', 1: 'b', length: 2 }; // has indices + length, but NOT iterable
+Array.from(fakeArrayLike);   // ['a', 'b'] — works, Array.from only needs .length + indices
+[...fakeArrayLike];          // TypeError: fakeArrayLike is not iterable
+```
+
+**Common pitfall:** in modern code, prefer a rest parameter (`function f(...args)`, Beginner Q7) over the legacy `arguments` object entirely — `args` is already a real array with every array method available, `arguments` doesn't exist at all inside arrow functions (Beginner Q5), and mixing rest parameters with `arguments` in the same function is a common source of confusion about which one actually reflects the call's real arguments.
+
+**Practical guidance:** reach for `Array.from()` as the default converter since it handles both array-likes and iterables uniformly and supports an inline mapping function; reach for spread only when you already know the source is iterable and don't need the mapping-function shortcut.
+
+---
+
+## Advanced — Question 14
+
+**Q14: JavaScript is famously "single-threaded," but browsers and Node.js both offer Web Workers / worker threads. What do they actually provide, and what's the relationship between a worker and the main thread's event loop?**
+
+"JavaScript is single-threaded" describes the **language's execution model within one realm**: one call stack, one running piece of JS code at a time, coordinated by the event loop (Intermediate Q4) rather than true concurrent execution. A **Web Worker** (browser) or **worker thread** (Node's `worker_threads` module) doesn't change that fact about any single piece of JS — instead, it spins up a **completely separate JS engine instance**, with its own call stack, its own heap, and its own event loop, running genuinely in parallel on a separate OS thread.
+
+```javascript
+// main.js
+const worker = new Worker('worker.js');
+worker.postMessage({ numbers: [1, 2, 3, /* ...millions more */] });
+worker.onmessage = (event) => console.log('Result from worker:', event.data);
+console.log('Main thread keeps running immediately — not blocked at all');
+
+// worker.js — runs on a completely separate thread, with its own event loop
+self.onmessage = (event) => {
+  const sum = event.data.numbers.reduce((a, b) => a + b, 0); // CPU-heavy work, doesn't block main thread
+  self.postMessage(sum);
+};
+```
+
+**The critical constraint — no shared memory by default:** a worker and the main thread cannot directly read or write each other's variables; `postMessage` is the only communication channel, and the data passed through it is **copied** using the structured clone algorithm (Advanced Q8) — the same algorithm `structuredClone()` exposes directly, and the same one that can't clone functions or preserve class prototypes. This is a deliberate design choice: since there's no shared mutable memory, there's no possibility of the classic multi-threading hazards (race conditions on shared variables, torn writes) that plague genuinely shared-memory concurrency in other languages — the trade-off is the cost of copying data across the boundary on every message.
+
+```javascript
+worker.postMessage({ callback: () => {} }); // DataCloneError — functions can't cross the postMessage boundary
+```
+
+`SharedArrayBuffer` is the deliberate, narrow exception — it allows true shared memory between a worker and the main thread for raw binary data, but requires explicit synchronization (`Atomics.wait`/`Atomics.notify`) precisely because sharing memory reintroduces the race conditions message-passing was designed to avoid.
+
+**Why this doesn't contradict the event loop model:** each realm (main thread, each worker) still runs its own independent single-threaded event loop internally — a worker still has its own microtask/macrotask queues and still can't block itself with two things running "at once." What workers add is **multiple independent event loops running in parallel across OS threads**, not concurrency inside a single event loop.
+
+**Practical guidance:** reach for a worker specifically to move CPU-bound work (image processing, parsing large payloads, complex calculations) off the main thread so it never blocks UI responsiveness/render — never for I/O-bound async work like `fetch`, which is already non-blocking on the main thread via the event loop and gains nothing from a worker, only the overhead of spinning one up and copying data across `postMessage`.
+
+---
+
+## Advanced — Question 15
+
+**Q15: Node.js exposes `process.nextTick()` alongside Promise-based microtasks. How does its queue relate to the standard microtask queue, and what production bug can result from misunderstanding the difference?**
+
+The event loop rules from Intermediate Q4 ("drain the entire microtask queue between every macrotask") describe the **web-standard microtask queue**, which Promise `.then()`/`async`-`await` continuations and `queueMicrotask()` all feed into. Node.js adds a **separate, higher-priority** queue on top of that: `process.nextTick()` callbacks are drained **completely, before the Promise microtask queue is drained at all** — not interleaved with it, and not equal-priority with it.
+
+```javascript
+console.log('start');
+
+process.nextTick(() => console.log('nextTick'));
+Promise.resolve().then(() => console.log('promise'));
+
+console.log('end');
+// Output: start, end, nextTick, promise
+// nextTick's queue is fully drained before the Promise microtask queue gets a single callback run
+```
+
+Worse for predictability: if a `process.nextTick()` callback itself schedules another `process.nextTick()`, that new one is also drained before the Promise microtask queue gets a turn — a **recursive chain of `process.nextTick()` calls can starve every pending Promise indefinitely**, something that has no equivalent hazard in browser JS, where there's only the one standard microtask queue with no higher-priority sibling.
+
+```javascript
+function scheduleNextTick(n) {
+  if (n <= 0) return;
+  process.nextTick(() => scheduleNextTick(n - 1));  // keeps re-scheduling itself at the front of the line
+}
+scheduleNextTick(Infinity);           // pathological, but shows the mechanism
+Promise.resolve().then(() => console.log('never runs while nextTick keeps recursing'));
+```
+
+**A realistic version of this bug:** a library (or a misguided "optimization") wraps every internal callback in `process.nextTick()` "to make it run sooner," and under sustained load — many operations each scheduling their own `nextTick` callback that itself schedules more `nextTick` work — the resulting `nextTick` queue never fully empties, so any code relying on a `Promise` (a `fetch`, a database driver's promise-based API, an `await`) appears to hang indefinitely, even though nothing is actually deadlocked — the Promise microtask queue is simply never getting a turn to run its callbacks, because Node keeps servicing an ever-refilling higher-priority queue first.
+
+**Why this doesn't come up in browser code:** browsers have no `process.nextTick()` at all — `queueMicrotask()` there feeds directly into the one standard microtask queue Promises also use, with no separate higher-priority tier, so this exact starvation mode is Node-specific.
+
+**Practical guidance:** avoid using `process.nextTick()` for ordinary async scheduling — reach for it only for the narrow cases Node's own documentation recommends (e.g., ensuring an error is emitted asynchronously right after a constructor returns, before any other code runs) — and never build a recursive chain of `nextTick` callbacks; prefer `setImmediate()` (a true macrotask, yielding to I/O and the Promise microtask queue between iterations) for any recursive or long-running scheduled work in Node.
+
+---
+
+## Advanced — Question 16
+
+**Q16: ES2022 added native private class fields (`#field`). How do they differ mechanically from the older `WeakMap`-based and closure-based patterns used to fake privacy, and what real behavior differs, not just syntax?**
+
+Before native private fields, "private" data on a class instance had to be faked, and the two dominant techniques (closures and `WeakMap`, both still valid) each have real behavioral trade-offs `#field` was designed to remove.
+
+**Closure-based privacy (the module-pattern idea, Beginner Q20, applied per-instance):**
+
+```javascript
+function BankAccount(initialBalance) {
+  let balance = initialBalance;                 // private via closure — invisible outside this function
+  this.deposit = (amount) => { balance += amount; };
+  this.getBalance = () => balance;
+}
+```
+
+This genuinely hides `balance` — there is no property to find via `Object.keys`, `for...in`, or reflection of any kind — but it can't be used with `class` syntax's `this`-based method definitions, since every "method" that needs access to the private variable must itself be created fresh inside the constructor as a closure, which means a new function per instance instead of one shared method on the prototype (a real memory cost at scale).
+
+**`WeakMap`-based privacy (the pattern referenced in Advanced Q3):**
+
+```javascript
+const balances = new WeakMap();               // module-level, shared across all instances
+class BankAccount {
+  constructor(initialBalance) { balances.set(this, initialBalance); }
+  deposit(amount) { balances.set(this, balances.get(this) + amount); } // real prototype method — one copy, shared
+  getBalance() { return balances.get(this); }
+}
+```
+
+This restores real prototype methods (no per-instance closures) and the `WeakMap`'s entries are automatically collected once an instance itself becomes unreachable (Advanced Q3) — but it requires an external, module-scoped `WeakMap` that has to be kept in sync by hand, and any code within the same module that also happens to have a reference to that `WeakMap` can still read or tamper with "private" state — the privacy is a convention enforced by module boundaries, not the language itself.
+
+**Native `#field` — enforced directly by the engine, at the class declaration itself:**
+
+```javascript
+class BankAccount {
+  #balance;                                      // declared as part of the class, no external structure needed
+  constructor(initialBalance) { this.#balance = initialBalance; }
+  deposit(amount) { this.#balance += amount; }   // real prototype method, true encapsulation
+  getBalance() { return this.#balance; }
+}
+
+const acct = new BankAccount(100);
+acct.#balance;              // SyntaxError — not even valid syntax outside the class body, unlike a runtime TypeError
+acct.balance;               // undefined — #balance isn't even the same property as a public `balance` would be
+```
+
+The access restriction is enforced by the **parser**, not just at runtime — `acct.#balance` outside the class body is a `SyntaxError` caught before the code even runs, which is stronger than both prior patterns (the closure pattern has no property to access at all; the `WeakMap` pattern only fails at runtime for code without access to the `WeakMap` reference, and succeeds silently for code that does have it).
+
+**A genuinely different behavior, not just stricter enforcement:** `in` cannot be used to *probe* for a private field's existence the normal way, but ES2022 added a dedicated syntax for exactly that check — `#balance in acct` — which returns `true`/`false` without throwing, useful for checking "is this actually an instance of a class using this exact private field" (a robust, unforgeable brand check no public property or `instanceof` check can replicate, since a subclass or an unrelated object literally cannot fake having the same private field).
+
+**Common pitfall:** assuming `#field`s are inherited and accessible the same way public fields are across a subclass — a subclass has no direct syntactic access to a private field declared in its parent class unless the parent exposes it through a public/protected-by-convention method; there's no "protected" access level, only fully private to the exact class body that declares it.
+
+**Practical guidance:** default to native `#field`s for new class-based code needing real encapsulation — they're simpler to write than either fake-privacy pattern and enforced by the language itself; reach for the `WeakMap` pattern only when supporting an environment old enough to lack `#field` support, or when privacy needs to be added to a plain object (not a class) from outside its own definition.
+
+---
+
+## Scenario — Question 8
+
+**Q8: A single-page app's "suggestion list" widget re-renders by wiping `container.innerHTML` and rebuilding rows on every keystroke, wiring a `click` handler to each row that references a shared `allSuggestions` array from the enclosing scope so it can look up sibling rows for a "related items" hover effect. After extended use, memory grows steadily and old suggestion data never disappears. What's the actual mechanism, and how do you fix it without just adding a manual cleanup call the next developer might forget?**
+
+```javascript
+function renderSuggestions(container, suggestions) {
+  const allSuggestions = suggestions;             // captured by every row's closure below
+  container.innerHTML = '';                        // wipes the OLD rows out of the DOM...
+  suggestions.forEach((item, index) => {
+    const row = document.createElement('div');
+    row.textContent = item.label;
+    row.addEventListener('click', () => {
+      highlightRelated(allSuggestions, index);      // closure captures the WHOLE array, not just `item`
+    });
+    container.appendChild(row);
+  });
+}
+```
+
+**The mechanism:** `container.innerHTML = ''` removes the *old* row elements from the visible DOM tree, but it does nothing about any JavaScript reference still pointing at them — and here, each old row's `click` listener closure is exactly such a reference, still reachable as long as something keeps the *listener function itself* alive. Because the DOM element was never explicitly told to drop its listener (`removeEventListener` was never called — `innerHTML = ''` only detaches nodes, it doesn't run listener cleanup), and because every closure captured the **entire** `allSuggestions` array rather than just the one `item` each row actually needs, every previous render's full suggestion list — plus every old detached row element still referenced by its own now-orphaned listener — stays reachable from the GC's perspective for as long as anything still holds that old listener reachable at all. In most engines, a detached DOM node with a still-referenced event listener is kept alive by the listener's closure, and the closure is kept alive because it's still registered — the two references keep each other's context reachable even after the node has visually vanished from the page.
+
+**Why "just call `removeEventListener` in cleanup" isn't the actual fix here:** with `innerHTML = ''` wiping the DOM directly rather than removing tracked nodes one at a time, there is no natural place to call `removeEventListener` on each old row before it's destroyed — the very technique used to clear the list (`innerHTML = ''`) discards the references needed to unregister listeners properly, which is exactly why "remember to clean up" isn't a reliable fix on its own; the code has to be restructured so cleanup isn't optional or forgettable.
+
+**Two structural fixes, applied together:**
+
+1. **Narrow what each closure captures** — capture only the one `item` a row actually needs, not the whole array, so a row's closure can never keep the entire dataset alive:
+
+```javascript
+row.addEventListener('click', () => {
+  highlightRelated(item, index);   // captures just this one item, not the full array
+});
+```
+
+2. **Use event delegation (Intermediate Q18)** instead of one listener per row, so there is exactly **one** long-lived listener (on `container`, which never gets destroyed) instead of N listeners tied to N disposable row elements — removing this problem's root cause structurally, since there's no longer a per-row closure to leak in the first place:
+
+```javascript
+function renderSuggestions(container, suggestions) {
+  container.dataset.suggestions = JSON.stringify(suggestions); // or keep a small, scoped reference elsewhere
+  container.innerHTML = '';
+  suggestions.forEach((item) => {
+    const row = document.createElement('div');
+    row.textContent = item.label;
+    row.dataset.index = item.index;
+    container.appendChild(row);
+  });
+}
+
+// Registered ONCE, outside renderSuggestions — survives every re-render, no per-row listener to ever leak
+container.addEventListener('click', (event) => {
+  const row = event.target.closest('[data-index]');
+  if (row) highlightRelated(currentSuggestions, Number(row.dataset.index));
+});
+```
+
+**Why this is more robust than a reminder to clean up:** the fix removes the *opportunity* for the leak to occur at all — there's no per-render listener left dangling for a future developer to forget to remove, because re-rendering no longer creates any new listeners in the first place. Structural fixes (delegation, narrow closures) that make the bug structurally impossible are strictly more reliable in a codebase with many contributors than a discipline-dependent fix like "remember to call `.destroy()`."
+
+**Practical guidance:** whenever a render function attaches a listener inside a loop over freshly-created elements, ask two questions: "does this listener capture more than the one item it needs?" and "could this be one delegated listener on a stable parent instead of N listeners on disposable children?" — answering both correctly upfront removes this entire class of leak rather than requiring perfect cleanup discipline forever.
+
+---
+
+## Scenario — Question 9
+
+**Q9: A batch job processes an array of order IDs, calling an async `chargeOrder(id)` for each one inside a `forEach` loop, and logs "all charges complete" immediately after the loop. In production, the log appears *before* several charges have actually finished, and — worse — two charges for the same customer occasionally overlap and double-charge a shared account balance. Diagnose both bugs and fix them.**
+
+```javascript
+async function processOrders(orderIds) {
+  orderIds.forEach(async (id) => {
+    await chargeOrder(id);         // looks like it should pause the loop... it doesn't
+  });
+  console.log('all charges complete'); // WRONG: logs before any charge has actually resolved
+}
+```
+
+**Bug 1 — `forEach` does not know or care that its callback is `async`.** `Array.prototype.forEach` calls its callback once per element and ignores whatever the callback returns — it was designed and specified long before `async`/`await` existed, and it has no mechanism to wait for a returned Promise before moving to the next element or before returning itself. Each `async (id) => { await chargeOrder(id); }` invocation *does* return a Promise, but `forEach` discards it immediately and moves straight to the next element without pausing — all the `chargeOrder(id)` calls effectively start firing back-to-back, nearly simultaneously, and `forEach` itself returns `undefined` synchronously the moment the loop over the array finishes dispatching them, long before any of the underlying async work has completed. `console.log('all charges complete')` then runs immediately after — which is exactly the observed premature log.
+
+**Bug 2 — the race condition is a direct consequence of Bug 1, not a separate issue.** Because every `chargeOrder(id)` call was kicked off nearly simultaneously rather than one completing before the next starts, two orders for the same customer can now be **in flight concurrently**, both reading the account's current balance before either has written back its updated result — a classic read-modify-write race, invisible in the code itself and only surfacing under production timing, not in a slower/smaller test run where the calls happen not to overlap.
+
+**Fix — for genuinely sequential processing (required when order matters, e.g., avoiding the double-charge race), use a real `for...of` loop, which `await` actually pauses:**
+
+```javascript
+async function processOrders(orderIds) {
+  for (const id of orderIds) {
+    await chargeOrder(id);          // this loop genuinely waits — the next iteration doesn't start until this resolves
+  }
+  console.log('all charges complete'); // now correctly runs only after every charge has settled
+}
+```
+
+Unlike `forEach`'s callback, a `for...of` loop's body is just an `async` function's own code — `await` inside it pauses the *enclosing* `async function`'s execution directly, which is precisely the mechanism `forEach`'s separate, uncoordinated callback invocations don't have access to.
+
+**If the operations are independent and don't need to run one-at-a-time** (no shared-state race like this one), `Promise.all` with `map` is the correct *parallel* fix, and is faster since it doesn't force artificial serialization — but it would not have fixed this specific race, since the whole problem here is that concurrent charges to the same account need to *not* overlap:
+
+```javascript
+await Promise.all(orderIds.map(id => chargeOrder(id))); // correct for independent operations, wrong for this race
+```
+
+**Practical guidance:** never pass an `async` function to `forEach` expecting it to wait — the two are structurally incompatible by design, not just a stylistic mismatch. When a race condition depends on shared mutable state that must be updated one operation at a time (a balance, a counter, an inventory count), use sequential `await` in a real loop (or a mutex/lock/queue abstraction for a busier system) rather than any construct that runs things concurrently; reach for `Promise.all` only once you've confirmed the operations are truly independent of each other.
+
+---
+
+## Scenario — Question 10
+
+**Q10: A dashboard's UI freezes completely — no scrolling, no button clicks register, the tab shows "page unresponsive" — right after a new "auto-refresh" feature ships. The refresh logic uses a chain of `.then()` calls that re-schedules itself. What's actually starving the browser, and why doesn't a `setTimeout(0)` inside the chain fix it?**
+
+```javascript
+function refreshLoop() {
+  return fetchLatestData()
+    .then(data => {
+      updateDashboard(data);
+      return Promise.resolve();   // deliberately chains to "yield" — or so the author assumed
+    })
+    .then(() => refreshLoop());   // immediately schedules the next cycle from within a .then()
+}
+refreshLoop();
+```
+
+**What's actually happening:** the author's intent was for `Promise.resolve()` to act like a small "yield point," letting the browser catch its breath between refresh cycles — but a resolved Promise's `.then()` callback is scheduled as a **microtask**, and the event loop's rule (Intermediate Q4) is that the **entire microtask queue drains before the browser gets a chance to render a frame or process an input event at all**. Once `fetchLatestData()` itself resolves quickly (e.g., served from a cache, or simply fast), the `.then(data => ...).then(() => refreshLoop())` chain re-enters itself from **within** an already-executing microtask, immediately queuing the next cycle's continuation as *another* microtask before the current one finishes draining — the microtask queue never actually empties, because each cycle's last step is scheduling the next cycle as more microtask work, faster than the browser is ever given an opening to paint or handle a click.
+
+**Why `setTimeout(0)` sprinkled into a `.then()` doesn't fix it if placed wrong:** `setTimeout` schedules a **macrotask**, and macrotasks only run once the current microtask queue is fully empty — so a `setTimeout(0)` called *from inside* a microtask that itself immediately schedules more microtask work still never gets a turn, for the same reason the browser's render step doesn't: the microtask queue has to actually reach empty first, and in this code, it never does, because the recursive scheduling happens synchronously inside the currently-draining microtask itself rather than after it's had a chance to finish.
+
+**The actual fix — force a yield to a macrotask, not a microtask, at the boundary between cycles:**
+
+```javascript
+function refreshLoop() {
+  fetchLatestData()
+    .then(data => {
+      updateDashboard(data);
+      setTimeout(refreshLoop, 0);   // schedules the NEXT cycle as a fresh macrotask, not from inside a microtask
+    });
+}
+refreshLoop();
+```
+
+Because `setTimeout(refreshLoop, 0)` is now the **last** thing that happens, and it schedules a macrotask rather than immediately chaining another `.then()`, the current microtask queue is allowed to actually finish draining — at which point the event loop's algorithm (Intermediate Q4) reaches the "run one macrotask, then possibly repaint" step, giving the browser a real opportunity to render and process pending input before the next refresh cycle begins. `requestAnimationFrame` or `requestIdleCallback` are the more idiomatic choices than a raw `setTimeout(0)` for anything tied to visual updates specifically, since they align the yield point with the browser's actual paint scheduling.
+
+**Practical guidance:** any recursive or looping async logic that re-invokes itself from directly inside a `.then()`/`await` continuation should be treated as a starvation risk by default — verify where the *actual* macrotask boundary is in the chain, not just where a `Promise.resolve()` or an `await` happens to appear, since neither one yields to rendering or input on its own; only a real macrotask scheduling call (`setTimeout`, `setImmediate`, `MessageChannel`, `requestAnimationFrame`) does.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A permissions check in production silently lets an unauthorized user through: `if (user.roleId == '5')` was meant to match role ID `5`, but a newer part of the system passes `roleId` as an array (`['5']`) when a user has been granted the role through a group as well as directly. The check still returns `true`. Explain exactly why, and fix the underlying class of bug, not just this one line.**
+
+```javascript
+function hasAdminAccess(user) {
+  return user.roleId == '5';      // == , not ===
+}
+
+hasAdminAccess({ roleId: '5' });     // true — intended case
+hasAdminAccess({ roleId: 5 });       // true — intended case, coerced
+hasAdminAccess({ roleId: ['5'] });   // true — NOT intended, but == lets it through anyway!
+hasAdminAccess({ roleId: [] });      // true — even more surprising, and very much not intended!
+```
+
+**Why `['5'] == '5'` is `true`:** the Abstract Equality Comparison algorithm (Beginner Q3), when comparing an object (an array is an object) to a string, first converts the object to a primitive via `ToPrimitive` — which for an array means calling `.toString()` (or effectively `.join(',')`). `['5'].toString()` produces the string `'5'`, and now the comparison is `'5' == '5'`, which is `true`. This is not a coincidence specific to this one value — it's how `==` is specced to behave for *any* array whose `.join(',')` happens to produce a string that loosely equals the other side.
+
+**Why `[] == '5'` isn't the concerning case, but `[] == '0'` or `hasAdminAccess({ roleId: [] })` matching something unintended can be:** `[].toString()` is `''` (empty string) — so `[] == '5'` is actually `false`, but the real production bug in this scenario is different: an empty array's coercion to `''` is falsy-adjacent (`[] == false` is `true`, per Beginner Q4's callout), so any code elsewhere in the same permission logic that also uses `==` against a falsy sentinel can be tripped by the *same* array-to-primitive coercion mechanism in a different, equally surprising direction — the underlying hazard is "an array can loosely-equal almost any single value depending on its contents," not one specific comparison.
+
+**The real, structural bug — the code was never checking "is this role granted," it was checking "does this value loosely-equal `'5'`,"** and once `roleId` became a collection instead of a scalar (a legitimate, unannounced shape change elsewhere in the system), the `==` check kept "succeeding" by accident, for a reason that has nothing to do with authorization logic at all.
+
+**Fix — stop coercing, and stop assuming `roleId` is a scalar:**
+
+```javascript
+function hasAdminAccess(user) {
+  const roles = Array.isArray(user.roleId) ? user.roleId : [user.roleId]; // normalize the shape explicitly
+  return roles.some(id => id === '5' || id === 5);                        // strict comparison, no coercion
+}
+```
+
+Normalizing to an array up front (rather than relying on `==`'s implicit array-to-string collapsing) makes the "a user might have the role via multiple grants" case an explicit, intentional branch instead of an accidental side effect of loose equality — and `===` inside `.some()` means a future shape change (say, `roleId` becoming an array of numbers instead of strings) fails loudly and specifically, rather than silently continuing to "work" for the wrong reason.
+
+**Practical guidance:** `==` bugs in production are rarely caught by the "classic" `0 == false` examples everyone memorizes for interviews — they're caught by an *upstream* data-shape change (a scalar becoming an array, a number becoming a numeric string) interacting with a loose comparison that was never exercised against that shape before. Auditing every `==`/`!=` in a codebase and replacing with `===`/`!==` plus an explicit type/shape check (as done here) removes an entire category of "worked for years, then broke without any code touching this line" incidents.
+
+---
+
+## Scenario — Question 12
+
+**Q12: A custom paginated data-fetcher is implemented as an iterable so it can be used with `for...of`, but calling code reports the loop "runs forever" and eventually crashes the tab with an out-of-memory error. Find the bug in the iterator protocol implementation and fix it.**
+
+```javascript
+function createPageIterator(fetchPage) {
+  let currentPage = 0;
+  return {
+    [Symbol.iterator]() {
+      return {
+        next() {
+          const page = fetchPage(currentPage);
+          currentPage++;
+          if (page.items.length > 0) {
+            return { value: page.items, done: false };
+          }
+          return { value: page.items };   // BUG: missing `done: true`
+        },
+      };
+    },
+  };
+}
+
+for (const items of createPageIterator(fetchPage)) {
+  render(items);
+}
+```
+
+**The bug:** the iterator protocol (Advanced Q4) requires `next()` to return an object with a `done` property that is explicitly `true` once iteration should stop — `for...of` checks `result.done` on every call and only stops looping when it is **strictly `true`**. The final `return` statement here (`return { value: page.items };`) omits `done` entirely, which means `result.done` is `undefined` — not `true` — so `for...of`'s loop-continuation check (`while (!result.done)`) keeps evaluating to `true` forever, since `!undefined` is also `true`. The loop keeps calling `.next()`, `fetchPage` keeps being called with an ever-increasing `currentPage` that's already run past the last real page, and — since the empty-page branch never terminates the loop — the process never stops requesting pages or invoking `render()`, exhausting memory as more and more empty-page results and rendered output accumulate without bound.
+
+**Why this class of bug is easy to miss in review:** a hand-written iterator's `next()` method has no compiler-enforced contract the way a typed language's interface would — nothing stops a method from returning an object shaped almost like `{ value, done }` but missing one field, and the omission produces `undefined` rather than a loud error, which then behaves exactly like `false` in the boolean check that matters. The bug is invisible until the *specific* runtime condition (the page-fetcher actually returning an empty page) is exercised — which might not happen in every manual test if development data always has more pages available than anyone scrolls through.
+
+**Fix — always return an explicit `done: true` on the terminating call, and treat the iterator's contract as a completeness checklist, not a “return whatever looks right” object literal:**
+
+```javascript
+function createPageIterator(fetchPage) {
+  let currentPage = 0;
+  return {
+    [Symbol.iterator]() {
+      return {
+        next() {
+          const page = fetchPage(currentPage);
+          currentPage++;
+          if (page.items.length > 0) {
+            return { value: page.items, done: false };
+          }
+          return { value: undefined, done: true };   // explicit, unambiguous termination
+        },
+      };
+    },
+  };
+}
+```
+
+**A generator-based rewrite sidesteps the whole class of bug** by letting the language generate the correct `{ value, done }` shape automatically (Advanced Q4) — there's no hand-written `done` field to forget at all, because a generator's `done: true` is produced implicitly the moment the function body actually returns/falls off the end:
+
+```javascript
+function* createPageIterator(fetchPage) {
+  let currentPage = 0;
+  while (true) {
+    const page = fetchPage(currentPage++);
+    if (page.items.length === 0) return;   // generator sets done:true automatically here — nothing to forget
+    yield page.items;
+  }
+}
+```
+
+**Practical guidance:** whenever a custom iterable is written by hand against the raw `{ next() { ... } }` protocol rather than with a generator function, treat every `return` statement inside `next()` as a place a `done: true`/`done: false` omission can silently break termination — and prefer generators over hand-rolled iterators whenever possible specifically because the language enforces the `done` contract for you, removing this entire bug class by construction.
+
+---
+
+## Scenario — Question 13
+
+**Q13: A form has two `input` event listeners on the same text field — one from a third-party validation library (attached first, on page load) that sets `field.dataset.valid`, and one from newly-added application code (attached second) that reads `field.dataset.valid` to decide whether to enable a submit button. After a refactor moved the application code's listener registration into a component that mounts *before* the validation library initializes, the submit button now enables one keystroke late — it reflects the *previous* keystroke's validity, not the current one. Diagnose the ordering issue and fix it without depending on registration order.**
+
+```javascript
+// Now runs FIRST after the refactor (used to run second, before the refactor)
+field.addEventListener('input', () => {
+  const isValid = field.dataset.valid === 'true';   // reads whatever the validation library set LAST TIME
+  submitButton.disabled = !isValid;
+});
+
+// Third-party validation library — still runs its own listener, now SECOND
+field.addEventListener('input', () => {
+  field.dataset.valid = validate(field.value) ? 'true' : 'false';
+});
+```
+
+**Why order matters here at all:** multiple listeners registered on the **same element for the same event, in the same phase** (both bubbling here, the default) run in **strict registration order** — first-registered, first-run, no exceptions. This scenario's logic has an implicit, undeclared dependency on "the validation listener runs before the button-enabling listener," because the button-enabling code reads a value (`field.dataset.valid`) that only the validation listener writes — and nothing in the code makes that ordering requirement visible or enforced; it was true only because of the order the two `<script>` tags/modules happened to register their listeners, an accident of initialization order rather than a designed contract.
+
+**Why the refactor broke it silently:** moving the application component to mount earlier changed *only* the registration order, not any visible code path — `field.addEventListener` was called with the exact same arguments either way, so nothing about the call site looked wrong. The bug manifests as "off by one keystroke" specifically because the button-enabling listener now reads `dataset.valid` **before** the validation listener updates it for the *current* keystroke — it's reading the value the validation listener wrote after the *previous* input event, since that's the freshest value that exists at the moment the (now-earlier) button-enabling listener runs.
+
+**The fix — remove the implicit ordering dependency entirely, rather than trying to force registration order back:** reordering script/component initialization is fragile (the next refactor, or a bundler changing module evaluation order, can silently reintroduce the exact same bug) — the durable fix is to make the actual dependency (validity must be computed before the button decision uses it) explicit in the code itself, rather than relying on listener registration order as an implicit contract nothing enforces:
+
+```javascript
+// Single listener owns the full sequence explicitly — no dependency on registration order at all
+field.addEventListener('input', () => {
+  const isValid = validate(field.value);      // compute directly, don't read a side-channel another listener wrote
+  field.dataset.valid = isValid ? 'true' : 'false';  // still set, if other code/CSS depends on reading it
+  submitButton.disabled = !isValid;
+});
+```
+
+Where the validation logic genuinely has to remain a separate, third-party listener that can't be inlined, the more general fix is to have the application code trigger explicitly *after* validation completes — e.g., the validation library dispatching its own custom event (`field.dispatchEvent(new CustomEvent('validated', { detail: { isValid } }))`) once it has finished, and the application code listening for `validated` instead of `input` — which makes "run after validation" a real, named dependency instead of an accident of two listeners sharing the same generic `input` event and hoping the browser calls them in the right order.
+
+**Practical guidance:** whenever two independently-registered listeners on the same element need to run in a specific order relative to each other, treat that as a real dependency to make explicit (a shared function call, a custom event, an orchestrating single listener) rather than something to protect by carefully controlling registration order — registration order is a global, fragile property of the whole application's initialization sequence, and any later refactor anywhere in the codebase can invalidate an assumption about it without touching the two listeners at all.
+
+---
