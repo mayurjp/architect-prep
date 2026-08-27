@@ -267,17 +267,46 @@ function main() {
     JSON.stringify(topicsWithCounts, null, 2)
   );
 
+  const totalAnswered = allQuestions.filter((q) => q.status === "answered").length;
+
   fs.writeFileSync(
     path.join(DATA_DIR, "build-info.json"),
-    JSON.stringify({ publishedAt: new Date().toISOString() }, null, 2)
+    JSON.stringify(
+      {
+        publishedAt: new Date().toISOString(),
+        totalQuestions: totalAnswered,
+        totalTopics: files.length,
+      },
+      null,
+      2
+    )
   );
 
-  const totalAnswered = allQuestions.filter((q) => q.status === "answered").length;
+  updateHomepageMeta(totalAnswered, files.length);
+
   console.log(
     `Built ${allQuestions.length} questions (${totalAnswered} answered, ${
       allQuestions.length - totalAnswered
     } planned) across ${files.length} content files -> docs/data/`
   );
+}
+
+// Keeps the homepage's <meta description>/OG/Twitter tags in sync with the current
+// question/topic counts, so the numbers shown in link previews (LinkedIn, etc.) never
+// go stale as content grows — docs/index.html is hand-authored, not generated, so this
+// only rewrites the specific count phrase rather than the whole file.
+function updateHomepageMeta(totalQuestions, totalTopics) {
+  const indexPath = path.join(ROOT, "docs", "index.html");
+  if (!fs.existsSync(indexPath)) return;
+  let html = fs.readFileSync(indexPath, "utf8");
+  const formattedCount = totalQuestions.toLocaleString("en-US");
+  const updated = html.replace(
+    /[\d,]+\+ interview questions across \d+ topics/g,
+    `${formattedCount}+ interview questions across ${totalTopics} topics`
+  );
+  if (updated !== html) {
+    fs.writeFileSync(indexPath, updated);
+  }
 }
 
 try {
