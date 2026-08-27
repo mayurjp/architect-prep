@@ -1485,6 +1485,114 @@ Angular Material (or any mature component library — PrimeNG, Nebular, and simi
 
 ---
 
+## Intermediate — Question 18
+
+**Q18: In modern Angular, when should you reach for a Signal versus an RxJS Observable to model a piece of state?**
+
+They overlap for a narrow case — "a current value that changes over time" — but are built for genuinely different problems, and picking the wrong one for the wrong reason (usually "signals feel more modern") tends to produce awkward code.
+
+**The decision framework:**
+1. **Is the value fundamentally an asynchronous stream of events over time** — HTTP responses, WebSocket messages, router events, keystrokes needing debouncing, several sources combined with timing operators? Use **Observables** — this is exactly what RxJS's operator library (`switchMap`, `debounceTime`, `combineLatest`, `retry`, all covered in earlier Intermediate questions) is built for, and nothing in the signals API replaces that composition today.
+2. **Is the value synchronous, local or shared state that a template reads directly, with derived values needed from it?** Use **`signal()`/`computed()`** — no subscription to manage, no leak risk (Advanced Q3), and it integrates natively with `OnPush`/zoneless change detection (Advanced Q5/Q11) without an `async` pipe.
+3. **Do you need to react imperatively to a change as a side effect** (persist to `localStorage` whenever state changes, log an analytics event)? Use `effect()` for signal-based state, or `tap()`/`subscribe()` for Observable-based state — the two have direct equivalents here.
+
+**Bridging the two at the seam where a stream becomes state:**
+
+```typescript
+private user$ = this.userService.getUser(id); // Observable<User>, from an async source
+user = toSignal(this.user$, { initialValue: undefined });
+fullName = computed(() => this.user() ? `${this.user()!.first} ${this.user()!.last}` : '');
+```
+`toSignal()`/`toObservable()` (from `@angular/core/rxjs-interop`) convert between the two worlds at exactly this boundary — the asynchronous plumbing stays in RxJS, and the resulting value a template actually consumes becomes a signal.
+
+**Common pitfall:** converting every Observable to a signal reflexively via `toSignal()` throughout a whole pipeline, rather than only at the point where a stream becomes a piece of state to read. Doing this mid-pipeline discards RxJS's operator composition for genuinely asynchronous, multi-step logic (a chained `debounceTime` → `switchMap` → `retry` sequence, say) that has no equally concise signal-based equivalent today — convert at the boundary, not throughout.
+
+**Practical guidance:** use RxJS for the asynchronous plumbing and Signals for the resulting state components and templates consume, with `toSignal`/`toObservable` at the seam between the two — treat this as complementary tooling, not a choice between two competing paradigms for the whole app.
+
+---
+
+## Intermediate — Question 19
+
+**Q19: Lazy loading (Intermediate Q4) means a route's code isn't fetched until the user first navigates there — which means that very first navigation pays a network-fetch delay. What is a router preloading strategy, and how do you configure a custom one?**
+
+A **preloading strategy** lets the Router fetch lazy route chunks *in the background*, after the initial app has finished loading, so that by the time a user actually navigates to one of those routes, the chunk is often already cached — trading a bit of extra background bandwidth immediately after load for a fast, no-fetch-delay experience on subsequent navigation.
+
+**Built-in strategies:**
+- **`NoPreloading`** (the default) — fetch a lazy chunk only on demand, when the user actually navigates there.
+- **`PreloadAllModules`** — fetch every lazy route's chunk shortly after the initial app loads, regardless of whether the user is likely to visit it.
+
+```typescript
+provideRouter(routes, withPreloading(PreloadAllModules))
+```
+
+**A custom, selective strategy** — useful once `PreloadAllModules`'s "fetch everything" becomes wasteful for a large app with many rarely-visited routes (an admin section most users never open):
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class SelectivePreloadingStrategy implements PreloadingStrategy {
+  preload(route: Route, load: () => Observable<unknown>): Observable<unknown> {
+    return route.data?.['preload'] ? load() : of(null);
+  }
+}
+```
+```typescript
+{ path: 'reports', data: { preload: true }, loadChildren: () => import('./reports/reports.routes').then(m => m.REPORTS_ROUTES) },
+{ path: 'admin', loadChildren: () => import('./admin/admin.routes').then(m => m.ADMIN_ROUTES) }, // never preloaded
+```
+```typescript
+provideRouter(routes, withPreloading(SelectivePreloadingStrategy))
+```
+
+**Mechanism:** once the initial navigation completes, the Router walks every lazy route in the configuration and, for each, asks the configured `PreloadingStrategy.preload()` whether to fetch it now — `PreloadAllModules` always calls `load()`; a custom strategy can inspect `route.data`, a user's role, or even network conditions (`navigator.connection`) to decide selectively rather than uniformly.
+
+**Common pitfall:** reaching for `PreloadAllModules` as a blanket "get lazy loading's benefit without the wait" fix — reasonable for a small-to-medium app, but on a very large app with many rarely-visited routes it silently reintroduces much of the bandwidth cost lazy loading exists to avoid, just deferred by a few seconds after load instead of eliminated for users who never visit those routes at all.
+
+**Practical guidance:** `PreloadAllModules` is a fine default while an app is small enough that preloading everything is cheap; for a large app, a custom strategy driven by route metadata (or real navigation analytics — preload what users actually go to most) balances fast subsequent navigation against not wasting bandwidth on routes most visitors never touch.
+
+---
+
+## Intermediate — Question 20
+
+**Q20: How do you write a custom synchronous validator and a custom asynchronous validator for a Reactive Form, and what's the mechanical difference in how Angular runs each?**
+
+A **synchronous validator** (`ValidatorFn`) is a plain function `(control: AbstractControl) => ValidationErrors | null`, run on every value change, immediately, with no I/O.
+
+```typescript
+export function passwordStrengthValidator(control: AbstractControl): ValidationErrors | null {
+  const value: string = control.value ?? '';
+  const strongEnough = /[A-Z]/.test(value) && /[0-9]/.test(value) && value.length >= 8;
+  return strongEnough ? null : { weakPassword: true };
+}
+```
+
+An **asynchronous validator** (`AsyncValidatorFn`) returns an `Observable<ValidationErrors | null>` (or a `Promise`) instead of a synchronous value, needed for validations requiring a round-trip — the classic case being "is this username already taken."
+
+```typescript
+export function uniqueUsernameValidator(userService: UserService): AsyncValidatorFn {
+  return (control: AbstractControl): Observable<ValidationErrors | null> =>
+    control.value
+      ? userService.checkUsernameAvailable(control.value).pipe(
+          map(isAvailable => (isAvailable ? null : { usernameTaken: true }))
+        )
+      : of(null);
+}
+```
+```typescript
+username = new FormControl('', {
+  validators: [Validators.required],
+  asyncValidators: [uniqueUsernameValidator(this.userService)],
+  updateOn: 'blur',
+});
+```
+
+**Mechanism:** Angular runs every synchronous validator first; only if all of them pass does it run the async validators, setting the control's `status` to `PENDING` while they're in flight and to `VALID`/`INVALID` once they resolve — a template checking `control.pending` can show a "checking availability…" indicator during that window. Like synchronous validators, async validators are re-run on every qualifying value change by default, which is exactly why they're almost always paired with debouncing and `updateOn: 'blur'` rather than firing a network call on every keystroke.
+
+**Common pitfall:** assuming a `debounceTime` placed inside the async validator's own `.pipe()` delays how often the validator function itself is *invoked* — it doesn't. Angular still calls the validator on every qualifying value change; each call independently starts its own debounce timer, so debouncing inside the validator delays each individual call's emission without reducing how many calls happen in the first place. Reducing actual call volume requires debouncing the *trigger* — `updateOn: 'blur'`, or a manually-debounced `valueChanges` subscription driving validation outside the standard validator pipeline.
+
+**Practical guidance:** default to `updateOn: 'blur'` for any field with an async validator to avoid a network call per keystroke, and make sure the validator's internal request chain is genuinely cancellable (via `switchMap` or equivalent) so a slow, stale response for an earlier value can't incorrectly overwrite the result for the value the user has since typed — see the following Scenario for exactly this race condition in practice.
+
+---
+
 ## Advanced — Question 11
 
 **Q11: What does it mean to run Angular fully zoneless — Zone.js removed entirely — and what are the current trade-offs of doing that versus staying on Zone.js-based change detection?**
@@ -1546,6 +1654,158 @@ Without `strictTemplates`, several of these fail *silently* — a misspelled `[n
 **Common pitfall:** treating the initial wave of errors as "the compiler being overly strict" and disabling it again rather than fixing the underlying issues — the errors are almost always real latent bugs (or at minimum, genuinely ambiguous types worth clarifying), not compiler false positives, since template type checking reuses the same type system already trusted for the rest of the codebase's `.ts` files.
 
 **Practical guidance:** enable `strictTemplates` on every new project by default — the cost is near zero when the codebase grows with it from day one. On a legacy app, budget it as a dedicated, tracked migration (not an afterthought squeezed into unrelated feature work), because the error volume on a large loosely-typed app can be substantial, but the alternative is leaving an entire class of runtime template bugs permanently undetectable until a user hits them.
+
+---
+
+## Advanced — Question 13
+
+**Q13: What do the `@Optional`, `@Self`, `@SkipSelf`, and `@Host` decorators do in Angular's DI system, and what is a "multi-provider" (`multi: true`)?**
+
+Building on the injector hierarchy from Advanced Q2, these decorators modify *how* a dependency is resolved rather than *what* is resolved:
+
+- **`@Optional()`** — if no provider is found anywhere up the injector chain, inject `null` instead of throwing `NullInjectorError`.
+- **`@Self()`** — only look at the current element injector; don't walk up to ancestors at all, and throw if not found there.
+- **`@SkipSelf()`** — skip the current element injector and start looking from the parent upward — a classic use is a directive checking whether an *ancestor* also provides the same token, e.g. detecting (and warning against) accidentally nested instances of a directive that shouldn't be nested.
+- **`@Host()`** — stop searching once reaching the current component's host boundary — mainly relevant for directives that need to interact with a specific enclosing component, less commonly needed in standalone-era code.
+
+```typescript
+@Directive({ selector: '[appControlErrorDisplay]' })
+export class ControlErrorDisplayDirective {
+  constructor(@Optional() @Self() private ngControl: NgControl | null) {
+    if (!this.ngControl) {
+      throw new Error('appControlErrorDisplay must be used on an element with a form control directive');
+    }
+  }
+}
+```
+
+**Multi-providers:** `{ provide: TOKEN, useClass: X, multi: true }` registers `X` as one of *several* values resolved for `TOKEN` — `inject(TOKEN)` then returns an array, rather than the new provider replacing whatever was previously registered. This is exactly the mechanism behind extensible tokens like `HTTP_INTERCEPTORS` (the legacy class-based interceptor API) and `NG_VALIDATORS`: many independent features can each contribute one more interceptor/validator to a shared token without needing to know about each other or hand-assemble a combined array themselves.
+
+```typescript
+export const APP_WIDGETS = new InjectionToken<Widget[]>('APP_WIDGETS');
+
+providers: [
+  { provide: APP_WIDGETS, useClass: WeatherWidget, multi: true },
+  { provide: APP_WIDGETS, useClass: NewsWidget, multi: true },
+]
+// inject(APP_WIDGETS) => [weatherWidgetInstance, newsWidgetInstance]
+```
+
+**Common pitfall:** forgetting `multi: true` when the intent is to *add to* a list-style token — omitting it makes the new provider silently *replace* whatever was previously registered for that token, rather than appending to it, which for something like `HTTP_INTERCEPTORS` means every interceptor registered before yours (potentially in a different, unrelated feature module) silently stops running with no error at all.
+
+**Practical guidance:** reach for `@Optional`/`@SkipSelf` when writing a directive or component meant to be aware of its position within a hierarchy of same-typed ancestors (nested drop zones, nested form groups); use the `multi: true` pattern whenever designing an extensibility point where independent features should each be able to register a contribution without a central coordinator needing to combine them by hand.
+
+---
+
+## Advanced — Question 14
+
+**Q14: Why does Angular throw `ExpressionChangedAfterItHasBeenCheckedError` in development mode, and what typically causes it?**
+
+In development mode, after Angular finishes a normal change-detection pass, it runs an extra verification pass: it re-checks every previously-checked expression a second time and compares the value against what it just rendered. If a bound expression's value differs between the first check and this second verification — meaning it changed *as a side effect of change detection itself*, rather than before the pass began — Angular throws this error rather than silently rendering a value that's one tick behind reality. Production builds skip this double-check entirely for performance, so the identical underlying bug wouldn't throw in production — it would just render subtly stale or inconsistent data, which is exactly why the dev-mode error is valuable to fix rather than an annoyance to suppress.
+
+**Typical causes:**
+
+1. **A child component's `ngAfterViewInit`/`ngOnInit` mutating a value the parent already rendered this cycle:**
+```typescript
+// Parent template: <child [footer]="footerText"></child>
+// Child:
+ngAfterViewInit() {
+  this.footerVisible.emit(true); // changes a parent-bound value AFTER the parent was already checked this pass
+}
+```
+2. **A getter or unmemoized `computed`-like function used directly in a template returning a different value each time it's called** (depending on `Date.now()`, `Math.random()`, or similar) — the "check" value and the "verify" value trivially differ because the function was genuinely invoked twice and returned two different results.
+3. **Mutating state inside a lifecycle hook that runs partway through a check** (`ngDoCheck`, `ngAfterContentChecked`) in a way that changes a value read earlier in that same pass.
+
+**Fix:** defer the state change to the *next* change-detection cycle rather than performing it synchronously mid-check — `Promise.resolve().then(() => this.footerVisible.emit(true))`, or `setTimeout(() => ..., 0)`. The more idiomatic modern fix is using a signal for the value: a signal update schedules a genuinely new, separate change-detection pass rather than trying to retroactively alter the one already in progress, which sidesteps the whole class of bug structurally.
+
+**Common pitfall:** wrapping the offending code in `setTimeout` everywhere the error appears without understanding *why* that fixes it — it defers the update by a tick and avoids the mismatch, but doesn't address the underlying design issue (state that should be derived is instead being pushed reactively mid-render), and can mask a deeper bug rather than resolving it. Understand the actual mutation-during-render cause before reaching for the timing workaround.
+
+**Practical guidance:** treat this error as a genuinely useful signal that a component's data flow briefly produced a one-tick inconsistency, not as framework noise — the cleanest long-term fix is almost always making the value a `computed()` signal, or restructuring so a child doesn't mutate a parent-owned value during its own initialization, rather than sprinkling `setTimeout` calls to dodge the dev-mode check.
+
+---
+
+## Advanced — Question 15
+
+**Q15: Beyond a single default `<ng-content>` slot, how does multi-slot content projection with `select` and `ngProjectAs` work — and whose change-detection cycle actually re-checks the projected content?**
+
+**Multi-slot projection** uses the `select` attribute to route different projected elements into different named slots, matched much like a CSS selector (tag name, attribute, class):
+
+```html
+<!-- card.component.html -->
+<div class="card">
+  <header><ng-content select="[card-header]"></ng-content></header>
+  <ng-content></ng-content> <!-- default/unnamed slot: catches anything not matched above -->
+  <footer><ng-content select="[card-footer]"></ng-content></footer>
+</div>
+```
+```html
+<app-card>
+  <h2 card-header>Title</h2>
+  <p>Body content, falls into the default slot.</p>
+  <button card-footer>OK</button>
+</app-card>
+```
+
+**`ngProjectAs`** lets an element be matched against a slot selector it doesn't literally satisfy in the DOM — useful when the projected content is itself a component whose own tag selector doesn't match what the receiving component's `select` expects:
+
+```html
+<app-custom-header ngProjectAs="[card-header]">...</app-custom-header>
+```
+Here, `<app-custom-header>` is a component with its own selector, but `ngProjectAs="[card-header]"` tells Angular's projection logic to treat it as if it matched `[card-header]` for slotting purposes, without the component needing a `card-header` attribute that might conflict with its own styling or selector.
+
+**Whose change detection actually runs the projected content — the subtle, frequently-misunderstood part:** content projected into a child's `<ng-content>` is **not** owned by that child for change-detection purposes, even though it visually renders inside the child's DOM. The projected template's bindings are evaluated against, and checked as part of, the *parent's* component instance and change-detection pass — not the child's. Concretely: if the receiving `AppCardComponent` uses `OnPush` but the parent doesn't, and the parent re-renders on every keystroke happening elsewhere on the page, the projected content's bindings still re-evaluate on every one of those keystrokes — `AppCardComponent`'s `OnPush` strategy only protects `AppCardComponent`'s *own* template bindings, not markup the parent handed it to project.
+
+**Common pitfall:** assuming that putting `OnPush` on a wrapper/card/layout component automatically shields everything visually inside it — including projected content — from unnecessary change-detection churn. It doesn't; projected content is gated by whichever component *wrote* that template (the parent), not by the component it happens to render *inside* (the child).
+
+**Practical guidance:** if a performance problem traces back to expensive projected content re-evaluating too often, the fix has to happen at the level of the component that *wrote* the projected template — making the parent `OnPush` as well, or wrapping the expensive expression in a `computed()`/pure pipe — since putting `OnPush` only on the receiving wrapper component won't touch it at all.
+
+---
+
+## Advanced — Question 16
+
+**Q16: How do you give a custom structural directive a typed context — so that inside the `*` template, TypeScript actually knows the shape of the value the directive hands back, the way `*ngFor`'s `let item` knows `item`'s type — and what is `ngTemplateContextGuard` for?**
+
+Building on Beginner Q16's basic structural directive, a typed context is what makes `*ngIf="value as v"` correctly narrow `v`'s type, or `*ngFor="let item of items"` correctly type `item` as the array's element type, rather than `any`.
+
+```typescript
+export interface UnwrapContext<T> {
+  $implicit: T;
+}
+
+@Directive({
+  selector: '[appUnwrap]',
+  standalone: true,
+})
+export class UnwrapDirective<T> {
+  private templateRef = inject(TemplateRef<UnwrapContext<T>>);
+  private viewContainerRef = inject(ViewContainerRef);
+
+  @Input() set appUnwrap(value: T | null | undefined) {
+    this.viewContainerRef.clear();
+    if (value != null) {
+      this.viewContainerRef.createEmbeddedView(this.templateRef, { $implicit: value });
+    }
+  }
+
+  static ngTemplateContextGuard<T>(
+    dir: UnwrapDirective<T>,
+    ctx: unknown
+  ): ctx is UnwrapContext<T> {
+    return true;
+  }
+}
+```
+```html
+<div *appUnwrap="user$ | async as user">
+  {{ user.name }}  <!-- `user` is correctly typed as `User`, not `User | null`, inside this block -->
+</div>
+```
+
+**Mechanism:** `createEmbeddedView(templateRef, context)`'s second argument populates the object that `let`/`as` bindings inside the template read from — `$implicit` is what an unqualified `let x` or `as x` binds to. Without a `static ngTemplateContextGuard` method, Angular's template type-checker (`strictTemplates`, Advanced Q12) has no way to know the *type* of that context object at compile time and falls back to `any` inside the structural block, defeating the type-safety `strictTemplates` is meant to provide. `ngTemplateContextGuard` is a compile-time-only type guard — its body is never actually executed at runtime; only its *type signature* matters to the compiler — that tells the type-checker "treat this directive's template context as `UnwrapContext<T>`," letting TypeScript correctly narrow `user` to `User` instead of `User | null | undefined` inside the block.
+
+**Common pitfall:** omitting `ngTemplateContextGuard` and being surprised that `strictTemplates` doesn't catch an obvious type error inside the structural block's content — the omission silently opts that one directive's projected context out of type-checking entirely, rather than erroring on the missing guard itself.
+
+**Practical guidance:** this ceremony is worth it for a structural directive meant for reuse across a team or codebase (exactly like `*ngIf`/`*ngFor` themselves), where the type-safety payoff compounds across every call site; for a one-off, locally-used structural directive, a simpler untyped context is often a reasonable, pragmatic trade-off.
 
 ---
 
@@ -1658,5 +1918,271 @@ A Directive is a class in Angular that can modify the structure or behavior of t
 A Service is a broad category encompassing any value, function, or feature that an application needs. A service is typically a class with a narrow, well-defined purpose (e.g., fetching data from an API, logging, or validating input). 
 
 Instead of writing this logic directly inside a Component, you write it in a Service and use Angular's Dependency Injection system to provide it to any Component that needs it, keeping components lean and focused purely on the UI.
+
+---
+
+## Scenario — Question 8
+
+**Q8: A `NotificationService` opens toast notifications dynamically using `ViewContainerRef.createComponent()` (Intermediate Q12), one per event from a WebSocket feed. QA reports that after leaving a busy page running for an hour, the tab's memory keeps climbing, and DevTools shows a steadily growing number of detached `ToastComponent` instances — even though each toast visually disappears from the screen after a few seconds. Diagnose and fix.**
+
+**Root diagnosis:** unlike the RxJS subscription leak in Scenario Q2, this leak is a dynamically created component (Intermediate Q12) that was never explicitly torn down. Components created via `createComponent()` have no structural directive (`*ngIf`) automatically managing their lifecycle the way declaratively-templated components do — nothing destroys them unless something calls `ComponentRef.destroy()` explicitly. "Disappearing from the screen after a few seconds" almost certainly means the toast was hidden via CSS (a fade-out animation class, or removal from a visible list) rather than actually destroyed — the DOM node, the Angular component instance behind it, its own change detector, and anything it itself set up (an internal auto-dismiss timer, say) are all still fully alive in memory, just invisible.
+
+**Confirming it:** inspect `NotificationService`'s toast-creation code — if it calls `viewContainerRef.createComponent(ToastComponent)` and either discards the returned `ComponentRef` entirely, or only ever toggles a CSS class on it for the fade-out animation without ever calling `ref.destroy()`, every toast ever shown remains a live `ComponentRef` for the rest of the session.
+
+**The fix:**
+```typescript
+@Injectable({ providedIn: 'root' })
+export class NotificationService {
+  show(message: string, viewContainerRef: ViewContainerRef) {
+    const ref = viewContainerRef.createComponent(ToastComponent);
+    ref.instance.message = message;
+
+    setTimeout(() => {
+      ref.instance.fadeOut(); // triggers the CSS animation
+      setTimeout(() => ref.destroy(), 300); // destroy only once the animation actually finishes
+    }, 3000);
+  }
+}
+```
+`ref.destroy()` runs `ngOnDestroy` on the toast, removes its DOM node, and releases the `ComponentRef` and its injector — closing exactly the gap that a structural-directive-managed component gets automatically (via `*ngIf`/`@if` tearing down its embedded view) but a dynamically created one does not.
+
+**Confirming the fix:** the same heap-snapshot methodology as Scenario Q2 — before/after several dozen toast events, take heap snapshots and confirm the `ToastComponent`/`ComponentRef` count returns to (near) zero after each toast's animation completes, rather than accumulating indefinitely.
+
+**Root lesson:** `*ngIf`/`@if`-managed components get automatic teardown "for free" the moment their condition goes false; any component created imperatively via `ViewContainerRef.createComponent()` opts out of that automatic lifecycle entirely and makes the calling code fully responsible for `destroy()` — a responsibility that's easy to forget specifically because the visual symptom ("the toast is gone") looks identical whether the component was actually destroyed or merely hidden.
+
+---
+
+## Scenario — Question 9
+
+**Q9: A data table renders 500 rows, each with several columns computed by calling component methods directly in the template — `{{ formatCurrency(row.amount) }}`, `{{ getStatusLabel(row.status) }}`, `{{ calculateDiscount(row) }}`. The table is already `OnPush` and the underlying data array is treated immutably, yet scrolling and any unrelated interaction on the page still visibly stutters. Diagnose why `OnPush` didn't fix this, and fix it properly.**
+
+**Root diagnosis:** `OnPush` (Advanced Q1) controls *whether* a component gets re-checked at all — it does nothing about *how expensive* that check is once it does run. Every method call in a template is re-invoked on **every change-detection check of that component**, for **every row**, because a function call is opaque to Angular — unlike a plain property read, Angular has no way to know a method's result hasn't changed, so it's always re-executed and re-compared. With 500 rows × 3 method calls, that's 1,500 invocations on every check — and since `OnPush` only prevents *unrelated* changes elsewhere in the app from triggering a check of this component, any event that legitimately *does* trigger a check of the table itself (virtual-scroll recycling, a row's own click handler, an `async`-piped emission) still re-runs all 1,500 calls, which is exactly the visible stutter.
+
+**The fix — replace template method calls with pure pipes:**
+```typescript
+@Pipe({ name: 'currencyFormat', standalone: true, pure: true })
+export class CurrencyFormatPipe implements PipeTransform {
+  transform(amount: number): string { return /* formatting logic */; }
+}
+```
+```html
+<!-- Before: re-invoked on every CD check, for every row -->
+<td>{{ formatCurrency(row.amount) }}</td>
+
+<!-- After: a pure pipe only re-runs when `row.amount` itself changes -->
+<td>{{ row.amount | currencyFormat }}</td>
+```
+Per Intermediate Q8's pure-pipe mechanism, Angular memoizes a pure pipe's result and only re-invokes `transform()` when its input actually changes — across a check where nothing about a given row changed, all three of that row's formatted values are served from the memoized result instead of recomputed, collapsing 1,500 calls per check down to effectively zero when the underlying data hasn't moved.
+
+**Alternative fix — precompute once when the data arrives, not on every render:** for values genuinely derived from a whole row, compute them once when data is loaded rather than in the template at all:
+```typescript
+rows = computed(() =>
+  this.rawRows().map(r => ({ ...r, discountLabel: calculateDiscount(r) }))
+);
+```
+This moves the cost from "every change-detection check" to "only when the source data actually changes" — strictly cheaper than even a pure pipe, since it computes once at the data layer rather than once per pipe invocation per render.
+
+**Common pitfall:** assuming `OnPush` alone is a complete performance fix and never auditing templates for method calls — one of the most common gaps in an otherwise well-optimized `OnPush` component, precisely because `OnPush` fixes the *frequency* of checks (Scenario Q1) while doing nothing about the *cost* of each individual check; the two problems produce an identical-looking symptom with entirely different root causes.
+
+**Root lesson:** `OnPush` and "avoid function calls in templates" are independent, complementary optimizations — one bounds how often a component is checked, the other bounds how expensive each check is — and a genuinely fast large list needs both, not just whichever one happens to be top of mind.
+
+---
+
+## Scenario — Question 10
+
+**Q10: A signup form's username field uses an async validator (Intermediate Q20) that calls an API to check availability. QA reports that if a user types "al", pauses briefly, then quickly types "ice" to make "alice", the field sometimes incorrectly shows "username taken" — even though "alice" is actually available and "al" was, correctly, taken. Diagnose the race condition and fix it.**
+
+**Root diagnosis:** this is an out-of-order-response race. Typing "al" triggers an async validation call for "al"; if that call happens to be slow (backend load, a different code path), and the user finishes typing "alice" before it resolves, a second validation call fires for "alice" and returns quickly. If the validator's implementation doesn't properly cancel the in-flight "al" request when a new value arrives — because it wasn't built on `switchMap`-style cancellation internally — the slow "al" response (correctly "taken") can arrive *after* the fast "alice" response and overwrite the control's validity state, incorrectly marking "alice" as taken.
+
+**Confirming it:** reproduce with an artificial delay on the validation endpoint keyed to specific test values (delay "al"'s response by 2s, "alice"'s by 200ms) and watch the Network tab — both requests are visibly in flight simultaneously, and the control's `errors` ends up reflecting whichever response's callback happened to execute last, not necessarily the one matching the control's *current* value.
+
+**The fix — build the async validator on `switchMap` over the triggering pipeline itself, not as an isolated one-shot call per invocation:**
+```typescript
+export function uniqueUsernameValidator(userService: UserService): AsyncValidatorFn {
+  return (control: AbstractControl): Observable<ValidationErrors | null> => {
+    if (!control.value) return of(null);
+    return timer(300).pipe(                                  // debounce inside the same cancellable pipeline
+      switchMap(() => userService.checkUsernameAvailable(control.value)),
+      map(isAvailable => (isAvailable ? null : { usernameTaken: true })),
+      catchError(() => of(null)),                             // fail open on a network error, don't block signup
+    );
+  };
+}
+```
+Angular re-invokes an `AsyncValidatorFn` on every qualifying value change; wrapping the debounce (`timer(300)`) *inside* the same `switchMap`-based pipe as the actual availability check, rather than as a separate mechanism outside the validator, means each new invocation's own internal timer/request chain is what gets cancelled when Angular calls the validator again for a newer value — rather than two independent, uncoordinated network calls racing each other to completion.
+
+Pair this with `updateOn: 'blur'` (Intermediate Q20) as a first line of defense — reducing how often the async validator is invoked at all reduces the *frequency* of the race, even though the `switchMap`-based fix is what actually eliminates it structurally rather than just making it rarer.
+
+**Root lesson:** an async validator that "looks correct" in a slow, one-keystroke-at-a-time manual test can hide a race condition that only surfaces under realistic fast typing with variable backend latency — and because RxJS's `switchMap` cancellation is precisely the tool built for exactly this class of bug (echoing Intermediate Q2's typeahead-search example), the fix is almost always to verify the validator's async chain is genuinely cancellable end to end, not just superficially wrapped in an Observable.
+
+---
+
+## Scenario — Question 11
+
+**Q11: You've inherited a large (200+ component) Angular application built entirely on NgModules, and leadership wants it migrated to standalone components. A big-bang rewrite isn't realistic — the app has to keep shipping features throughout. Design the migration approach.**
+
+**Framing:** this is an incremental-migration problem, not a rewrite problem — Angular explicitly supports NgModules and standalone components coexisting and interoperating during a transition (Beginner Q4), which is what makes an incremental path viable at all rather than forcing a risky big-bang switch.
+
+**The migration approach:**
+
+1. **Run the official `ng generate @angular/core:standalone` schematic first**, which automates the bulk of the mechanical conversion (adding `standalone: true` with an explicit `imports` array, removing entries from `NgModule.declarations`) far more reliably across 200+ components than a manual pass — tracing each component's actual template dependencies into an explicit `imports` array is exactly the tedious, error-prone part automation should own.
+2. **Migrate leaf/feature modules before the app's root and shared modules.** A self-contained feature module with few or no dependents (a "reports" feature, say) can be converted end to end without touching anything else, since NgModule-declared components can still import and use standalone components, and vice versa, throughout the transition. Save `AppModule`, `SharedModule`, and `CoreModule` — the most widely depended-upon modules — for later, once enough leaf modules are converted that removing the shared module becomes a smaller, better-understood change.
+3. **Convert bootstrapping only once a meaningful share of the tree is standalone.** Switching `platformBrowserDynamic().bootstrapModule(AppModule)` to `bootstrapApplication(AppComponent, { providers: [...] })`, and routing from `RouterModule.forRoot(routes)` to `provideRouter(routes)`, is a single, all-at-once cutover point — you can't half-bootstrap — so sequence it deliberately once its prerequisites (every provider previously registered via `NgModule.providers` identified and relocated) are actually ready, rather than attempting it as the very first step.
+4. **Expect — and rely on — both patterns running side by side for an extended period.** A standalone component can `imports` an NgModule it still needs directives/pipes from, and an NgModule can `imports` a standalone component directly, since standalone components/directives/pipes are importable the same way another module would be. This bidirectional interop is precisely what makes a gradual, feature-by-feature migration structurally sound rather than requiring careful big-bang sequencing.
+5. **Update each component's tests alongside its own conversion.** `TestBed.configureTestingModule({ imports: [MyStandaloneComponent] })` replaces `declarations: [MyComponent]` (Beginner Q7) for a newly-converted component's spec file — a small, mechanical, low-risk change to land in the same commit as the component's own conversion.
+6. **Set a policy for new code immediately:** every component written from this point forward is standalone, regardless of which module its neighbors still live in — a zero-cost decision on day one that stops the backlog from continuing to grow while the existing one is worked down.
+
+**Common pitfall:** migrating `SharedModule`/`CoreModule` early because they feel foundational — in practice this is backwards, since widely-depended-upon modules have the largest blast radius if the conversion introduces a subtle regression (a missed import, a shifted provider scope), and converting leaf modules first builds team familiarity and tooling confidence on lower-stakes code before the highest-fanout modules are touched.
+
+**Root lesson:** the schematic-assisted, leaf-to-root, side-by-side migration path exists specifically because Angular's standalone/NgModule interop was designed for exactly this scenario — a 200+ component app doesn't need, and shouldn't attempt, a stop-the-world rewrite; it needs a sequenced, incremental conversion with the riskiest, most-depended-upon pieces deliberately saved for when the team has the most practice and the least remaining surface area to get wrong.
+
+---
+
+## Scenario — Question 12
+
+**Q12: Two sibling `OnPush` components — a `CartSummaryComponent` and a `CartIconComponent` in the header — both receive the same `CartService`-provided `cart` object as an `@Input()` from their shared parent. When a user adds an item, `CartSummaryComponent` updates immediately, but `CartIconComponent`'s badge count only updates the *next* time the user clicks something else. Diagnose why the two `OnPush` siblings behave differently for what should be the same update, and fix it.**
+
+**Root diagnosis:** this is a variant of Scenario Q4's "OnPush + mutation" cause, but the genuinely confusing part is *why one sibling updates immediately and the other doesn't*. The likely explanation: the "add to cart" action happens *inside* `CartSummaryComponent`'s own template (its own click handler) — under `OnPush`, an event originating from within a component's own template is one of the triggers that forces a check of that component (Advanced Q1's rule), so `CartSummaryComponent` gets checked and re-renders regardless of whether the `cart` reference actually changed, simply because the click happened inside it. `CartIconComponent`, meanwhile, has no event of its own firing — it's a passive `@Input()` recipient sitting in the header — so it's only checked when its own `@Input()` reference changes, an event happens inside *it*, or an `async`-piped source it depends on emits. If `CartService.addItem()` mutates the existing cart in place (`this.cart.items.push(newItem)`) rather than replacing it with a new reference, `CartIconComponent`'s `@Input()` reference never changes, so nothing tells Angular to check it — until an unrelated click elsewhere happens to trigger a check that reaches it anyway, which is why it "eventually" catches up rather than never updating at all.
+
+**Confirming it:** inspect `CartService.addItem()` for in-place mutation versus reference replacement; add a temporary log in `CartIconComponent`'s `ngOnChanges` (or an `effect()`) to confirm it doesn't fire on the add-to-cart action itself, only on the later unrelated click.
+
+**The fix — treat the shared cart state immutably at the source, and have both siblings read it directly rather than through a parent-owned `@Input()`:**
+```typescript
+@Injectable({ providedIn: 'root' })
+export class CartService {
+  private cartSignal = signal<Cart>({ items: [] });
+  readonly cart = this.cartSignal.asReadonly();
+
+  addItem(item: CartItem) {
+    this.cartSignal.update(current => ({
+      ...current,
+      items: [...current.items, item], // new array AND new cart object reference
+    }));
+  }
+}
+```
+With the cart exposed as a signal read directly by each sibling, both components depend on the same reactive source and are each notified precisely when it actually changes — removing the dependency on "did some unrelated click happen to also trigger a check of this specific component," which is what made the bug look inconsistent between siblings in the first place.
+
+**Common pitfall:** "fixing" this by simply removing `OnPush` from `CartIconComponent` — the badge does update reliably then, since Default strategy checks it on any event regardless of reference changes, but this reintroduces the exact blanket-checking cost `OnPush` exists to avoid, on a component (a header badge) that's present and checked on every single page — a particularly poor place to give up that optimization.
+
+**Root lesson:** two sibling `OnPush` components receiving the "same" shared state can behave inconsistently not because one is buggy and the other isn't, but because their own local trigger conditions differ — the durable fix is making the shared state's own change notification (a signal, an Observable) the thing each component depends on directly, rather than relying on `@Input()` propagation through a parent and hoping enough incidental events keep every consumer in sync.
+
+---
+
+## Scenario — Question 13
+
+**Q13: Two services, `AuthService` and `UserPreferencesService`, each inject the other in their constructors — `AuthService` needs preferences to decide default post-login routing, and `UserPreferencesService` needs `AuthService` to know the current user ID for loading preferences. The app throws `NG0200: Circular dependency in DI detected` at startup. Diagnose why this happens and fix it.**
+
+**Root diagnosis:** Angular's injector resolves a dependency by fully constructing it — including resolving *its own* constructor dependencies — before handing it back to whatever asked for it. If `AuthService`'s constructor asks for `UserPreferencesService`, and constructing that requires resolving `AuthService` (which isn't finished constructing yet, since we're still in the middle of building it to satisfy `UserPreferencesService`'s dependency), the injector detects it's been asked to construct something it's already in the process of constructing, and throws rather than looping forever.
+
+```typescript
+@Injectable({ providedIn: 'root' })
+export class AuthService {
+  constructor(private prefs: UserPreferencesService) {} // triggers construction of UserPreferencesService
+}
+
+@Injectable({ providedIn: 'root' })
+export class UserPreferencesService {
+  constructor(private auth: AuthService) {} // ...which needs AuthService, still mid-construction — NG0200
+}
+```
+
+**Fix 1 — remove the unnecessary direction of the dependency.** Often, on inspection, one direction isn't a true construction-time dependency at all — `AuthService` doesn't need `UserPreferencesService` *injected*, it needs to trigger loading preferences *after* login succeeds, which a higher-level orchestrator (a component, or a third service) can do by calling `userPreferencesService.loadDefaults(userId)` once login completes, rather than `AuthService` owning that call internally.
+
+**Fix 2 — use `Injector.get()` for a lazy, deferred lookup**, when the two services genuinely need to reference each other but not *during construction*:
+```typescript
+@Injectable({ providedIn: 'root' })
+export class AuthService {
+  private injector = inject(Injector);
+  private get prefs(): UserPreferencesService {
+    return this.injector.get(UserPreferencesService); // resolved on first actual use, not at AuthService's own construction
+  }
+}
+```
+This breaks the cycle because `UserPreferencesService` is no longer constructed as a side effect of constructing `AuthService` — it's resolved the first time `this.prefs` is actually accessed, by which point both services' constructors have long since finished.
+
+**Fix 3 — extract the genuinely shared state into a third service both depend on**, usually the more architecturally honest fix: introduce a `CurrentUserService` holding just the user ID/session state both services need, with neither `AuthService` nor `UserPreferencesService` depending on the other at all:
+```typescript
+@Injectable({ providedIn: 'root' })
+export class CurrentUserService {
+  userId = signal<string | null>(null);
+}
+// AuthService sets CurrentUserService.userId on login; UserPreferencesService reads it — no cycle.
+```
+
+**Common pitfall:** reaching for `Injector.get()`/lazy resolution (Fix 2) by default because it's the least invasive change, when the underlying design genuinely has two services each needing logic that depends on the other's current state — that's usually a sign the shared state belongs in a third service (Fix 3), not a signal to paper over a real circular *design* with a deferred lookup.
+
+**Root lesson:** `NG0200` surfaces a design smell, not just a mechanical injector limitation to route around — two services needing each other at construction time almost always means they're modeling an implicit shared concept (here, "the current user and their session") that hasn't been extracted into its own service yet, and the most durable fix addresses that directly rather than choosing whichever workaround makes the error message go away fastest.
+
+---
+
+## Beginner — Question 16
+
+**Q16: How would you build your own custom structural directive — say, an `*appUnless` that's the inverse of `*ngIf`?**
+
+A custom structural directive is a class decorated with `@Directive`, applied with the `*` shorthand exactly like the built-in `*ngIf`/`*ngFor` (Beginner Q3), that decides whether (and how) to render the template it's attached to by working directly with `TemplateRef` and `ViewContainerRef`.
+
+```typescript
+@Directive({
+  selector: '[appUnless]',
+  standalone: true,
+})
+export class UnlessDirective {
+  private hasView = false;
+  private templateRef = inject(TemplateRef<unknown>);
+  private viewContainerRef = inject(ViewContainerRef);
+
+  @Input() set appUnless(condition: boolean) {
+    if (!condition && !this.hasView) {
+      this.viewContainerRef.createEmbeddedView(this.templateRef);
+      this.hasView = true;
+    } else if (condition && this.hasView) {
+      this.viewContainerRef.clear();
+      this.hasView = false;
+    }
+  }
+}
+```
+```html
+<div *appUnless="isLoading">Content shown when NOT loading</div>
+```
+
+**Mechanism:** this is the exact desugaring Beginner Q3 described for `*ngIf` — `*appUnless="cond"` becomes `<ng-template [appUnless]="cond">...</ng-template>` under the hood, so Angular compiles the element's content into a `TemplateRef` and passes `cond` into an `@Input()` whose name matches the directive's selector (`appUnless`), which is exactly what the `*` shorthand relies on to bind a single value directly. Inside the setter, `viewContainerRef.createEmbeddedView(templateRef)` instantiates the template's content into the DOM at the directive's location, and `viewContainerRef.clear()` destroys it — running `ngOnDestroy` on anything inside, precisely mirroring what `*ngIf` does internally when its condition flips.
+
+**Common pitfall:** forgetting to track `hasView` and calling `createEmbeddedView` unconditionally on every change, which stacks duplicate views on repeated toggles instead of showing/hiding one. Also, `clear()` genuinely destroys the content's state, so any local component state inside the toggled-off block is lost on re-show — the same trade-off `*ngIf` already has versus CSS-based hiding.
+
+**Practical guidance:** reach for a custom structural directive when you need reusable show/hide-with-teardown logic beyond what the built-in `@if`/`@for`/`@switch` express directly — e.g., a `*appHasPermission="role"` directive centralizing an authorization check across the app. For anything the built-ins already express, prefer them — they're better optimized by the compiler and need no extra code to maintain.
+
+---
+
+## Beginner — Question 17
+
+**Q17: At a basic level, what is a Signal, and how is reading `count()` different from just having a plain class property `count`?**
+
+A **Signal** (`signal(initialValue)`) is a wrapper around a value that Angular can watch — you read its current value by calling it as a function (`count()`), and you change it with `.set(newValue)` or `.update(fn)` rather than plain assignment.
+
+```typescript
+@Component({
+  selector: 'app-counter',
+  standalone: true,
+  template: `<button (click)="increment()">Count: {{ count() }}</button>`,
+})
+export class CounterComponent {
+  count = signal(0);
+  increment() {
+    this.count.update(n => n + 1);
+  }
+}
+```
+
+**Why this looks like it "does the same thing" as a plain property at first:** a plain `count = 0` property, incremented with `this.count++`, also updates correctly in the template under Angular's normal (Zone.js-based) change detection — the click still triggers a full change-detection pass that re-checks the binding and picks up the new value. This is the source of a common beginner question: if both "work," what's the actual difference?
+
+**The real difference is *how* Angular finds out something changed**, not whether the update itself works. A plain property relies entirely on Angular's blanket "something happened, re-check everything relevant" behavior. A signal *actively declares* exactly which template bindings (or `computed()`s) read it, so when it changes, Angular can, in principle, update precisely those bindings rather than relying on a broad re-check triggered by an unrelated event elsewhere. That precision is what unlocks real benefits once combined with `OnPush`/zoneless change detection, covered in the Advanced tier — for now, the practical takeaway is simpler: a signal is a container Angular is explicitly watching, not just a plain variable it happens to re-read whenever something else prompts it to look.
+
+**Common pitfall:** forgetting the parentheses in the template — `{{ count }}` prints the signal function itself (its reference, effectively unhelpful text), not its value; you must call it, `{{ count() }}`, every time you read it.
+
+**Practical guidance:** for new component state, prefer `signal()`/`.set()`/`.update()` over plain class properties as the modern default — the payoff compounds once you start deriving values with `computed()` or reacting to changes with `effect()`, both of which only work cleanly against signals, not plain properties.
+
+---
 
 ---
