@@ -1979,3 +1979,490 @@ Because the downscoped token is a genuinely separate, narrower credential rather
 **Common Pitfall:** passing a service's own full-privilege access token directly to a less-trusted downstream component "because it's simpler than implementing Token Exchange" — this directly violates least privilege at the token level, meaning any compromise of that downstream component (however minor its own actual job) exposes the originating service's entire access scope, not just the narrow subset that component genuinely needed.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is ASP.NET Core Identity's Password Hasher, and how does it protect stored passwords even if the database itself is stolen?**
+
+Never store a password itself, or even a plain, unsalted hash of it — `ASP.NET Core Identity`'s default `PasswordHasher<TUser>` runs every password through a slow, salted key-derivation function so that even a full database breach doesn't hand an attacker usable passwords.
+
+**The mechanism, step by step:**
+```csharp
+// Registration -- HashPassword generates a random salt and derives a hash from it
+var hasher = new PasswordHasher<ApplicationUser>();
+string hashedPassword = hasher.HashPassword(user, "MyP@ssw0rd123");
+// Stored in the database: a single string encoding {format marker}{salt}{derived hash}{iteration count}
+
+// Login -- VerifyHashedPassword re-derives the hash using the STORED salt and compares
+PasswordVerificationResult result =
+    hasher.VerifyHashedPassword(user, hashedPassword, "MyP@ssw0rd123");
+// Success, SuccessRehashNeeded, or Failed
+```
+Internally (Identity v3 format), this is **PBKDF2** with `HMACSHA256`, a 128-bit random salt generated fresh per password, and a configurable iteration count (10,000 by default in current versions) — the salt is stored alongside the hash (not secret), while the *slowness* of the algorithm is the actual defense.
+
+**Why slowness matters more than secrecy of the algorithm:** a fast hash like plain `SHA256` can be brute-forced at billions of guesses per second on commodity GPU hardware. PBKDF2's deliberate iteration count means each single guess costs meaningfully more compute, turning a brute-force attack against even a stolen database from "hours" into "years" for a reasonably strong password.
+
+**Why the salt matters independently of the iteration count:** without a per-user random salt, an attacker could precompute a **rainbow table** (a lookup of hash → common password) once and reuse it against every stolen account instantly. A unique salt per user forces the attacker to redo the expensive computation separately for every single account, even if two users happen to share the same password.
+
+**Common Pitfall:** treating the iteration count as "set once and forget" — hardware gets faster every year, so an iteration count considered safe in 2015 is meaningfully weaker today. `VerifyHashedPassword` returning `SuccessRehashNeeded` is Identity's built-in signal that the stored hash used outdated parameters; the correct response is to silently re-hash the password with current parameters right after that successful login, rather than waiting for a mass, disruptive password-reset event.
+
+---
+
+## Beginner — Question 24
+
+**Q24: In OAuth 2.0, what is the difference between a `client_id` and a `client_secret`, and why is only one of them meant to be kept confidential?**
+
+Both identify an application ("client") to the Authorization Server, but they play very different roles: `client_id` is a public identifier, while `client_secret` is a credential that proves the application is genuinely who it claims to be.
+
+**The distinction:**
+```text
+client_id:     "my-web-app-12345"
+               -- Public. Appears in browser redirect URLs, mobile app manifests,
+                  JavaScript bundles. Identifies WHICH application is making a request,
+                  the same way a username identifies WHICH person is logging in.
+
+client_secret: "8f3a9c2e1b7d4f6a..."
+               -- CONFIDENTIAL. Must never appear in a browser URL, client-side
+                  JavaScript, or a mobile app binary. Proves the request genuinely
+                  comes from the legitimate application's own backend, the same way
+                  a password proves a specific person is who they claim to be.
+```
+
+**Where each is used, concretely:**
+```csharp
+// client_id: fine to embed even in a public SPA's config -- it's not a secret
+var authUrl = $"https://idp.com/authorize?client_id=my-web-app-12345&response_type=code&...";
+
+// client_secret: used ONLY in a server-to-server call, never sent through the browser
+var tokenRequest = new FormUrlEncodedContent(new Dictionary<string, string>
+{
+    ["grant_type"] = "authorization_code",
+    ["code"] = returnedCode,
+    ["client_id"] = "my-web-app-12345",
+    ["client_secret"] = serverSideSecretFromConfig   // stays on the backend, always
+});
+```
+
+**Why this splits applications into "confidential clients" and "public clients":** a traditional server-rendered web app can safely hold a `client_secret` in its backend configuration — its code never ships to the end user's device. A SPA or mobile app, however, ships its entire codebase to the user's device; any secret embedded in it can be extracted by inspecting the JavaScript bundle or decompiling the binary. This is exactly why public clients (SPAs, mobile apps) use PKCE instead of a `client_secret` to prove their legitimacy (covered elsewhere) — PKCE's `code_verifier` is generated fresh per login attempt rather than baked permanently into distributed code.
+
+**Common Pitfall:** embedding a `client_secret` in a mobile app or SPA "because the login flow needs it" — this is a common misreading of OAuth setup guides written for confidential, server-side clients. Any secret shipped inside a public client's distributed code should be assumed compromised the moment it ships; it provides no real confidentiality at all.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is the difference between HS256 and RS256 as JWT signing algorithms, and why does a multi-service or third-party-facing architecture usually require RS256?**
+
+Both are signature algorithms a JWT's header can specify, but they differ in a way that fundamentally changes who is able to *verify* a token versus who is able to *forge* one.
+
+**HS256 — HMAC with SHA-256, a symmetric algorithm (one shared secret):**
+```csharp
+// The SAME secret key both SIGNS and VERIFIES the token
+var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(sharedSecret));
+var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+// Any party holding `sharedSecret` can BOTH issue valid tokens AND verify them
+```
+Whoever holds the shared secret can create a perfectly valid, correctly-signed token — there's no distinction between "can verify" and "can forge." This is fine when exactly one application both issues and validates its own tokens, but breaks down the moment a second service needs to *verify* tokens without also being trusted to *issue* them.
+
+**RS256 — RSA signature with SHA-256, an asymmetric algorithm (a key pair):**
+```csharp
+// The Authorization Server signs with its PRIVATE key (never shared)
+var creds = new SigningCredentials(rsaPrivateKey, SecurityAlgorithms.RsaSha256);
+
+// Any Resource Server can verify using only the PUBLIC key (safe to distribute widely,
+// typically published at a JWKS endpoint, covered elsewhere)
+var validationParams = new TokenValidationParameters { IssuerSigningKey = rsaPublicKey };
+```
+Verification only requires the *public* key, which is safe to hand out to every resource server, third-party integration partner, or even publish openly — none of them can use the public key to forge a new token, only to confirm one already signed by the private key is genuine.
+
+**Why this matters for multi-service or third-party architectures specifically:** with HS256, every service that needs to *verify* tokens must also possess the same secret capable of *issuing* them — a single compromised or careless microservice leaking that shared secret means an attacker can now forge tokens for the entire system. With RS256, dozens of resource servers (or external partners) can safely verify tokens using only the widely-distributed public key, while only the single Authorization Server holding the private key can ever mint a new one.
+
+**Common Pitfall:** defaulting to HS256 "because it's simpler and the sample code uses it" in an architecture that will eventually need multiple independently-deployed services or external partners verifying tokens — migrating from HS256 to RS256 later means every verifying service needs a coordinated configuration change, whereas starting with RS256 costs little extra complexity upfront and scales cleanly as more verifiers are added.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What are the common strategies for isolating tenant data in a multi-tenant identity architecture, and what security/operational trade-off does each one make?**
+
+"Multi-tenant isolation" spans a spectrum from cheapest-to-operate-but-riskiest to most-isolated-but-most-expensive; the right choice depends on how catastrophic a cross-tenant leak would be versus how many tenants (and how large) the system needs to support economically.
+
+**1. Shared database, shared schema, discriminator column (`TenantId`):**
+```sql
+SELECT * FROM Orders WHERE TenantId = @currentTenantId
+```
+Cheapest to operate — one database serves every tenant. The entire isolation guarantee rests on *every single query* correctly filtering by `TenantId` (typically enforced via EF Core Global Query Filters, covered under the tenant-isolation scenario elsewhere) — a single missed filter anywhere in the codebase is a direct cross-tenant data leak. Best suited to a large number of small tenants where per-tenant infrastructure cost would be prohibitive.
+
+**2. Shared database, separate schema per tenant:**
+```sql
+-- Tenant A's tables live in schema "tenant_a", Tenant B's in "tenant_b"
+SELECT * FROM tenant_a.Orders;
+```
+Stronger isolation than a discriminator column — a connection scoped to the wrong schema simply can't see another tenant's tables at all, even with a buggy query. Still shares the same database engine instance (and therefore its performance characteristics and blast radius for an engine-level compromise) across tenants; migrations must run per-schema, adding operational overhead as the tenant count grows.
+
+**3. Separate database per tenant:**
+```csharp
+var connectionString = _tenantConfig.GetConnectionStringFor(tenantId);
+using var context = new AppDbContext(connectionString);
+```
+Strongest isolation — a query literally cannot reach another tenant's data because it never has a connection to that tenant's database at all, structurally ruling out the "forgot the filter" failure mode entirely. Highest operational cost: connection pool management, migrations, and backups all multiply by tenant count, and this typically only scales economically to dozens or hundreds of tenants, not the tens of thousands a discriminator-column model can serve on shared infrastructure.
+
+**Decision guide:** regulated industries (healthcare, finance) or a small number of large, high-value enterprise tenants usually justify separate-database isolation despite the cost; a large number of small tenants (a typical B2C SaaS) usually can only afford the shared-schema discriminator-column model, and must invest correspondingly more engineering effort into making that filter genuinely impossible to accidentally omit.
+
+**Common Pitfall:** choosing the shared-schema, discriminator-column model for cost reasons without also investing in structural enforcement (Global Query Filters, automated tests asserting every entity has a filter configured) — the model itself is a reasonable trade-off, but only if paired with tooling that makes "forgot to filter by TenantId" structurally difficult rather than merely a code-review convention.
+
+---
+
+## Advanced — Question 23
+
+**Q23: How does zero-downtime JWT signing key rotation work in practice, and what specifically breaks if a key is rotated without an overlapping validity window?**
+
+Rotating a signing key isn't a single atomic swap across every server at once — it must account for tokens already issued under the *old* key still being presented for verification for as long as their (short) lifespan allows, even after the *new* key comes into use for freshly-issued tokens.
+
+**The naive, broken approach — swap the key everywhere at once:**
+```text
+T+0:  Authorization Server switches to signing NEW tokens with Key B, and
+      resource servers are updated to ONLY trust Key B
+T+1s: A user's still-valid, not-yet-expired token (signed minutes earlier
+      with Key A) is presented to a resource server -- REJECTED, because
+      Key A is no longer trusted anywhere
+```
+Every token issued under the old key becomes instantly invalid the moment the switch happens — for an access token with even a 15-minute lifespan, this immediately breaks every active session system-wide, not just newly-issued tokens.
+
+**The correct approach — publish both keys via JWKS during an overlap window:**
+```json
+// The JWKS endpoint (/.well-known/jwks.json) lists MULTIPLE currently-valid keys,
+// each identified by a "kid" (Key ID) that appears in every token's header
+{
+  "keys": [
+    { "kid": "key-a-2026-01", "kty": "RSA", "use": "sig", "n": "...", "e": "AQAB" },
+    { "kid": "key-b-2026-02", "kty": "RSA", "use": "sig", "n": "...", "e": "AQAB" }
+  ]
+}
+```
+```text
+1. NEW tokens start being signed with Key B; the token header's "kid" says "key-b-2026-02"
+2. The JWKS endpoint continues listing BOTH Key A and Key B during the overlap window
+3. Resource servers fetch the JWKS and use each token's own "kid" header to select
+   WHICH published key to verify against -- an OLD token (kid: key-a) still verifies
+   successfully against the still-published Key A; a NEW token (kid: key-b) verifies
+   against Key B
+4. Only once EVERY token signed under Key A has naturally expired (overlap window >=
+   the access token's max lifespan) is Key A finally removed from the JWKS response
+```
+
+**Why the overlap window's length matters:** it must be at least as long as the longest-lived token that could still be in circulation when the rotation began — rotating too aggressively (removing the old key before all tokens signed under it have expired) reproduces exactly the naive approach's outage, just delayed by however long the (too-short) overlap window was.
+
+**Common Pitfall:** caching the JWKS response for too long on the resource-server side without respecting `Cache-Control` headers or a reasonable refresh interval — if a resource server cached the JWKS *before* the rotation began and doesn't refresh it during the overlap window, it never learns about Key B at all, and rejects every newly-issued token as having an unrecognized `kid`, even though the JWKS endpoint itself was updated correctly.
+
+---
+
+## Advanced — Question 24
+
+**Q24: How do WS-Federation, SAML, and OpenID Connect compare as federated identity protocols, and why do enterprises still run legacy WS-Federation/SAML deployments alongside newer OIDC ones rather than migrating outright?**
+
+All three let an application trust an external Identity Provider's assertion about a user's identity, but they differ substantially in message format, transport, and era of design — which is exactly why a large enterprise IT estate often runs all three simultaneously rather than cleanly on one.
+
+**WS-Federation — the oldest of the three, XML-based, designed alongside the broader WS-* SOAP ecosystem:**
+```xml
+<!-- A WS-Federation sign-in response embeds a SAML-like token inside a form POST -->
+<wsp:AppliesTo><wsa:EndpointReference>
+  <wsa:Address>https://app.company.com/</wsa:Address>
+</wsa:EndpointReference></wsp:AppliesTo>
+```
+Common in older on-premises Microsoft-centric environments (classic ADFS deployments, legacy `System.IdentityModel`-based .NET Framework apps). Verbose XML, no equivalent notion of scoped API access (it's authentication-only, no OAuth-style delegated API authorization).
+
+**SAML 2.0 — also XML-based, the long-standing enterprise SSO standard, more actively maintained than WS-Federation:**
+```xml
+<saml:Assertion>
+  <saml:Subject><saml:NameID>alice@company.com</saml:NameID></saml:Subject>
+  <saml:AttributeStatement>
+    <saml:Attribute Name="department"><saml:AttributeValue>Engineering</saml:AttributeValue></saml:Attribute>
+  </saml:AttributeStatement>
+</saml:Assertion>
+```
+Still the dominant protocol for enterprise SSO into large, established SaaS platforms (Salesforce, Workday, many others) — its XML Assertion plays the same structural role as an OIDC ID Token, but is verbose, requires XML digital signature handling (a historically bug-prone area of security libraries), and has no native mobile-app-friendly flow.
+
+**OpenID Connect — the modern, JSON/JWT-based layer on OAuth 2.0 (covered extensively elsewhere):**
+Compact, mobile- and SPA-friendly, and — critically — naturally extends into OAuth 2.0's scoped API authorization model, something neither WS-Federation nor SAML was designed to address at all.
+
+**Why enterprises don't simply migrate everything to OIDC:** a large enterprise's SSO estate typically includes dozens to hundreds of already-integrated third-party SaaS applications, many of which were integrated years ago against whatever protocol was standard *then* — re-integrating a stable, working SAML connection to a vendor purely for protocol modernization carries real migration risk and vendor-coordination cost for no functional gain if the existing integration works correctly. Identity Providers like Entra ID and Okta support all three protocols simultaneously specifically so that legacy integrations can keep running unchanged while new integrations are built on OIDC.
+
+**Common Pitfall:** assuming "SAML is legacy and shouldn't be used for new integrations" is universally true — for authentication-only, browser-based enterprise SSO into a third-party SaaS product that only supports SAML on its side, SAML is simply the protocol required by that vendor, not a mistake; the "OIDC is more modern" framing applies to protocol *design*, not necessarily to which protocol is correct for a specific integration constraint.
+
+---
+
+## Advanced — Question 25
+
+**Q25: When a password hashing algorithm's parameters (or the algorithm itself) need to be strengthened — say, PBKDF2's iteration count needs raising, or migrating to Argon2 entirely — how can this be done without forcing every user to reset their password?**
+
+Re-hashing every stored password at once is impossible without knowing users' plaintext passwords (which the system correctly never stored) — the standard solution is a **rehash-on-next-login** pattern that migrates each user's hash gradually, transparently, the next time they happen to authenticate.
+
+**The mechanism:**
+```csharp
+public async Task<IActionResult> Login(string email, string password)
+{
+    var user = await _users.FindByEmailAsync(email);
+    var hasher = new PasswordHasher<ApplicationUser>();
+
+    var result = hasher.VerifyHashedPassword(user, user.PasswordHash, password);
+
+    if (result == PasswordVerificationResult.Failed)
+        return Unauthorized();
+
+    if (result == PasswordVerificationResult.SuccessRehashNeeded)
+    {
+        // The password was correct, but hashed with OUTDATED parameters (old iteration
+        // count, or an old algorithm entirely) -- we still HAVE the plaintext right now,
+        // at this exact moment, because the user just typed it to log in
+        user.PasswordHash = hasher.HashPassword(user, password); // re-hash with CURRENT parameters
+        await _users.UpdateAsync(user);
+    }
+
+    return SignInUser(user);
+}
+```
+The plaintext password only ever exists transiently, in memory, at the moment of a successful login — which is precisely the one moment a re-hash with updated parameters is possible at all. `PasswordVerificationResult.SuccessRehashNeeded` (or an equivalent explicit check comparing the stored hash's embedded iteration count/algorithm marker against current configuration) is the signal that this particular user's hash is due for an upgrade.
+
+**Why this is inherently gradual, not instantaneous:** a user who logs in daily gets migrated almost immediately; a user who logs in once a year keeps their old, weaker hash until their next login — meaningfully, this means a "raise the iteration count" change doesn't uniformly protect every account the moment it ships, only the accounts that authenticate again afterward. For a genuinely urgent security requirement (a confirmed breach of the *old* algorithm itself, not just "it's aging"), this gradual migration alone isn't sufficient and must be paired with forcing a password reset for accounts that haven't re-authenticated within an acceptable window.
+
+**Common Pitfall:** changing the hashing configuration going forward (new registrations get the new parameters) but never implementing the rehash-on-login check at all — this silently leaves every existing user permanently on the old, weaker parameters forever, since nothing about a normal login flow otherwise re-derives or updates a stored hash once it's written.
+
+---
+
+## Scenario — Question 6
+
+**Q6: Your monitoring flags a refresh token being used twice in quick succession from two different IP addresses. Refresh Token Rotation is already implemented. Walk through what's actually happening and how the system should respond in real time — not just what rotation with reuse detection means conceptually.**
+
+Rotation alone (issuing a new refresh token and invalidating the old one on every use) already limits a stolen token's window, but the *reuse* itself — the old, already-rotated-away token being presented again — is a distinguishable, actionable signal that shouldn't just be silently rejected.
+
+**Reconstructing the timeline from the two IPs:**
+```text
+T+0:   Legitimate user's app uses Refresh Token #1 (from IP-A) -> issued Refresh Token #2,
+       Token #1 is marked used/invalidated in the database
+T+30s: An ATTACKER, who stole Token #1 earlier (e.g., via a compromised device backup,
+       intercepted traffic, or a leaked log), uses Token #1 (from IP-B) -> the Authorization
+       Server sees a refresh token that's ALREADY been marked used
+T+90s: The legitimate app's NEXT silent refresh attempt uses Token #2 (from IP-A) -- this
+       one is still technically valid, since Token #2 was never itself compromised... YET
+```
+The critical detail: at T+30s, the system doesn't just reject the attacker's request — a refresh token being reused *after* it was already rotated away is a strong signal that a copy of that specific token leaked to someone else, since under normal operation only one party should ever hold "the current" refresh token at a time.
+
+**The correct real-time response — revoke the entire token family, not just the reused token:**
+```csharp
+public async Task<TokenResponse> RefreshAsync(string presentedToken)
+{
+    var record = await _tokenStore.FindByTokenAsync(presentedToken);
+
+    if (record.IsAlreadyRotated)
+    {
+        // This exact token was already exchanged once before -- REUSE DETECTED.
+        // Revoke every token descended from the same original login (the "token family"),
+        // not just this one token -- Token #2 (still technically unused) must ALSO die.
+        await _tokenStore.RevokeEntireFamilyAsync(record.FamilyId);
+        await _alerting.FlagPossibleTheftAsync(record.UserId, record.FamilyId);
+        throw new SecurityTokenException("Refresh token reuse detected; session family revoked.");
+    }
+
+    // Normal path: rotate as usual
+    ...
+}
+```
+Revoking only the specific reused token (Token #1) while leaving Token #2 valid would let the legitimate user keep their session alive — but it would also mean the *investigation* has no forcing function, and if the attacker's theft method (compromised device, malware) is ongoing rather than a one-time leak, they could simply intercept the next rotation too. Killing the entire family forces **both** parties — attacker and legitimate user alike — back to a fresh login, which is the correct trade-off: a security event serious enough to trigger reuse detection warrants re-establishing trust from scratch, not just patching the one symptom observed.
+
+**Common Pitfall:** implementing reuse detection that logs/alerts on the anomaly but doesn't actually revoke the token family automatically, relying on a human to review the alert and manually intervene — by the time a person reviews an alert, the attacker's stolen (still-valid) Token #2-equivalent may already have been used repeatedly; the revocation must be automatic and immediate, with the alert serving to inform incident response afterward, not to gate it.
+
+---
+
+## Scenario — Question 7
+
+**Q7: Immediately after a routine deploy that rotates the JWT signing key, your API starts rejecting a large fraction of requests with `401 Unauthorized`, even though affected users' tokens were issued minutes earlier and shouldn't have expired yet. Diagnose the cause and the fix.**
+
+This is the classic **key-rotation-without-overlap outage** (the mechanism is covered in depth elsewhere) — playing out concretely in production, it's worth walking through how to actually recognize and fix it under pressure.
+
+**Reconstructing what the deploy actually did:**
+```csharp
+// BEFORE the deploy -- resource server trusted ONLY Key A
+options.TokenValidationParameters.IssuerSigningKey = keyA;
+
+// The deploy's change -- swapped to trusting ONLY the NEW key, Key B
+options.TokenValidationParameters.IssuerSigningKey = keyB;   // <-- Key A is now GONE entirely
+```
+Every token issued *before* the deploy was signed with Key A. The moment the new configuration goes live, the resource server has no way to verify those tokens' signatures at all — they fail signature validation and are rejected as `401`, regardless of their actual, unexpired expiry time. Users who happened to log in (or silently refresh) *after* the deploy get tokens signed with Key B and work fine; everyone still holding a pre-deploy token is broken until their token naturally expires and they re-authenticate.
+
+**Confirming the diagnosis quickly:** decode a few of the failing requests' JWTs (without needing the signing key — the header is just Base64Url, not encrypted) and check the `kid` claim against what the resource server currently trusts:
+```json
+{ "alg": "RS256", "kid": "key-a-2026-01" }   // token's kid -- but the server now only trusts key-b-2026-02
+```
+A `kid` mismatch against the currently-configured trusted key is the specific, confirmable signature of this exact failure mode — distinguishing it from, say, a genuine expiry issue or an unrelated authentication bug.
+
+**The fix — restore Key A alongside Key B, then rotate properly:**
+```csharp
+// Immediate rollback/hotfix: trust BOTH keys during the overlap window
+options.TokenValidationParameters.IssuerSigningKeys = new[] { keyA, keyB };
+```
+This immediately un-breaks every still-valid pre-deploy token while allowing newly-issued Key-B tokens to keep working. Only once every token that could possibly have been signed with Key A has naturally expired (waiting out the access token's max lifespan) should Key A actually be removed from the trusted set.
+
+**Common Pitfall:** treating this incident as "the new key is bad, roll back to the old key entirely" instead of "trust both keys during a proper overlap window" — a full rollback to Key A alone just reproduces the identical outage in reverse for any token already issued (correctly) under Key B in the interim, rather than fixing the actual root cause: rotating without an overlap window at all.
+
+---
+
+## Scenario — Question 8
+
+**Q8: Users in your multi-tenant SaaS application start reporting that they occasionally see another company's data flash briefly in their dashboard before it corrects itself. Your `TenantId` Global Query Filter (covered elsewhere) is correctly configured. What's actually going wrong, and how do you find it?**
+
+A correctly-configured Global Query Filter rules out the database query layer as the leak's source — since the symptom is specifically transient (data "flashes" then corrects), the most likely culprit is something **caching a `ClaimsPrincipal`, a resolved tenant context, or a claims-derived value across requests from different tenants**, rather than the database filter itself being wrong.
+
+**A common root cause — a singleton or improperly-scoped cache keyed without tenant context:**
+```csharp
+// BUG: IMemoryCache entry keyed ONLY by a generic key, with NO tenant discriminator --
+// under load, one tenant's request can read a cache entry POPULATED BY A DIFFERENT TENANT'S
+// concurrent request just moments earlier
+public async Task<DashboardData> GetDashboardAsync()
+{
+    if (_cache.TryGetValue("dashboard-summary", out DashboardData cached))
+        return cached;   // <-- could be ANOTHER TENANT'S data, if they hit this endpoint moments ago
+
+    var data = await LoadDashboardForCurrentTenantAsync();
+    _cache.Set("dashboard-summary", data, TimeSpan.FromSeconds(30));
+    return data;
+}
+```
+The fix requires the cache key to genuinely incorporate the tenant identity:
+```csharp
+var cacheKey = $"dashboard-summary:{_tenantContext.TenantId}";
+if (_cache.TryGetValue(cacheKey, out DashboardData cached)) return cached;
+```
+
+**Another common root cause — an `IClaimsTransformation` (covered elsewhere) that mutates a shared, incorrectly-scoped object:** if a claims-enrichment step is accidentally registered as a singleton rather than scoped/transient, and it mutates shared state rather than the current request's own `ClaimsPrincipal`, concurrent requests from different tenants can race and briefly observe each other's enriched claims.
+
+**Why this specific bug is so hard to catch in normal testing:** it's a **race condition** — it only manifests under genuine concurrent load from multiple tenants hitting the same cached code path within the cache's TTL window, which single-user manual testing or most integration tests (running requests sequentially) simply never exercises. "Flash then corrects" is the signature of a cache TTL expiring and a legitimate re-fetch overwriting the leaked value shortly after — not a permanent, always-reproducible bug.
+
+**Common Pitfall:** fixing the immediate reported bug (this one cache key) without auditing *every* cache key, singleton service, and static/shared field in the codebase for the same missing-tenant-discriminator pattern — this class of bug tends to recur across a codebase wherever caching was added without the tenant-isolation requirement being front-of-mind, and a single fix rarely catches every instance.
+
+---
+
+## Scenario — Question 9
+
+**Q9: A partner team reports that a JWT issued by your company's Authorization Server for their "Inventory API" also works when sent to your "Payments API" — an API it was never supposed to have access to. What's the specific validation gap, and how do you close it?**
+
+Every JWT issued by a shared Authorization Server is cryptographically valid everywhere trusting that Authorization Server's signing key — signature validity alone says nothing about *which specific API* the token was intended for. The missing check is **audience (`aud`) validation**.
+
+**What's currently happening — Payments API validates signature and expiry, but not audience:**
+```csharp
+// Payments API's current (INCOMPLETE) configuration
+builder.Services.AddJwtBearer(options =>
+{
+    options.Authority = "https://identity.company.com";
+    // NO explicit Audience configured -- signature and expiry are checked,
+    // but the token's "aud" claim is never compared against anything
+});
+```
+A token minted with `"aud": "inventory-api"` passes signature validation at the Payments API just fine — the signature proves the Authorization Server genuinely issued it, but says nothing about which API it was scoped for, and Payments API never checked.
+
+**The fix — explicitly validate the audience claim:**
+```csharp
+builder.Services.AddJwtBearer(options =>
+{
+    options.Authority = "https://identity.company.com";
+    options.TokenValidationParameters.ValidAudience = "payments-api";
+    options.TokenValidationParameters.ValidateAudience = true;   // must be explicitly true
+});
+```
+Now a token whose `aud` claim says `"inventory-api"` fails validation outright at the Payments API, exactly as it should — the token proves the bearer authenticated successfully with the shared Authorization Server, but not that it was ever intended to reach this specific downstream API.
+
+**Why this is easy to miss during initial setup:** many JWT bearer configuration examples (including quick-start tutorials) omit explicit audience validation because a single-API system has no other API for a token to be misused against — the gap only becomes exploitable once a second API starts trusting the same Authorization Server, which is exactly what happened here when the Payments API was added later, copying the Inventory API's original (audience-less) configuration.
+
+**Common Pitfall:** assuming `Authority` alone is sufficient configuration for JWT bearer authentication because it enables signature validation against the Authorization Server's published keys — `Authority` establishes *trust in the issuer*, not *scoping to a specific intended API*; those are two independent checks, and omitting the second one is precisely the silent authorization bypass this scenario describes.
+
+---
+
+## Scenario — Question 10
+
+**Q10: Your ASP.NET Core MVC application currently uses cookie authentication exclusively. Product wants to add a public JSON API that mobile clients will call directly, which needs JWT bearer authentication instead. You cannot log out or disrupt any of the existing, currently-active browser sessions during the rollout. How do you introduce token-based authentication alongside the existing cookie auth?**
+
+This doesn't require choosing one mechanism over the other or migrating existing sessions at all — ASP.NET Core supports registering multiple authentication schemes simultaneously (covered elsewhere), letting the two coexist indefinitely, each serving the client type it's actually suited for.
+
+**Register both schemes side by side, without touching the existing cookie configuration:**
+```csharp
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme) // unchanged default
+    .AddCookie(CookieAuthenticationDefaults.AuthenticationScheme, options =>
+    {
+        // EXACT existing configuration -- untouched, so active sessions keep working
+    })
+    .AddJwtBearer(JwtBearerDefaults.AuthenticationScheme, options =>
+    {
+        options.Authority = "https://identity.company.com";
+        options.TokenValidationParameters.ValidAudience = "mobile-api";
+    });
+```
+Because the existing cookie scheme's configuration is left completely unchanged (and remains the default scheme), every currently-active browser session's cookie continues to authenticate exactly as it did before this change — nothing about existing sessions is invalidated, re-issued, or even touched by adding the new scheme.
+
+**Explicitly routing each endpoint to the correct scheme, rather than relying on a single default:**
+```csharp
+[Authorize(AuthenticationSchemes = CookieAuthenticationDefaults.AuthenticationScheme)]
+[HttpGet("/account/settings")]   // existing browser-facing page -- cookie auth, as always
+public IActionResult AccountSettings() { ... }
+
+[Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
+[HttpGet("/api/v1/orders")]      // NEW mobile-facing API -- JWT bearer auth
+public IActionResult GetOrders() { ... }
+```
+
+**Why this genuinely doesn't require a migration at all:** cookie authentication and JWT bearer authentication are independent authentication schemes with entirely separate credential formats (an encrypted cookie value versus a bearer token) — there is no "existing session" to convert into a token, because the mobile API's users will be a largely separate population authenticating for the first time via the new flow, while browser users keep using the mechanism they already have. The two schemes simply coexist, each applied to the endpoints appropriate for their respective client type.
+
+**Common Pitfall:** attempting to unify both under a single scheme "for consistency" — e.g., trying to make the cookie-based pages also emit and validate JWTs internally — this adds real complexity (now every browser request needs JWT issuance and validation logic layered on top of cookies) for no actual requirement; the two client types (browsers navigating pages, mobile apps calling a JSON API) are genuinely different consumers, and serving each with the mechanism suited to it is simpler than forcing a single unified approach neither client type actually needs.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A security researcher reports that your OAuth 2.0 `redirect_uri` validation only checks that a submitted callback URL *starts with* your registered domain — e.g., `https://app.company.com` — rather than matching it exactly. Explain exactly how this enables an attack, and what the fix is.**
+
+Prefix (or substring) matching on `redirect_uri` is a well-known OAuth misconfiguration that allows an attacker to register or control a URL that technically "starts with" the legitimate domain while actually pointing somewhere entirely under the attacker's control.
+
+**The exploitable gap — prefix matching accepts URLs the developer never intended:**
+```text
+Registered/expected redirect_uri:  https://app.company.com/callback
+
+Validation logic (BROKEN): does the submitted redirect_uri START WITH
+"https://app.company.com"?
+
+Attacker-controlled URLs that PASS this broken check:
+  https://app.company.com.attacker-domain.com/callback   <-- a SUBDOMAIN of attacker-domain.com,
+                                                                NOT app.company.com at all -- string
+                                                                prefix matching is fooled by this
+  https://app.company.com@attacker.com/callback           <-- the "@" makes everything before it
+                                                                just a USERNAME in the URL; the
+                                                                actual HOST is attacker.com
+  https://app.company.com/callback.evil-path/../../redirect  <-- path traversal tricks depending
+                                                                on exactly how the check is implemented
+```
+
+**How this becomes a full token-theft attack:**
+```text
+1. Attacker crafts an authorization URL using one of the malicious redirect_uri
+   variants above, and tricks the victim into clicking it (phishing email, malicious ad)
+2. The victim, ALREADY LOGGED IN at the Authorization Server, sees a normal-looking
+   consent/login flow (the Authorization Server's own domain looks correct in the browser)
+3. Upon successful authorization, the Authorization Server redirects the browser to the
+   ATTACKER-CONTROLLED redirect_uri, carrying the authorization CODE (or, worse, an
+   access token directly, in older Implicit-Grant-style flows) in the URL
+4. The attacker's server, sitting at that redirect_uri, captures the code/token from
+   the incoming request and can exchange it for full access to the victim's account
+```
+
+**The fix — exact, full-string match against a pre-registered allowlist:**
+```csharp
+// CORRECT validation: exact match against a fixed, pre-registered set of exact URIs --
+// no prefix matching, no wildcard matching, no partial logic of any kind
+var registeredRedirectUris = new HashSet<string> { "https://app.company.com/callback" };
+
+if (!registeredRedirectUris.Contains(submittedRedirectUri))
+    return BadRequest("redirect_uri does not exactly match a registered value.");
+```
+Every legitimate redirect destination must be pre-registered as a complete, exact string; the Authorization Server rejects anything that doesn't match one of those exact strings byte-for-byte, closing off every variant of "looks similar to the legitimate domain" exploitation.
+
+**Common Pitfall:** implementing what looks like a stricter check — e.g., validating the URL's *hostname* matches, rather than a plain string prefix — but still getting fooled by URL-parsing edge cases (the `@` trick above being the classic example, since a naive "does the string contain company.com" check, or even some careless hostname-extraction logic, can still be fooled). The only genuinely safe approach is exact, full-string matching against a pre-registered allowlist — never pattern-based, prefix-based, or "looks like the right domain" logic of any kind.
+
+---
