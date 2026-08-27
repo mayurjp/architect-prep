@@ -2036,3 +2036,454 @@ Blue/Green deployment is a release strategy that reduces downtime and risk.
 You maintain two identical production environments (Blue and Green). At any time, only one environment is live and serving all production traffic (e.g., Blue). You deploy the new version of the software to the idle environment (Green), test it thoroughly, and when ready, you simply flip the router/load balancer to point traffic to Green. If something goes wrong, you instantly flip back to Blue.
 
 ---
+
+## Beginner — Question 28
+
+**Q28: What does "Secrets Management" mean in a CI/CD context, and why is a pipeline's own built-in secret store safer than putting a credential in a config file or a plain pipeline variable?**
+
+A secret is any credential a pipeline needs but must never expose in plain text — a database password, an API key, a signing certificate. Secrets Management is the discipline of storing those values in a dedicated, encrypted store the CI/CD platform provides, and injecting them into a pipeline run only at the moment they're needed, rather than writing them directly into a YAML file or an ordinary plain-text variable.
+
+```yaml
+# BAD -- a plain pipeline variable, visible to anyone who can view the pipeline config or its logs
+variables:
+  DB_PASSWORD: "Sup3rSecret!"
+
+# GOOD -- a masked secret from the platform's dedicated secret store
+steps:
+  - run: deploy.sh
+    env:
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}   # injected at run time, masked in logs if it's ever echoed
+```
+
+**Why the dedicated secret store matters, not just "hiding" the value:** a real secrets store encrypts the value at rest, restricts who can view or edit it (separate from who can merely trigger a pipeline using it), and automatically masks it if it ever accidentally gets printed to a log — an ordinary pipeline variable typically has none of these protections, and anyone with read access to the pipeline definition can simply read it in plain text.
+
+**Common Pitfall:** assuming a "private repository" is itself sufficient protection for a hardcoded secret — private just means fewer people can see the repository today; it does nothing to prevent the secret from leaking through a fork, a contractor's temporary access, a misconfigured CI log that echoes environment variables, or the repository later being made public by mistake. Secrets belong in a dedicated secret store regardless of repository visibility.
+
+---
+
+## Beginner — Question 29
+
+**Q29: What is a Container/Artifact Registry, and how does it differ from the source-code repository the application itself is stored in?**
+
+A source-code repository (GitHub, Azure Repos) stores the *human-written source code* — a Container/Artifact Registry instead stores the *built, compiled output* of that code: Docker images, NuGet packages, npm packages. CI builds the code once and pushes the resulting artifact to the registry; every later stage (staging, production) pulls that same built artifact from the registry rather than ever touching the source code directly.
+
+```text
+Source repo (GitHub):        stores .cs files, .csproj files, Dockerfile -- the HUMAN-EDITED source
+Artifact registry (ACR/Docker Hub/GitHub Packages): stores the BUILT, COMPILED output --
+    myregistry/order-service:1.4.2  -- an actual, runnable, immutable container image
+```
+
+```bash
+docker build -t myregistry/order-service:1.4.2 .   # compiles source INTO an image
+docker push myregistry/order-service:1.4.2          # publishes the built artifact to the REGISTRY
+docker pull myregistry/order-service:1.4.2          # every environment PULLS the SAME built artifact
+```
+
+Because the registry stores the already-compiled, immutable output rather than editable source, deploying to any environment is simply "pull this exact, already-tested image" — no compilation happens at deploy time at all, directly supporting the "Build Once, Deploy Many" principle (covered elsewhere) by giving that one build a durable, versioned home separate from the ever-changing source repository.
+
+**Common Pitfall:** treating the registry as just a backup copy of the source repo, or conflating "committed to source control" with "available to deploy" — a commit merely changes the source; only a completed CI build pushing a new image tag to the registry actually produces something deployable. A commit sitting in the source repo with no corresponding registry artifact isn't deployable yet, no matter how long ago it was merged.
+
+---
+
+## Intermediate — Question 23
+
+**Q23: What is Workload Identity Federation (OIDC-based CI/CD authentication), and how does it let a pipeline authenticate to a cloud provider without storing any long-lived credential at all?**
+
+Traditional CI/CD-to-cloud authentication stores a long-lived secret (a service principal password, a static access key) as a pipeline secret — Workload Identity Federation replaces that stored secret entirely: the CI platform issues a short-lived, cryptographically-signed OIDC token identifying *this specific pipeline run*, and the cloud provider is configured to trust that token directly, exchanging it for temporary cloud credentials on the fly.
+
+```yaml
+# GitHub Actions -- NO stored Azure secret anywhere in this pipeline
+permissions:
+  id-token: write   # lets GitHub mint a short-lived OIDC token for THIS run
+jobs:
+  deploy:
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}      # not secret -- just an identifier
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # No client-secret at all -- Azure trusts GitHub's OIDC token directly,
+          # because Azure AD was pre-configured with a federated credential trusting
+          # tokens issued specifically for "repo:myorg/myrepo:ref:refs/heads/main"
+```
+
+**Why this closes a real, persistent risk that ordinary secret-rotation practices only mitigate, not eliminate:** a stored static credential exists continuously and can leak (a misconfigured log, a compromised runner, an over-permissioned contributor) at any point during its entire lifetime — an OIDC-federated token is minted fresh for each run, is valid for only minutes, is scoped to exactly that run's identity (repo, branch, environment), and there is simply no long-lived secret sitting anywhere to steal in the first place.
+
+**Common Pitfall:** configuring the cloud-side trust policy too broadly (trusting OIDC tokens from *any* branch or *any* repository in an org, rather than the specific repo/branch/environment that should actually be allowed to deploy) — this defeats much of the benefit, since a pipeline on an unrelated branch (or a malicious fork's PR pipeline) could then mint a token the cloud provider accepts just as readily as the legitimate deployment pipeline's own token.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What does it mean to sign a build artifact (a container image or package), and how does verifying that signature before deployment prevent an unauthorized or tampered image from ever running?**
+
+Signing an artifact means the CI pipeline cryptographically signs the built image (or package) with a private key immediately after building it — anyone deploying that image can verify the signature against the corresponding public key, confirming both that the image genuinely came from the expected build pipeline and that it hasn't been altered since. An unsigned, or invalidly-signed, image is a signal that the artifact's origin can't be trusted.
+
+```bash
+# Signing at build time (using Sigstore's cosign, a common keyless-signing tool)
+cosign sign --yes myregistry/order-service:1.4.2
+# Verifying before deploy -- FAILS the pipeline if the signature is missing or invalid
+cosign verify myregistry/order-service:1.4.2 \
+  --certificate-identity=https://github.com/myorg/order-service/.github/workflows/build.yml@refs/heads/main \
+  --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+```
+
+```text
+WITHOUT signing: anyone with push access to the registry (or a compromised registry
+  credential) can push an image tagged "1.4.2" -- the deployment pipeline has NO way to
+  distinguish it from the image the LEGITIMATE build pipeline actually produced
+
+WITH signature verification as a REQUIRED deploy-time gate: an image lacking a valid
+  signature from the expected pipeline identity is REJECTED before it ever runs --
+  a tampered or unauthorized image, even one sitting in the CORRECT registry with the
+  CORRECT tag, simply cannot pass verification
+```
+
+**Why this closes a gap SBOM scanning alone (covered elsewhere) doesn't:** an SBOM tells you *what's inside* an image; it says nothing about whether the image itself is the one your own pipeline actually produced, versus one someone pushed directly to the registry bypassing CI entirely. Signature verification answers a different, complementary question — provenance and integrity — not vulnerability content.
+
+**Common Pitfall:** signing images as a pipeline step but never actually enforcing verification at deploy time (a Kubernetes admission controller, or an explicit pipeline gate) — a signature that's generated but never checked provides no real protection at all; the security value comes entirely from *rejecting* unsigned or invalidly-signed images before they run, not merely from the signing step existing somewhere upstream.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is SLSA (Supply-chain Levels for Software Artifacts) provenance, and how does it extend artifact signing (covered earlier) from "this image wasn't tampered with" to "here's a verifiable, tamper-evident record of exactly how this image was built"?**
+
+Signing an image (covered earlier) proves the image came from a specific pipeline identity and hasn't been altered since — SLSA provenance goes a step further, attaching a signed, structured metadata document (a "provenance attestation") recording *how* the build actually happened: which source commit, which build platform, which build steps, which inputs — letting a downstream consumer verify not just "this is authentic" but "this was built the way our policy requires it to have been built."
+
+```json
+// A provenance attestation, cryptographically bound to the image digest
+{
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "subject": [{ "name": "myregistry/order-service", "digest": { "sha256": "a1b2..." } }],
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "github-actions-workflow",
+      "externalParameters": { "workflow": ".github/workflows/build.yml", "ref": "refs/heads/main" }
+    },
+    "runDetails": { "builder": { "id": "https://github.com/actions/runner" } }
+  }
+}
+```
+
+```text
+Signature alone: "this image was produced by SOME run of a pipeline with THIS identity"
+SLSA provenance: "this image was produced by a run that used THIS EXACT source commit,
+  ran on THIS builder, executed THESE steps -- with NO undocumented manual step, NO
+  build running on an untrusted, ad-hoc machine outside the recognized CI system"
+```
+
+**Why this specifically defends against a build-time compromise that signing alone doesn't catch:** signing proves the *output* came from the expected identity — it says nothing about whether that identity's build process was itself compromised (a poisoned build runner, a malicious build step injected into the pipeline definition). SLSA's provenance record, combined with policy enforcement at deploy time ("only accept images with provenance meeting SLSA level 3"), lets an organization reject an artifact whose *build process itself* deviated from the expected, trusted path — even if it's validly signed by the expected identity.
+
+**Common Pitfall:** treating "we sign our images" as equivalent to "we have supply-chain provenance" — signing alone answers "who signed this," while SLSA provenance answers the meaningfully deeper question "under what verifiable conditions was this actually built"; an organization that stops at signing has closed off tampering-after-build but has no verifiable record protecting against tampering-during-build.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is "Secret Zero," and how does the problem of needing an initial credential to bootstrap access to a secrets vault undermine a naive "just put everything in Vault" secrets strategy?**
+
+Moving every secret into a centralized vault (Azure Key Vault, HashiCorp Vault) solves the problem of scattering credentials across config files — but the application or pipeline still needs *some* credential to authenticate to the vault itself in the first place. That initial, bootstrapping credential is "Secret Zero" — and if it's just another long-lived static secret stored in a config file, the entire vault strategy has only moved the original problem one level up, not actually solved it.
+
+```text
+NAIVE approach -- Secret Zero is ITSELF a static, stored credential:
+  appsettings.json contains: "VaultClientSecret": "abc123..."
+  -- this "abc123..." IS Secret Zero -- and it's STILL a long-lived static secret,
+     sitting in a config file, EXACTLY the problem moving secrets to a vault was
+     supposed to SOLVE -- just one LEVEL removed from the ACTUAL application secrets
+
+BETTER approach -- Secret Zero is ELIMINATED via platform-native identity, not stored at all:
+  An Azure VM/App Service/Kubernetes pod authenticates to Key Vault using a MANAGED
+  IDENTITY -- the cloud platform ITSELF vouches for "this specific compute resource is
+  who it claims to be," with NO credential file, NO stored secret, ANYWHERE, needed to
+  make that FIRST authentication happen
+```
+
+**Why eliminating Secret Zero (rather than just moving it) is the actual goal, connecting to Workload Identity Federation (covered earlier):** a Managed Identity (Azure) or a federated OIDC identity (covered under Workload Identity Federation) lets the *platform itself* — not a stored credential — vouch for an application's or pipeline's identity; there is no bootstrapping secret sitting in a config file for an attacker to find, because the trust chain starts from the compute platform's own identity guarantee rather than from a static value stored somewhere.
+
+**Common Pitfall:** declaring a secrets-management migration complete once every *application* secret has been moved into a vault, while overlooking that the vault-access credential itself is still a static, stored secret sitting in a config file or CI variable — this is real progress (fewer secrets scattered across many files, centralized rotation and auditing) but hasn't actually eliminated the fundamental "a stored static credential can leak" risk; it has only concentrated that risk onto one single, now more consequential credential.
+
+---
+
+## Advanced — Question 25
+
+**Q25: What is a GitOps "App of Apps" pattern with ordered sync waves, and how does it let a single Git commit safely orchestrate a coordinated rollout across many interdependent services without a traditional pipeline explicitly sequencing each deployment step?**
+
+A single GitOps Application resource (covered earlier) manages one service — an "App of Apps" pattern instead defines a parent Application whose own manifests are simply *other* Application definitions, letting one Git commit to the parent repo trigger a coordinated update across many child services at once. Because those services often have real dependencies (a database migration must apply before the service consuming it starts), sync waves let the GitOps controller apply them in an explicit, deterministic order rather than all simultaneously.
+
+```yaml
+# Child Application 1 -- a database migration job, must apply FIRST
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-db-migration
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"   # LOWER numbers sync FIRST
+---
+# Child Application 2 -- the service itself, must NOT start before its migration has applied
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-service
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # waits for wave "0" to reach a healthy state first
+```
+
+```text
+A single commit to the "App of Apps" parent repo changes BOTH the migration job's version
+  AND the service's image tag TOGETHER -- the controller applies wave 0 (the migration)
+  FIRST, waits for it to report healthy, THEN applies wave 1 (the service) -- coordinated,
+  ORDERED rollout across MULTIPLE services, driven by ONE Git change, with NO separate
+  imperative pipeline script explicitly sequencing "migrate, then wait, then deploy"
+```
+
+**Why this specifically extends plain GitOps reconciliation (covered earlier) rather than just being "GitOps with extra steps":** ordinary reconciliation treats each Application independently, with no inherent ordering guarantee between them — a coordinated, multi-service rollout with real inter-service ordering dependencies would otherwise require falling back to an imperative pipeline script (reintroducing exactly the "external system orchestrates the deployment" model GitOps is meant to move away from). Sync waves let the *declarative* model itself express ordering, keeping the entire coordinated rollout expressible as pure Git state.
+
+**Common Pitfall:** relying on sync waves for correctness-critical ordering without also configuring health checks the controller actually waits on between waves — a sync wave only controls the *order in which resources are applied*; without a defined health check gating "wave 1 doesn't start until wave 0 is confirmed healthy," a fast-failing migration could still let the dependent service start against a not-yet-ready database, silently defeating the entire purpose of ordering the waves in the first place.
+
+---
+
+## Scenario — Question 6
+
+**Q6: Your canary deployment passed every automated health check — error rate and latency stayed well within threshold during the 15-minute canary window, and the rollout proceeded to 100%. Six hours later, customers report the application is intermittently unresponsive, and you discover the new version has a slow memory leak that only manifests after several hours of sustained traffic. What went wrong with your canary process, and how do you prevent this specific failure mode going forward?**
+
+The canary analysis wasn't wrong about what it measured — it was measuring the right metrics for too short a window to catch a *slow-burn* failure mode. A memory leak that takes hours to exhaust available memory looks completely healthy in the first 15 minutes; the canary's automated gate correctly reported "no threshold breach," because no breach had happened *yet* within the observation period.
+
+**What the canary process was missing:**
+```text
+Canary window: 15 minutes -- error rate 0.1%, p99 latency 180ms -- WELL within thresholds
+  -- PASSES, rollout proceeds to 100% -- but memory usage was climbing SLOWLY the entire
+  time, invisible to a canary evaluating only error rate and latency over a SHORT window
+
+Hour 6: memory usage finally crosses the threshold that triggers GC thrashing, then OOM --
+  by this point the bad version is running on 100% of traffic, with NO canary population
+  still isolated to compare against or roll back in isolation
+```
+
+**The fix — extend Bake Time and add resource-saturation metrics to the canary's own evaluation:**
+```yaml
+canary:
+  steps:
+    - setWeight: 10
+    - pause: { duration: 4h }   # BAKE TIME long enough for a slow leak to become visible
+  metrics:
+    - name: memory-usage-trend    # NOT just error rate/latency -- track SATURATION over the bake window
+      successCondition: "slope(memory_usage_bytes[4h]) < threshold"
+```
+
+**Why fixing this requires both a longer bake time and different metrics, not just one or the other:** a longer bake time alone doesn't help if the canary is still only watching error rate and latency, since those genuinely never breach until the leak causes an actual crash — the canary needs to watch a *leading indicator* (memory trending upward) over a window long enough for a slow leak to show a clear trend, catching the problem while it's still confined to the canary's 10% traffic slice rather than after it's already reached 100%.
+
+**Common Pitfall:** responding to this incident by simply extending the canary window without also adding trend-based resource metrics — a longer wait watching only error rate and latency still won't catch a leak until it's severe enough to actually cause failures, which may take even longer than the extended window; the real fix is instrumenting the canary to watch resource-saturation trends specifically, the class of signal a short, failure-focused observation window is structurally blind to.
+
+---
+
+## Scenario — Question 7
+
+**Q7: A developer accidentally commits an `appsettings.json` file containing a live production database connection string and an Azure Storage account key, then pushes it to a public GitHub repository. It's discovered 40 minutes later. Walk through the full incident response — not just "remove the file."**
+
+Simply deleting the file or force-pushing a "fix" commit does **not** remove the exposure — Git preserves the secret in the repository's history, and worse, a public push may already have been scraped by automated credential-harvesting bots within minutes, regardless of how quickly it's caught.
+
+**The response sequence — rotation first, cleanup second:**
+```text
+1. ROTATE IMMEDIATELY, before anything else:
+   - Regenerate the Azure Storage account key -- the OLD key is treated as PERMANENTLY
+     compromised the instant it left the private environment, REGARDLESS of exposure duration
+   - Rotate the database credential and update every service's connection string
+   -- Rotation happens FIRST because it's the only step that actually neutralizes the
+      exposed secret; everything else is cleanup AFTER the real risk is already closed
+
+2. ASSESS BLAST RADIUS:
+   - Check Azure Storage access logs and database audit logs for the exposure window --
+     was the OLD credential actually used by anyone besides your own services during
+     those 40 minutes (and any time before discovery you can't fully rule out)?
+   - Check GitHub's own security alerts / secret-scanning notifications -- GitHub scans
+     public pushes for recognizable credential patterns and may have already flagged it
+
+3. REMOVE FROM HISTORY (only after rotation, since the OLD secret is now worthless to anyone
+   who still has it):
+   git filter-repo --path appsettings.json --invert-paths   # rewrites history, removing the file
+   # force-push the rewritten history; every other clone/fork STILL has the old history
+   # with the secret in it -- rewriting your own repo does NOT retroactively secure THOSE copies
+
+4. PREVENT RECURRENCE:
+   - Add a pre-commit secret-scanning hook (gitleaks, trufflehog) blocking a commit
+     containing a recognizable credential pattern BEFORE it's ever committed, not after
+   - Move the credential out of appsettings.json entirely -- into Key Vault, retrieved via
+     Managed Identity at runtime (covered elsewhere), so there is no secret VALUE to
+     accidentally commit in the first place
+```
+
+**Why rotation has to come before history cleanup, not after:** rewriting Git history removes the secret from *your* repository going forward, but does nothing about anyone who already cloned, forked, or scraped the exposed commit during the window it was public — the secret must be treated as permanently burned the moment it left a private context, making rotation the only action that actually closes the vulnerability; history cleanup is good hygiene but provides zero actual security benefit on its own.
+
+**Common Pitfall:** treating a quick force-push that removes the file from the latest commit as sufficient remediation — this leaves the credential fully readable in the repository's reflog and any existing clones/forks, and does nothing to invalidate a secret that may already have been harvested; skipping the rotation step because "we caught it fast" is the single most common way this kind of incident turns into an actual breach later.
+
+---
+
+## Scenario — Question 8
+
+**Q8: Your Terraform-managed production environment starts experiencing intermittent 502 errors from one specific service. Investigating, you find that its load balancer's backend pool is missing an entire availability zone's worth of instances — but your Terraform code clearly declares instances across all three zones, and the last `terraform apply` succeeded cleanly with no errors. How do you diagnose and recover from this?**
+
+A clean `terraform apply` only confirms Terraform successfully reconciled *the resources it's currently tracking* — it says nothing about whether something *else* modified the same infrastructure outside Terraform's awareness afterward. This is Infrastructure Drift (covered elsewhere) manifesting as a live, partial outage rather than being caught proactively.
+
+**Diagnosis — confirm the mismatch is drift, not a code bug:**
+```bash
+terraform plan
+# Output reveals the actual live state no longer matches the declared configuration:
+#   ~ resource "azurerm_availability_set" "app_tier" {
+#       ~ managed_disk[2] -> instance was manually DEALLOCATED via the Azure Portal
+#         during an unrelated, undocumented "quick fix" three days ago
+#     }
+```
+The `terraform plan` output confirms the drift: someone manually deallocated instances in one zone directly through the portal (perhaps an emergency cost-cutting action, or an accidental deletion) — a change that never went through Terraform, so the codebase still declares the original, correct configuration, but the *live* infrastructure has silently diverged from it.
+
+**Recovery — reconcile, don't just patch the symptom:**
+```bash
+# Re-apply to bring the live state back in line with the declared configuration,
+# recreating the missing instances in the affected zone
+terraform apply
+# Verify the load balancer's backend pool now includes instances from all three zones again
+```
+```text
+DON'T: manually recreate the missing instances directly in the portal to "fix it fast" --
+  this is the SAME undocumented-manual-change pattern that caused the drift in the first
+  place, and Terraform's state file would STILL not reflect what actually exists, setting
+  up the NEXT drift-related incident
+DO: let Terraform itself reconcile actual state back to declared state -- this is
+  precisely the guarantee IaC is supposed to provide, and using it here (rather than a
+  manual portal fix) restores that guarantee rather than eroding it further
+```
+
+**Preventing recurrence:** schedule `terraform plan` (read-only, no `apply`) as a recurring, alerting job specifically to catch drift *before* it causes a live incident — and restrict direct portal/CLI write access to production infrastructure to a small, audited group (or ideally, nobody at all — only the CI/CD service principal applies changes), closing off the "quick manual fix" path that caused this drift in the first place.
+
+**Common Pitfall:** manually recreating the missing resources directly in the cloud console to restore service quickly, without also either fixing the Terraform state to match or investigating why the drift occurred — this "fixes" the immediate outage while leaving the underlying process gap (someone can still make undocumented manual changes to production) completely unaddressed, guaranteeing a similar incident recurs.
+
+---
+
+## Scenario — Question 9
+
+**Q9: Your CI pipeline's integration test stage fails roughly 1 time in 8, always with a different test failing, and always passing on a simple re-run with no code changes. This is now blocking nearly every PR from merging on the first attempt, and the team has started reflexively clicking "re-run" without investigating. How do you actually diagnose and fix this, rather than normalizing the re-run habit?**
+
+A test that fails intermittently with no code change, passing on identical re-runs, indicates the test (or the environment it runs in) has a race condition, timing dependency, or shared-state issue — not that the application code is actually broken. But "just re-run it" is a dangerous habit: it trains the team to ignore CI signal entirely, and a re-run can just as easily mask a *genuine* intermittent bug as a genuinely flaky test.
+
+**Diagnosis — stop guessing, gather data:**
+```bash
+# Run the suspect stage repeatedly, in isolation, to characterize the actual failure pattern
+for i in $(seq 1 50); do dotnet test --filter Category=Integration; done
+# Track WHICH specific tests fail, and cross-reference against whether they run in
+# PARALLEL with other tests that touch the SAME shared resource (a test database, a
+# static in-memory cache, a fixed port number)
+```
+```text
+Common root causes for "different test fails each time, passes on re-run":
+  - Shared test-database state -- two tests running in PARALLEL write/read the SAME
+    rows, and their outcome depends on nondeterministic ordering
+  - A fixed port/resource two parallel test processes both try to bind
+  - An async operation the test doesn't properly await, sometimes finishing in time,
+    sometimes not, depending on machine load that particular run
+  - A test relying on wall-clock time near a boundary (midnight, month-end) that
+    occasionally rolls over mid-test
+```
+
+**Fix — address the actual root cause, not the symptom:**
+```text
+1. IMMEDIATE: quarantine identified flaky tests into a separate, non-blocking suite
+   (visible, still run, but doesn't block merges) -- this stops the reflexive re-run
+   habit from hiding a REAL regression among the noise, without blocking the team
+   indefinitely while the root cause is fixed
+2. ROOT-CAUSE FIX: apply the Testcontainers-style isolation pattern (covered elsewhere)
+   if shared test-database state is the cause -- give each parallel test run its own
+   isolated resources rather than sharing one
+3. RE-ADMIT: once a quarantined test is fixed and passes reliably across many repeated
+   runs, move it back into the blocking suite
+```
+
+**Why simply telling the team "stop clicking re-run" doesn't fix anything by itself:** the re-run habit is a symptom, not the disease — as long as the underlying race condition exists, *some* mechanism (a human re-running, or an automated retry) is still needed to get a PR through, because the flaky test genuinely does fail some fraction of the time; the actual fix is eliminating the nondeterminism itself, which quarantining buys time to do without either blocking the team indefinitely or normalizing ignored CI failures in the meantime.
+
+**Common Pitfall:** adding automatic retry logic to the CI stage (silently re-running any failed test up to 3 times) as the fix, without any tracking of which tests are actually being retried or investigation into why — this makes the flakiness invisible in the pipeline's pass/fail status while doing nothing to fix the underlying race condition, and can just as easily mask a genuine, code-caused intermittent bug as a genuinely flaky test, with no visibility into which is which.
+
+---
+
+## Scenario — Question 10
+
+**Q10: A deployment introduces a serious bug in production. You attempt to roll back to the previous version, but discover the rollback itself fails — the previous version's code can't run against the database schema, because the bad deployment's migration already ran and altered a column the old code depends on. You now have a broken new version AND a broken rollback path. How do you recover?**
+
+This is the exact failure mode the Expand/Contract migration pattern (covered elsewhere) exists to prevent — but discovering the pattern wasn't followed *during* an active incident means the clean "just switch back" rollback option is already gone, and recovery requires a more careful, forward-only fix rather than a simple revert.
+
+**Why a simple rollback is no longer available:**
+```text
+The bad deployment's migration RENAMED a column the OLD code's queries reference by its
+  OLD name -- reverting to the OLD application code does NOT revert the SCHEMA, since
+  application rollback and database rollback are SEPARATE operations -- the old code
+  immediately breaks against the ALREADY-migrated schema, just as badly as the new code
+  is currently broken for its OWN, unrelated reason
+```
+
+**Recovery sequence — fix forward, carefully, rather than trying to revert:**
+```text
+1. STOP further deployments immediately -- no new changes until the current state is
+   fully understood, to avoid compounding the problem
+2. ASSESS: is the actual bug in the APPLICATION code, or did the MIGRATION itself
+   corrupt/lose data? These require different recovery paths:
+   - Application-only bug: write and deploy a FORWARD FIX to the current (new) schema --
+     do NOT try to revert the schema; fix the code that's actually broken
+   - Data-corrupting migration: this requires a database-level recovery (restoring from
+     a pre-migration backup/snapshot, or a carefully written data-repair script) --
+     considerably higher-risk and should involve whoever owns the backup/DR process
+3. If reverting the schema is genuinely necessary: write a DELIBERATE, TESTED reverse
+   migration (renaming the column back) -- do NOT assume the forward migration's
+   reverse is a trivial mirror image; a migration that also transformed DATA (not just
+   a column name) needs its own carefully considered reverse transformation, tested
+   against a copy of the actual current data
+4. Once stable, retroactively apply the FIX: the true root-cause fix here is process --
+   this deployment should have used Expand/Contract, keeping BOTH old and new code
+   compatible with the schema throughout the transition, precisely so rollback stays
+   available as a safety net
+```
+
+**Why "fix forward" is usually safer than forcing a schema revert during an active incident:** a hastily-written reverse migration, created and tested for the first time under incident pressure, carries its own real risk of further data loss or corruption — a targeted forward fix to the *application* code (which is a much smaller, better-understood change than an ad-hoc reverse migration) is often the lower-risk path, even though it feels less like a "clean rollback."
+
+**Common Pitfall:** attempting to force a database rollback by directly running the inverse SQL statements against production, improvised in the moment, without testing them against a copy of the actual current data first — an untested reverse migration invented under incident pressure is a common way a single-service bug escalates into an actual data-loss incident, which is a categorically worse outcome than the original application bug.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A routine dependency-vulnerability scan flags something unusual: a transitive dependency your build recently picked up (a minor-version bump, seemingly routine) makes an outbound network call during its package install step — behavior that has no legitimate reason to exist in a logging utility library. How do you confirm whether this is a genuine supply-chain compromise, and what's your response if it is?**
+
+An install-time network call from a library that has no legitimate reason to make one is a classic signature of a compromised package — a malicious actor gaining control of a popular package's publishing credentials (or publishing a similarly-named typosquat) and inserting code that exfiltrates environment variables, CI secrets, or other reachable credentials during install, before the actual "useful" code of the package ever runs.
+
+**Confirming the compromise — don't assume, verify:**
+```bash
+# Inspect the package's install/postinstall scripts directly, rather than trusting the
+# published description
+npm view suspicious-logging-lib scripts
+# { "postinstall": "node ./scripts/collect.js" }
+
+# Diff against the previous, trusted version to see EXACTLY what changed
+diff <(npm pack suspicious-logging-lib@1.4.0 -o - | tar -xO) \
+     <(npm pack suspicious-logging-lib@1.4.1 -o - | tar -xO)
+# Reveals collect.js was added in 1.4.1, sending process.env to an external endpoint
+```
+This confirms it's a genuine compromise, not a false positive — the newly-added script has no relationship to the package's stated purpose (logging), and its behavior (exfiltrating environment variables, which in a CI runner commonly include secrets) is a textbook supply-chain attack pattern.
+
+**Response — treat this as a credential-exposure incident, not just "remove a bad package":**
+```text
+1. PIN back to the last known-good version immediately, and BLOCK the compromised
+   version from being installed anywhere (an internal package-registry proxy/allowlist,
+   or an explicit lockfile pin) -- stopping further exposure first
+2. ASSUME every secret reachable by any CI run that installed the compromised version
+   is compromised -- rotate ALL of them (API keys, cloud credentials, signing keys),
+   not just the ones you can specifically prove were exfiltrated
+3. Audit which build artifacts were produced using the compromised dependency -- any
+   image/package built during the exposure window is now of UNKNOWN trustworthiness
+   and should be considered for rebuild-and-redeploy from a clean dependency set
+4. Report the compromised package to the registry maintainers (npm, NuGet) so it can be
+   pulled/flagged for other consumers
+```
+
+**Why this specifically validates having SBOM and dependency-scanning practices (covered elsewhere) in the first place:** without an SBOM and active vulnerability/behavior scanning, this compromise likely goes unnoticed until secrets are actually misused elsewhere — the entire value of continuous scanning is catching exactly this kind of transitive, easy-to-overlook dependency change before its blast radius grows any larger than "one team's CI runs since the last routine minor-version bump."
+
+**Common Pitfall:** treating this purely as a "remove the bad package version" fix without also rotating every secret potentially exposed to it — the actual damage (if any occurred) happened via exfiltrated credentials during install, not via the package remaining in the dependency tree; removing the package stops *future* exposure but does nothing about secrets that may already have been stolen during the window it was present.
+
+---

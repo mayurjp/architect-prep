@@ -2049,3 +2049,479 @@ Because most rebalances (a single consumer joining or leaving, out of many) only
 **Common Pitfall:** assuming Sticky Partition Assignment (covered earlier) and Cooperative Sticky rebalancing are the same thing — Sticky Assignment minimizes *which* partitions move during a rebalance computation, while Cooperative Sticky additionally changes *how* the rebalance protocol itself revokes and reassigns partitions, avoiding the eager protocol's blanket revocation of every partition regardless of whether it actually needs to move; the two concepts are complementary but distinct.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is the Request-Reply pattern over a message broker, and how does a temporary reply queue plus a correlation ID let an asynchronous request eventually get matched back to its response?**
+
+HTTP naturally pairs a request with its response over the same open connection — an asynchronous message broker has no such built-in pairing, since the requester and responder communicate through two entirely separate, one-way channels. Request-Reply recreates request/response semantics on top of messaging by having the requester specify where the reply should go and a unique ID to match it against, once it eventually arrives.
+
+```csharp
+// The REQUESTER creates a temporary, private reply queue, and includes a correlation ID
+var replyQueue = channel.QueueDeclare(queue: "", exclusive: true, autoDelete: true); // temporary
+var correlationId = Guid.NewGuid().ToString();
+
+var props = channel.CreateBasicProperties();
+props.ReplyTo = replyQueue.QueueName;   // "send your answer to THIS queue"
+props.CorrelationId = correlationId;    // "and TAG it with THIS id, so I know it's MY answer"
+channel.BasicPublish(exchange: "", routingKey: "price-lookup-requests", basicProperties: props, body: requestBody);
+
+// The RESPONDER reads ReplyTo and CorrelationId off the incoming request, and replies accordingly
+var replyProps = channel.CreateBasicProperties();
+replyProps.CorrelationId = incomingProps.CorrelationId;
+channel.BasicPublish(exchange: "", routingKey: incomingProps.ReplyTo, basicProperties: replyProps, body: responseBody);
+```
+
+Because the requester listens on its own private reply queue and filters incoming replies by matching `CorrelationId`, it can issue several concurrent requests over the same broker connection and correctly match each eventual reply back to the specific request that triggered it, exactly as an HTTP client implicitly does by keeping the request and response on one connection — just made explicit here, since messaging provides no equivalent built-in pairing.
+
+**Common Pitfall:** using Request-Reply as a default communication style throughout a system rather than reserving it for the genuine cases that need a synchronous-style answer — it reintroduces a form of temporal coupling (the requester is effectively waiting on a response) that plain, one-way asynchronous messaging (a fire-and-forget command, or a published event) was specifically meant to avoid; most inter-service communication is better served by genuine one-way messaging, with Request-Reply reserved for the narrower cases that truly need a correlated answer back.
+
+---
+
+## Beginner — Question 24
+
+**Q24: What is the difference between an "Event Notification" (a thin event saying only that something happened) and "Event-Carried State Transfer" (an event carrying the full data a consumer needs), and what trade-off determines which style fits a given event?**
+
+Both describe a published event about something that occurred — an Event Notification carries just enough information to identify what happened (an ID, a type), forcing an interested consumer to call back to the source service for any actual details — Event-Carried State Transfer instead includes the full relevant data directly in the event itself, letting a consumer act without any follow-up call at all.
+
+```json
+// Event Notification -- THIN, just enough to identify WHAT happened
+{ "eventType": "OrderUpdated", "orderId": 123 }
+// -- a consumer needing the ACTUAL details must call BACK to OrderService's API:
+// GET /orders/123 -- to find out WHAT specifically changed
+```
+
+```json
+// Event-Carried State Transfer -- carries the FULL relevant data directly
+{
+  "eventType": "OrderUpdated",
+  "orderId": 123,
+  "status": "Shipped",
+  "shippingAddress": { "city": "Austin", "state": "TX" },
+  "items": [ { "sku": "ABC-1", "quantity": 2 } ]
+}
+// -- a consumer can act IMMEDIATELY, with NO follow-up call needed AT ALL
+```
+
+**The trade-off:** a thin Event Notification keeps the event small and simple, but couples every consumer to calling back to the source service — creating exactly the kind of runtime dependency an event-driven architecture is often trying to avoid, and adding load to the source service proportional to how many consumers react to each event. Event-Carried State Transfer removes that callback dependency entirely, at the cost of a larger message and needing to think carefully about exactly which fields consumers actually need duplicated into the event.
+
+**Common Pitfall:** defaulting to thin Event Notifications throughout a system without recognizing the callback dependency they create — a consumer that must call back to the publisher for details on every single event has only traded a direct synchronous call for an indirect one, undermining much of the decoupling benefit an event-driven design was meant to provide in the first place; Event-Carried State Transfer is usually the better default whenever the relevant data is reasonably small and stable enough to duplicate into the event.
+
+---
+
+## Intermediate — Question 28
+
+**Q28: What is the difference between a Command message and an Event message, and how does the semantic distinction — an imperative instruction versus a statement of fact — shape how many consumers each is expected to have and what happens if no one is listening?**
+
+Both travel over the same physical messaging infrastructure, but they express fundamentally different intents: a Command tells a specific recipient to *do* something (`ChargeCustomer`), addressed to exactly one service that's expected to act on it — an Event states that something has already *happened* (`CustomerCharged`), with no expectation about who's listening or whether anyone reacts to it at all.
+
+```csharp
+// COMMAND -- imperative, addressed to a SPECIFIC recipient, an ACTION is expected
+await _commandBus.SendAsync(new ChargeCustomerCommand(customerId, amount));
+// -- sent to the ONE service (PaymentService) responsible for CARRYING OUT this instruction --
+// -- if NOBODY is listening, that's a GENUINE problem: the intended action never HAPPENS --
+
+// EVENT -- a statement of FACT, broadcast, NO specific recipient expected or required
+await _eventBus.PublishAsync(new CustomerChargedEvent(customerId, amount, chargedAt));
+// -- PaymentService publishes THIS after successfully charging -- with ZERO knowledge of,
+//    or expectation about, WHO (if anyone) is listening --
+// -- if NOBODY is currently subscribed, that's PERFECTLY FINE -- the fact still HAPPENED --
+```
+
+**Why this distinction matters beyond naming convention:** a Command implies a required responsibility and a meaningful failure mode if it's never carried out (a queue with zero consumers means the charge genuinely never happens) — an Event implies no such obligation (a topic with zero current subscribers simply means nobody happened to react this time, which is a completely valid, unremarkable state). Conflating the two — publishing what's semantically a Command as a broadcast Event, or vice versa — makes a system's actual behavioral guarantees much harder to reason about from its message names alone.
+
+**Common Pitfall:** naming and routing an imperative instruction as if it were a past-tense event (`ProcessPayment` published broadcast-style to a topic, hoping "whoever's listening" picks it up) — this obscures that a specific action genuinely needs to happen and blurs who's actually responsible for making sure it does; commands belong on a point-to-point queue routed to a specific, accountable consumer, not broadcast the way a fact-stating event is.
+
+---
+
+## Intermediate — Question 29
+
+**Q29: What is producer-side message batching (`batch.size` and `linger.ms` in Kafka), and how does deliberately waiting a short time before sending a batch trade a small amount of latency for a large gain in throughput?**
+
+A producer could send every message the instant it's queued, one network round trip per message — or it can accumulate several messages into one batch before sending, amortizing the fixed per-request overhead (network round trip, broker-side bookkeeping) across many messages at once. `linger.ms` controls how long the producer is willing to *wait*, hoping more messages arrive to fill out a fuller batch, before sending whatever it currently has.
+
+```properties
+batch.size=16384      # accumulate UP TO 16KB worth of messages into ONE batch before sending
+linger.ms=5           # but wait AT MOST 5ms for the batch to fill, even if it's not yet full
+```
+
+```text
+linger.ms=0 (send immediately, no batching): each message pays its OWN full network
+  round-trip cost -- LOWEST possible per-message latency, but the WORST throughput,
+  since NOTHING is amortized across messages at all
+
+linger.ms=5: the producer waits UP TO 5 extra milliseconds, letting several messages
+  accumulate into ONE batch -- adds a SMALL, bounded latency per message, but batches
+  MANY messages into ONE network request, DRAMATICALLY increasing overall THROUGHPUT
+  under sustained, high-volume load
+```
+
+Because the fixed cost of a network round trip and broker-side write is paid once per *batch* rather than once per *message*, a producer sending thousands of messages per second sees a large throughput improvement from even a few milliseconds of deliberate batching delay — the "cost" is a small, bounded increase in per-message latency, which is usually a worthwhile trade for high-volume producers, though genuinely latency-sensitive, low-volume publishing may prefer `linger.ms=0` instead.
+
+**Common Pitfall:** leaving `linger.ms=0` (or an unconsidered default) for a high-throughput producer, then being surprised that the messaging pipeline's throughput ceiling seems far lower than the broker itself should be capable of — without any deliberate batching delay, every single message pays its own full round-trip cost, capping throughput well below what the same producer could achieve simply by allowing a few milliseconds of batching latency in exchange for dramatically fewer, larger network requests.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What is Consumer-Driven Contract Testing applied to asynchronous messages, and how does it let a consumer's own expectations of a message's shape be verified against the producer's actual schema changes, before either side deploys?**
+
+A Schema Registry (covered earlier) enforces compatibility rules at the *schema* level — Consumer-Driven Contract Testing goes a step further, letting each individual consumer publish an explicit, concrete expectation of the specific fields *it* actually reads from a message, so a producer's pipeline can verify a proposed schema change against every real consumer's actual, current usage — not just abstract compatibility rules that might theoretically allow a change no real consumer can actually tolerate.
+
+```json
+// A CONTRACT, published by the "EmailService" consumer, describing what IT specifically
+// expects to be able to read from an "OrderCreated" message
+{
+  "consumer": "EmailService",
+  "producer": "OrderService",
+  "expectedFields": ["orderId", "customerEmail", "items[].sku"]
+}
+```
+
+```text
+OrderService's CI pipeline, BEFORE allowing a schema change to merge:
+  1. Fetches EVERY consumer's published contract for the "OrderCreated" message
+  2. Generates a SAMPLE message using the PROPOSED new schema
+  3. VERIFIES the sample still satisfies EVERY consumer's contract (every expected
+     field is STILL present, in the EXPECTED shape)
+  4. If EmailService's contract expects "customerEmail" and the proposed schema
+     RENAMES it to "email" -- the CONTRACT TEST FAILS, BLOCKING the merge, BEFORE
+     it ever reaches a REAL environment where EmailService would actually break
+```
+
+**Why this catches a category of breakage that a Schema Registry's generic backward-compatibility rules alone can miss:** a schema change can be technically "backward compatible" by the registry's generic rules (adding a field, or even a rename implemented as add-new-plus-deprecate-old) while still silently breaking a *specific* consumer relying on behavior the generic rules don't model precisely — contract tests check against each consumer's actual, concrete expectations rather than a producer's own generic guess at what "compatible" means for every consumer it doesn't have direct visibility into.
+
+**Common Pitfall:** relying solely on Schema Registry compatibility checks (covered earlier) without any consumer-specific contract verification, assuming "the registry approved it, so it's safe" — the registry's rules are necessarily generic and schema-shape-based; they can't catch a change that's compatible in the abstract but still breaks a specific consumer's actual, narrower usage pattern, which is exactly the gap consumer-driven contracts are designed to close.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is Kafka's "Hot Partition" problem, and how does a poorly-chosen or low-cardinality partition key defeat the throughput benefit partitioning is supposed to provide?**
+
+Partitioning a topic is meant to spread load across many partitions for parallel consumption — but if the chosen partition key has low cardinality, or if one key's traffic vastly outweighs every other key's, the resulting partition assignment is badly skewed: one partition (and the single consumer instance handling it) absorbs a disproportionate share of the total traffic, while other partitions — and the consumer instances assigned to them — sit comparatively idle.
+
+```text
+A topic keyed by "tenantId", with 12 partitions -- but ONE enterprise tenant generates
+  80% of ALL traffic across the ENTIRE platform:
+
+  Partition holding that ONE large tenant's key: receives ~80% of ALL messages --
+    its assigned consumer instance is CONSTANTLY struggling, growing lag, while...
+  The OTHER 11 partitions: collectively receive only ~20% of traffic -- their
+    consumer instances sit LARGELY IDLE, doing almost nothing
+```
+
+```text
+Adding MORE consumer instances doesn't help the hot partition at all -- Kafka only
+  ever assigns ONE consumer per partition WITHIN a group (covered earlier) -- a
+  SINGLE overloaded partition has a HARD ceiling of exactly ONE consumer's
+  throughput, no matter how many idle consumer instances exist for the OTHER partitions
+```
+
+**Why this is a genuinely structural problem, not something more consumer instances can fix:** because Kafka's parallelism unit is the partition, not the message, a hot partition's ceiling is fixed at whatever throughput a single consumer instance can sustain — scaling out the consumer group further simply adds more idle capacity elsewhere without touching the actual bottleneck, unlike a Competing-Consumers-style queue (covered earlier) where any available worker can pick up the next message regardless of which "partition" it conceptually belongs to.
+
+**The fix — increase key cardinality, or split the hot key further:** a composite key (`tenantId + shardIndex`, where the large tenant's own traffic is further split into several deterministic sub-buckets) spreads even one dominant tenant's traffic across multiple partitions, restoring genuine parallelism for that tenant's own messages, at the cost of that tenant's ordering guarantee now being scoped to each sub-bucket rather than to the tenant as a single unit.
+
+**Common Pitfall:** diagnosing a growing consumer-group lag purely as "we need more consumer instances" without first checking per-partition lag and traffic distribution — if the actual cause is a single hot partition, adding more instances to a group already sized to match the partition count does nothing at all for the bottleneck, since the excess instances simply have no partition to consume from; the real fix addresses the skewed key distribution itself, not the instance count.
+
+---
+
+## Advanced — Question 25
+
+**Q25: How does a stateful stream-processing application's "local state store" (as in Kafka Streams' `KTable`/RocksDB-backed state) get rebuilt after a partition reassignment, and why does this recovery cost specifically motivate features like Sticky Assignment and Standby Replicas?**
+
+A stream-processing application often maintains local, per-partition state derived from the messages it's processed (a running total, a join buffer) — typically backed by an embedded store like RocksDB. When a partition is reassigned to a different consumer instance (during a rebalance, covered extensively earlier), that new instance doesn't inherit the old instance's in-memory/local-disk state at all; it must rebuild it from scratch by replaying the relevant changelog topic from the beginning.
+
+```text
+Instance A has been processing Partition 3 for DAYS, building up a large local
+  RocksDB state store (e.g., a running order-total PER customer)
+
+A REBALANCE reassigns Partition 3 to Instance B (a DIFFERENT machine, with NO
+  existing local copy of that state at all)
+
+Instance B must REBUILD the ENTIRE state store from scratch, by replaying
+  Partition 3's CHANGELOG TOPIC (a Kafka-backed durable log of every state
+  change ever made) from the BEGINNING -- for a state store with MILLIONS
+  of entries, this can take SEVERAL MINUTES before Instance B can resume
+  actually processing NEW messages for this partition at all
+```
+
+**Why this recovery cost specifically motivates two mitigations:**
+```text
+Sticky Assignment (covered earlier): minimizes HOW OFTEN a partition actually
+  moves to a DIFFERENT consumer in the first place -- fewer reassignments
+  directly means fewer EXPENSIVE state-rebuild events
+
+Standby Replicas: a SEPARATE, already-running consumer instance continuously
+  replays the SAME changelog topic in the BACKGROUND, keeping its OWN local
+  copy of the state store WARM and near-up-to-date AT ALL TIMES -- if a
+  rebalance reassigns the partition to THIS standby instance specifically,
+  it can resume processing ALMOST IMMEDIATELY, since its local state was
+  ALREADY nearly caught up, rather than starting a rebuild from ZERO
+```
+
+**Why this specifically extends the general rebalance-disruption discussion (covered under Sticky/Cooperative rebalancing) to a stateful-processing-specific cost:** a stateless consumer's rebalance disruption is measured in seconds (re-establishing a connection, resuming from a committed offset) — a stateful stream processor's disruption, without standby replicas, can be measured in minutes, since the new owner must fully rebuild a potentially large local state store before it can resume producing correct output at all; this materially larger cost is precisely why stateful processing frameworks invest specifically in standby-replica warm-failover, beyond what stateless consumer groups typically need.
+
+**Common Pitfall:** running a stateful stream-processing topology with large local state stores and no configured standby replicas, then being surprised by long processing gaps (minutes of no output) every time a routine deployment triggers a rebalance — for state-heavy topologies, standby replicas aren't an optional performance tweak; they're often the difference between a rebalance being a brief blip and a multi-minute processing outage for that partition's data.
+
+---
+
+## Scenario — Question 6
+
+**Q6: Your `OrderProcessor` consumer keeps crashing and restarting in a tight loop. Investigating, you find one specific message with a malformed JSON payload — every time it's redelivered, deserialization throws an unhandled exception, the process crashes, Kubernetes restarts the pod, and the same message (never acknowledged) is immediately redelivered again. No Dead Letter Queue was ever configured. Every other order behind this one in the queue is now stuck. How do you recover right now, and what do you fix so this can't happen again?**
+
+This is a poison message with no safety net — because the crash happens *before* the code ever reaches an ack/nack decision, the broker (seeing the connection drop without acknowledgment) simply redelivers the same message once the pod comes back up, and the cycle repeats indefinitely. With no DLQ configured, there was never a mechanism to break this loop automatically.
+
+**Immediate recovery — stop the crash loop first, don't try to "fix forward" mid-incident:**
+```text
+1. Scale the consumer deployment to ZERO replicas -- stop the crash-restart cycle
+   from continuing to consume cluster resources and spamming your error monitoring
+2. Manually inspect the queue's head message via the broker's management UI/CLI
+   to confirm it's genuinely the malformed payload causing the crash
+3. Manually move (or purge, if truly unrecoverable and non-critical) JUST that one
+   message out of the main queue -- most brokers support manually shoveling a
+   specific message to a side queue via the management API
+4. Scale the consumer back up -- it can now proceed past the point that was
+   blocking it, processing the healthy backlog of orders that piled up behind it
+```
+
+```csharp
+// The ROOT-CAUSE fix -- wrap deserialization so a malformed payload NACKs into
+// a dead-letter path instead of crashing the process outright
+public async Task Handle(BasicDeliverEventArgs ea)
+{
+    OrderMessage message;
+    try
+    {
+        message = JsonSerializer.Deserialize<OrderMessage>(ea.Body.Span);
+    }
+    catch (JsonException)
+    {
+        // a message that CAN'T even be deserialized is DEFINITIONALLY poison --
+        // dead-letter it immediately, don't let a deserialization failure crash the process
+        channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: false);
+        return;
+    }
+    await ProcessOrder(message);
+    channel.BasicAck(ea.DeliveryTag, multiple: false);
+}
+```
+```yaml
+# Configure the queue's DLQ routing so future poison messages route automatically,
+# with NO manual intervention or crash loop required at all
+arguments:
+  x-dead-letter-exchange: "orders-dlx"
+  x-delivery-limit: 5
+```
+
+**Why the fix has to be both "catch the exception" and "configure a DLQ," not just one:** catching the deserialization exception alone stops the crash loop but, without a DLQ target, the message would just be requeued indefinitely if nacked with `requeue: true` — and dropping it silently (nack without requeue and no DLQ) loses the message entirely with no record; a DLQ target combined with catching the exception is what gives you both "the process stops crashing" and "the failed message is preserved somewhere for investigation."
+
+**Common Pitfall:** treating the manual message-purge as the actual fix, and moving on once the queue is flowing again — without also fixing the code to catch deserialization failures and configuring a DLQ target, the exact same crash loop recurs the very next time any message arrives with unexpected shape, since nothing about the underlying vulnerability was actually addressed.
+
+---
+
+## Scenario — Question 7
+
+**Q7: A customer reports being charged twice for a single order. Investigating your logs, you find your `PaymentService` consumer processed the same `OrderPlaced` message twice, roughly four minutes apart, and both times called your payment gateway's charge API. The message broker's own metrics show it only delivered the message once each time it was actually redelivered — this wasn't a broker bug. What's the actual root cause, and how do you prevent this specific category of incident going forward?**
+
+The broker behaved correctly — at-least-once delivery (covered elsewhere) means redelivery is an expected, normal occurrence (a consumer crash between processing and acknowledgment, a network blip, a rebalance), not a bug. The actual defect is that `PaymentService`'s processing logic wasn't idempotent: it had no way to recognize "I've already charged this exact order" before making a second, genuinely duplicate charge to an external, real-money payment gateway.
+
+**Why this is worse than an ordinary duplicate-processing bug:** most duplicate-processing incidents (a duplicate email, a duplicate log entry) are merely annoying — a duplicate call to an external payment gateway has a real, financial, and hard-to-reverse consequence the moment it happens, making this a case where idempotency isn't just good practice but a genuine compliance/financial-risk requirement.
+
+**The fix — idempotency at two layers, not just one:**
+```csharp
+// LAYER 1: the Inbox pattern (covered earlier) -- stops a duplicate MESSAGE from
+// re-triggering business logic at all
+public async Task Handle(OrderPlacedEvent e)
+{
+    if (await _inbox.AlreadyProcessed(e.MessageId)) return;
+
+    // LAYER 2: an idempotency key passed to the EXTERNAL payment gateway itself --
+    // protects against ANY duplicate charge attempt, even one caused by something
+    // OTHER than a redelivered message (a retried HTTP call to the gateway, a
+    // double-click retried at a higher layer, etc.)
+    var idempotencyKey = $"order-{e.OrderId}"; // DETERMINISTIC, not a fresh Guid per attempt
+    await _paymentGateway.ChargeAsync(e.CustomerId, e.Amount, idempotencyKey);
+
+    await _inbox.MarkProcessed(e.MessageId);
+}
+```
+Most real payment gateways (Stripe, Braintree) natively support an idempotency key: submitting the *same* key twice returns the *original* charge's result rather than creating a second charge, regardless of what caused the duplicate submission — this closes the gap even for duplicate triggers the Inbox pattern alone wouldn't catch (a retried HTTP call to the gateway itself, independent of message redelivery).
+
+**Recovery for the affected customer:** issue an immediate refund for the duplicate charge, and audit recent payment logs for any *other* customers who may have been affected by the same gap in the window before the fix deployed — a single detected incident often isn't isolated once the root cause is a systemic missing-idempotency gap rather than a one-off fluke.
+
+**Common Pitfall:** fixing only the message-level Inbox pattern and considering the incident closed — this prevents *this specific* trigger (a redelivered message) from causing a duplicate charge again, but leaves the payment gateway call itself non-idempotent, still vulnerable to a duplicate charge triggered by any other path (a retried gateway call after a timeout, a manually-replayed message during a later incident); genuine protection against a financial double-charge requires idempotency enforced at the external call itself, not merely at the message-consumption layer.
+
+---
+
+## Scenario — Question 8
+
+**Q8: The `InventoryService` team deploys a change that renames a field in the `StockLevelChanged` event from `quantityAvailable` to `availableQuantity`, without telling anyone. Three other teams' consumers — `PricingService`, `ReorderService`, and a reporting pipeline — all silently start receiving `null` for a field they depend on, since their deserialization doesn't fail outright (the old field name is just absent), it just quietly produces a default value. The bug isn't discovered for two days, by which point pricing has been wrong and reorder thresholds have misfired repeatedly. What structural gaps let this happen, and how do you close them?**
+
+This incident has two separate structural gaps, and fixing only one leaves the other one able to cause the exact same outcome again: no compatibility enforcement stopped the breaking change from being published, and no fast-failing behavior on the consumer side surfaced the mismatch immediately instead of silently defaulting.
+
+**Gap 1 — no Schema Registry (or equivalent) enforcing compatibility before publish:**
+```text
+WITHOUT a registry: InventoryService can publish ANY shape it wants, at ANY time,
+  with NO check against what EXISTING consumers actually expect -- a field rename
+  is INDISTINGUISHABLE, from the PUBLISHING side, from any other harmless change
+```
+```text
+WITH a Schema Registry (covered earlier) enforcing BACKWARD compatibility: a
+  rename that REMOVES "quantityAvailable" entirely would FAIL the compatibility
+  check at PUBLISH time -- InventoryService's OWN pipeline would REJECT the
+  change BEFORE it ever reached a REAL topic, forcing the team to EITHER add
+  the new field ALONGSIDE the old ONE (keeping BOTH, temporarily), or explicitly
+  coordinate the breaking change ACROSS every KNOWN consumer FIRST
+```
+
+**Gap 2 — consumers silently defaulting on a missing field instead of failing loudly:**
+```csharp
+// SILENT, DANGEROUS -- a missing field just becomes a default value, no error at all
+public class StockLevelChanged { public int QuantityAvailable { get; set; } } // defaults to 0
+
+// BETTER -- a REQUIRED field that's missing should be a LOUD, IMMEDIATE deserialization
+// failure, NOT a silently-wrong default value that propagates into business logic unnoticed
+public class StockLevelChanged
+{
+    [Required] public int QuantityAvailable { get; set; }
+}
+// deserialization/validation THROWS if this field is absent -- surfaced IMMEDIATELY,
+// as a clearly-failing consumer, rather than a SILENTLY wrong business outcome DAYS later
+```
+
+**Why fixing only the registry (Gap 1) isn't fully sufficient either:** a registry prevents *this specific* class of accidental breaking change from ever being published — but any future, deliberate multi-field migration, or a producer bypassing the registry's check, could still reach a consumer with an unexpected shape; a consumer that fails loudly and immediately on a genuinely missing required field provides a second, independent layer of defense that doesn't depend on the producer-side enforcement working perfectly every single time.
+
+**Common Pitfall:** treating this purely as "InventoryService should have communicated better" — a process fix (a change-notification Slack channel, a review checklist) helps, but doesn't scale as the number of services grows and doesn't prevent the *next* team from making the identical mistake; the durable fix is a Schema Registry enforcing compatibility mechanically, backed by consumers that fail fast and loud on a genuinely missing required field, rather than relying on every team remembering to communicate every future change perfectly.
+
+---
+
+## Scenario — Question 9
+
+**Q9: Your `InventoryService` consumes `StockAdjusted` events keyed by `productId`, and relies on Kafka's per-partition ordering to apply adjustments in the correct sequence. After a topic migration that increased the partition count from 6 to 12, you start seeing negative stock levels — a `StockAdjusted(-5)` event is sometimes applied before an earlier `StockAdjusted(+10)` event for the same product. What broke, and how do you fix it safely?**
+
+Kafka's partition assignment is computed by hashing the key modulo the *current* partition count — changing the number of partitions changes which partition a given key hashes to. Existing, already-produced events for a given `productId` were written under the old 6-partition hash; newly-produced events for that same `productId`, after the migration to 12 partitions, hash to a *different* partition than before, and the two populations of events for the same key are no longer guaranteed to stay in relative order with each other.
+
+```text
+BEFORE migration (6 partitions): hash("product-42") % 6 = Partition 3
+  -- ALL of product-42's events, historically, landed in Partition 3, IN ORDER
+
+AFTER migration (12 partitions): hash("product-42") % 12 = Partition 9 (a DIFFERENT partition)
+  -- NEW events for product-42 now land in Partition 9 -- a consumer reading
+  Partition 9 has NO relationship to, or awareness of, what's STILL sitting
+  unconsumed in Partition 3 for the SAME product -- the two streams can be
+  consumed in an INTERLEAVED, effectively ARBITRARY relative order
+```
+
+**Why this is specifically a partition-count-change problem, not a general ordering bug:** ordering *within* a single, stable partition was never actually violated — the bug is that the *set of events sharing a partition* changed at the exact moment of migration, silently breaking the implicit assumption that "all of product-42's events land in the same partition" the application's correctness had been quietly depending on.
+
+**The safe fix — never change partition count on a topic where key-to-partition stability matters, migrate to a new topic instead:**
+```text
+1. Create a NEW topic with the DESIRED final partition count from the START
+   (12 partitions, decided UP FRONT, not changed LATER)
+2. Drain the OLD topic completely -- ensure every consumer has fully caught
+   up and processed everything in the OLD topic before cutting over
+3. Redirect PRODUCERS to the NEW topic only ONCE the old one is fully drained
+4. Only THEN retire the old topic -- at no point do IN-FLIGHT, unconsumed
+   events for the SAME key exist across TWO different partition-count regimes
+   simultaneously
+```
+
+**Common Pitfall:** treating "just increase the partition count for more parallelism" as a routine, safe operational change — for any topic where a consumer's correctness depends on stable key-to-partition mapping (ordering-sensitive, per-entity processing), changing partition count on a live topic is a breaking change requiring careful migration, not an in-place operational tweak; the partition count for such a topic should be decided deliberately up front, sized generously enough that it's unlikely to need changing later.
+
+---
+
+## Scenario — Question 10
+
+**Q10: Six months after configuring a Dead Letter Queue for your `NotificationsQueue`, an unrelated audit discovers the DLQ has silently accumulated 2.3 million messages and is now approaching its own storage limit — at which point it will itself start rejecting or dropping messages. Nobody had been monitoring it. What does this reveal about the original DLQ setup, and how do you both recover safely and prevent a recurrence?**
+
+A DLQ that's configured but never monitored provides none of its intended operational value — its entire purpose is surfacing "something needs human attention," and a DLQ nobody watches just relocates messages that would have been lost anyway from one silent, unattended location (the main queue, retrying forever) to another (the DLQ, sitting untouched) — with the added risk, as discovered here, that the DLQ itself has finite capacity and can eventually start failing too.
+
+**Immediate recovery — understand what's actually in there before doing anything destructive:**
+```bash
+# Sample and categorize the DLQ's contents BEFORE deciding how to handle it --
+# treating 2.3 million messages as one undifferentiated blob risks discarding
+# something that still matters, or wasting effort reprocessing something that doesn't
+peek-dlq --queue notifications-dlq --sample 1000 --group-by failure-reason
+# Output reveals: 95% are a SPECIFIC, now-fixed bug (a null-reference in a notification
+# template, fixed 4 months ago) -- 5% are GENUINELY invalid, unrecoverable data
+# (malformed customer records from a since-decommissioned legacy import)
+```
+```text
+For the 95% caused by an ALREADY-FIXED bug: SAFE to replay back through the
+  (now-fixed) consumer -- these are legitimately recoverable notifications that
+  SHOULD have been delivered, and CAN be now, with the bug that originally
+  caused them to fail no longer present
+
+For the 5% that are genuinely INVALID, UNRECOVERABLE data: safe to discard,
+  AFTER confirming with the business/product owner that these truly have
+  no remaining recovery value (a notification for an order that's long
+  since been cancelled or refunded, for instance)
+```
+
+**The actual, durable fix — alerting on DLQ depth, not just its existence:**
+```yaml
+# An alert that FIRES the moment ANY message lands in the DLQ, or when depth
+# crosses a threshold -- rather than relying on someone eventually noticing
+alert: NotificationsDlqNonEmpty
+expr: dlq_depth{queue="notifications-dlq"} > 0
+for: 5m
+annotations:
+  summary: "Messages are accumulating in the notifications DLQ -- investigate"
+```
+
+**Why the recovery process itself has to start with categorization, not a blanket replay-everything-or-discard-everything decision:** blindly replaying all 2.3 million messages risks re-triggering whatever *other*, still-unfixed issues might also be represented in there (not every DLQ entry necessarily shares the same root cause) — and blindly discarding everything risks losing recoverable, legitimately-owed notifications; understanding the actual distribution of failure reasons first is what makes the subsequent replay-or-discard decision safe and correct.
+
+**Common Pitfall:** treating "we have a DLQ configured" as equivalent to "we have a working failure-handling process" — a DLQ without active depth monitoring and a defined, regularly-exercised triage process is really just a slower, quieter way to eventually lose data (or, as here, eventually hit its own capacity limit) rather than a genuine safety net; the DLQ's existence is necessary but nowhere near sufficient on its own.
+
+---
+
+## Scenario — Question 11
+
+**Q11: During a flash sale, traffic to your `OrderCreated` topic spikes to 20x normal volume. Your `InventoryReservationService` consumer group's lag — normally near zero — climbs steadily throughout the sale and is still climbing an hour after the sale ends, now numbering in the hundreds of thousands of unprocessed messages, and customers are reporting significant delays between placing an order and receiving stock confirmation. How do you diagnose the actual bottleneck, and what are your options to bring lag back down?**
+
+Growing consumer lag (covered earlier) means the consumer group is falling behind the incoming rate — but "add more consumers" isn't automatically correct until you've identified *why* it's falling behind, since the fix differs meaningfully depending on where the actual bottleneck sits.
+
+**Diagnosis — check per-partition lag and what the consumer is actually spending time on:**
+```bash
+kafka-consumer-groups.sh --describe --group inventory-reservation
+# Reveals: lag is roughly EVEN across all 12 partitions (not one hot partition,
+# covered elsewhere) -- every consumer instance is uniformly falling behind
+
+# Check what a SINGLE message's processing time actually looks like
+# -- reveals each reservation call makes a synchronous HTTP call to a
+#    downstream WarehouseAvailabilityService, averaging 400ms per call,
+#    now itself under heavy load and responding SLOWER than usual during the spike
+```
+The bottleneck isn't Kafka, and it isn't (per the even lag distribution) a partitioning/skew problem — it's a downstream synchronous dependency that's both slow under normal load and further degraded by the same traffic spike, meaning every consumer instance, however many you run, spends most of its time blocked waiting on that one call.
+
+**Options, roughly in order of how directly they address the actual bottleneck:**
+```text
+1. Scale consumer INSTANCES up to the partition count (12): helps SOMEWHAT, since
+   MORE instances means MORE concurrent OUTSTANDING calls to the downstream
+   service -- but this is bounded by PARTITION COUNT (covered earlier under
+   Consumer Groups) and, MORE importantly, just shifts LOAD onto an ALREADY
+   struggling downstream dependency, potentially making ITS OWN degradation worse
+
+2. Add caching/batching for the downstream availability check, if the data
+   doesn't need to be PERFECTLY real-time for every single check -- reduces
+   the NUMBER of actual calls made per message, addressing the ROOT bottleneck
+   directly rather than just adding MORE callers competing for the SAME
+   struggling downstream capacity
+
+3. Apply BACKPRESSURE further upstream (rate-limit HOW FAST OrderCreated events
+   are even ACCEPTED during a KNOWN high-traffic event) -- doesn't reduce the
+   TOTAL work, but SPREADS it over a LONGER window, avoiding the WORST of the
+   downstream service's own overload DURING the peak
+
+4. Longer-term: if WarehouseAvailabilityService's SYNCHRONOUS call is the
+   RECURRING bottleneck during EVERY traffic spike, consider WHETHER inventory
+   reservation genuinely NEEDS a real-time synchronous check AT ALL, versus an
+   EVENTUALLY-consistent local cache of AVAILABILITY, refreshed ASYNCHRONOUSLY
+```
+
+**Why blindly scaling consumer instances first, without this diagnosis, can make things worse rather than better:** if the actual constraint is a shared downstream dependency's own capacity (as it is here), adding more consumer instances just means more concurrent callers competing for that same constrained capacity — potentially pushing the already-struggling `WarehouseAvailabilityService` into deeper overload, extending the incident rather than resolving it, exactly the shared-bottleneck trap covered under the Competing Consumers pattern's own common pitfall.
+
+**Common Pitfall:** reflexively scaling consumer instance count as the first and only response to growing lag, without first checking whether the bottleneck is actually consumer-side processing capacity or a shared downstream dependency the additional instances would only pile more load onto — the correct response depends entirely on which one it is, and diagnosing that (as shown above) takes only a few minutes but determines whether the "fix" actually helps or actively worsens the incident.
+
+---

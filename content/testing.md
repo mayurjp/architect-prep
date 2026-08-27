@@ -205,6 +205,209 @@ Tests must be completely isolated and idempotent.
 
 ---
 
+## Scenario — Question 5
+
+**Q5: One specific integration test, `OrderNotificationTests`, fails intermittently in CI — roughly one run in twenty — but passes every time when run alone locally, and the failure message varies (sometimes a `NullReferenceException`, sometimes a timeout). The test class registers a hosted background notification service and disposes it in a teardown method. How do you find and fix the actual root cause, rather than just adding a retry?**
+
+A failure whose *symptom* varies between runs (different exception types, not the same assertion failing every time) is a strong signal of a **race condition or resource leak**, not a straightforward logic bug — a logic bug fails the same way every time; genuinely non-deterministic failure modes point toward timing, shared state, or improperly awaited async lifecycle.
+
+**Step 1 — reproduce locally by forcing parallel execution and repetition:**
+```bash
+dotnet test --filter "FullyQualifiedName~OrderNotificationTests" -- xunit.parallelizeTestCollections=true
+# Run the SAME test class repeatedly, back-to-back, rather than once in isolation --
+# a leak or race that needs "one run's leftover state" to manifest often needs several
+# consecutive runs before it actually reproduces
+```
+
+**Step 2 — inspect the teardown for improperly-awaited async disposal:**
+```csharp
+// THE BUG -- teardown calls Dispose() synchronously on a service with genuinely ASYNC shutdown work
+public void Dispose()
+{
+    _hostedService.StopAsync(CancellationToken.None); // NOT awaited -- fires and forgets!
+    // the method returns immediately, but the hosted service's background thread may STILL be
+    // mid-shutdown, still holding a reference to a shared resource the NEXT test also uses
+}
+```
+Because `StopAsync` isn't awaited, xUnit considers teardown "complete" and starts the next test while the previous hosted service's shutdown is potentially still running in the background — under most timing, the shutdown finishes just fast enough not to matter; under CI's typically more contended, slower-scheduled environment, it occasionally doesn't, causing the next test to observe a half-torn-down service (a `NullReferenceException`) or to be blocked waiting on a resource the still-shutting-down service hasn't released yet (a timeout).
+
+**The fix — implement `IAsyncLifetime` (covered elsewhere) instead of `IDisposable` for genuinely async teardown:**
+```csharp
+public class OrderNotificationTests : IAsyncLifetime
+{
+    public async Task DisposeAsync() => await _hostedService.StopAsync(CancellationToken.None); // genuinely AWAITED
+    public Task InitializeAsync() => Task.CompletedTask;
+}
+```
+
+**Common Pitfall:** "fixing" this class of flakiness by adding a CI-level automatic retry on failure — a retry masks the symptom (the pipeline eventually goes green) without addressing the actual unawaited-disposal race, which remains latent and can manifest as a genuine production bug (a real hosted service leaking during a real deployment's shutdown sequence) that the now-silenced flaky test could otherwise have caught.
+
+---
+
+## Scenario — Question 6
+
+**Q6: A `DiscountCalculator.IsEligible(int orderCount)` method has 100% line and branch coverage, and every test passes. In production, a customer with exactly 10 prior orders was incorrectly denied a loyalty discount that should apply starting at 10 orders. How did full coverage miss this, and what process change would have caught it before release?**
+
+100% branch coverage confirms every `if`/`else` path *executed* at least once during testing — it says nothing about whether the *exact boundary value* was ever tested, which is precisely the class of bug that just reached production here.
+
+**The bug and the coverage that missed it:**
+```csharp
+public bool IsEligible(int orderCount) => orderCount > 10; // BUG: should be >= 10
+
+[Fact] public void IsEligible_NineOrders_ReturnsFalse() => Assert.False(_calc.IsEligible(9));  // hits the FALSE branch
+[Fact] public void IsEligible_TwentyOrders_ReturnsTrue() => Assert.True(_calc.IsEligible(20)); // hits the TRUE branch
+// Both branches EXECUTED -- 100% branch coverage achieved -- but NEITHER test uses orderCount == 10,
+// the EXACT boundary value where the off-by-one bug actually lives
+```
+
+**Confirming the coverage gap retroactively, via mutation testing (covered elsewhere):**
+```bash
+dotnet stryker
+# Stryker.NET generates a mutant flipping ">" to ">=" -- the EXISTING test suite still passes against
+# this mutant, meaning it SURVIVES -- the mutation report flags this exact line as a genuine gap:
+# "no test distinguishes > from >= here," directly naming the bug that just shipped
+```
+
+**The fix — a boundary-value test (Boundary Value Analysis, covered elsewhere), then the code fix:**
+```csharp
+[Fact] public void IsEligible_ExactlyTenOrders_ReturnsTrue() => Assert.True(_calc.IsEligible(10)); // NOW fails, correctly
+// code fix: public bool IsEligible(int orderCount) => orderCount >= 10;
+```
+
+**The process change:** running Mutation Testing (covered elsewhere) periodically — even just on business-critical modules like eligibility/pricing logic, given its computational cost — would have surfaced this exact surviving mutant *before* release, since a coverage report alone cannot distinguish "every branch ran" from "every meaningfully distinct boundary was actually tested."
+
+**Common Pitfall:** responding to this incident by mandating "100% coverage on all future PRs" as the fix — the bug already had 100% coverage; the actual gap was the *absence of a boundary-value test*, a distinction coverage tooling structurally cannot see. The durable process fix is specifically boundary-value test discipline (and/or periodic mutation testing) for comparison-heavy business logic, not a higher coverage threshold that this exact bug would have satisfied anyway.
+
+---
+
+## Scenario — Question 7
+
+**Q7: You've inherited a 200,000-line legacy billing module with zero automated tests, written by developers who've since left. Management wants a significant refactor to support a new pricing model, but every previous attempt to touch this code has introduced regressions. How do you safely add test coverage before refactoring, given you don't have a specification of the code's intended behavior?**
+
+With no specification and no original authors available, you genuinely don't know what the code is *supposed* to do in every case — only what it *currently* does. Characterization Testing (covered elsewhere) is specifically designed for exactly this situation: capture current behavior as a safety net first, defer judgments about correctness to a later, separate step.
+
+**Step 1 — identify a seam to make the module testable at all:**
+```csharp
+// The legacy method is likely tangled with static calls and direct instantiation, resisting testing entirely
+public decimal CalculateInvoice(int customerId)
+{
+    var customer = CustomerRepository.GetById(customerId); // static call -- can't substitute in a test
+    // ... 400 more lines of tangled logic ...
+}
+```
+Introducing a minimal seam (extracting an interface for `CustomerRepository`, injecting it rather than calling the static method directly) is often the *smallest possible change* needed to make the module testable at all — done carefully, this change itself should be behavior-preserving and low-risk, before any other refactoring begins.
+
+**Step 2 — write Characterization Tests capturing current output for a wide range of real, representative inputs, bugs included:**
+```csharp
+[Theory]
+[InlineData(1001, 245.50)]  // captured from a KNOWN real customer's CURRENT actual invoice output
+[InlineData(1002, 0.00)]    // a known EDGE CASE currently (perhaps buggy) — still captured AS-IS
+public void CalculateInvoice_MatchesCurrentBehavior(int customerId, decimal expectedTotal) =>
+    Assert.Equal(expectedTotal, _billingService.CalculateInvoice(customerId));
+```
+These tests deliberately don't judge whether $0.00 for customer 1002 is "correct" — they exist purely to detect if the refactor accidentally *changes* it, which would then require a deliberate, explicit decision about whether that change is an intended fix or an unintended regression.
+
+**Step 3 — refactor incrementally, running the Characterization Tests after every small step:** any test failure now immediately identifies exactly which small change altered observable behavior, rather than discovering a regression only after the entire refactor is "complete" and has been running in production for weeks.
+
+**Common Pitfall:** attempting to write "correct," specification-style tests for the legacy behavior before refactoring, rather than Characterization Tests capturing what it *actually* currently does — without a specification or the original author available, guessing at "correct" behavior risks encoding the *wrong* expected values into the new tests, which would then mask a genuine regression (the refactor introducing the *guessed* incorrect behavior) as a passing test suite.
+
+---
+
+## Scenario — Question 8
+
+**Q8: `MobileApp` and `WebApp` both consume `OrderService`'s `GET /orders/{id}` endpoint. A developer on the `OrderService` team removes a `customerName` field from the response, believing it's unused, and opens a PR. The change never reaches production. What caught it, and why didn't this require anyone to manually check with the consumer teams first?**
+
+This is Consumer-Driven Contract Testing (covered elsewhere) functioning exactly as designed — the `OrderService` developer didn't need to personally track down and ask every consumer team whether they use `customerName`, because each consumer's actual dependency is already recorded as an executable contract.
+
+**What actually happened in CI, step by step:**
+```text
+1. MobileApp's team had earlier published a Pact contract stating:
+   "GET /orders/{id} must return a body including customerName"
+   (recorded automatically from MobileApp's own consumer-side test run, covered elsewhere)
+
+2. The OrderService developer's PR removes customerName from the response DTO
+
+3. OrderService's CI pipeline runs its PROVIDER verification step against the
+   Pact Broker's currently-published contracts (covered elsewhere) BEFORE merge
+
+4. The verification REPLAYS MobileApp's recorded request against the CANDIDATE new code --
+   the response no longer contains customerName -- MobileApp's contract expectation FAILS
+
+5. CI blocks the PR merge automatically, with a CLEAR failure message naming
+   EXACTLY which consumer's contract broke and WHY
+```
+
+**Why this specifically didn't require manual, ask-around coordination:** the entire value of Consumer-Driven Contract Testing is that each consumer's actual, real dependency is already captured as a machine-checkable artifact (the Pact file, covered elsewhere) the moment the consumer's own tests run — a provider-side developer never has to guess, remember, or manually track down which fields matter to whom; the CI pipeline's automated verification step does that checking mechanically, every single time, for every currently-published consumer contract.
+
+**The resolution:** the `OrderService` developer either restores `customerName` (if `MobileApp` genuinely still needs it) or coordinates directly with the `MobileApp` team to update their contract first (if the field is now genuinely obsolete) — either way, the decision happens deliberately, *before* the breaking change reaches production, rather than being discovered via a `MobileApp` crash report after deployment.
+
+**Common Pitfall:** treating this near-miss as proof contract testing alone is sufficient, and skipping the direct conversation with the consumer team even when a contract does need to change — a passing contract-update doesn't tell you *why* a consumer depends on a field, only *that* they do; genuinely obsolete fields still deserve a real conversation with the owning consumer team, not just a unilateral contract edit to make CI pass again.
+
+---
+
+## Scenario — Question 9
+
+**Q9: A tester notices that an integration test suite for `OrderService`, run nightly against a "staging" connection string, has been silently inserting and deleting real rows in the *production* database for the past three weeks — the connection string was accidentally left pointing at production after a configuration file merge conflict. How do you contain the immediate damage, and what structural safeguard prevents this from being possible at all going forward?**
+
+The immediate risk is twofold: ongoing data corruption (every future nightly run keeps mutating real customer data) and *already-corrupted* historical data that needs identifying and repairing — this needs both an immediate stop and a forward-looking structural fix, not just a config correction.
+
+**Immediate containment:**
+1. Disable or pause the nightly integration test pipeline immediately — stop the bleeding before anything else.
+2. Correct the connection string back to the actual staging environment.
+3. Using the test suite's own known test-data patterns (specific customer IDs, order references the tests are known to create/delete), audit production for orphaned or corrupted rows created or deleted by the test run's three weeks of execution, and work with the data/ops team to restore or reconcile them from backups where needed.
+
+**Why a mere connection-string fix isn't a sufficient long-term safeguard — a future merge conflict could reintroduce the exact same mistake:**
+```csharp
+// STRUCTURAL safeguard 1 -- the test's OWN setup actively REFUSES to run against anything
+// that doesn't look unmistakably like a test environment, regardless of what the config says
+[CollectionDefinition("Integration")]
+public class IntegrationTestSetup : ICollectionFixture<DatabaseFixture>
+{
+    public IntegrationTestSetup(DatabaseFixture fixture)
+    {
+        if (!fixture.ConnectionString.Contains("staging-", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "Refusing to run integration tests: connection string does not look like a staging environment.");
+    }
+}
+```
+2. **Network-level isolation** — the strongest guarantee: the CI runner executing integration tests simply has no network route to the production database at all, making an accidental connection a hard *impossibility* rather than something application code has to remember to check.
+3. **Testcontainers (covered elsewhere)** — spinning up a genuinely disposable, real database instance per test run eliminates the entire class of "pointed at the wrong persistent environment" mistake, since there's no shared, long-lived connection string to misconfigure in the first place.
+
+**Common Pitfall:** treating this incident as a one-off configuration mistake fixed by correcting the connection string, without adding any structural safeguard against the *same category* of mistake recurring — a config file is exactly the kind of artifact that can be silently altered by a future merge conflict, a copy-paste error, or an environment-variable mix-up; a safeguard that makes the mistake structurally difficult or impossible (network isolation, an explicit environment-name assertion, ephemeral Testcontainers) is far more durable than relying on careful configuration review alone.
+
+---
+
+## Scenario — Question 10
+
+**Q10: Your team has one week left in a sprint with a large, business-critical feature still needing tests written, and there clearly isn't time to unit-test everything at the same depth. How do you decide what to test thoroughly, what to test lightly, and what to deliberately skip for now — without just guessing?**
+
+Time-constrained testing prioritization isn't about testing "everything a little" — it's about deliberately allocating the *most* scrutiny to the code where a bug would be *most costly*, using concrete signals rather than a uniform, shallow pass across the entire feature.
+
+**Prioritize thoroughly-tested coverage for:**
+1. **Business-critical, high-blast-radius logic** — pricing, billing, anything touching money or compliance; a bug here is expensive and often user-facing at scale. This is the Golden Path (covered elsewhere) *plus* its boundary values and error paths, not just the happy path.
+2. **Code with genuinely high cyclomatic complexity** — many branches, nested conditionals — statistically where bugs concentrate, and exactly where a reader's manual code review is least likely to independently catch every edge case.
+3. **Code other teams/services actually depend on** — a public API's contract (tying to Contract Testing, covered elsewhere) deserves real coverage, since a regression here has effects outside your own team's visibility.
+
+**Deliberately test lightly, or explicitly defer, for:**
+1. **Thin wrapper/pass-through code** — a method that does nothing but forward its arguments to a well-tested library call has little unique logic of its own to verify.
+2. **UI-only cosmetic logic** with low business impact, where a visual bug is annoying but not costly and would be caught quickly by ordinary manual QA anyway.
+3. **Code behind a feature flag defaulting to "off"** — genuinely lower immediate risk, since it isn't yet affecting real users; still worth a regression test before the flag flips on, just not necessarily this sprint.
+
+**Making the trade-off explicit and visible, rather than silent:**
+```markdown
+<!-- In the PR description, not silently decided -->
+## Test coverage notes
+- Pricing calculation: fully covered incl. boundary values (critical path)
+- Discount eligibility: fully covered (critical path)
+- PDF export formatting: smoke-tested only, deferred detailed coverage to follow-up ticket JIRA-4821
+```
+Writing this down turns an implicit, easy-to-forget gap into an explicit, reviewable, trackable decision — a reviewer can push back if they disagree with the prioritization, and the deferred area has a concrete follow-up ticket rather than silently never getting tested at all.
+
+**Common Pitfall:** silently skipping tests for whatever code simply *felt* most tedious or time-consuming to test, rather than deliberately reasoning about actual business risk and complexity — this correlates poorly (and sometimes inversely) with where bugs are actually most costly; explicitly reasoning through and documenting the trade-off, rather than letting time pressure make the decision implicitly, is what separates a deliberate risk-based testing strategy from simply cutting whatever corner was easiest to cut under deadline pressure.
+
+---
+
 ## Beginner — Question 2
 
 **Q2: What is Test-Driven Development (TDD), and what is the Red-Green-Refactor cycle?**
@@ -2191,6 +2394,64 @@ Because Contract-First establishes the API's shape *before* implementation begin
 
 ---
 
+## Intermediate — Question 24
+
+**Q24: What is AutoFixture, and how does automatically generating realistic dummy values for every property a test doesn't explicitly care about reduce Arrange-section boilerplate beyond what a hand-written Test Data Builder (covered earlier) already provides?**
+
+A Test Data Builder (covered earlier) requires a developer to manually write and maintain sensible default values for every field — AutoFixture instead automatically generates plausible, non-null, non-zero values for every property of an object it's asked to create, with zero manually-written defaults required at all, letting a test's Arrange section specify only the one or two properties that actually matter to that specific test.
+
+```csharp
+// WITHOUT AutoFixture -- a Test Data Builder STILL requires MANUALLY writing every default value
+var order = new OrderBuilder().WithStatus("Cancelled").Build(); // relies on hand-maintained builder defaults
+
+// WITH AutoFixture -- values are generated AUTOMATICALLY, with NO manually-written defaults at all
+var fixture = new Fixture();
+var order = fixture.Build<Order>()
+    .With(o => o.Status, "Cancelled") // override ONLY the property THIS test actually cares about
+    .Create();
+// every OTHER property (Total, PlacedAt, CustomerName, Id...) gets a REALISTIC, AUTO-GENERATED value --
+// a non-zero decimal, a non-null string, a plausible DateTime -- with ZERO manual setup required
+```
+
+**Why this matters more as an object's shape grows over a project's lifetime:** a Test Data Builder (covered earlier) still requires someone to maintain its default values by hand as new required fields get added to the underlying entity — AutoFixture instead reflects over the type at test-run time and generates values for *whatever* properties currently exist, meaning a newly-added property to `Order` is automatically populated with a sensible value in every existing test the very next time they run, with no builder code to update at all.
+
+**Common Pitfall:** using AutoFixture's auto-generated values for properties whose *specific* value actually matters to what the test is verifying — auto-generated values are deliberately arbitrary (a random string, a random decimal), so any property the test's assertion actually depends on must still be explicitly set via `.With(...)`; relying on an auto-generated value for something the assertion checks produces a test that's fragile and confusing, since the "expected" value only exists by incidental random generation rather than deliberate test design.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is xUnit's `IAsyncLifetime` interface, and how does it solve the specific problem that a test class's constructor cannot be `async`, for tests needing genuinely asynchronous setup/teardown?**
+
+A C# constructor cannot be declared `async` — a Test Fixture's constructor (covered earlier for synchronous shared setup) has no way to `await` an asynchronous operation (starting a Testcontainers container, opening an async database connection) during construction itself. `IAsyncLifetime` gives xUnit an explicit, awaitable setup/teardown hook that runs *after* construction and *before* disposal, specifically for this case.
+
+```csharp
+public class DatabaseFixture : IAsyncLifetime
+{
+    private MsSqlContainer _container = new MsSqlBuilder().Build();
+    public string ConnectionString { get; private set; } = string.Empty;
+
+    public async Task InitializeAsync() // xUnit awaits THIS before running any test using the fixture
+    {
+        await _container.StartAsync(); // genuinely ASYNC startup -- impossible inside a constructor
+        ConnectionString = _container.GetConnectionString();
+    }
+
+    public async Task DisposeAsync() => await _container.DisposeAsync(); // genuinely ASYNC teardown
+}
+
+public class OrderTests : IClassFixture<DatabaseFixture>
+{
+    public OrderTests(DatabaseFixture fixture) { /* fixture.ConnectionString is ALREADY ready by this point */ }
+}
+```
+
+Because xUnit specifically awaits `InitializeAsync()` to fully complete before running any test that depends on the fixture, and awaits `DisposeAsync()` during teardown, code that genuinely needs asynchronous setup (spinning up a container, an async connection handshake) has a correct, supported place to put it — attempting the same thing inside an ordinary constructor would require blocking on the async call synchronously (`.Result`/`.Wait()`, covered elsewhere as a thread-pool-starvation risk), which is exactly the anti-pattern `IAsyncLifetime` exists to avoid.
+
+**Common Pitfall:** performing genuinely asynchronous setup inside a fixture's constructor by blocking synchronously on a `Task` (`_container.StartAsync().Wait()`) instead of implementing `IAsyncLifetime` — this "works" but reintroduces sync-over-async blocking (covered elsewhere as a source of thread-pool starvation) purely to work around the constructor's synchronous-only limitation, when `IAsyncLifetime`'s `InitializeAsync`/`DisposeAsync` hooks are the framework-supported, genuinely asynchronous alternative built specifically for this exact situation.
+
+---
+
 ## Advanced — Question 23
 
 **Q23: What is Shrinking in Property-Based Testing (covered earlier), and how does automatically reducing a failing random input down to the smallest, simplest case that still reproduces the failure make debugging dramatically easier?**
@@ -2214,6 +2475,110 @@ WITH shrinking: the FRAMEWORK automatically tries SIMPLER versions --
 Because a minimal failing case isolates the actual root cause far more clearly than a large, complex, mostly-irrelevant randomly-generated one, Shrinking is what makes Property-Based Testing's randomly-generated failures actually practical to debug — without it, a framework generating complex random inputs would produce failures that are technically reproducible but practically very difficult for a human to make sense of.
 
 **Common Pitfall:** assuming a Property-Based Testing framework's shrinking process always converges on the theoretically globally-minimal failing case — shrinking algorithms use heuristics and can sometimes get stuck at a local minimum that's simpler than the original failure but not the absolute simplest possible one; the shrunk case is still typically far more debuggable than the original, even if not always perfectly minimal.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is "Test-Induced Design Damage," and how does the "Classicist" (Detroit school) versus "Mockist" (London school) divide in TDD philosophy relate directly to the State-Based versus Interaction-Based testing styles covered earlier?**
+
+Test-Induced Design Damage is the criticism (most associated with Kent Beck, DHH, and others in a well-known public debate) that aggressively mocking every collaborator forces a design to be split into more, smaller interfaces than the problem actually warrants — purely to make each piece independently mockable — producing indirection that exists to satisfy the *tests*, not the actual production design.
+
+**The Classicist (Detroit school) approach — favors real collaborators and State-Based assertions (covered earlier):**
+```csharp
+[Fact]
+public void PlaceOrder_ReducesInventory_Classicist()
+{
+    var inventory = new InMemoryInventoryRepository(); // a REAL, working Fake (covered earlier), not a mock
+    inventory.Add(new Product { Id = 1, Stock = 10 });
+    var service = new OrderService(inventory);
+
+    service.PlaceOrder(new Order { ProductId = 1, Quantity = 3 });
+
+    Assert.Equal(7, inventory.GetById(1).Stock); // asserts the RESULTING STATE -- doesn't care HOW it got there
+}
+```
+
+**The Mockist (London school) approach — isolates every collaborator with a mock, verified via Interaction-Based assertions (covered earlier):**
+```csharp
+[Fact]
+public void PlaceOrder_CallsReduceStock_Mockist()
+{
+    var mockInventory = new Mock<IInventoryRepository>();
+    var service = new OrderService(mockInventory.Object);
+
+    service.PlaceOrder(new Order { ProductId = 1, Quantity = 3 });
+
+    mockInventory.Verify(i => i.ReduceStock(1, 3), Times.Once()); // verifies the INTERACTION, not any resulting state
+}
+```
+
+**Where the "design damage" criticism specifically comes from:** the Mockist style, taken to its logical extreme across an entire codebase, pressures every single collaborator into its own narrowly-scoped interface purely so it *can* be mocked in isolation — even collaborators that would naturally be simple, concrete, internal implementation details in a Classicist design end up extracted behind interfaces solely to satisfy testability, and the resulting web of interfaces and `Verify()` calls tightly couples tests to *how* the code is internally wired rather than *what* it actually accomplishes — precisely the brittleness-under-refactoring concern raised earlier for Interaction-Based testing and over-verification.
+
+**Common Pitfall:** treating one school as universally "correct" rather than recognizing both are legitimate, deliberate trade-offs — Classicist/state-based testing scales less painfully with a growing object graph but can require slower, heavier tests (real collaborators, real database fakes); Mockist/interaction-based testing gives fast, isolated tests but risks the design pressure and refactor-brittleness described above. Many experienced teams deliberately mix both: Mockist isolation at a system's true external boundaries (a payment gateway, an email service), Classicist/state-based verification for the bulk of internal business logic collaborating with real, in-process objects.
+
+---
+
+## Advanced — Question 25
+
+**Q25: How does using `[Trait]` attributes to categorize tests by speed/type, combined with `dotnet test --filter`, let a CI pipeline run a fast subset on every pull request while reserving a slower, fuller suite for a later pipeline stage?**
+
+Not every test in a suite needs to run at the same cadence — a fast, in-memory unit test can reasonably gate every single pull request, while a slow Testcontainers-backed integration test (covered earlier) or an E2E test (covered under the Test Pyramid) is often better reserved for a post-merge or nightly pipeline stage. `[Trait]` attributes let tests self-declare which category they belong to, and `dotnet test --filter` lets a pipeline stage select only the traits relevant to it.
+
+```csharp
+[Fact]
+[Trait("Category", "Unit")]
+public void CalculateDiscount_AppliesCorrectPercentage() { /* fast, no external dependencies */ }
+
+[Fact]
+[Trait("Category", "Integration")]
+public async Task PlaceOrder_PersistsToRealDatabase() { /* slow -- spins up a Testcontainers instance */ }
+```
+
+```bash
+# PR gate -- runs ONLY the fast Unit-tagged tests, giving quick feedback on every push
+dotnet test --filter "Category=Unit"
+
+# Post-merge / nightly stage -- runs the SLOWER Integration-tagged tests, on a more relaxed cadence
+dotnet test --filter "Category=Integration"
+```
+
+**Why this differs from Test Impact Analysis (covered earlier):** TIA selects a *subset* of tests based on which ones are statically/dynamically related to a specific code change, regardless of category — Trait-based staging instead partitions the *entire* suite by inherent characteristic (speed, external dependencies) independent of what changed in a given commit; the two techniques are complementary and are frequently combined (a PR gate running only fast, TIA-selected unit tests; a nightly build running the full, Trait-categorized integration/E2E suite).
+
+**Common Pitfall:** forgetting to tag a newly-added slow integration test with the correct `[Trait]`, causing it to silently run in the fast PR-gating stage (slowing down every single PR's feedback loop) — or, in the opposite direction, forgetting to tag a fast unit test at all, causing it to be excluded from the PR gate entirely and only caught much later in the slower nightly stage; Trait-based staging is only as reliable as the discipline of correctly tagging every new test as it's written.
+
+---
+
+## Advanced — Question 26
+
+**Q26: Should you write unit tests that directly call a class's `private` methods, and what does the strong conventional answer ("test through the public API only") reveal about what a private method that's hard to test through its callers is actually signaling?**
+
+Directly testing a `private` method (via reflection, or by temporarily making it `internal`/`public` purely for testability) is widely discouraged — the conventional, well-established answer is to test private methods *indirectly*, exclusively through the public methods that actually invoke them, treating the class's public API as the only legitimate testing surface.
+
+```csharp
+public class DiscountCalculator
+{
+    public decimal Apply(decimal price, string tier) => price - CalculateDiscountAmount(price, tier); // public entry point
+
+    private decimal CalculateDiscountAmount(decimal price, string tier) => // PRIVATE -- an implementation detail
+        tier == "Premium" ? price * 0.1m : 0;
+}
+
+// TESTING THROUGH the public API -- exercises the private method INDIRECTLY, without knowing it exists
+[Fact]
+public void Apply_PremiumTier_Reduces10Percent() =>
+    Assert.Equal(90m, new DiscountCalculator().Apply(100m, "Premium"));
+
+// AVOID -- reaching into PRIVATE implementation details via reflection just to test them directly
+var method = typeof(DiscountCalculator).GetMethod("CalculateDiscountAmount",
+    BindingFlags.NonPublic | BindingFlags.Instance); // couples the test to an internal detail that could rename/vanish
+```
+
+**Why this matters beyond just "it's inconvenient":** a `private` method is, by definition, an *implementation detail* — its exact name, signature, and even its existence can freely change during a refactor as long as the class's observable, public behavior stays the same. A test written against a private method directly (via reflection) breaks the instant that implementation detail changes, even when nothing about the class's actual, externally-visible behavior changed at all — precisely the brittleness-under-refactoring problem covered earlier for over-specified Interaction-Based tests, here applied to structure rather than mocked calls.
+
+**What genuine difficulty testing a private method through its public callers usually signals:** if a private method's logic feels *impossible* to adequately exercise through the class's existing public API, that's often a sign the private method actually represents a distinct, extractable *responsibility* that deserves to be its own class with its own public API — not a signal that reflection-based private-method testing is the right tool. Extracting it (the same instinct behind the Single Responsibility Principle, covered under Design Principles) makes that logic directly, legitimately testable through a genuine public surface, rather than working around encapsulation to poke at it as it currently sits, buried inside a larger class.
+
+**Common Pitfall:** reaching for reflection-based private-method testing as a first resort when a public-API test feels awkward to set up, rather than treating that awkwardness as a design signal — the awkwardness is frequently telling you the class has taken on too many responsibilities, and extracting the private logic into its own properly-public, independently-testable unit is almost always the more durable fix than testing around encapsulation via reflection.
 
 ---
 
@@ -2265,5 +2630,75 @@ TDD is a software development process relying on a very short, repeating cycle:
 Code Coverage is a metric (usually a percentage) that measures how many lines or branches of your source code are actually executed while your automated tests are running. 
 
 While high code coverage (e.g., 80%) is generally good, it does not guarantee the *quality* of the tests—it only proves the code was executed, not that the correct assertions were made.
+
+---
+
+## Beginner — Question 29
+
+**Q29: What is Behavior-Driven Development (BDD), and how does its Given-When-Then structure differ from the Arrange-Act-Assert pattern (covered earlier) it closely resembles?**
+
+BDD is a testing/specification style that expresses a test scenario in structured, near-natural-language sentences — **Given** (the starting context), **When** (the action taken), **Then** (the expected outcome) — specifically so that a test's intent is readable by non-developers (a product owner, a QA analyst) without needing to read any actual code at all.
+
+```gherkin
+Feature: Discount calculation
+
+Scenario: Premium customer receives a 10% discount
+  Given a customer with a "Premium" membership tier
+  When they purchase an order totaling 100 dollars
+  Then the final price should be 90 dollars
+```
+```csharp
+// A tool like SpecFlow/Reqnroll binds each Gherkin line to actual C# code that executes it
+[Given(@"a customer with a ""(.*)"" membership tier")]
+public void GivenACustomerWithTier(string tier) => _customer = new Customer { Tier = tier };
+
+[When(@"they purchase an order totaling (.*) dollars")]
+public void WhenTheyPurchaseAnOrder(decimal amount) => _result = _calculator.Apply(amount, _customer);
+
+[Then(@"the final price should be (.*) dollars")]
+public void ThenTheFinalPriceShouldBe(decimal expected) => Assert.Equal(expected, _result);
+```
+
+**Why this is conceptually the same idea as AAA, wearing different clothes:** Given maps directly to Arrange, When maps directly to Act, Then maps directly to Assert — the underlying testing discipline (separate setup, action, and verification) is identical; what BDD adds is a plain-language layer specifically designed so a non-technical stakeholder can read (and even help *write*) the scenario, turning it into a shared, executable specification both business and engineering can review together.
+
+**Common Pitfall:** adopting a BDD framework (SpecFlow/Reqnroll) purely for its syntax, without ever actually involving non-technical stakeholders in writing or reviewing the Gherkin scenarios — at that point it's just AAA-style testing with extra parsing overhead and indirection between the human-readable feature file and the C# step-definition code, without BDD's actual intended benefit (a shared specification language) ever being realized.
+
+---
+
+## Beginner — Question 30
+
+**Q30: What is the difference between `Assert.Throws<T>` and wrapping code in a `try`/`catch` block to test that a method throws an expected exception, and why is the former the preferred pattern?**
+
+Testing that a method correctly throws an exception under some condition requires actually invoking it and checking that the expected exception occurs — `Assert.Throws<T>` does this directly and concisely; manually wrapping the call in `try`/`catch` works too, but is more verbose and easy to get subtly wrong.
+
+**The manual, error-prone approach:**
+```csharp
+[Fact]
+public void Withdraw_InsufficientBalance_ThrowsException_TryCatch()
+{
+    var account = new BankAccount(50);
+    try
+    {
+        account.Withdraw(100);
+        Assert.Fail("Expected an exception but none was thrown"); // easy to forget this line entirely!
+    }
+    catch (InvalidOperationException) { /* expected -- test passes */ }
+}
+```
+
+**The direct, idiomatic approach:**
+```csharp
+[Fact]
+public void Withdraw_InsufficientBalance_ThrowsException()
+{
+    var account = new BankAccount(50);
+    var ex = Assert.Throws<InvalidOperationException>(() => account.Withdraw(100));
+    Assert.Equal("Insufficient balance", ex.Message); // can also assert on the exception's own details
+}
+```
+
+**Why `Assert.Throws<T>` is the safer default:** the manual `try`/`catch` version has a subtle trap — if a developer forgets the `Assert.Fail(...)` line inside the `try` block, a test where the exception is *never* actually thrown at all will still pass, silently, since the `catch` block simply never executes and nothing else fails the test. `Assert.Throws<T>` structurally cannot make this mistake: it explicitly fails if the expected exception type isn't thrown, and also returns the caught exception instance for further inspection (checking its message or specific properties).
+
+**Common Pitfall:** writing a manual `try`/`catch`-based exception test and forgetting the explicit `Assert.Fail()` (or equivalent) inside the `try` block for the "no exception was thrown at all" case — this produces a test that looks like it verifies exception-throwing behavior but would actually pass even if the method under test stopped throwing entirely, silently losing its coverage of that behavior without any visible failure ever alerting the team.
 
 ---
