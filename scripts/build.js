@@ -268,12 +268,13 @@ function main() {
   );
 
   const totalAnswered = allQuestions.filter((q) => q.status === "answered").length;
+  const publishedAt = new Date().toISOString();
 
   fs.writeFileSync(
     path.join(DATA_DIR, "build-info.json"),
     JSON.stringify(
       {
-        publishedAt: new Date().toISOString(),
+        publishedAt,
         totalQuestions: totalAnswered,
         totalTopics: files.length,
       },
@@ -282,7 +283,7 @@ function main() {
     )
   );
 
-  updateHomepageMeta(totalAnswered, files.length);
+  updateHomepageMeta(totalAnswered, files.length, publishedAt);
 
   console.log(
     `Built ${allQuestions.length} questions (${totalAnswered} answered, ${
@@ -295,14 +296,22 @@ function main() {
 // question/topic counts, so the numbers shown in link previews (LinkedIn, etc.) never
 // go stale as content grows — docs/index.html is hand-authored, not generated, so this
 // only rewrites the specific count phrase rather than the whole file.
-function updateHomepageMeta(totalQuestions, totalTopics) {
+function updateHomepageMeta(totalQuestions, totalTopics, publishedAt) {
   const indexPath = path.join(ROOT, "docs", "index.html");
   if (!fs.existsSync(indexPath)) return;
   let html = fs.readFileSync(indexPath, "utf8");
   const formattedCount = totalQuestions.toLocaleString("en-US");
-  const updated = html.replace(
+  let updated = html.replace(
     /[\d,]+\+ interview questions across \d+ topics/g,
     `${formattedCount}+ interview questions across ${totalTopics} topics`
+  );
+  updated = updated.replace(
+    /(<meta property="article:modified_time" content=")[^"]*(" \/>)/,
+    `$1${publishedAt}$2`
+  );
+  updated = updated.replace(
+    /(<meta property="og:updated_time" content=")[^"]*(" \/>)/,
+    `$1${publishedAt}$2`
   );
   if (updated !== html) {
     fs.writeFileSync(indexPath, updated);
