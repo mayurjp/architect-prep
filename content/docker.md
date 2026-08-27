@@ -2061,3 +2061,467 @@ The `EXPOSE` instruction informs Docker that the container listens on the specif
 To actually make the port accessible from outside the container, the person running it must use the `-p` (publish) flag (e.g., `docker run -p 8080:80`) to map a port on the host machine to the exposed port inside the container.
 
 ---
+
+## Beginner — Question 29
+
+**Q29: How do you inspect a running container's live resource usage (`docker stats`) and the processes running inside it (`docker top`), and why can't `docker inspect` (covered earlier) answer these questions?**
+
+`docker inspect` returns a container's static *configuration* — its mounts, environment variables, network settings — captured as a JSON snapshot. It tells you nothing about what the container is doing *right now*. `docker stats` and `docker top` fill that gap by reporting live, moment-to-moment behavior.
+
+**`docker stats` — a live, continuously-updating resource dashboard:**
+```bash
+docker stats my-api
+
+CONTAINER ID   NAME     CPU %   MEM USAGE / LIMIT     MEM %   NET I/O           PIDS
+a1b2c3d4e5f6   my-api   12.34%  340.2MiB / 512MiB     66.45%  1.2MB / 850kB     18
+```
+This updates continuously (like `top` on a Linux host) until you `Ctrl+C` it — useful for confirming, in real time, whether a container is approaching a configured `--memory` limit (covered earlier) or spiking CPU under load, without needing an external monitoring stack for a quick manual check.
+
+**`docker top` — the actual OS processes running inside the container, from the HOST's point of view:**
+```bash
+docker top my-api
+
+UID    PID    PPID   C    STIME   TTY   TIME       CMD
+root   4821   4799   0    10:02   ?     00:00:02   dotnet MyApi.dll
+```
+This is genuinely just the host's own `ps` output filtered to that container's PID namespace (covered elsewhere) — it confirms exactly which process(es) are running inside the container and their host-visible PIDs, which is useful for diagnosing an application that's unexpectedly spawned multiple child processes it shouldn't have.
+
+**Common Pitfall:** relying on `docker stats` output as if it were a historical time-series — by default it only shows the current instant, with no retention once the terminal closes; diagnosing a memory leak that develops over hours needs an actual metrics pipeline (cAdvisor, Prometheus node/container exporters) scraping and storing this same underlying data over time, not a human watching `docker stats` in a terminal.
+
+---
+
+## Beginner — Question 30
+
+**Q30: What is the practical difference between an Alpine-based image and a "slim"/distroless-based image as a minimal base image choice, and why can switching to Alpine silently break an application that worked fine on a full Debian/Ubuntu-based image?**
+
+Both are popular ways to shrink an image's size relative to a full OS base, but they shrink it in different ways with different compatibility costs — Alpine swaps the entire C standard library out from under your application, while slim/distroless variants keep the same standard library and just remove extra packages/tooling.
+
+**Alpine — small because it uses `musl` libc instead of `glibc`:**
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine   # ~110MB, uses musl libc
+```
+Alpine achieves its small size partly by using `musl`, a different (and much smaller) C standard library implementation than the `glibc` most Linux distributions and most compiled binaries assume. A .NET app itself runs fine on Alpine (Microsoft ships an Alpine-based runtime image specifically for this), but a **native dependency** (a NuGet package with a native `.so` shim, an ICU-dependent culture-aware string operation, or a third-party native library) built and tested only against `glibc` can fail at runtime on Alpine — sometimes with a cryptic `musl` symbol-resolution error, not an obvious "wrong OS" message.
+
+**Debian "slim"/distroless — small because it strips packages, not the C library:**
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0   # full Debian-based, glibc, larger
+FROM gcr.io/distroless/base-debian12       # distroless: same glibc, no shell/package manager
+```
+These remain glibc-compatible, so a native dependency that works on a full Debian/Ubuntu base continues working identically — the size reduction comes from removing the shell, package manager, and non-essential OS packages (the same attack-surface reduction covered earlier for distroless), not from swapping the underlying C library.
+
+**The practical decision rule:** reach for Alpine when the application and *all* its dependencies are confirmed musl-compatible (pure-managed .NET/Node/Python code usually is) for the smallest possible image; reach for slim/distroless instead the moment any native dependency's musl-compatibility is unconfirmed, since debugging a musl-specific runtime failure that only reproduces in the Alpine image (and not on a developer's glibc-based machine) is a genuinely time-consuming class of bug.
+
+**Common Pitfall:** switching a production base image to Alpine purely to shave off size, without first checking every native/transitive dependency for musl compatibility — this is exactly the kind of change that passes local testing (if the developer's machine or CI never actually ran the Alpine-based image) and only fails once the smaller image reaches a specific production code path exercising the incompatible native dependency.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: How does Docker's embedded DNS server let one container resolve another container's name to an IP address on a user-defined network, and what actually happens if you try the same trick on the default `bridge` network?**
+
+Docker runs a small internal DNS resolver (at the well-known address `127.0.0.11` inside every container) that answers name lookups for other containers sharing the same **user-defined** network — this is the actual mechanism behind the "use container names as hostnames" advice covered earlier under Docker Networking, not magic Docker performs globally.
+
+**On a user-defined network — name resolution works out of the box:**
+```bash
+docker network create my-app-net
+docker run -d --name api --network my-app-net my-api-image
+docker run -d --name db --network my-app-net postgres:16
+
+# From inside the "api" container:
+curl http://db:5432          # resolves via 127.0.0.11 to db's current container IP
+cat /etc/resolv.conf         # shows "nameserver 127.0.0.11" -- Docker's own embedded resolver
+```
+Every container joined to a given user-defined network is automatically registered with that network's embedded DNS server under its container name (and any `--network-alias` given) — when `api` looks up `db`, the request goes to `127.0.0.11`, which Docker's daemon answers directly from its own internal service-discovery records, no external DNS server involved.
+
+**On the default `bridge` network — this silently does NOT work:**
+```bash
+docker run -d --name api my-api-image        # no --network specified -> default bridge
+docker run -d --name db postgres:16          # also default bridge
+
+# From inside "api":
+curl http://db:5432   # FAILS -- name resolution error; default bridge has NO embedded DNS registration
+```
+The default `bridge` network predates Docker's embedded DNS feature and was never updated to register container names in it — containers on it can only reach each other by IP address (which changes on every recreate), which is precisely why the earlier networking guidance is "always create a user-defined network," not a stylistic preference.
+
+**Common Pitfall:** debugging an intermittent "can't resolve hostname" failure by checking the *application's* configuration first, when the actual cause is that the containers were started without `--network` (or without a compose file's implicit user-defined network) and are sitting on the default bridge — the fix is entirely at the `docker run`/compose network level, not anything the application code is doing wrong.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: How do you set CPU/memory limits for a service defined in `docker-compose.yml`, and why does the older `deploy.resources.limits` syntax silently do nothing when running `docker compose up` outside of Swarm mode?**
+
+Compose has two different-looking ways to express the same resource-limiting intent, and only one of them is honored by plain `docker compose up` — picking the wrong one produces a config file that looks correct but enforces no limit at all.
+
+**The Swarm-only syntax — silently ignored by plain `docker compose up`:**
+```yaml
+services:
+  api:
+    image: my-api:latest
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+```
+`deploy.resources` was designed for **Docker Swarm mode** (`docker stack deploy`) — running this same file with ordinary `docker compose up` parses it without error, but the `deploy` key is simply not applied outside a Swarm context, so the container actually starts with **no** memory/CPU limit at all, despite the config file appearing to set one.
+
+**The syntax that plain Compose actually enforces:**
+```yaml
+services:
+  api:
+    image: my-api:latest
+    mem_limit: 512m
+    cpus: "0.50"
+```
+`mem_limit` and `cpus` are Compose's own top-level resource keys (translating directly to the same `--memory`/`--cpus` flags covered earlier for `docker run`) and are honored by plain `docker compose up` on a single host, with no Swarm involved.
+
+**Why this distinction matters in practice:** a team copying a `deploy.resources` block from a Swarm-oriented example (or an older tutorial) into a plain Compose-based local/CI setup ends up with containers that appear correctly resource-constrained on paper but are completely unbounded at runtime — the failure mode isn't an error message, it's an absence of enforcement that only surfaces later as an unexpectedly resource-hungry container in an environment nobody thought needed limits checked.
+
+**Common Pitfall:** assuming `docker compose config` (which validates and normalizes a compose file) would flag a `deploy.resources` block as pointless outside Swarm — it does not; the key is valid Compose YAML schema, just conditionally applied based on the runtime context, so a purely visual file review is what actually catches this, not tooling.
+
+---
+
+## Advanced — Question 25
+
+**Q25: How does BuildKit's DAG (directed acyclic graph)-based build engine let independent Dockerfile stages build in PARALLEL, compared to the legacy builder's strictly sequential execution?**
+
+The legacy Docker builder executes a Dockerfile's instructions strictly top-to-bottom, one at a time, even across multi-stage builds — a stage that doesn't depend on another stage still waits for it to finish simply because it appears later in the file. BuildKit instead parses the entire Dockerfile into a dependency graph *before* building anything, and executes any stages with no dependency relationship between them concurrently.
+
+**A multi-stage Dockerfile with two genuinely independent stages:**
+```dockerfile
+FROM golang:1.22 AS backend-builder
+WORKDIR /src
+COPY backend/ .
+RUN go build -o /out/server .
+
+FROM node:20 AS frontend-builder
+WORKDIR /src
+COPY frontend/ .
+RUN npm ci && npm run build
+
+FROM nginx:alpine
+COPY --from=backend-builder /out/server /usr/local/bin/server
+COPY --from=frontend-builder /src/dist /usr/share/nginx/html
+```
+`backend-builder` and `frontend-builder` share no `COPY --from` relationship between each other — nothing in `frontend-builder` depends on anything `backend-builder` produces, or vice versa. The legacy builder would still build them sequentially purely because of their order in the file; BuildKit's graph analysis recognizes they're independent and runs `go build` and `npm run build` **concurrently**, only the final `nginx` stage waits on both.
+
+**Enabling and observing it:**
+```bash
+DOCKER_BUILDKIT=1 docker build .
+# or, on modern Docker installs, BuildKit is already the default builder
+# The build output interleaves both stages' logs, prefixed by stage name,
+# rather than showing one stage's full log before the next stage begins
+```
+
+**Why this matters beyond raw wall-clock speed:** a Dockerfile with genuinely independent stages (a frontend build and a backend build feeding into one final image, as above) sees a real, often substantial build-time reduction proportional to how imbalanced or parallelizable those stages are — a change that costs nothing in Dockerfile complexity, since the parallelism comes purely from BuildKit's own graph scheduling, not anything the Dockerfile author explicitly orchestrates.
+
+**Common Pitfall:** assuming reordering stages in the Dockerfile changes execution order or parallelism — with BuildKit, stage order in the file is irrelevant to execution order; what matters is the actual `COPY --from`/`FROM ... AS` dependency graph between stages, so reordering stages for "readability" has zero effect on build performance, and chasing a build-order theory unrelated to the actual dependency graph wastes debugging time on a non-issue.
+
+---
+
+## Advanced — Question 26
+
+**Q26: How do Docker's layered security controls — seccomp, dropped Linux capabilities, a read-only root filesystem, and user-namespace remapping (each covered individually earlier) — combine into genuine defense-in-depth, where no single control is expected to be sufficient on its own?**
+
+Each of these controls, covered individually, restricts a different *dimension* of what a compromised process inside a container can do — combining them means an attacker who defeats one control still runs into the next, rather than any single misconfiguration being a complete bypass.
+
+**Stacking all four in one `docker run`:**
+```bash
+docker run \
+  --security-opt seccomp=default.json \
+  --cap-drop ALL --cap-add NET_BIND_SERVICE \
+  --read-only --tmpfs /tmp \
+  --userns-remap default \
+  my-api-image
+```
+
+**What each layer independently denies to a successful exploit inside the container:**
+```text
+seccomp default profile   -> blocks dangerous/unnecessary SYSCALLS entirely (e.g., ptrace, mount)
+                              even for a process that IS root inside the container
+--cap-drop ALL             -> removes Linux capabilities (CAP_SYS_ADMIN, CAP_NET_RAW, etc.) a root
+                              process would otherwise have, re-adding back only what's explicitly needed
+--read-only + tmpfs        -> even a successful code-execution exploit can't persist a backdoor by
+                              writing to the container's own filesystem outside the declared tmpfs paths
+--userns-remap             -> even if the FIRST three layers are somehow defeated and the attacker
+                              achieves genuine "root inside the container," that root maps to an
+                              UNPRIVILEGED user ID on the HOST -- a container-escape doesn't grant host root
+```
+No individual layer assumes the others don't exist — `seccomp` doesn't assume capabilities are already dropped, and `userns-remap` provides its protection specifically for the scenario where the first three controls have *already* failed and a genuine container-escape is underway; it's the last line of defense, not a substitute for the earlier ones.
+
+**Why layering matters over picking "the best" single control:** an attacker's exploit path is often a chain (initial code execution → attempted privilege escalation inside the container → attempted container escape) — a single control tends to interrupt only one link in that chain, while a real production hardening baseline interrupts multiple links independently, so a novel bypass of any *one* control still leaves the others standing.
+
+**Common Pitfall:** treating these as interchangeable alternatives ("we're already using `--cap-drop ALL`, so we don't need `--read-only` too") rather than complementary layers — each addresses a genuinely different attack primitive (syscall access, Linux capabilities, filesystem persistence, host-level privilege), and skipping one doesn't get compensated for by the others being configured well.
+
+---
+
+## Advanced — Question 27
+
+**Q27: What is Docker's `--memory-reservation` "soft limit," and how does it behave differently from the hard `--memory` limit (covered earlier) under actual host memory pressure?**
+
+`--memory` is a hard ceiling — a container is `OOMKilled` (covered earlier) the instant it tries to exceed it, no exceptions. `--memory-reservation` is a *soft* target instead: the container is allowed to burst above it when the host has spare memory available, and is only throttled back down toward the reservation value once the host itself comes under genuine memory pressure.
+
+**Configuring both together, for a workload with legitimate bursty memory usage:**
+```bash
+docker run \
+  --memory=1g \                 # HARD limit -- OOMKilled if ever exceeded, no matter what
+  --memory-reservation=512m \   # SOFT target -- only enforced when the HOST is under memory pressure
+  my-api-image
+```
+
+**The behavior this actually produces:**
+```text
+Host has plenty of free memory available:
+  -> container can use anywhere up to its HARD limit (1g) freely, bursting well above
+     the 512m reservation with no penalty at all
+
+Host comes under genuine memory pressure (multiple containers competing for scarce RAM):
+  -> the kernel now actively tries to reclaim memory from containers that are OVER
+     their reservation, pushing this container back down TOWARD 512m -- but it is
+     still NOT killed outright the way exceeding the hard --memory limit would kill it
+```
+This gives a workload with legitimately bursty memory needs (an occasional large batch job, a cache that fills up under load) room to use spare host capacity when it's genuinely available, while still cooperating reasonably with other containers the moment the host actually needs that memory back — a pure hard `--memory` limit alone can't express "use more when it's free, but yield when it's not."
+
+**Common Pitfall:** setting `--memory-reservation` equal to or higher than `--memory`, which makes the soft limit meaningless (there's no room between the two for the "burst above reservation, throttle back under pressure" behavior to ever manifest) — the reservation should be a genuine floor comfortably below the hard ceiling, sized to the container's actual steady-state usage, with the hard limit sized to its legitimate peak.
+
+---
+
+## Scenario — Question 4
+
+**Q4: A production container is getting killed and automatically restarted every few hours, but there's no crash in the application logs — the process just disappears. `docker ps` shows the container's status briefly as `Exited (137)` before it restarts. How do you confirm the cause and fix it?**
+
+Exit code `137` (128 + signal 9, `SIGKILL`) with no application-level crash log is the signature of an **OOM kill** (covered earlier under cgroup memory limits) — the kernel's out-of-memory killer terminated the process forcibly, which is why the application never got a chance to log anything about its own shutdown.
+
+**Confirming it's actually an OOM kill, not an unrelated crash:**
+```bash
+docker inspect my-api --format='{{.State.OOMKilled}}'
+# true  <- this confirms the LAST exit was specifically an OOM kill, not a normal crash
+
+dmesg | grep -i "killed process"
+# Out of memory: Killed process 4821 (dotnet) total-vm:2100000kB, anon-rss:512000kB
+```
+`docker inspect`'s `OOMKilled` field is the authoritative confirmation — a generic `Exited (137)` alone could also mean someone ran `docker kill`, but `OOMKilled: true` specifically means the container hit its memory ceiling.
+
+**Diagnosing WHY it's hitting the ceiling — is it a leak, or just under-provisioned:**
+```bash
+docker stats my-api   # (covered earlier) watch memory climb over hours toward the --memory limit
+```
+- **A gradual, monotonic climb over hours before each kill** points to a genuine memory leak in the application (an unbounded cache, an event handler never unsubscribed) — restarting on a timer masks the symptom but the leak itself needs fixing in code.
+- **Memory reaching the ceiling quickly and repeatedly at roughly the same usage level** more often means the container's `--memory` limit was simply set too low for the workload's legitimate steady-state usage, not a leak at all.
+
+**The fix, depending on which it is:**
+```bash
+# If under-provisioned: raise the limit to a value with headroom above observed steady-state usage
+docker update --memory=1g --memory-swap=1g my-api
+
+# If a genuine leak: the container limit isn't the bug -- profile the app (dotnet-gcdump, memory profiler)
+# to find the actual unbounded growth, and treat the restart-on-OOM as a temporary mitigation, not a fix
+```
+
+**Common Pitfall:** raising the memory limit repeatedly every time the container gets OOMKilled, without ever confirming via `docker stats`/profiling whether it's a genuine leak — a leaking process just takes longer to hit a higher ceiling before repeating the same failure, while the actual bug (and the eventual, larger production incident it will still cause once even a generous limit is reached) goes unaddressed.
+
+---
+
+## Scenario — Question 5
+
+**Q5: A CI pipeline reports a Docker image is 1.4GB, and the team wants it smaller — investigation shows the Dockerfile already uses a multi-stage build (covered earlier). What layer-caching/build-structure mistakes commonly cause a bloated image even when multi-stage builds are already in use, and how do you find the actual offender?**
+
+Multi-stage builds eliminate the SDK/toolchain from the *final* stage, but they don't automatically prevent the final stage itself from accumulating unnecessary bulk — the investigation needs to look at what's actually being `COPY --from`'d into that final stage, and what's landing in its own layers.
+
+**Finding the actual offending layers:**
+```bash
+docker history my-api:latest --no-trunc
+# lists every layer with its individual size -- the single most direct way
+# to see WHICH instruction is responsible for the bulk, rather than guessing
+```
+
+**Common mistakes this usually reveals:**
+1. **Copying more than the built artifact from the builder stage:**
+```dockerfile
+# WRONG: copies the builder's ENTIRE output directory, which may include
+# intermediate object files, test artifacts, or an entire node_modules tree
+COPY --from=build /src /app
+
+# RIGHT: copy only the actual published/compiled output the app needs at runtime
+COPY --from=build /src/bin/Release/net8.0/publish /app
+```
+2. **Installing packages without cleaning up the package manager's own cache, in the SAME layer:**
+```dockerfile
+# WRONG: the apt cache is downloaded in this layer and persists in the image
+# even though a LATER layer's `rm -rf /var/lib/apt/lists/*` doesn't remove it
+# from THIS already-committed layer -- each RUN is its own layer
+RUN apt-get update && apt-get install -y curl
+RUN rm -rf /var/lib/apt/lists/*
+
+# RIGHT: install AND clean up within the SAME RUN instruction/layer
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+```
+3. **Not using a `.dockerignore` (covered earlier)**, so the build context (and sometimes a stray `COPY . .`) drags in `.git`, local `node_modules`, or test fixtures that were never meant to reach any image layer at all.
+
+**Why `docker history` is the right first step, not guessing:** a layer's size is fixed the moment it's committed — a `rm` in a *later* layer doesn't shrink an *earlier* layer's already-baked-in size, since each layer is an immutable diff; `docker history` shows exactly which historical layer is large, which tells you precisely which Dockerfile instruction to fix, rather than restructuring instructions that aren't actually the problem.
+
+**Common Pitfall:** assuming the final image being large means the multi-stage build "isn't working" and abandoning it — multi-stage builds correctly eliminate the SDK/build tools from the final image; a still-bloated final image almost always means the final stage's *own* `COPY`/`RUN` instructions are pulling in more than intended, which `docker history` pinpoints directly.
+
+---
+
+## Scenario — Question 6
+
+**Q6: Two containers, `api` and `db`, are both running and healthy individually, but `api`'s code fails to connect to `db` with a connection-refused or name-resolution error. Both were started with separate `docker run` commands (no Compose file). How do you systematically diagnose this?**
+
+The most common root cause when two independently-`docker run`-started containers can't reach each other is that they ended up on **different networks** (often both silently on the default bridge, or one explicitly attached to a user-defined network and the other not) — this needs to be confirmed before looking anywhere in application code.
+
+**Step 1 — confirm which network each container is actually on:**
+```bash
+docker inspect api --format='{{json .NetworkSettings.Networks}}'
+docker inspect db  --format='{{json .NetworkSettings.Networks}}'
+# if these show DIFFERENT network names, that's very likely the entire problem --
+# containers on different networks cannot reach each other at all, by design
+```
+
+**Step 2 — if they share a network, confirm whether it's the default bridge (no DNS, covered earlier) or user-defined:**
+```bash
+docker network inspect bridge --format='{{range .Containers}}{{.Name}} {{end}}'
+# if BOTH containers show up here, they're on the default bridge -- name resolution
+# ("db" as a hostname) will NOT work there even though raw IP connectivity might
+```
+
+**Step 3 — if on the same user-defined network, confirm the actual port and process binding inside `db`:**
+```bash
+docker exec db netstat -tlnp
+# confirms Postgres/SQL Server/etc is actually listening, and on which interface --
+# a service bound only to 127.0.0.1 INSIDE the container is unreachable from
+# api even on a correctly shared network, since 127.0.0.1 inside db means db itself,
+# not "other containers on this network"
+```
+
+**The fix, once isolated (most often the network mismatch):**
+```bash
+docker network create shared-net
+docker network connect shared-net api
+docker network connect shared-net db
+# now api can reach db by name: http://db:5432
+```
+
+**Common Pitfall:** immediately suspecting a firewall or the application's connection-string configuration, and spending time there first — for two containers that are each individually healthy, a networking-topology mismatch (different networks, or the default bridge's lack of DNS) is by far the more common cause than either the firewall or the app's own connection logic being wrong.
+
+---
+
+## Scenario — Question 7
+
+**Q7: A container vulnerability scanner (Trivy, Snyk, or similar) flags your production base image with several HIGH-severity CVEs in OS packages you don't even directly use. The application itself has no known code-level vulnerabilities. How do you remediate this, and how do you prevent it recurring silently?**
+
+CVEs reported against a base image's OS packages are usually inherited transitively from the base image itself, not from anything the application added — remediation is mostly about reducing what's *in* the base image and keeping it current, not patching application code that isn't actually at fault.
+
+**Step 1 — confirm what's actually flagged and whether it's even reachable:**
+```bash
+trivy image my-api:latest --severity HIGH,CRITICAL
+# lists each CVE with the specific PACKAGE it's in -- often something like
+# a libssl or zlib version bundled in the base OS image, unrelated to app code
+```
+
+**Step 2 — the most effective fix is usually reducing what's in the image, not patching package-by-package:**
+```dockerfile
+# BEFORE: a full OS base drags in dozens of packages the app never touches,
+# each one a potential future CVE surface even if unused today
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+
+# AFTER: distroless/minimal base (covered earlier) with only the runtime's
+# actual dependencies -- most of the flagged OS packages simply aren't present at all
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-noble-chiseled
+```
+A "chiseled"/distroless base doesn't just reduce *attack surface* (the framing used earlier) — it directly reduces the number of *scannable packages present*, which is the actual axis a CVE scanner measures against; many HIGH findings simply disappear because the vulnerable package was never in the smaller image to begin with.
+
+**Step 3 — for CVEs in packages genuinely needed, rebuild against an updated base tag rather than patching manually:**
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-noble-chiseled   # pin to a TAG, rebuild regularly
+# re-pulling and rebuilding against this tag periodically picks up the base
+# image maintainer's own upstream security patches, without app-side changes
+```
+
+**Preventing recurrence — scan in CI, not just occasionally by hand:**
+```yaml
+# CI pipeline step, failing the build on new HIGH/CRITICAL findings:
+- name: Scan image
+  run: trivy image --exit-code 1 --severity HIGH,CRITICAL my-api:${{ github.sha }}
+```
+Wiring the scan into CI (failing the pipeline on new findings above a chosen severity) turns "someone eventually notices a scan report" into "a vulnerable image can't be built and shipped in the first place" — the same shift from manual vigilance to structural enforcement covered earlier for other governance concerns.
+
+**Common Pitfall:** treating a flagged base-image CVE as something to individually patch inside your own Dockerfile (e.g., manually `apt-get upgrade`-ing the specific flagged package) — this fights the base image maintainer's own update cadence, produces a config that silently drifts from the maintained base over time, and needs to be redone for every new CVE; rebuilding against an updated, actively maintained base image tag is almost always the more durable fix.
+
+---
+
+## Scenario — Question 8
+
+**Q8: A developer says "it works on my machine" — the container runs fine locally but fails immediately in the CI/staging environment with a different error. Both environments claim to use "the same Dockerfile." How do you systematically rule out environment mismatch as the cause?**
+
+"Same Dockerfile" doesn't guarantee "same image" or "same runtime environment" — the investigation needs to check whether the *built image* and the *execution context* are actually identical, not just the source file.
+
+**Step 1 — confirm it's genuinely the same image, not a rebuild that resolved differently:**
+```bash
+docker inspect my-api:local --format='{{.Id}}'
+docker inspect my-api:ci    --format='{{.Id}}'
+# if these SHA256 IDs differ, it is NOT actually "the same image" --
+# something in the build (a base image tag resolving to a newer digest,
+# an unpinned dependency version, a different build-arg) produced a different result
+```
+A base image referenced by a mutable tag (like `node:20`, not a pinned digest — covered earlier) can silently resolve to genuinely different underlying bytes between when the developer built it locally and when CI built it later, even from the identical Dockerfile text.
+
+**Step 2 — confirm the platform/architecture actually matches:**
+```bash
+docker inspect my-api:local --format='{{.Architecture}}'
+docker inspect my-api:ci    --format='{{.Architecture}}'
+# a developer on Apple Silicon building "linux/arm64" locally, deployed
+# to an "linux/amd64" CI/staging environment, can behave differently for
+# any native dependency without multi-platform support (covered earlier)
+```
+
+**Step 3 — confirm environment variables and mounted config actually match:**
+```bash
+docker exec local-container env | sort > local-env.txt
+docker exec ci-container    env | sort > ci-env.txt
+diff local-env.txt ci-env.txt
+# a locally-set env var (an API key, a feature flag, a connection string
+# pointing at a local dependency) that CI never had configured is one of
+# the single most common causes of this exact complaint
+```
+
+**Step 4 — confirm the build context itself was identical**, not silently different due to `.dockerignore` (covered earlier) excluding a file locally present but missing from a fresh CI checkout, or an uncommitted local file the developer's build picked up that CI's clean checkout never had.
+
+**Common Pitfall:** treating "it works on my machine" as evidence the bug is CI/staging's environment problem to fix, rather than treating it as a signal that the build/run environment isn't as reproducible as assumed — the actual fix is almost always pinning what was previously left to float (a base image digest, a dependency version, an explicitly declared platform), making the two environments genuinely identical instead of "probably the same."
+
+---
+
+## Scenario — Question 9
+
+**Q9: A container is being restarted repeatedly by the orchestrator because it keeps failing its `HEALTHCHECK` (covered earlier) — but the application logs show it handling requests successfully the whole time. The restarts themselves are now causing brief user-facing outages during traffic spikes. How do you diagnose and fix this?**
+
+A container failing health checks while genuinely serving traffic successfully points to the **health check itself** being miscalibrated for the application's actual behavior under load, not the application being unhealthy — restarting a container that was working fine turns a false alarm into a real, self-inflicted outage.
+
+**Step 1 — check what the health check actually does, and how expensive it is:**
+```dockerfile
+HEALTHCHECK --interval=10s --timeout=2s --retries=3 \
+  CMD curl -f http://localhost/health || exit 1
+```
+If `/health` does real work (a live database query, an internal aggregate computation) rather than a cheap liveness check, it competes for the exact same thread pool/connection pool resources as real user traffic — under a genuine traffic spike, the health check endpoint itself can slow down or time out precisely *because* the app is busy serving real requests successfully, which is the opposite of what a health check is supposed to signal.
+
+**Step 2 — check whether `--timeout` is simply too aggressive for the endpoint's worst-case latency under load:**
+```text
+--timeout=2s might be comfortably enough during normal load, but during a genuine
+traffic spike, response time for even a lightweight endpoint can legitimately exceed it --
+a health check with no headroom for real (not unhealthy) load-driven latency
+variance produces exactly this false-positive-under-load pattern.
+```
+
+**The fix — separate a cheap liveness signal from any real dependency check, and give it load-aware headroom:**
+```dockerfile
+# A trivial endpoint that returns 200 the moment the process is up and accepting
+# connections -- NOT one that queries a database or does real work per check
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=30s \
+  CMD curl -f http://localhost/health/live || exit 1
+```
+Raising `--retries` alongside `--timeout` means a single slow check during a legitimate spike doesn't immediately trigger a restart — the orchestrator only acts after several consecutive failures, tolerating brief load-driven latency blips without treating them as genuine unhealthiness.
+
+**Common Pitfall:** "fixing" this by removing the `HEALTHCHECK` entirely to stop the restarts — this doesn't fix anything, it just removes the orchestrator's ability to detect a *genuine* future failure; the correct fix separates a cheap liveness probe from expensive dependency checks and calibrates timeout/retries to the application's real load-time latency profile, preserving the health check's actual value.
+
+---

@@ -2310,3 +2310,545 @@ A Namespace provides a mechanism for isolating groups of resources within a sing
 - **Access Control & Quotas:** You can apply RBAC permissions and Resource Quotas to an entire Namespace to restrict what a specific team can do or how much CPU/Memory they can consume.
 
 ---
+
+## Beginner — Question 29
+
+**Q29: What are Kubernetes' three Quality of Service (QoS) classes — Guaranteed, Burstable, and BestEffort — and how does a Pod's `resources.requests`/`resources.limits` configuration determine which one it's automatically assigned?**
+
+Kubernetes derives a QoS class for every Pod automatically from its containers' resource requests and limits — no field explicitly sets it; it's a computed consequence of *how* (or whether) resources are specified, and it directly determines how that Pod is treated under resource pressure.
+
+**Guaranteed — every container's requests exactly equal its limits, for BOTH CPU and memory:**
+```yaml
+resources:
+  requests: { cpu: "500m", memory: "256Mi" }
+  limits:   { cpu: "500m", memory: "256Mi" }   # IDENTICAL to requests -- both CPU and memory
+```
+
+**Burstable — at least one request/limit is set, but they don't match exactly:**
+```yaml
+resources:
+  requests: { cpu: "250m", memory: "128Mi" }
+  limits:   { cpu: "500m", memory: "256Mi" }   # limit is HIGHER than request -- can "burst" up to it
+```
+
+**BestEffort — no requests or limits specified at all:**
+```yaml
+containers:
+  - name: app
+    image: myapp:latest
+    # NO "resources" section whatsoever
+```
+
+```text
+Guaranteed:  the SCHEDULER knows EXACTLY what this Pod will consume -- HIGHEST protection
+             during node resource pressure -- the LAST class considered for eviction
+
+Burstable:   gets its REQUESTED amount reserved, but can use MORE (up to its limit) when
+             SPARE capacity exists -- evicted BEFORE Guaranteed pods if the node runs low
+
+BestEffort:  NO reservation, NO ceiling at all -- the FIRST class evicted the MOMENT a node
+             comes under memory pressure, regardless of how long it's been running fine
+```
+
+Because a node under genuine memory pressure must decide which Pods to evict to reclaim capacity, QoS class is the primary factor in that decision — a `BestEffort` Pod provides zero information about its actual needs, making it the safest (from the node's perspective) to sacrifice first, while a `Guaranteed` Pod's identical requests/limits mean the node can trust it will never legitimately need more than what's already been reserved for it.
+
+**Common Pitfall:** assuming a Pod with resource *limits* set (but no matching *requests*, or a `Burstable` mismatch between the two) receives the same eviction protection as a `Guaranteed` Pod — QoS class depends specifically on requests and limits *matching exactly*, for *both* CPU and memory; a Pod with generous limits but no requests set at all is still `BestEffort` and among the very first evicted, regardless of how high its limit is configured.
+
+---
+
+## Beginner — Question 30
+
+**Q30: What is CoreDNS, and how does it let a Pod resolve a Service's stable, human-readable DNS name into that Service's actual, currently-routable IP address?**
+
+Every Kubernetes cluster runs CoreDNS (the default, pluggable DNS server) as a cluster-internal service — it watches the Kubernetes API for Services and Pods, and automatically serves DNS records for each one, letting application code reach another Service by a predictable, stable name rather than needing to know (or hardcode) any actual IP address.
+
+**A Pod resolving a Service by its conventional, cluster-internal DNS name:**
+```csharp
+var response = await _httpClient.GetAsync("http://order-service.payments.svc.cluster.local/orders");
+// or, from WITHIN the same namespace, the short form:
+var response = await _httpClient.GetAsync("http://order-service/orders");
+```
+```text
+DNS name structure: <service-name>.<namespace>.svc.cluster.local
+  order-service.payments.svc.cluster.local  -- resolves to the "order-service" Service's
+    stable ClusterIP (covered earlier), REGARDLESS of which actual Pods currently back it
+```
+
+**How this stays correct as Pods come and go:** CoreDNS doesn't answer from a static, hand-maintained zone file — it queries the Kubernetes API's own live state, meaning the moment a Service's backing Pods change (a rolling update, a crash and reschedule), any *subsequent* DNS lookup already reflects the new, current state — the DNS layer and the Service's own label-selector-based membership (covered earlier) stay in sync automatically, without any separate DNS-record-management step.
+
+**Why this matters architecturally:** application code never needs to be configured with another service's specific IP address (which changes constantly as Pods are replaced) — it only ever needs that other Service's stable, predictable *name*, with CoreDNS handling the translation from name to currently-correct IP transparently, every time, which is precisely the abstraction that lets Kubernetes freely reschedule and replace Pods without breaking how services find each other.
+
+**Common Pitfall:** hardcoding a Pod's own IP address (rather than a Service's DNS name) into another application's configuration for convenience during initial testing — a Pod's IP is never stable across a restart/reschedule, and code depending on it will break the moment that specific Pod is replaced; the DNS name (resolving to a stable Service, not a specific Pod) is the correct thing to depend on for anything beyond a one-off manual debugging session.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is a "default-deny" `NetworkPolicy`, and how does it flip a namespace's traffic model from "everything is allowed unless a policy blocks it" to "everything is blocked unless a policy explicitly allows it" — including for EGRESS, not just the ingress case covered earlier?**
+
+The `NetworkPolicy` covered earlier allowed traffic *to* a specific Pod from a specific source — but a namespace with no policies at all still permits every *other* kind of traffic freely, since `NetworkPolicy` objects are purely additive (they only ever grant, never revoke, permissions). A default-deny policy establishes the opposite starting point: block everything for a set of Pods, then layer specific `NetworkPolicy` objects on top to explicitly re-permit exactly what's needed.
+
+**Default-deny for ALL ingress AND egress traffic in a namespace:**
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-all, namespace: payments }
+spec:
+  podSelector: {}          # applies to EVERY Pod in this namespace
+  policyTypes: [Ingress, Egress]
+  # NO "ingress"/"egress" rules specified -- an EMPTY policyTypes entry means DENY EVERYTHING of that type
+```
+
+**Then explicitly re-permitting only what's genuinely needed, on top of the default-deny baseline:**
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-db-egress, namespace: payments }
+spec:
+  podSelector: { matchLabels: { app: payments-api } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: payments-db } } }]
+      ports: [{ protocol: TCP, port: 5432 }]
+    - to: [{ namespaceSelector: {} }]              # ALSO explicitly allow DNS -- easy to forget!
+      ports: [{ protocol: UDP, port: 53 }]
+```
+
+Because `payments-api` now has `Egress` in its `policyTypes` from the default-deny policy, *every* outbound connection it attempts is blocked unless a subsequent policy explicitly re-permits it — including DNS lookups (UDP port 53 to CoreDNS, covered earlier), which is easy to overlook and results in `payments-api` being unable to resolve *any* DNS name at all, breaking outbound calls to legitimately-allowed destinations in a confusing way (the connection is permitted, but the name never resolves to an IP in the first place).
+
+**Common Pitfall:** applying a default-deny-egress policy without an accompanying explicit allow-rule for DNS traffic to CoreDNS — every outbound connection that depends on resolving a DNS name first (essentially all of them) silently fails, and the resulting error ("could not resolve host") looks like a DNS outage or misconfiguration rather than what it actually is: a `NetworkPolicy` blocking the DNS query itself before it ever reaches CoreDNS.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is a Kubernetes `startupProbe`, and how does it let a slow-starting application avoid being killed by an impatient `livenessProbe` (covered earlier) during its own, legitimately-long initial startup?**
+
+A `livenessProbe` (covered earlier) is meant to detect an application that's *already running* but has become deadlocked — but its short timeout/failure-threshold, tuned for catching a genuine deadlock quickly, can be far too impatient for an application's *initial* startup (JIT warm-up, EF Core model building, a large in-memory cache being populated), causing Kubernetes to kill and restart a Pod that was simply still legitimately booting, not actually broken. `startupProbe` solves this by disabling liveness/readiness checking entirely until the startup probe itself first succeeds.
+
+**Without a startupProbe — an impatient livenessProbe fighting a slow, legitimate startup:**
+```yaml
+livenessProbe:
+  httpGet: { path: /health/live, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 3   # KILLS the container after just 15 seconds of failed checks --
+                          # but THIS application genuinely takes 45 seconds to finish starting up
+```
+
+**With a startupProbe — liveness/readiness checks are held off until startup genuinely completes:**
+```yaml
+startupProbe:
+  httpGet: { path: /health/live, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 30   # allows up to 150 seconds (30 x 5s) for genuinely SLOW startup
+livenessProbe:
+  httpGet: { path: /health/live, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 3    # ONLY starts being evaluated AFTER startupProbe FIRST succeeds
+```
+```text
+WITHOUT startupProbe: livenessProbe starts checking IMMEDIATELY, from container start --
+  a genuinely slow BUT healthy startup gets KILLED, mistaken for a DEADLOCK
+
+WITH startupProbe: livenessProbe (and readinessProbe) are HELD OFF entirely until
+  startupProbe FIRST reports success -- a SLOW startup gets the GENEROUS failureThreshold
+  it needs, WITHOUT having to permanently WEAKEN the livenessProbe's OWN, tighter
+  deadlock-detection SENSITIVITY once the application is ACTUALLY running
+```
+
+**Why this is better than simply loosening the `livenessProbe`'s own thresholds to accommodate slow startup:** widening the liveness probe's `failureThreshold`/`periodSeconds` to tolerate a 45-second startup also means a *genuine* deadlock, occurring hours into normal operation, takes just as long to detect and restart — `startupProbe` lets startup get however much patience it legitimately needs, while keeping the liveness probe's own steady-state deadlock detection tight and responsive once the application is actually up and running.
+
+**Common Pitfall:** loosening a `livenessProbe`'s `failureThreshold`/`periodSeconds` specifically to accommodate slow application startup, rather than adding a dedicated `startupProbe` — this trades away fast deadlock detection during normal, steady-state operation just to tolerate a one-time startup cost, when a `startupProbe` achieves both goals independently without that trade-off at all.
+
+---
+
+## Advanced — Question 24
+
+**Q24: How does a node's Quality of Service (QoS) class assignment (covered earlier) determine the specific ORDER in which the kubelet evicts Pods under genuine node memory pressure, and why does `Guaranteed` alone not guarantee complete eviction immunity?**
+
+Covered earlier at the classification level — under actual memory pressure, the kubelet doesn't evict Pods randomly or purely by memory usage; it evicts strictly in QoS-class order first, and only considers usage-relative-to-request *within* a class as a tiebreaker.
+
+**The eviction order, strictly by class first:**
+```text
+1. BestEffort Pods    -- evicted FIRST, regardless of how much (or little) memory they're using --
+                          they made NO reservation at all, so they have NO claim to protection
+2. Burstable Pods     -- evicted NEXT, ordered by HOW FAR OVER their own memory REQUEST they
+                          currently are -- a Burstable Pod using MUCH more than it REQUESTED is
+                          evicted BEFORE one using close to (or under) its requested amount
+3. Guaranteed Pods    -- evicted LAST, and ONLY if evicting every lower class still hasn't
+                          freed enough memory -- or if a Guaranteed Pod itself somehow exceeds
+                          its OWN limit (which, for MEMORY specifically, triggers an IMMEDIATE
+                          OOMKill regardless of QoS class -- covered below)
+```
+
+**Why `Guaranteed` doesn't mean "can never be killed":**
+```text
+QoS-based EVICTION (the kubelet reclaiming node-wide memory under PRESSURE): Guaranteed
+  Pods are evicted LAST, genuinely the SAFEST class here
+
+OOMKill (the Linux KERNEL enforcing a container's OWN cgroup memory LIMIT): applies
+  REGARDLESS of QoS class -- a Guaranteed Pod that EXCEEDS its OWN declared memory limit
+  gets OOMKilled by the kernel IMMEDIATELY, an ENTIRELY separate mechanism from the
+  kubelet's node-pressure EVICTION ordering above -- "Guaranteed" protects against being
+  sacrificed for SOMEONE ELSE's excess usage, NOT against exceeding its OWN stated limit
+```
+
+Because these are two genuinely distinct mechanisms — the kubelet's proactive, QoS-ordered eviction to relieve *node-wide* pressure, versus the kernel's own cgroup enforcement of *that specific container's* individual limit — a `Guaranteed` Pod is fully protected from the first (it will never be sacrificed to free memory some other, less-protected Pod is consuming) but has zero special protection from the second (its own limit is still a hard ceiling, enforced identically regardless of QoS class).
+
+**Common Pitfall:** setting a `Guaranteed` QoS class's memory request/limit too tightly, assuming "Guaranteed" itself provides some cushion against exceeding it — the QoS class only affects the kubelet's *relative* eviction ordering against *other* Pods during genuine node-wide pressure; it grants no additional tolerance for the Pod's own actual memory usage exceeding its own configured limit, which triggers an immediate OOMKill via the kernel's cgroup enforcement regardless of how "protected" the Pod's QoS class otherwise makes it.
+
+---
+
+## Advanced — Question 25
+
+**Q25: How do multiple `NetworkPolicy` objects selecting the same Pod combine — additively, as a union of allowed traffic — and why does this mean there's no way to write an explicit "deny" rule that overrides another policy's "allow"?**
+
+Unlike some firewall systems where rules are evaluated in order and a later "deny" can override an earlier "allow," Kubernetes `NetworkPolicy` objects are purely additive: if *any* policy selecting a given Pod permits a specific piece of traffic, that traffic is allowed — there is no rule *type* for an explicit "deny," and no ordering/priority between policies that could make one policy's restriction override another's permission.
+
+**Two policies, independently written, that combine into a wider allowance than either intends alone:**
+```yaml
+# Policy A (written by the payments team) -- intends to allow traffic ONLY from payments-api
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-payments-api, namespace: payments }
+spec:
+  podSelector: { matchLabels: { app: payments-db } }
+  ingress: [{ from: [{ podSelector: { matchLabels: { app: payments-api } } }] }]
+---
+# Policy B (written LATER, by a DIFFERENT team debugging connectivity) -- INTENDED as TEMPORARY
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: debug-allow-all, namespace: payments }
+spec:
+  podSelector: { matchLabels: { app: payments-db } }
+  ingress: [{ from: [{}] }]   # allows traffic from EVERY Pod, EVERY namespace -- meant to be TEMPORARY
+```
+```text
+The RESULT is the UNION of both policies -- Policy B's overly broad allowance is NOT
+  "overridden" or "narrowed" by Policy A's more RESTRICTIVE one -- payments-db is now
+  reachable from ANY Pod in the cluster, because AT LEAST ONE policy (B) permits it,
+  REGARDLESS of how RESTRICTIVE Policy A independently tries to be
+```
+
+Because there's no mechanism to express "deny this, even if some other policy allows it," a single overly-permissive policy — even one explicitly labeled "temporary" or "debug" — silently and completely undoes the restriction every *other*, more carefully-written policy on that same Pod was trying to enforce, for as long as it continues to exist.
+
+**Why this makes NetworkPolicy auditing fundamentally different from auditing a single, ordered firewall ruleset:** correctly reasoning about a Pod's actual effective network exposure requires enumerating and combining *every* `NetworkPolicy` object that selects it across the entire namespace (or cluster, if some select cluster-wide) — there's no single place to look, and no way a strict, narrow policy's author could have prevented a completely separate, later-added policy from silently widening what they'd carefully restricted.
+
+**Common Pitfall:** adding a broad, "just to unblock this for now" `NetworkPolicy` while debugging connectivity, intending to delete it afterward — because policies combine additively with no override mechanism, this temporary policy immediately and silently widens *every* other policy's restrictions on the same Pod for as long as it exists, and if forgotten (a common outcome of "temporary" debugging changes), it permanently undoes the security intent of every other, more careful policy targeting that same Pod.
+
+---
+
+## Advanced — Question 26
+
+**Q26: Can the Horizontal Pod Autoscaler (HPA, covered extensively) scale a `StatefulSet` (covered earlier) the same way it scales a `Deployment`, and what specific nuance of ordered, per-replica identity makes scaling a `StatefulSet` a meaningfully different operation than scaling a stateless Deployment?**
+
+HPA can target a `StatefulSet` exactly the same way it targets a `Deployment` — the API is identical (`scaleTargetRef.kind: StatefulSet`) — but the *consequence* of scaling differs meaningfully, because a `StatefulSet`'s replicas aren't interchangeable the way a `Deployment`'s are, and scale-down specifically removes replicas in a strict, predictable order that a stateless workload's autoscaling never has to account for.
+
+**HPA targeting a StatefulSet — same configuration shape as targeting a Deployment:**
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: sharded-cache-hpa }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: StatefulSet, name: sharded-cache }
+  minReplicas: 3
+  maxReplicas: 10
+  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } } }]
+```
+
+**The nuance — scale-down always removes the HIGHEST-ordinal replica first, never an arbitrary one:**
+```text
+StatefulSet scaling from 5 -> 3 replicas: Kubernetes ALWAYS terminates
+  "sharded-cache-4" THEN "sharded-cache-3", in that STRICT, REVERSE-ordinal order --
+  NEVER an arbitrary replica, and NEVER "sharded-cache-1" while "sharded-cache-4" still exists
+
+Deployment scaling from 5 -> 3 replicas: Kubernetes can terminate ANY 2 of the 5
+  INTERCHANGEABLE replicas -- WHICH specific Pods get removed is NOT a meaningful
+  question at all, since EVERY replica is IDENTICAL and INTERCHANGEABLE
+```
+
+Because this ordering is strict and predictable, HPA-driven autoscaling works correctly for a `StatefulSet` *only* if the application's own logic can genuinely tolerate losing its highest-ordinal replicas specifically (a sharded cache where each shard's data can be safely rebalanced or is itself replicated elsewhere) — a `StatefulSet` where `sharded-cache-4` happens to be holding the *primary* role for some critical function (rather than every replica being genuinely equivalent in role, just not in identity) would need additional, application-aware logic to safely relinquish that role *before* HPA's scale-down actually terminates it.
+
+**Common Pitfall:** enabling HPA on a `StatefulSet` without first confirming the application's own logic gracefully handles losing its *highest-ordinal* replicas specifically, rather than an arbitrary one — unlike a `Deployment`, where "which replica gets removed" is a non-question, a `StatefulSet`'s strict reverse-ordinal scale-down order means the specific replica removed is entirely predictable but not arbitrary, and an application that assigns any special role or irreplaceable, non-replicated state to a high-ordinal Pod can suffer real consequences from an HPA-triggered scale-down it wasn't specifically designed to tolerate.
+
+---
+
+## Scenario — Question 4
+
+**Q4: A Pod keeps entering `CrashLoopBackOff`, but `kubectl logs --previous` shows the application logging "Server started successfully, listening on port 8080" just before each restart — the application isn't crashing at all. `kubectl describe pod` shows repeated `Liveness probe failed: Get "http://10.1.2.3:8080/health": context deadline exceeded`. What's actually going on, and how do you fix it, as distinct from a genuine application-level crash?**
+
+This is a specific, easy-to-misdiagnose variant of `CrashLoopBackOff` (the general anatomy covered earlier): the application itself is healthy and running — it's the *liveness probe's own timeout* that's too aggressive for how long the endpoint genuinely takes to respond under the application's actual startup/warm-up load, and the kubelet is killing a perfectly healthy container believing it's unresponsive.
+
+**Distinguishing "the app crashed" from "the probe gave up too early":**
+```text
+A GENUINE application crash: kubectl logs --previous shows an UNHANDLED exception,
+  a stack trace, or the process simply STOPS logging entirely, mid-operation
+
+THIS scenario: kubectl logs --previous shows a CLEAN, SUCCESSFUL startup message, with
+  NO error at all -- the kubectl describe Events instead show "Liveness probe failed" --
+  the KUBELET, not the APPLICATION, is what's terminating the container
+```
+
+**The likely root cause — a `/health` endpoint that itself does real, slow work under load, combined with too tight a probe timeout:**
+```yaml
+livenessProbe:
+  httpGet: { path: /health, port: 8080 }
+  timeoutSeconds: 1        # TOO tight if /health occasionally takes >1s to respond
+  periodSeconds: 5
+  failureThreshold: 3       # 3 slow responses in a row -- KILLED, even though the APP is fine
+```
+```csharp
+// a "/health" endpoint that does MORE than a cheap liveness check should ever do
+app.MapGet("/health", async (AppDbContext db) => {
+    await db.Database.CanConnectAsync(); // a REAL database round-trip -- can occasionally be SLOW
+    return Results.Ok();
+});
+```
+If the health endpoint performs a genuine database round-trip (appropriate for *readiness*, but not for a *liveness* check, which should only confirm the process itself isn't deadlocked) and that database occasionally responds slowly under real load, a `timeoutSeconds: 1` probe fails intermittently for reasons entirely unrelated to whether the application process itself is actually healthy.
+
+**The fix — separate concerns: a cheap, in-process liveness check plus a more generous timeout, distinct from a heavier readiness check:**
+```yaml
+livenessProbe:
+  httpGet: { path: /health/live, port: 8080 }   # a TRIVIAL check -- confirms the PROCESS responds AT ALL
+  timeoutSeconds: 5
+  failureThreshold: 3
+readinessProbe:
+  httpGet: { path: /health/ready, port: 8080 }  # the HEAVIER, database-touching check belongs HERE instead
+  timeoutSeconds: 5
+```
+Moving the database check to a distinct `readinessProbe` endpoint means a slow database round-trip only ever removes the Pod from load-balancing *temporarily* (Service routing, covered earlier) rather than causing the kubelet to kill and restart an otherwise perfectly healthy process — exactly the distinction between "should traffic be routed here right now" (readiness) and "is this process fundamentally alive, deadlock-free" (liveness) that the two probe types exist to separate.
+
+**Common Pitfall:** implementing a single `/health` endpoint used by *both* liveness and readiness probes, with that endpoint performing genuine dependency checks (database connectivity, downstream service reachability) — a liveness probe should be cheap and purely in-process; conflating the two lets a slow *dependency* (which readiness should handle by temporarily pulling the Pod from rotation) instead trigger a full container *restart*, mistaking "a downstream system is briefly slow" for "this process itself is broken."
+
+---
+
+## Scenario — Question 5
+
+**Q5: Your `order-service` Deployment has no CPU limit configured (only a request), running on a shared node alongside several other teams' Deployments. During a traffic spike, `order-service`'s Pods start consuming far more CPU than their request, and other, unrelated services on the same node begin reporting elevated latency despite having their own requests/limits correctly configured. Diagnose and fix this "noisy neighbor" problem.**
+
+Covered earlier at the concept level (`LimitRange`, `ResourceQuota`) — this scenario is the concrete failure mode those mechanisms exist to prevent: a Pod with a *request* but no *limit* is free to consume all of a node's spare CPU capacity the moment it's available, at the direct expense of every other Pod sharing that same node.
+
+**Diagnosing — confirming it's a resource-contention problem, not a bug in the affected services themselves:**
+```bash
+kubectl top pods --all-namespaces --sort-by=cpu   # find WHICH Pod is consuming disproportionate CPU
+kubectl describe node <node-name>                  # check "Allocated resources" -- REQUESTS vs node CAPACITY
+```
+```text
+order-service Pods: request 250m CPU each, NO LIMIT set -- during the spike, EACH Pod is
+  ACTUALLY consuming 1800m+ -- the NODE's scheduler ALLOWED this because CPU is
+  COMPRESSIBLE (unlike memory, a Pod exceeding CPU usage is THROTTLED, not KILLED --
+  but throttling happens SHARED, PROPORTIONALLY, only once the node is GENUINELY out of
+  spare capacity -- by THEN, every OTHER Pod on the SAME node is ALSO competing for the
+  SAME scarce CPU time, causing THEIR latency to rise too)
+```
+
+**The fix — set an explicit CPU limit on `order-service`, bounding its worst-case consumption:**
+```yaml
+resources:
+  requests: { cpu: "250m", memory: "256Mi" }
+  limits: { cpu: "500m", memory: "512Mi" }   # now BOUNDED -- can burst, but NEVER beyond THIS ceiling
+```
+
+**The structural fix — a namespace-wide `LimitRange` (covered earlier) preventing this class of misconfiguration from recurring for ANY team's workload, not just this one incident:**
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata: { name: enforce-limits, namespace: shared-cluster }
+spec:
+  limits:
+    - max: { cpu: "1000m", memory: "1Gi" }             # a HARD ceiling no Pod in this namespace may exceed
+      default: { cpu: "500m", memory: "256Mi" }         # applied automatically if a Pod omits its OWN limit
+      type: Container
+```
+Setting `max` (not just `default`) means even a Pod that *does* specify its own limit can't set one higher than the namespace-wide ceiling — closing the gap where a single team's deliberately (or accidentally) generous limit could still starve neighboring workloads sharing the same node.
+
+**Common Pitfall:** setting a CPU *request* without a corresponding *limit*, reasoning "requests are what matters for scheduling, limits are optional" — while true for the *scheduler's placement decision*, an unset limit means genuinely unbounded burst potential once the node has spare capacity, which is precisely the shared-node "noisy neighbor" risk; requests alone protect a Pod's own minimum guarantee, but only a limit protects *everyone else* sharing the same node from that Pod's own potential burst.
+
+---
+
+## Scenario — Question 6
+
+**Q6: Your rolling update strategy uses `maxUnavailable: 0` and correctly configured readiness probes, yet you still observe a brief spike of failed requests (connection refused / 502s) during every deployment, specifically during old-Pod termination rather than new-Pod startup. What's causing this despite readiness probes apparently working correctly, and how do you close the gap?**
+
+This is a well-known race condition between Pod termination and Service endpoint propagation, distinct from the startup-readiness case `maxUnavailable`/readiness probes are designed to handle — the gap here occurs on the *termination* side, not the startup side.
+
+**The race — Kubernetes starts terminating a Pod at the same moment it's removed from the Service's routing:**
+```text
+1. Kubernetes decides to terminate an old Pod (part of the rolling update)
+2. TWO things happen roughly SIMULTANEOUSLY, but NOT perfectly synchronized:
+   a. SIGTERM is sent to the Pod's main process
+   b. the Pod is REMOVED from the Service's EndpointSlice (covered earlier) --
+      but this removal must PROPAGATE across every node's kube-proxy, which
+      takes a SMALL, NON-ZERO amount of TIME (typically well under a second,
+      but NOT instantaneous)
+3. DURING that propagation window: some kube-proxy instances have ALREADY
+   removed the terminating Pod from their routing table -- OTHERS have NOT yet --
+   a request landing on a NODE that HASN'T updated yet gets ROUTED to a Pod
+   that's ALREADY shutting down (or has ALREADY exited) -- CONNECTION REFUSED / 502
+```
+
+**The fix — a `preStop` hook that deliberately delays actual shutdown, giving endpoint propagation time to catch up FIRST:**
+```yaml
+lifecycle:
+  preStop:
+    exec:
+      command: ["sh", "-c", "sleep 5"]   # deliberately delays the ACTUAL shutdown sequence
+terminationGracePeriodSeconds: 35         # must be increased to ACCOMMODATE the preStop delay
+```
+```text
+Corrected sequence:
+1. Kubernetes decides to terminate the Pod -- REMOVAL from EndpointSlice begins PROPAGATING
+2. preStop hook runs FIRST -- sleeps 5 seconds -- the Pod CONTINUES accepting and
+   completing IN-FLIGHT requests during this window, WHILE propagation catches up
+3. ONLY AFTER the sleep completes does SIGTERM actually get sent -- by THIS point,
+   virtually every kube-proxy instance has ALREADY removed this Pod from routing,
+   so essentially NO new requests are being sent to it ANYMORE
+4. the application then shuts down CLEANLY, having served every request that
+   was ROUTED to it DURING the propagation window, rather than being CUT OFF mid-flight
+```
+
+**Why readiness probes alone don't address this:** readiness probes govern whether a *starting* Pod is added to routing — they have no bearing on the *termination* side of the lifecycle, where the actual gap here exists; `maxUnavailable: 0` similarly only guarantees replacement capacity exists before an old Pod is removed, saying nothing about the brief propagation delay between "Kubernetes decided to terminate this Pod" and "every node's routing table has caught up to reflect that."
+
+**Common Pitfall:** assuming `maxUnavailable: 0` plus correctly configured readiness probes fully guarantees zero-downtime rollouts — this covers the *startup* side of the rolling update completely, but the termination-side endpoint-propagation race is a separate, well-documented gap that specifically requires a deliberate `preStop` delay (this exact technique, covered briefly under graceful shutdown, applied here specifically to close the zero-downtime gap rather than merely to finish in-flight work) to close.
+
+---
+
+## Scenario — Question 7
+
+**Q7: A `payment-processor` Pod intermittently fails to reach an external payment gateway, with errors like `System.Net.Sockets.SocketException: No such host is known`, but only about 10% of the time — the same request, retried immediately, usually succeeds. Application logs show nothing else unusual. How do you diagnose an intermittent DNS resolution failure inside the cluster, and what are the common root causes?**
+
+Intermittent (rather than total) DNS failure inside a cluster is a specific, well-known class of problem distinct from CoreDNS simply being down (which would fail 100% of the time) — the most common root causes involve either CoreDNS being under-provisioned relative to query volume, or a subtle interaction with `glibc`'s DNS resolver behavior.
+
+**Step 1 — confirm CoreDNS itself is healthy and check its own resource pressure:**
+```bash
+kubectl get pods -n kube-system -l k8s-app=kube-dns
+kubectl top pods -n kube-system -l k8s-app=kube-dns   # is CoreDNS itself CPU-throttled or OOM-adjacent?
+kubectl logs -n kube-system -l k8s-app=kube-dns | grep -i "error\|timeout"
+```
+```text
+A CoreDNS deployment sized for a much SMALLER cluster, now serving a MUCH higher query
+volume as the cluster GREW, can start DROPPING a small percentage of queries under
+LOAD -- exactly matching an INTERMITTENT (not total) failure pattern
+```
+
+**Step 2 — the well-known `ndots:5` + `glibc` parallel-query race condition:**
+```bash
+kubectl exec payment-processor-xyz -- cat /etc/resolv.conf
+# search payments.svc.cluster.local svc.cluster.local cluster.local example.com
+# options ndots:5
+```
+```text
+Kubernetes' default resolv.conf sets "ndots:5" -- a name with FEWER than 5 dots
+  (like "payment-gateway.example.com", which has only 2) gets EVERY search-domain
+  SUFFIX tried FIRST, before the ACTUAL external name -- up to 4 EXTRA, WASTED DNS
+  queries per lookup, EACH one adding LATENCY and consuming CoreDNS capacity
+  -- and older glibc versions have a KNOWN race condition sending SEVERAL of
+  these queries in PARALLEL over UDP, occasionally DROPPING a response under load
+```
+
+**The fix — reduce unnecessary search-domain queries for known-external names:**
+```yaml
+spec:
+  dnsConfig:
+    options:
+      - name: ndots
+        value: "1"    # for a WORKLOAD that mostly calls EXTERNAL hosts by FULLY-QUALIFIED name
+  # OR: append a trailing dot to the external hostname in application code/config,
+  # e.g. "payment-gateway.example.com." -- explicitly marks it as ALREADY fully-qualified,
+  # skipping the search-domain expansion ENTIRELY for that SPECIFIC lookup
+```
+
+**A complementary, cluster-wide fix — NodeLocal DNSCache**, running a caching DNS agent on every node itself, absorbing repeated/retried queries locally rather than sending every single one across the network to CoreDNS, meaningfully reducing both latency and CoreDNS's own query load.
+
+**Common Pitfall:** treating an intermittent DNS failure as "flaky network" or blaming the external payment gateway's own DNS, and adding blanket application-level retry logic without investigating the actual root cause — retries mask the symptom (which is often what makes this class of issue linger unresolved for a long time, since "it usually works on retry" reduces the felt urgency to diagnose it) without addressing either CoreDNS capacity or the `ndots`-driven extra query volume actually causing the intermittent drops in the first place.
+
+---
+
+## Scenario — Question 8
+
+**Q8: After rolling out a default-deny `NetworkPolicy` (covered earlier) to harden the `payments` namespace, a completely unrelated `reporting-service` in a different namespace starts failing with connection timeouts when calling `payments-api`, even though nobody modified `reporting-service` or its own namespace at all. The `payments` team insists their new policy only restricts traffic *within* their own namespace. How do you investigate and resolve this?**
+
+This is the additive-policy-combination nuance covered earlier — but concretely, it illustrates why "we only touched our own namespace" isn't actually a safe assumption for `NetworkPolicy`: a default-deny policy applied to Pods in `payments` restricts *all* ingress to those Pods, from *any* namespace, unless another policy explicitly re-permits the specific cross-namespace traffic that was previously working purely because no policy existed to block it at all.
+
+**Step 1 — confirm the timing correlation and enumerate every policy actually selecting `payments-api`:**
+```bash
+kubectl get networkpolicy -n payments
+kubectl describe networkpolicy default-deny-all -n payments
+kubectl describe networkpolicy <any-other-policy-name> -n payments
+```
+```text
+BEFORE the default-deny policy existed: reporting-service (a DIFFERENT namespace) could
+  reach payments-api freely -- NOT because any policy EXPLICITLY allowed it, but simply
+  because NO policy existed to RESTRICT it at all (the cluster's DEFAULT-open behavior)
+
+AFTER default-deny-all was applied to EVERY Pod in "payments", including payments-api:
+  ALL ingress is now BLOCKED unless SOME policy explicitly RE-PERMITS it -- and the
+  payments team's OTHER, newly-added ALLOW policies only accounted for TRAFFIC
+  ORIGINATING FROM WITHIN their OWN namespace, never having NEEDED to think about
+  reporting-service's cross-namespace call AT ALL, since it had ALWAYS just WORKED
+```
+
+**Step 2 — the fix: an explicit allow rule for the legitimate cross-namespace traffic, using a namespace selector:**
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-reporting-service, namespace: payments }
+spec:
+  podSelector: { matchLabels: { app: payments-api } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: reporting } }
+          podSelector: { matchLabels: { app: reporting-service } }
+      ports: [{ protocol: TCP, port: 8080 }]
+```
+
+**Why "we only touched our own namespace" is a genuinely dangerous assumption for `NetworkPolicy` specifically:** a `podSelector`/`policyTypes: [Ingress]` policy governs traffic *arriving at* the selected Pods, regardless of which namespace that traffic originates from — hardening a namespace's *own* Pods against ingress inherently affects every *other* namespace's traffic to those same Pods too, meaning a genuinely complete rollout requires first enumerating every legitimate cross-namespace caller (via existing traffic/observability data, not just the payments team's own mental model of who calls them) before applying default-deny, rather than discovering the missed callers reactively via a broken downstream service.
+
+**Common Pitfall:** rolling out a default-deny `NetworkPolicy` based solely on the deploying team's own knowledge of "who calls us," without first consulting actual traffic data (service mesh telemetry, access logs, or a `NetworkPolicy` staged in a monitoring-only mode if the CNI supports it) to identify every genuine caller — a team's own mental model of their consumers is frequently incomplete, especially for cross-team, cross-namespace dependencies that "just worked" for so long nobody currently on the team was involved in setting them up.
+
+---
+
+## Scenario — Question 9
+
+**Q9: You've configured an HPA on `checkout-service` targeting 70% CPU utilization, with `minReplicas: 3` and `maxReplicas: 20`. During a real traffic surge, response latency climbs sharply and the replica count never goes above 4. `kubectl top pods` shows CPU sitting around 35-40% the entire time. Why isn't HPA scaling despite genuinely degraded performance, and how do you fix it?**
+
+This is the CPU-isn't-always-the-right-signal gap covered earlier under HPA, now presenting concretely: HPA is working exactly as configured — the configuration itself is scaling on the wrong metric for this specific workload's actual bottleneck.
+
+**Step 1 — confirm HPA itself isn't the problem; the target metric choice is:**
+```bash
+kubectl describe hpa checkout-service-hpa
+# Metrics: ( current / target )
+#   resource cpu on pods: 38% / 70%     <-- comfortably UNDER target -- HPA correctly sees NO reason to scale
+kubectl top pods -l app=checkout-service   # confirms genuinely LOW CPU, consistent with the HPA's own view
+```
+
+**Step 2 — identify the ACTUAL bottleneck, which CPU utilization isn't capturing at all:**
+```text
+checkout-service makes a SYNCHRONOUS, BLOCKING call to a downstream payment gateway --
+  during the SURGE, that DOWNSTREAM call's LATENCY itself increases (the gateway is
+  ALSO under load) -- checkout-service's OWN threads spend MORE time WAITING on I/O,
+  NOT consuming MORE CPU -- request QUEUE depth and P99 LATENCY both climb sharply,
+  while CPU usage stays LOW, because WAITING for a response isn't a CPU-intensive
+  activity AT ALL -- this is EXACTLY the I/O-bound mismatch covered earlier under HPA
+```
+
+**The fix — scale on a metric that actually reflects the real bottleneck (requests-in-flight, or queue depth):**
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+spec:
+  scaleTargetRef: { kind: Deployment, name: checkout-service }
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Pods
+      pods:
+        metric: { name: http_requests_in_flight }   # exposed via the app's own Prometheus metrics
+        target: { type: AverageValue, averageValue: "20" }
+```
+Because `http_requests_in_flight` directly reflects "how much concurrent work is each Pod currently juggling" — rising the moment downstream latency increases, entirely independent of whether that increase shows up as CPU usage — this metric captures the genuine bottleneck an I/O-bound service experiences under load, triggering scale-up exactly when it's actually needed rather than only when CPU (a proxy that doesn't apply to this workload's actual bottleneck) happens to also rise.
+
+**Common Pitfall:** assuming HPA "isn't working" and troubleshooting the autoscaler's own configuration/permissions/metrics-server connectivity, when the actual issue is a mismatched target metric for a fundamentally I/O-bound (rather than CPU-bound) workload — HPA is frequently functioning entirely correctly against the metric it was told to watch; the real fix is identifying and switching to whichever metric genuinely correlates with that specific workload's real bottleneck, not debugging the autoscaling mechanism itself.
+
+---

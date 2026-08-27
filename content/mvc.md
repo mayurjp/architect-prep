@@ -2272,3 +2272,551 @@ Model Binding is the mechanism ASP.NET Core uses to map data from an incoming HT
 For example, if a user submits a form with a text box named `FirstName`, and your controller action has a parameter `string firstName` (or a class with a `FirstName` property), Model Binding automatically extracts the value from the request and populates the C# variable for you, saving you from having to manually parse the raw HTTP request.
 
 ---
+
+## Beginner — Question 29
+
+**Q29: What is Output Caching in ASP.NET Core MVC, and what problem does it solve that isn't already solved by response compression or a CDN?**
+
+Output Caching stores the fully-rendered HTML response an action produced, so that an identical subsequent request can be served directly from that stored copy — skipping the controller action, the database calls it makes, and the Razor view rendering entirely — rather than regenerating the same page from scratch on every single request.
+
+**Without Output Caching — every request re-does all the work:**
+```csharp
+public IActionResult ProductList()
+{
+    var products = _catalog.GetFeaturedProducts(); // hits the database EVERY request
+    return View(products); // re-renders the Razor view EVERY request
+}
+```
+
+**With Output Caching — the response is stored and reused:**
+```csharp
+[OutputCache(Duration = 60)]
+public IActionResult ProductList()
+{
+    var products = _catalog.GetFeaturedProducts();
+    return View(products);
+}
+```
+The first request runs the action normally and stores its rendered HTML output. For 60 seconds afterward, any matching request is served that stored HTML directly — the action method, the database call, and the view-rendering step never run again until the cache entry expires.
+
+**Why this is different from compression or a CDN:** compression (gzip/Brotli) makes an *already-generated* response smaller to transfer, and a CDN caches responses at edge locations geographically closer to users — neither one avoids re-running your application's own controller/database/rendering work on your own server for every request that isn't already cached at the edge. Output Caching specifically targets that server-side regeneration cost.
+
+**Common Pitfall:** applying Output Caching to a page whose content is personalized per user (e.g., "Welcome back, Alice") without a vary-by-user configuration — the first user to hit the action would have their personalized greeting cached and served to every subsequent visitor until the cache expires, a data-leakage bug easy to introduce by caching a page that looks generic but actually isn't.
+
+---
+
+## Beginner — Question 30
+
+**Q30: What is Session State in ASP.NET Core MVC, and how does it differ from `TempData` (covered elsewhere)?**
+
+Session State is server-side storage tied to a specific browser's visit, identified by a session cookie, that persists data across many requests for as long as that session stays active (typically until the browser closes or an idle timeout expires) — `TempData` (covered elsewhere), by contrast, is deliberately narrow: it survives exactly one redirect and is then cleared.
+
+**Using Session to persist data across an entire browsing visit:**
+```csharp
+public IActionResult AddToCart(int productId)
+{
+    var cart = HttpContext.Session.GetString("Cart") ?? "";
+    cart += $"{productId},";
+    HttpContext.Session.SetString("Cart", cart); // available on EVERY subsequent request this session
+    return RedirectToAction("Cart");
+}
+
+public IActionResult Cart()
+{
+    var cart = HttpContext.Session.GetString("Cart"); // still here, MANY requests later
+    return View(cart);
+}
+```
+Unlike `TempData`, which is automatically marked for removal the moment it's read, Session data stays available across as many requests as the session remains alive — there's no "used once, then gone" behavior; the developer must explicitly call `Session.Remove(...)` or `Session.Clear()` to get rid of it.
+
+**Common Pitfall:** storing large or frequently-changing objects in Session and assuming it's free — Session is typically backed by an in-memory store (or a distributed cache like Redis for multi-server deployments), so storing large payloads per user multiplies real memory/network cost across every concurrent session; Session is best reserved for small amounts of genuinely visit-scoped state (a shopping cart's product IDs, not the full product details), with `TempData` used instead for the much narrower "just survive one redirect" case.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: How do you accept a file upload with `IFormFile` in ASP.NET Core MVC, and what are the common pitfalls around size limits and storage that trip people up in production?**
+
+`IFormFile` is the model-binding type ASP.NET Core MVC uses to represent an uploaded file from a `multipart/form-data` request — the same model-binding pipeline that maps form fields to action parameters (covered extensively elsewhere) also maps an `<input type="file">` element to an `IFormFile` parameter automatically.
+
+**Binding and saving an uploaded file:**
+```csharp
+[HttpPost]
+public async Task<IActionResult> Upload(IFormFile file)
+{
+    if (file == null || file.Length == 0)
+        return BadRequest("No file selected.");
+
+    var path = Path.Combine(_env.ContentRootPath, "uploads", file.FileName);
+    using (var stream = new FileStream(path, FileMode.Create))
+    {
+        await file.CopyToAsync(stream); // streams the upload to disk without loading it all into memory at once
+    }
+    return Ok();
+}
+```
+```html
+<form method="post" enctype="multipart/form-data">
+    <input type="file" name="file" />
+    <button type="submit">Upload</button>
+</form>
+```
+**Why `enctype="multipart/form-data"` is not optional:** without it, the browser encodes the form as ordinary URL-encoded key-value pairs, which cannot carry binary file content at all — `IFormFile` model binding will simply receive nothing, with no obvious error to point at the missing `enctype`.
+
+**The size-limit pitfall:** ASP.NET Core enforces a default request body size limit (Kestrel's `MaxRequestBodySize`, ~28.6 MB by default) that silently rejects larger uploads with a `413` unless explicitly raised:
+```csharp
+[RequestSizeLimit(50_000_000)] // per-action override, in bytes
+public async Task<IActionResult> Upload(IFormFile file) { ... }
+```
+
+**Common Pitfall:** trusting `file.FileName` as a safe path to save to — it comes directly from the client and can contain path-traversal sequences (`../../etc/passwd`) or characters invalid on the server's filesystem; always generate your own filename (e.g., a GUID) server-side and store the original filename separately as metadata if it needs to be preserved, rather than using client-supplied input directly as part of a file-system path.
+
+---
+
+## Intermediate — Question 26
+
+**Q26: How do you write a custom Action Filter in ASP.NET Core MVC, and what's the difference between implementing `IActionFilter` synchronously versus `IAsyncActionFilter`?**
+
+A custom Action Filter lets you run cross-cutting logic (logging, timing, short-circuiting under a condition) before and after an action method executes, without duplicating that logic inside every action that needs it — you write the logic once, as a filter class, and apply it via an attribute or global registration.
+
+**A synchronous `ActionFilterAttribute` (has separate before/after hook methods):**
+```csharp
+public class LogExecutionTimeAttribute : ActionFilterAttribute
+{
+    public override void OnActionExecuting(ActionExecutingContext context)
+    {
+        context.HttpContext.Items["StartTime"] = Stopwatch.GetTimestamp();
+    }
+
+    public override void OnActionExecuted(ActionExecutedContext context)
+    {
+        var start = (long)context.HttpContext.Items["StartTime"];
+        var elapsedMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        _logger.LogInformation("{Action} took {Ms}ms", context.ActionDescriptor.DisplayName, elapsedMs);
+    }
+}
+```
+
+**The async equivalent — one method, wrapping the action via a delegate:**
+```csharp
+public class LogExecutionTimeAsyncAttribute : Attribute, IAsyncActionFilter
+{
+    public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
+    {
+        var sw = Stopwatch.StartNew();
+        var executedContext = await next(); // runs the action (and any INNER filters) here
+        _logger.LogInformation("{Action} took {Ms}ms", context.ActionDescriptor.DisplayName, sw.ElapsedMilliseconds);
+    }
+}
+```
+The async version wraps the action call in a single method via `next()` — this matters because it lets you naturally run `await`-based logic both before and after the action without splitting it across two separate synchronous hook methods, and it's the required shape if the filter's own before/after logic needs to itself be asynchronous (e.g., checking a cache or calling an external service).
+
+**Applying it:**
+```csharp
+[LogExecutionTime]
+public IActionResult Index() => View();
+```
+
+**Common Pitfall:** implementing both `IActionFilter` and `IAsyncActionFilter` on the same class "to be safe" — ASP.NET Core only invokes the async version if both are present, silently making the synchronous implementation dead code; pick one interface deliberately based on whether the filter's own logic is genuinely asynchronous, rather than implementing both out of uncertainty.
+
+---
+
+## Advanced — Question 25
+
+**Q25: How does ASP.NET Core's Output Caching middleware support cache invalidation via tags, and why does this matter for content that changes unpredictably (unlike a fixed time-based expiration)?**
+
+A simple `Duration`-based Output Cache entry (covered at an introductory level elsewhere) expires purely on a timer — adequate for content that's fine being briefly stale, but wrong for content that must be invalidated immediately the moment underlying data changes (a product's price update, a comment being deleted). Tag-based eviction lets code explicitly clear specific cached entries on demand, rather than waiting for a timer.
+
+**Tagging a cached response by the resource it represents:**
+```csharp
+[OutputCache(Tags = new[] { "products" })]
+public IActionResult ProductList() => View(_catalog.GetFeaturedProducts());
+
+[OutputCache(Tags = new[] { "products" })]
+public IActionResult ProductDetails(int id) => View(_catalog.GetById(id));
+```
+
+**Evicting every cache entry sharing that tag the moment underlying data actually changes:**
+```csharp
+[HttpPost]
+public async Task<IActionResult> UpdatePrice(int productId, decimal newPrice)
+{
+    await _catalog.UpdatePriceAsync(productId, newPrice);
+    await _cacheStore.EvictByTagAsync("products", default); // invalidates BOTH cached actions above immediately
+    return RedirectToAction("ProductDetails", new { id = productId });
+}
+```
+Every cached response tagged `"products"` — regardless of which specific action or URL produced it — is evicted in one call, rather than needing to track down and individually invalidate each specific cached URL variant (`ProductList`, `ProductDetails?id=1`, `ProductDetails?id=2`, ...) that happens to reflect the changed data.
+
+**Why this beats a shorter `Duration` as a workaround:** shrinking the cache duration to "make staleness less bad" is a blunt trade-off — a duration short enough to feel acceptably fresh for unpredictable updates often isn't short enough to prevent a genuinely stale response being served right after a real change, while also giving up most of the caching benefit during the (much more common) periods when nothing changed. Tag-based eviction gets both: long cache lifetimes during quiet periods, and immediate correctness the instant something actually changes.
+
+**Common Pitfall:** tagging cache entries too coarsely (one single tag for the entire application) — this makes any single data change evict the *entire* cache, destroying the benefit of caching everything else that wasn't actually affected; tags should be scoped to the specific resource(s) whose change should actually invalidate that specific cached content.
+
+---
+
+## Advanced — Question 26
+
+**Q26: How does a custom `IExceptionFilter` differ from the `UseExceptionHandler` middleware for handling unhandled exceptions in ASP.NET Core MVC, and when would you reach for one over the other?**
+
+Both intercept an unhandled exception and produce a response instead of letting it crash the request — but they operate at different layers of the pipeline, which determines what context each one has available and what kinds of exceptions each one can actually see.
+
+**`UseExceptionHandler` — middleware, sees exceptions from anywhere in the pipeline:**
+```csharp
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        context.Response.StatusCode = 500;
+        var feature = context.Features.Get<IExceptionHandlerFeature>();
+        await context.Response.WriteAsJsonAsync(new { error = "An unexpected error occurred." });
+    });
+});
+```
+Because middleware wraps the *entire* request pipeline, it catches exceptions from routing, other middleware, and MVC action execution alike — but by the time it runs, it has lost MVC-specific context (which controller/action was executing, the `ModelState`, filter-pipeline state) beyond what's captured in `IExceptionHandlerFeature`.
+
+**A custom `IExceptionFilter` — runs inside the MVC filter pipeline, with full MVC context:**
+```csharp
+public class ApiExceptionFilter : IExceptionFilter
+{
+    public void OnException(ExceptionContext context)
+    {
+        if (context.Exception is NotFoundException)
+        {
+            context.Result = new NotFoundObjectResult(new { error = context.Exception.Message });
+            context.ExceptionHandled = true; // stops it from propagating further
+        }
+    }
+}
+```
+Because this runs as part of the MVC filter pipeline, it has access to the full `ActionContext` — which controller/action threw, route values, `ModelState` — letting it produce a response tailored to MVC-specific concerns (like returning a `ProblemDetails`-shaped `ObjectResult` with the correct content negotiation applied) that a generic pipeline-level middleware handler doesn't have the context to construct as precisely.
+
+**When to use which:** `UseExceptionHandler` is the right tool for a single, application-wide fallback (a generic 500 page, or a baseline `ProblemDetails` response for anything MVC-specific handling didn't catch) — a custom `IExceptionFilter` is the right tool when specific, MVC-aware behavior is needed for specific exception types thrown from action methods (translating a domain exception like `NotFoundException` into a specific HTTP status with MVC context intact), and can be scoped to just the controllers that need it rather than applying globally.
+
+**Common Pitfall:** relying solely on `IExceptionFilter` and assuming it catches everything — exception filters only see exceptions thrown from within the MVC action-invocation pipeline; an exception thrown by routing middleware, authentication middleware, or anything running *before* MVC even starts handling the request never reaches an `IExceptionFilter` at all, only the pipeline-level `UseExceptionHandler` (or global middleware) sees those.
+
+---
+
+## Advanced — Question 27
+
+**Q27: What is Content Negotiation in ASP.NET Core MVC, and how does implementing a custom `IOutputFormatter` let an API return a response format beyond the built-in JSON/XML options?**
+
+Content Negotiation is the process by which MVC decides *which representation format* (JSON, XML, or something custom) to serialize an action's return value into, based on the requesting client's `Accept` header — rather than the server unilaterally always returning the same format regardless of what the client actually asked for.
+
+**The built-in negotiation, using the default JSON/XML formatters:**
+```csharp
+[HttpGet]
+public ActionResult<Product> Get(int id) => _catalog.GetById(id);
+```
+```http
+GET /products/5 HTTP/1.1
+Accept: application/xml
+```
+```text
+MVC inspects the "Accept" header, finds a registered formatter that can
+produce "application/xml", and uses IT instead of the default JSON
+formatter -- the SAME action method's return value, serialized DIFFERENTLY
+based purely on what the CLIENT asked for.
+```
+
+**A custom `IOutputFormatter` for a format MVC doesn't support out of the box (e.g., CSV):**
+```csharp
+public class CsvOutputFormatter : TextOutputFormatter
+{
+    public CsvOutputFormatter()
+    {
+        SupportedMediaTypes.Add("text/csv");
+        SupportedEncodings.Add(Encoding.UTF8);
+    }
+
+    protected override bool CanWriteType(Type type) => typeof(IEnumerable<Product>).IsAssignableFrom(type);
+
+    public override async Task WriteResponseBodyAsync(OutputFormatterWriteContext context, Encoding encoding)
+    {
+        var products = (IEnumerable<Product>)context.Object;
+        var csv = string.Join("\n", products.Select(p => $"{p.Id},{p.Name},{p.Price}"));
+        await context.HttpContext.Response.WriteAsync(csv, encoding);
+    }
+}
+```
+```csharp
+builder.Services.AddControllers(options =>
+{
+    options.OutputFormatters.Add(new CsvOutputFormatter()); // registered ALONGSIDE the built-in JSON/XML formatters
+});
+```
+Now a request with `Accept: text/csv` against the same `Get` action is served by this custom formatter instead — the action method's own code never changes; content negotiation transparently picks whichever registered formatter matches what the client requested.
+
+**Common Pitfall:** forgetting to register the custom formatter as high-priority (or forgetting `CanWriteType`'s scoping) and having it unexpectedly try to handle response types it wasn't designed for — an overly broad `CanWriteType` check can cause the custom formatter to be selected for types it produces incorrect or garbled output for, which is easy to miss in testing if the specific `Accept` header/type combination that triggers it isn't explicitly exercised.
+
+---
+
+## Scenario — Question 4
+
+**Q4: A form posts a `ViewModel` containing a nested `List<OrderLineViewModel>` with 5 rows the user filled in. On the server, `ModelState.IsValid` is true, but `model.Lines` comes back with only 2 of the 5 rows populated — the other 3 are silently missing, with no validation error at all. What's the likely cause, and how do you fix it?**
+
+The default Model Binder reconstructs a bound collection using strictly sequential, zero-based indices in the posted field names (`Lines[0].Quantity`, `Lines[1].Quantity`, `Lines[2].Quantity`, ...) — the moment the binder encounters a **gap** in that index sequence, it stops binding further items into the collection entirely, silently, with no error raised, because from the binder's perspective the collection legitimately just "ended" at that gap.
+
+**Reproducing the root cause:**
+```html
+<!-- If rows are removed/reordered client-side (e.g., a JS "delete row" button)
+     WITHOUT re-indexing the remaining rows' input names, a GAP appears: -->
+<input name="Lines[0].Quantity" value="5" />
+<input name="Lines[1].Quantity" value="3" />
+<!-- row index 2 was deleted client-side, but indices 3 and 4 were NOT renumbered -->
+<input name="Lines[3].Quantity" value="7" />
+<input name="Lines[4].Quantity" value="2" />
+```
+```text
+Model Binder logic: look for "Lines[0]" -> FOUND, bind it.
+                     look for "Lines[1]" -> FOUND, bind it.
+                     look for "Lines[2]" -> NOT FOUND -> STOP. The collection is
+                     considered COMPLETE at 2 items. "Lines[3]" and "Lines[4]"
+                     are NEVER EVEN LOOKED FOR, let alone bound.
+```
+This is exactly why `ModelState.IsValid` reports true — as far as the binder is concerned, it successfully bound a valid 2-item collection; it has no way to know 3 more logical rows existed client-side but were never supplied under index names it was looking for.
+
+**The fix — re-index the remaining rows whenever the client-side row count changes:**
+```javascript
+// After removing a row client-side, RENUMBER every remaining row's
+// input "name" attributes so they form a CONTIGUOUS 0..N-1 sequence again
+function reindexRows() {
+    document.querySelectorAll('.line-row').forEach((row, i) => {
+        row.querySelectorAll('input').forEach(input => {
+            input.name = input.name.replace(/Lines\[\d+\]/, `Lines[${i}]`);
+        });
+    });
+}
+```
+Alternatively, use the `TryUpdateModelAsync`/`ModelBinder`-independent approach of prefixing each row with a stable, non-sequential identifier (`Lines[guid-a].Quantity`) via ASP.NET Core's index property support (a hidden `Lines.Index` field per row), which the default binder also supports specifically to avoid this exact renumbering requirement.
+
+**Common Pitfall:** trusting `ModelState.IsValid` as proof that "everything the user submitted was received" — it only validates whatever the binder actually *found and bound successfully*; a binder that silently stopped early due to an index gap produces a perfectly "valid" `ModelState` for an incomplete model, meaning collection-completeness bugs like this one, one of the more common causes of "the last few rows of my form just vanish," can't be caught by validation logic alone.
+
+---
+
+## Scenario — Question 5
+
+**Q5: A product listing page that renders 50 products, each via `<partial name="_ProductCard" model="product">`, takes 4+ seconds to load. Profiling shows the database being hit 51 times — once for the initial product list, and once more *inside* the partial view for each individual product's "average rating." How do you fix this without losing the partial view's reusability?**
+
+This is the classic N+1 query problem, just manifesting through a Partial View instead of an ORM's lazy-loading navigation property — the partial view's own code (or a helper it calls) queries the database for that one product's rating every time it's rendered, and rendering it 50 times means 50 separate round trips instead of one batched one.
+
+**The anti-pattern — the partial (or its backing helper) queries per-item:**
+```csharp
+// Inside a helper called from within _ProductCard.cshtml
+public decimal GetAverageRating(int productId)
+{
+    return _db.Reviews.Where(r => r.ProductId == productId).Average(r => r.Rating); // ONE query PER CALL
+}
+```
+```html
+<!-- ProductList.cshtml -->
+@foreach (var product in Model.Products)
+{
+    <partial name="_ProductCard" model="product" /> <!-- triggers ANOTHER rating query EACH iteration -->
+}
+```
+
+**The fix — batch-load everything the partial needs BEFORE the loop, pass it in already-computed:**
+```csharp
+public async Task<IActionResult> Index()
+{
+    var products = await _catalog.GetProductsAsync();
+    var productIds = products.Select(p => p.Id).ToList();
+
+    // ONE query for ALL products' ratings, instead of one query PER product
+    var ratings = await _db.Reviews
+        .Where(r => productIds.Contains(r.ProductId))
+        .GroupBy(r => r.ProductId)
+        .Select(g => new { ProductId = g.Key, Average = g.Average(r => r.Rating) })
+        .ToDictionaryAsync(x => x.ProductId, x => x.Average);
+
+    var viewModel = new ProductListViewModel
+    {
+        Products = products,
+        RatingsByProductId = ratings // handed to the view as already-computed data
+    };
+    return View(viewModel);
+}
+```
+```html
+@foreach (var product in Model.Products)
+{
+    <!-- the partial now just READS a value that's already there -- no query happens during rendering -->
+    <partial name="_ProductCard" model="(product, Model.RatingsByProductId[product.Id])" />
+}
+```
+The Partial View stays exactly as reusable as before — it still renders one product card given the data it needs — the fix moves *where* that data is fetched (once, batched, before the loop starts) rather than changing what the partial itself does or looks like.
+
+**Common Pitfall:** "fixing" this by adding a per-request in-memory cache inside the rating-fetching helper, hoping repeated calls within the same request get deduplicated — this treats the symptom rather than the cause, still issues at least one query per distinct product on a page that's never rendered before, and is fragile if the caching key logic has any subtle bug; batching the fetch before rendering starts is the structural fix, not a cache layered on top of the N+1 pattern.
+
+---
+
+## Scenario — Question 6
+
+**Q6: Shortly after a developer adds a global logging `ActionFilter` (registered via `options.Filters.Add<RequestLoggingFilter>()` in `AddControllers`) to log request duration for a new reporting controller, an unrelated authentication controller in the same application starts intermittently returning the wrong user's data to different users. What's the likely cause, and how do you fix it?**
+
+A filter registered globally via `options.Filters.Add<T>()` applies to **every** controller and action in the application, not just the one it was written for — if `RequestLoggingFilter` was written carrying **per-request mutable state in an instance field**, and that filter instance is inadvertently shared across requests (a lifetime mismatch), state from one user's request can leak into another's.
+
+**The likely root cause — a filter registered with the wrong DI lifetime, holding per-request state:**
+```csharp
+public class RequestLoggingFilter : IActionFilter
+{
+    private string _currentUserId; // INSTANCE FIELD -- fine ONLY if a new instance exists per request
+
+    public void OnActionExecuting(ActionExecutingContext context)
+    {
+        _currentUserId = context.HttpContext.User.Identity.Name; // stored on THIS instance
+    }
+
+    public void OnActionExecuted(ActionExecutedContext context)
+    {
+        _logger.LogInformation("Request by {User} took ...", _currentUserId); // reads it back
+    }
+}
+
+// If registered as a SINGLETON (or the filter type itself is resolved as one,
+// e.g. via a DI container misconfiguration), the SAME instance -- and the
+// SAME _currentUserId field -- is shared and OVERWRITTEN across CONCURRENT requests
+builder.Services.AddSingleton<RequestLoggingFilter>();
+options.Filters.Add<RequestLoggingFilter>();
+```
+Under concurrent load, one request's `OnActionExecuting` can overwrite `_currentUserId` between another, still-in-flight request's own `OnActionExecuting` and `OnActionExecuted` calls — since filters (added globally like this) run for the authentication controller too, that controller's responses start reflecting whichever user's request most recently wrote to the shared field, not necessarily the user actually making that specific request.
+
+**The fix — ensure a new filter instance per request, and avoid instance-field state entirely if possible:**
+```csharp
+// ServiceFilter/TypeFilter resolve a NEW instance PER REQUEST from DI,
+// rather than relying on a filter type's own registered lifetime
+options.Filters.Add<RequestLoggingFilter>(); // scoped by default, unless explicitly overridden elsewhere
+
+// Safer still: avoid instance fields for per-request data entirely --
+// read everything needed directly from the CONTEXT parameter each time
+public void OnActionExecuted(ActionExecutedContext context)
+{
+    var userId = context.HttpContext.User.Identity.Name; // read fresh from the CONTEXT, not a stored field
+    _logger.LogInformation("Request by {User} took ...", userId);
+}
+```
+
+**Common Pitfall:** assuming a bug in one controller must originate from code specific to that controller — a globally-registered filter's bug can surface as symptoms in a completely unrelated controller, since the filter runs for every action in the application; the fact that the authentication controller's own code never changed is itself a clue pointing toward something applied application-wide (a global filter, a global middleware) rather than that controller's own logic.
+
+---
+
+## Scenario — Question 7
+
+**Q7: A large MVC application currently uses only conventional routing (`MapControllerRoute` with the default `{controller}/{action}/{id?}` template) across 40 controllers. The team wants to migrate to attribute routing for its per-action clarity, but the application has existing bookmarked/indexed URLs that must keep working. How do you migrate safely, incrementally, without breaking those URLs?**
+
+Conventional and attribute routing can coexist in the same application — this is the key fact that makes an incremental migration possible at all: you don't have to convert all 40 controllers in one all-or-nothing change, and you don't have to guess at every existing URL's exact shape from memory.
+
+**Step 1 — inventory the URLs that must keep working, rather than guessing:**
+```bash
+# Mine actual access logs for real, currently-used URL patterns --
+# this catches bookmarked/indexed URLs a code read-through might miss
+grep -oP 'GET \K/\S+' access.log | sort | uniq -c | sort -rn | head -50
+```
+
+**Step 2 — migrate one controller at a time, using `[Route]` templates that reproduce the exact existing URL shape:**
+```csharp
+// BEFORE: relies entirely on the conventional route producing this URL
+public class ProductsController : Controller
+{
+    public IActionResult Details(int id) => View(_catalog.GetById(id)); // was: /Products/Details/5
+}
+
+// AFTER: attribute routing, explicitly reproducing the SAME URL shape
+[Route("Products")]
+public class ProductsController : Controller
+{
+    [Route("Details/{id}")]
+    public IActionResult Details(int id) => View(_catalog.GetById(id)); // STILL: /Products/Details/5
+}
+```
+Because the attribute route template is written to match the exact URL the conventional route was already producing, existing bookmarks and indexed links continue resolving correctly — the migration changes *how* the route is declared, not what URL reaches the action.
+
+**Step 3 — keep the conventional route registered until every controller has been migrated:**
+```csharp
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Home}/{action=Index}/{id?}"); // still catches any controller NOT yet migrated
+```
+Leaving the conventional fallback in place means an un-migrated controller keeps working exactly as before throughout the migration — attribute-routed controllers and conventionally-routed ones resolve correctly side by side, since ASP.NET Core's routing middleware evaluates both route sources together.
+
+**Step 4 — verify with integration tests hitting the exact inventoried URLs from Step 1**, not just spot-checking a few obvious ones, before removing the conventional route entirely once every controller has an explicit `[Route]` attribute covering it.
+
+**Common Pitfall:** attribute-routing a controller with a *slightly* different template than what the conventional route actually produced — for instance, forgetting that the default template's `{id?}` was optional, and writing `[Route("Details/{id}")]` without the `?`, silently breaking any existing URL that omitted the `id` segment; the safest migration reproduces the *precise* existing shape (verified against real traffic, not assumption) before considering any cleanup or improvement to the URL structure itself.
+
+---
+
+## Scenario — Question 8
+
+**Q8: A form's client-side validation shows no errors and lets the user submit, but the server then rejects the same submission with a `ModelState` error on a field the client-side validation should have already caught. Users are confused because the form "looked fine." What's the likely cause, and how do you fix it?**
+
+Client-side (unobtrusive) validation works by mirroring Data Annotations metadata into `data-val-*` HTML attributes at the time the view is rendered — if a validation rule exists only on the server side (a custom `IValidatableObject` check, or a Data Annotation attribute added without regenerating/registering its client-side adapter), the browser's jQuery Validation script has no rule to enforce for it at all, even though the server does.
+
+**The likely root cause — a validation rule with no client-side equivalent:**
+```csharp
+public class RegistrationViewModel : IValidatableObject
+{
+    public string Password { get; set; }
+    public string ConfirmPassword { get; set; }
+
+    // Cross-property rule via IValidatableObject -- runs on the SERVER ONLY.
+    // Unlike a [Compare] Data Annotation (which DOES have a built-in client
+    // adapter), IValidatableObject logic has NO automatic client-side mirror.
+    public IEnumerable<ValidationResult> Validate(ValidationContext context)
+    {
+        if (Password != ConfirmPassword)
+            yield return new ValidationResult("Passwords do not match.", new[] { nameof(ConfirmPassword) });
+    }
+}
+```
+The browser has no `data-val-*` attribute telling jQuery Validation to check that the two fields match — client-side validation genuinely passes, correctly, because as far as it's concerned there's no rule being violated; the mismatch only surfaces once the server runs its own, additional `IValidatableObject` check.
+
+**The fix — either use a Data Annotation with a built-in client adapter, or provide a custom one:**
+```csharp
+public class RegistrationViewModel
+{
+    public string Password { get; set; }
+
+    [Compare(nameof(Password), ErrorMessage = "Passwords do not match.")]
+    public string ConfirmPassword { get; set; } // [Compare] DOES generate the matching data-val-equalto attribute
+}
+```
+If the rule genuinely can't be expressed as a Data Annotation, implementing a custom `IClientModelValidator` (covered under the custom validation-attribute-adapter topic elsewhere) lets a bespoke rule generate its own `data-val-*` attributes, so client-side and server-side validation logic are driven from the exact same source of truth instead of silently drifting apart.
+
+**Common Pitfall:** treating this as "just add a JavaScript validation rule matching the server's logic" — writing the client-side rule by hand, separately from the server-side one, means the two can independently drift out of sync over time (someone updates the server rule later and forgets the hand-written JS copy); a `[Compare]`-style Data Annotation or a proper `IClientModelValidator` keeps both sides generated from one single rule definition, which is the actual fix, not just "add matching JS."
+
+---
+
+## Scenario — Question 9
+
+**Q9: A controller sets `TempData["OrderConfirmation"]` right before redirecting, but on the page that follows, the value is sometimes there and sometimes mysteriously empty — reproducible only when the app is running on more than one server instance behind a load balancer. What's the cause, and how do you fix it?**
+
+`TempData`'s default provider stores its data in Session state (covered elsewhere) — Session, in turn, defaults to an in-memory, per-server store unless explicitly configured otherwise. Behind a load balancer without "sticky sessions," the redirect's follow-up request can land on a *different* server instance than the one that set the `TempData` value, and that second server's in-memory session store has never heard of it.
+
+**Reproducing the mechanism:**
+```text
+Server A: handles the POST, sets TempData["OrderConfirmation"], stores it
+          in SERVER A's OWN in-memory session store, then redirects.
+
+Load balancer routes the FOLLOWING GET request to SERVER B instead
+          (no sticky sessions configured) -- Server B's in-memory session
+          store has NEVER SEEN this session's TempData entry at all --
+          reads back null, even though nothing is actually "wrong" with
+          the TempData code itself.
+```
+This is exactly why it's intermittent rather than consistently broken — it only manifests on the specific requests the load balancer happens to route to a different server than the one that set the value, which can look like a flaky, hard-to-reproduce bug if you're not specifically looking at server-affinity.
+
+**The fix — back Session (and therefore TempData) with a distributed store shared across all server instances:**
+```csharp
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = "redis-cache:6379";
+});
+builder.Services.AddSession(); // now backed by the distributed Redis cache above, not in-memory per-server
+```
+With a distributed cache backing Session, every server instance reads and writes the *same* underlying store — whichever server the load balancer happens to route the follow-up request to, `TempData["OrderConfirmation"]` is found consistently, regardless of server affinity.
+
+**An alternative fix without a distributed cache:** configure the load balancer for sticky sessions (routing all of one user's requests to the same server instance) — simpler to configure, but a weaker fix overall, since it reintroduces a single point of failure per user session (if that specific server instance restarts or is taken out of rotation, that user's in-flight session data, including any pending `TempData`, is lost anyway).
+
+**Common Pitfall:** debugging this by adding logging around the `TempData` calls themselves and finding nothing wrong with the code — the bug isn't in how `TempData` is being used at all; it's in the underlying Session store's server-affinity assumption not holding true in a multi-server deployment, which only becomes visible in production/staging environments actually running behind a real load balancer, not in local, single-instance development.
+
+---

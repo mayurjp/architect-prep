@@ -2074,3 +2074,399 @@ An Azure Virtual Network (VNet) is the fundamental building block for your priva
 A VNet is similar to a traditional network that you'd operate in your own data center, but brings the benefits of Azure's infrastructure such as scale, availability, and isolation. You can define your own private IP address spaces, create subnets, configure route tables, and apply Network Security Groups (NSGs) to act as firewalls blocking unwanted traffic between subnets.
 
 ---
+
+## Beginner — Question 29
+
+**Q29: What is an Azure Log Analytics Workspace, and how does it relate to Azure Monitor and Application Insights (covered earlier)?**
+
+Azure Monitor is the umbrella platform for collecting and acting on telemetry across Azure; Application Insights is the specific piece that instruments an *application* (requests, dependencies, exceptions, custom events); a **Log Analytics Workspace** is the actual data store underneath both — a searchable, Kusto-queryable database that logs and metrics ultimately land in.
+
+**How the pieces fit together:**
+```text
+Application Insights SDK (in your app)
+        │  sends telemetry (requests, traces, exceptions)
+        ▼
+Log Analytics Workspace  <──  also receives: VM/AKS diagnostic logs,
+   (stores everything as        NSG flow logs, Activity Log entries,
+    queryable tables)            anything else piped in via Azure Monitor
+        │
+        ▼
+Kusto Query Language (KQL) queries, dashboards, alerts — all run AGAINST the workspace
+```
+Application Insights used to have its own separate storage; modern ("workspace-based") Application Insights resources store their data *inside* a Log Analytics Workspace instead, so a single KQL query can join application telemetry with infrastructure logs (e.g., correlating a spike in HTTP 500s with a VM's CPU/memory metrics) in one place.
+
+**A KQL query against the workspace:**
+```kql
+requests
+| where timestamp > ago(1h)
+| where resultCode == "500"
+| summarize FailureCount = count() by bin(timestamp, 5m)
+| order by timestamp desc
+```
+
+**Common Pitfall:** treating "Application Insights" and "Log Analytics" as two unrelated products that happen to share an Azure subscription — in the current (workspace-based) model, Application Insights is really a *view* and ingestion path over data that physically lives in a Log Analytics Workspace; access control, retention, and cost are governed at the workspace level, not per Application Insights resource.
+
+#### Follow-up: Why does workspace-based Application Insights matter for cost and access control specifically?
+
+Retention policy, daily cap, and RBAC are all configured once on the Log Analytics Workspace and apply uniformly to everything feeding into it — mixing multiple applications' telemetry into one workspace means one team's noisy app can drive up ingestion cost/retention for everyone sharing that workspace, which is why larger organizations often split workspaces by team or environment rather than using a single shared one for convenience.
+
+---
+
+## Beginner — Question 30
+
+**Q30: What is Azure Container Registry (ACR), and why do containerized Azure deployments typically pull images from it rather than a public registry like Docker Hub?**
+
+Azure Container Registry is a private, managed Docker/OCI image registry hosted inside your Azure subscription — the place your CI/CD pipeline pushes built images to, and the place AKS, Container Apps, App Service (for containers), and Azure Functions pull them from at deploy time.
+
+**A typical build-and-push flow:**
+```bash
+az acr create --resource-group my-rg --name myregistry --sku Basic
+
+az acr build --registry myregistry --image myapp:1.0 .
+# builds the image IN Azure (no local Docker daemon required) and pushes it to the registry
+
+az webapp config container set --name my-app --resource-group my-rg \
+  --container-image-name myregistry.azurecr.io/myapp:1.0
+```
+
+**Why not just use Docker Hub:**
+- **Network proximity and private access** — ACR can be reached over a **Private Endpoint** from inside a VNet, so pulling images never has to cross the public internet; Docker Hub pulls always go over the internet (or through an egress proxy).
+- **Identity-based access, not a shared password** — AKS and App Service can be granted `AcrPull` role access via Managed Identity, so no registry credential is stored anywhere; Docker Hub's free/pro tiers rely on a username/password or access token.
+- **Rate limits** — Docker Hub throttles anonymous and free-tier pulls; a busy AKS cluster redeploying/scaling frequently can hit those limits, which ACR (a resource you fully control) doesn't impose on you.
+
+**Common Pitfall:** granting a service principal or Managed Identity `Contributor` on the whole registry when it only ever needs to *pull* images — the built-in `AcrPull` role is scoped exactly to read-only image pulls, and using a broader role than necessary is an avoidable over-permissioning mistake for a credential that's often attached to many running compute instances.
+
+---
+
+## Intermediate — Question 24
+
+**Q24: What is the practical difference between a Managed Identity and a Service Principal in Microsoft Entra ID, given that a Managed Identity IS technically a special kind of Service Principal under the hood?**
+
+Every application identity in Entra ID that can authenticate and be granted RBAC roles is represented as a **Service Principal** — the difference is *how that Service Principal's credential is created, stored, and rotated*, not whether one "is" a Service Principal and the other isn't.
+
+**Regular (manually-created) Service Principal — you own the credential lifecycle:**
+```bash
+az ad sp create-for-rbac --name my-app-sp
+# Output includes appId, tenant, and a CLIENT SECRET you must store yourself,
+# rotate yourself before it expires, and keep out of source control yourself
+```
+This is what you use when a workload runs *outside* Azure entirely (an on-prem service, another cloud, a developer's laptop) and needs an Entra ID identity — Azure has no platform-level way to hand that workload a credential automatically, so a human or pipeline must generate, store, and periodically rotate a client secret or certificate.
+
+**Managed Identity — Azure creates AND manages the Service Principal's credential for you:**
+```bash
+az webapp identity assign --resource-group my-rg --name my-app
+# Azure creates a Service Principal in Entra ID, tied 1:1 to this App Service,
+# and silently issues/rotates short-lived credentials — you never see or handle one
+```
+Under the hood this also produces a Service Principal object in Entra ID (visible in `az ad sp list`), but the credential backing it is provisioned, rotated, and scoped to exactly one Azure resource entirely by the platform — there is no secret for a human to generate, store, or leak.
+
+**The decision rule:** if the workload runs *on* Azure compute (App Service, VM, Function, AKS pod via workload identity), always prefer Managed Identity — there's no legitimate reason to hand-manage a Service Principal's secret when Azure can issue and rotate one for you automatically. Reach for a manually-created Service Principal only when the workload runs entirely outside Azure and can't use Workload Identity Federation (covered under Advanced) either.
+
+**Common Pitfall:** provisioning a manually-created Service Principal with a long-lived client secret for a workload that's *already running on Azure compute* — this is almost always a leftover from before Managed Identity existed (or from copying an older tutorial), and represents an unnecessary, avoidable stored-secret liability that Managed Identity would eliminate entirely.
+
+---
+
+## Intermediate — Question 25
+
+**Q25: What is an Azure Policy Initiative (Policy Set), and how does assigning it at the Management Group level let an organization enforce consistent governance across many subscriptions at once?**
+
+A single Azure Policy definition (like the "Deny" effect covered earlier) enforces one specific rule. An **Initiative** bundles many related policy definitions together so they can be assigned, tracked, and reported on as one logical group — and assigning that initiative at a **Management Group** (a container that sits above subscriptions) applies it to every subscription underneath, without touching each subscription individually.
+
+**The scope hierarchy policy assignments can target:**
+```text
+Management Group ("Production")
+   ├── Subscription A (Team 1's prod resources)
+   ├── Subscription B (Team 2's prod resources)
+   └── Subscription C (Team 3's prod resources)
+
+Assigning an Initiative at the "Production" Management Group level
+  → automatically applies to Subscriptions A, B, and C, and everything under them
+  → a new Subscription D added to this Management Group LATER inherits it automatically too
+```
+
+**A simplified Initiative bundling several related policies:**
+```json
+{
+  "properties": {
+    "displayName": "Required Tagging and Allowed Locations",
+    "policyDefinitions": [
+      { "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/require-tag-costcenter" },
+      { "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/allowed-locations" },
+      { "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/deny-public-ip" }
+    ]
+  }
+}
+```
+
+**Why this matters at scale, beyond just convenience:** a large organization might have dozens of individual policies (tagging requirements, allowed regions, denying public IPs, requiring encryption) — assigning each one individually to every subscription, and remembering to do so again for every *new* subscription, doesn't scale and inevitably drifts. Grouping them into an Initiative and assigning it once at a Management Group means governance is enforced structurally, at the point where subscriptions are organized, rather than by manual per-subscription discipline.
+
+**Common Pitfall:** assigning policies directly to individual subscriptions "for now" with a plan to consolidate into Management Groups "later" — in practice this creates policy drift almost immediately (a new subscription gets created and someone forgets to apply the same set), whereas Management-Group-level assignment makes compliance the *default* a new subscription inherits automatically rather than something that has to be remembered.
+
+#### Follow-up: What is a Policy Exemption, and why is it preferable to simply not assigning the policy to a resource that needs an exception?
+
+An Exemption records that a *specific* resource is intentionally excluded from a *specific* policy (or initiative), with a documented reason and optional expiration date — the resource still shows up in compliance reporting as "exempted" rather than silently missing from evaluation entirely, preserving an audit trail of *why* an exception exists instead of the exception being invisible and easy to forget about.
+
+---
+
+## Advanced — Question 24
+
+**Q24: How does Durable Functions' Fan-out/Fan-in pattern let an Orchestrator process many independent activities in parallel and then aggregate their results, and how do Sub-Orchestrations extend that same idea to whole nested workflows?**
+
+The basic Orchestrator pattern (covered earlier) is inherently sequential — each `CallActivityAsync` is awaited before the next line runs. Fan-out/Fan-in instead kicks off many activity calls *without* awaiting each one individually, then awaits all of them together, letting independent units of work run concurrently while still giving the orchestrator a single deterministic point to resume from once they've all completed.
+
+**Fan-out/Fan-in — processing a batch of items in parallel:**
+```csharp
+[Function(nameof(BatchOrchestrator))]
+public async Task RunOrchestrator([OrchestrationTrigger] TaskOrchestrationContext context)
+{
+    var fileNames = context.GetInput<string[]>();
+
+    // Fan-out: start ALL activity calls without awaiting each one individually
+    var tasks = fileNames.Select(f => context.CallActivityAsync<bool>("ProcessFile", f)).ToList();
+
+    // Fan-in: wait for every one of them to complete, THEN continue
+    var results = await Task.WhenAll(tasks);
+
+    await context.CallActivityAsync("SendSummaryReport", results.Count(r => r));
+}
+```
+Each `ProcessFile` activity can be scheduled onto a different Function instance and run truly in parallel — the orchestrator itself doesn't do the processing, it just coordinates *when* work starts and waits for the whole batch to finish before moving to the aggregation step.
+
+**Sub-Orchestrations — the same idea, one level up, for composing whole nested workflows:**
+```csharp
+var orderTasks = orderIds.Select(id =>
+    context.CallSubOrchestratorAsync<OrderResult>(nameof(ProcessSingleOrder), id)).ToList();
+var results = await Task.WhenAll(orderTasks);
+```
+Instead of fanning out to individual *activities*, this fans out to entire independent *orchestrations* — each with its own multi-step sequence (reserve inventory, charge payment, ship) — letting a parent orchestration compose many child workflows the same way a top-level orchestrator composes individual activities, without one giant, unwieldy orchestrator function trying to express every order's entire lifecycle inline.
+
+**Common Pitfall:** forgetting that the orchestrator's replay model (covered earlier) still applies here — `Task.WhenAll` over a fanned-out set of activity calls is deterministic and replay-safe, but manually reordering or filtering that task list based on non-deterministic state (like `DateTime.Now`) between replays produces a mismatched history and a runtime orchestration error, since the framework expects the exact same sequence of scheduled tasks on every replay.
+
+---
+
+## Advanced — Question 25
+
+**Q25: What is Azure API Management's distinction between an API "Version" and a "Revision," and why does conflating the two lead to breaking existing consumers unintentionally?**
+
+Both let an API evolve over time, but they solve different problems: a **Revision** is a non-breaking change deployed to the *same* API surface consumers already call, while a **Version** is a genuinely distinct, separately-addressable API that old and new consumers can call *side by side* indefinitely.
+
+**Revisions — safe, non-breaking iteration on the SAME URL, with a staged rollout:**
+```text
+https://api.contoso.com/orders           <- existing consumers keep calling THIS, unaffected
+https://api.contoso.com/orders;rev=2     <- new revision, testable BEFORE making it "current"
+
+az apim api revision create --api-id orders-api --api-revision 2 ...
+# test rev=2 directly via its revision-specific URL, THEN promote it to "current"
+# once promoted, https://api.contoso.com/orders silently starts serving rev=2 --
+# existing consumers see zero URL change, because the change was non-breaking
+```
+A Revision is appropriate for things like fixing a typo in documentation, adding an optional response header, or tightening a rate-limit policy — changes that don't alter the contract any existing consumer already depends on.
+
+**Versions — genuinely different, BREAKING API contracts, coexisting side by side:**
+```text
+https://api.contoso.com/v1/orders   <- old consumers keep using this INDEFINITELY
+https://api.contoso.com/v2/orders   <- new consumers opt INTO this; NOT automatically applied to v1 callers
+```
+A Version is appropriate when the request/response contract itself changes in a way that would break existing callers (a renamed field, a different required parameter) — both versions continue running simultaneously, and migrating consumers from v1 to v2 is a deliberate, opt-in process on the consumer's own timeline, not something APIM does for them automatically.
+
+**Why conflating the two causes real incidents:** pushing a genuinely breaking contract change as a Revision (because it's the "current" revision that gets silently promoted to the existing URL) breaks every consumer still calling that URL the moment the revision is promoted — with no opportunity for them to opt in or migrate on their own schedule, since Revisions are explicitly designed to be invisible, non-breaking changes to the same live endpoint.
+
+**Common Pitfall:** using Revisions purely as a lightweight way to avoid the perceived overhead of standing up a new Version — the deciding factor isn't how big the change *feels*, it's whether the change is contract-breaking; a "small" change to a required field's type or a removed response property is still a breaking change and belongs behind a new Version, not a same-URL Revision.
+
+---
+
+## Advanced — Question 26
+
+**Q26: How does Application Insights' distributed tracing correlate a single logical request as it flows across multiple independently-deployed microservices, given that each service only sees its own slice of the overall request?**
+
+Each microservice logs its own requests and dependency calls into Application Insights independently, with no shared in-memory state between services — correlation instead works by propagating a small set of **W3C Trace Context** headers on every outbound call, which each downstream service picks up and re-emits alongside its own telemetry, letting Application Insights' backend reassemble the full end-to-end picture after the fact.
+
+**The propagated headers, carried across every hop:**
+```http
+GET /api/orders/123 HTTP/1.1
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+             │  └─ trace-id (SAME for the entire end-to-end request) │  └─ flags
+             └─ version                                              └─ parent-span-id (THIS hop's caller)
+```
+The `trace-id` segment stays identical across every service the request touches — Service A generates it on the initial request, and every downstream call (Service A → Service B → Service C) carries the same `trace-id` forward while each hop gets its own unique `parent-span-id`, forming a parent-child chain.
+
+**What this produces in Application Insights — the "Application Map" and end-to-end transaction view:**
+```text
+Application Map reconstructs, from independently-logged telemetry across 3 different services:
+
+  API Gateway (200ms) ──> Orders Service (150ms) ──> Inventory Service (80ms)
+                       └─> Notification Service (30ms, fire-and-forget)
+
+All four spans share the SAME trace-id -- Application Insights groups them into
+ONE end-to-end transaction view, even though each service logged independently
+and has no direct knowledge the other services even exist.
+```
+The .NET SDK does this propagation automatically via `HttpClient` instrumentation — outbound calls made through an instrumented `HttpClient` have the `traceparent` header injected without any explicit code, and inbound requests automatically read it back out to continue the same trace rather than starting a new one.
+
+**Common Pitfall:** introducing a hop that doesn't propagate the trace context — a message dropped onto a queue (Service Bus, Storage Queue) without manually forwarding the `traceparent` value into the message's own properties breaks the correlation chain at that exact point, since the downstream consumer picking up the queue message has no HTTP request to read a header from at all; asynchronous, queue-based hops require explicitly carrying the trace context through the message payload/properties for the end-to-end trace to remain unbroken.
+
+---
+
+## Scenario — Question 6
+
+**Q6: An Azure Function that was working fine in staging starts throwing `Access denied` when it calls Key Vault immediately after being promoted to production. The App Service has a system-assigned Managed Identity enabled, and the same code path works in staging. How do you diagnose and fix this?**
+
+This is almost always an **environment-specific RBAC/access-policy gap**, not a code or Managed Identity bug — the Managed Identity mechanism itself (covered earlier) doesn't change between environments, but the *Key Vault access grant* is typically configured per-environment and easy to miss when promoting.
+
+**Diagnosis, in order:**
+1. **Confirm the identity actually exists and is enabled on the PRODUCTION resource specifically** — a system-assigned identity is unique per resource; swapping a deployment slot (covered earlier) can also change which identity is "live" if the identity wasn't configured as slot-sticky, so the identity that was granted access in staging may not be the one now running in production.
+```bash
+az webapp identity show --resource-group my-rg --name my-app --slot production
+# confirm the principalId here matches EXACTLY what was granted access on the Key Vault
+```
+2. **Check the Key Vault's access model and the actual grant** — if the vault uses the legacy Access Policy model, confirm an access policy exists for this exact `principalId` with `Get`/`List` on Secrets; if it uses RBAC, confirm the `Key Vault Secrets User` role is assigned at the vault (or resource group) scope to this identity specifically — a policy/role granted to the *staging* slot's identity does not automatically apply to production's.
+3. **Check network restrictions on the vault** — if the Key Vault has a Private Endpoint or firewall restricting access to specific VNets, confirm production's outbound traffic path is actually permitted; staging and production App Services can sit in different subnets/VNets even when the code is identical.
+4. **Check propagation delay** — RBAC role assignments can take several minutes to propagate; a role assigned moments before the first production request can transiently fail even though the configuration is now correct.
+
+**The fix, once isolated:**
+```bash
+az keyvault set-policy --name my-vault --object-id <production-identity-principal-id> \
+  --secret-permissions get list
+```
+
+**Common Pitfall:** assuming `DefaultAzureCredential` itself is broken and adding fallback credential logic or a stored client secret "just to unblock production" — this treats the symptom (an authentication failure) while leaving the actual root cause (a missing access grant for production's specific identity) unresolved, and reintroduces exactly the stored-secret risk Managed Identity was adopted to eliminate.
+
+---
+
+## Scenario — Question 7
+
+**Q7: An Azure Function on the Consumption plan handles a sudden burst of traffic by scaling out to hundreds of instances, as designed — but a large fraction of outbound calls to a downstream SQL Database start failing with connection errors during the burst, even though SQL Database itself isn't reporting high CPU. What's actually happening, and how do you fix it?**
+
+This is a classic **SNAT (Source NAT) port exhaustion** issue, not a downstream database capacity problem — it's easy to misdiagnose as "the database can't handle the load" when the actual bottleneck is the outbound networking layer between the Function instances and their destination.
+
+**The mechanism:** every outbound connection from an App Service/Function instance to an external endpoint (like Azure SQL over its public endpoint) consumes one SNAT port from a limited pool allocated to that instance by the underlying host. When hundreds of Function instances scale out simultaneously and each one opens new SQL connections per invocation (rather than reusing pooled connections), the finite SNAT port pool for that scale unit gets exhausted — new outbound connections start failing, which surfaces as connection errors that look database-side but are actually a networking-layer resource limit.
+
+**Fixing the actual cause, in order of effectiveness:**
+1. **Ensure the SQL client is genuinely connection-pooling, not opening a new connection per invocation:**
+```csharp
+// WRONG: a new SqlConnection (and likely a new outbound connection) created and disposed
+// on every single function invocation, defeating ADO.NET's own connection pool reuse
+using var conn = new SqlConnection(connectionString);
+
+// Better: reuse a shared, pooled DbContext/connection factory across invocations,
+// and confirm Pooling=true (the ADO.NET default) isn't accidentally disabled
+```
+2. **Route outbound traffic through a Private Endpoint to Azure SQL instead of its public endpoint** — private, VNet-routed traffic to another Azure PaaS service doesn't consume SNAT ports from the public outbound pool at all, sidestepping the exhaustion entirely rather than just delaying it.
+3. **Move to a Premium/Elastic Premium plan with VNet integration**, which provides a larger, more predictable SNAT port allocation than the Consumption plan's shared, less controllable pool.
+
+**Common Pitfall:** scaling the SQL Database up (more DTUs/vCores) in response to these errors — since SQL itself isn't the bottleneck, this adds cost without fixing anything; the errors will recur at the next burst because the actual constraint (SNAT ports on the compute side) was never addressed.
+
+---
+
+## Scenario — Question 8
+
+**Q8: Users in Asia report your web application feels noticeably slower than users in the US, even though your architecture is deployed identically to both East US and Southeast Asia regions behind Azure Front Door. Application Insights shows nearly identical server-side processing time in both regions. Where do you look next, and what's the likely cause?**
+
+Since server-side processing time is already confirmed nearly identical, the latency gap is happening **outside** the application code entirely — the investigation needs to move to network path and dependency topology, not application logic.
+
+**Where to look, in order:**
+1. **Confirm Front Door is actually routing Asian users to the Asian backend, not falling back to US** — check Front Door's routing/health-probe configuration; if the Southeast Asia backend is failing health probes (even intermittently) or wasn't added to the correct routing rule, Asian users get silently routed cross-continent to the US backend, which alone would explain the entire gap.
+```bash
+az afd origin show --resource-group my-rg --profile-name my-fd --origin-group-name main --origin-name southeast-asia
+# confirm health/enabled state and that it's actually IN the routing rule Asian users hit
+```
+2. **Check for a "hidden" single-region dependency** — a common cause: the application itself is deployed to both regions, but it calls a *shared, single-region* dependency (a Cosmos DB account without the Southeast Asia region added to its own replication, a Redis cache, a third-party API) that only exists in East US. Every Asian-region request pays a full cross-continent round trip to that one dependency, even though the compute serving the request is correctly regional — and this cost wouldn't show up in "server-side processing time" if that metric only captures the app's own CPU time, not time spent awaiting a cross-region dependency call.
+3. **Check DNS/TLS negotiation, not just steady-state throughput** — confirm Front Door's anycast edge (covered earlier) is actually being used for connection termination near the user, rather than the client resolving directly to a regional origin for some requests.
+
+**The typical root cause found in practice:** the compute layer (App Service/AKS) was correctly deployed multi-region, but a *data* dependency (most often Cosmos DB or a cache) was left single-region — the "multi-region" story was completed for compute but not for every downstream dependency the request actually touches.
+
+**Common Pitfall:** concluding the problem is Front Door's global routing itself and adding a CDN or extra caching layer — if server-side time is genuinely identical and the gap is real, the fix is almost always closing the multi-region gap on a specific *dependency*, not adding more infrastructure on top of an already-correct routing layer.
+
+---
+
+## Scenario — Question 9
+
+**Q9: A team discovers, weeks after the fact, that thousands of order-processing messages have been silently accumulating in an Azure Service Bus queue's Dead-Letter Queue (DLQ), meaning thousands of real customer orders were never actually processed. No alert fired. How do you both recover from this incident and prevent it from happening silently again?**
+
+The recovery and the prevention are two separate problems: recovering the specific backlog of already-dead-lettered messages, and closing the *observability* gap that let it go unnoticed for weeks.
+
+**Recovering the backlog:**
+```csharp
+// Dead-lettered messages are NOT lost -- they sit in a queue's own sub-queue,
+// retrievable and reprocessable once the root cause is fixed:
+ServiceBusReceiver dlqReceiver = client.CreateReceiver("orders-queue",
+    new ServiceBusReceiverOptions { SubQueue = SubQueue.DeadLetter });
+
+var messages = await dlqReceiver.ReceiveMessagesAsync(maxMessages: 100);
+foreach (var msg in messages)
+{
+    // Inspect msg.DeadLetterReason / DeadLetterErrorDescription to confirm
+    // the original failure cause is actually fixed before resubmitting
+    await sender.SendMessageAsync(new ServiceBusMessage(msg));
+    await dlqReceiver.CompleteMessageAsync(msg);
+}
+```
+Before blindly resubmitting, the `DeadLetterReason` and `DeadLetterErrorDescription` properties must be checked — if the underlying bug that caused `MaxDeliveryCount` (covered earlier) to be exceeded hasn't actually been fixed, resubmitting just refills the DLQ again with the same messages.
+
+**Closing the observability gap — the actual prevention:**
+```bash
+az monitor metrics alert create --name "DLQ-Message-Count-Alert" \
+  --resource-group my-rg \
+  --scopes /subscriptions/.../namespaces/my-sb-namespace \
+  --condition "avg DeadletteredMessages > 0" \
+  --window-size 5m --evaluation-frequency 5m \
+  --action-group my-oncall-action-group
+```
+A DLQ existing at all is not itself a failure — it's Service Bus doing exactly what it's designed to do — but a DLQ that nobody is *watching* silently converts "a few messages needed manual review" into "thousands of orders were never fulfilled and nobody knew." The fix is a metric alert on `DeadletteredMessages > 0` wired to an on-call action group, so the very first dead-lettered message triggers investigation within minutes, not weeks.
+
+**Common Pitfall:** treating this purely as a code-fix problem (fixing whatever bug caused the original failures) without also adding the missing alert — the code fix prevents *this specific* cause from dead-lettering messages again, but without an alert on the DLQ itself, an entirely different future bug can silently repeat the exact same weeks-long undetected backlog.
+
+---
+
+## Scenario — Question 10
+
+**Q10: A monthly Azure bill comes in significantly higher than expected. Cost Management attributes most of the overrun to a single Azure SQL Database. The application team insists nothing changed in the code or traffic volume recently. How do you track down the actual cause?**
+
+An unexplained cost spike attributed to a single resource, with no corresponding application change, points toward a **configuration/sizing mismatch** rather than genuine new demand — the investigation should compare the resource's actual utilization against what it's provisioned/billed for, not assume the cost reflects real necessary usage.
+
+**Diagnosis, in order:**
+1. **Check what tier/size the database is actually provisioned at, versus what it needs:**
+```bash
+az sql db show --resource-group my-rg --server my-server --name my-db --query "{sku:currentSku, maxSizeBytes:maxSizeBytes}"
+```
+Compare this against actual DTU/vCore utilization in Azure Monitor — a database provisioned at a high fixed tier (say, provisioned vCore) but averaging 10% utilization most of the day is paying for capacity it essentially never uses; this is the single most common cause of "nothing changed but the bill went up," especially if someone previously scaled it UP temporarily for a one-time load event and never scaled it back down.
+2. **Check for an accidental purchasing-model mismatch** — a database on the DTU model migrated to vCore (or vice versa) without re-evaluating the equivalent tier can land on a meaningfully more expensive configuration for the same actual workload, since the two models' pricing/performance curves (covered earlier) don't map 1:1.
+3. **Check Autoscale/Serverless configuration, if applicable** — a Serverless Azure SQL Database left without an appropriate auto-pause delay, or with a minimum vCore floor set too high, bills for provisioned capacity even during genuinely idle periods.
+4. **Check for an orphaned duplicate** — confirm a second, forgotten copy of the database (a geo-replica left over from a completed migration, or a manually-created backup-restore test database) isn't quietly running and billing alongside the one actually in use.
+
+**The fix, once isolated (commonly a sizing mismatch):**
+```bash
+az sql db update --resource-group my-rg --server my-server --name my-db \
+  --edition GeneralPurpose --family Gen5 --capacity 4   # right-sized to ACTUAL observed utilization
+```
+
+**Common Pitfall:** right-sizing the database down purely based on average utilization without checking peak/burst utilization too — a database that averages 10% but has a genuine daily peak of 80% during business hours would suffer real performance degradation if downsized based on the average alone; right-sizing needs to account for legitimate peak demand, not just the average that makes the overrun visible.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A blue-green deployment using Azure App Service deployment slots (covered earlier) fails partway through — the swap between "staging" and "production" appears to hang, and afterward the application intermittently serves a mix of old and new behavior depending on which instance handles the request. How do you diagnose this and safely recover?**
+
+A swap that hangs or produces inconsistent post-swap behavior almost always points to either a **health-check/warm-up failure during the swap's validation step**, or a **sticky setting misconfiguration** (covered earlier) causing some instances to retain stale configuration after the swap.
+
+**Diagnosis, in order:**
+1. **Check whether the swap actually completed or is stuck mid-swap:**
+```bash
+az webapp deployment slot list --resource-group my-rg --name my-app --query "[].{name:name, slotSwapStatus:slotSwapStatus}"
+```
+A swap that's stuck typically means the staging slot failed its automatic warm-up/health check before Azure would commit the swap — if `applicationInitialization` isn't configured, Azure may consider the slot "ready" prematurely, or conversely, a slow-starting app can cause the swap orchestration to time out waiting for a health signal that never arrives.
+2. **Check for a "mixed old/new behavior" pattern, which points at sticky settings, not the swap mechanism itself** — if a connection string or feature-flag setting wasn't marked slot-sticky, some in-flight requests may briefly be served by instances that haven't fully completed the settings/config transition, especially under load during the swap window; this is exactly the sticky-settings pitfall covered earlier surfacing as an intermittent, hard-to-reproduce symptom rather than an obvious hard failure.
+3. **Check Application Insights' Availability/Live Metrics during the swap window specifically** — a spike in 5xx errors concentrated in a narrow time window right at the swap timestamp confirms the swap itself (not unrelated application code) as the trigger.
+
+**Safe recovery — swap back immediately, don't debug in production:**
+```bash
+az webapp deployment slot swap --resource-group my-rg --name my-app --slot production --target-slot staging
+# swapping AGAIN reverses the roles, restoring the last-known-good code to production
+# WITHOUT a slow redeploy -- the same near-instant re-pointing mechanism covered earlier
+```
+Because a swap is a fast metadata re-pointing operation rather than a redeploy, "swap back" is almost always the fastest path to a stable state — recovering forward by trying to hot-patch the new version in place, while customers are actively affected, is rarely the right call under time pressure.
+
+**Common Pitfall:** configuring `applicationInitialization`/health-check warm-up only loosely (or not at all) and relying on the swap "usually working" — a properly configured warm-up path that Azure actually waits on before committing the swap is what prevents half-initialized instances from ever receiving production traffic in the first place, turning this whole failure mode into something the platform catches automatically rather than something discovered by users after the fact.
+
+---

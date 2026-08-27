@@ -2206,3 +2206,472 @@ Because Blind XSS specifically targets *internal, privileged* contexts (admin da
 **Common Pitfall:** focusing XSS prevention efforts exclusively on public-facing pages while neglecting internal admin/back-office tools that display user-submitted content — Blind XSS specifically exploits exactly this gap, since internal tools are often assumed (incorrectly) to be a lower-risk environment simply because they're not directly public-facing, when in fact a successful Blind XSS payload executing in an *admin's* browser can be considerably more damaging than one executing in an ordinary user's.
 
 ---
+
+## Beginner — Question 23
+
+**Q23: What is Secret Scanning, and how do tools like `gitleaks` or GitHub's built-in secret scanning detect an accidentally-committed API key or connection string BEFORE (or immediately after) it reaches a shared repository?**
+
+Secret Scanning tools search a repository's file contents — and critically, its *entire commit history*, not just the current working tree — for patterns matching known secret formats (an AWS access key's distinctive prefix, a private key's PEM header, a database connection string's structure), flagging a match so a developer can rotate the exposed credential immediately, ideally before it's ever pushed anywhere shared at all.
+
+**Catching it before it's committed — a pre-commit hook:**
+```bash
+# .git/hooks/pre-commit (or a shared pre-commit-config.yaml running gitleaks)
+gitleaks protect --staged --verbose
+# scans ONLY the currently-staged changes -- BLOCKS the commit entirely if a
+# secret-shaped pattern (an AWS key, a private key header) is detected
+```
+```text
+$ git commit -m "add payment integration"
+Finding:     AKIA...REDACTED...
+Secret:      AKIA1234567890EXAMPLE
+RuleID:      aws-access-token
+File:        appsettings.Production.json
+-- commit BLOCKED -- the secret NEVER even reaches the local repository's history
+```
+
+**Catching it after a push — repository-wide history scanning:**
+```bash
+gitleaks detect --source . --report-path findings.json
+# scans the FULL commit history -- catches a secret committed WEEKS ago,
+# even if the file containing it was later "deleted" in a subsequent commit
+```
+Because a secret committed even once remains recoverable from Git's history forever (deleting the file in a later commit does not remove it from earlier commits), history-wide scanning is necessary to catch what a pre-commit hook alone would miss — a secret introduced before scanning was ever set up, or one committed on a machine without the hook installed.
+
+**Common Pitfall:** running secret scanning only as a manual, occasional check rather than wiring it into both a pre-commit hook (fast local feedback, stops the leak before it's shared at all) and a CI pipeline step (a backstop catching anything that slips past a developer who bypassed or lacked the local hook) — relying on just one of the two leaves a real gap, since a pre-commit hook only protects commits made on a machine that has it installed, and CI-only scanning still lets the secret briefly exist in the shared repository's history before detection.
+
+---
+
+## Beginner — Question 24
+
+**Q24: What is Rate Limiting, and what distinct categories of attack does it mitigate beyond simply "too many requests"?**
+
+Rate Limiting caps how many requests a client (identified by IP, API key, or account) may make within a given time window, rejecting or delaying requests beyond that cap — a foundational security control that mitigates several genuinely distinct attack categories, not merely a performance/capacity safeguard.
+
+**A basic rate limiter in ASP.NET Core:**
+```csharp
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("login", opt =>
+    {
+        opt.PermitLimit = 5;                       // at most 5 attempts...
+        opt.Window = TimeSpan.FromMinutes(1);       // ...per rolling minute
+        opt.QueueLimit = 0;                          // excess requests are rejected outright, not queued
+    });
+});
+
+app.MapPost("/login", (LoginRequest r) => { /* ... */ }).RequireRateLimiting("login");
+```
+
+**What it actually mitigates:**
+```text
+Brute-force login attempts   -- limits how many password guesses per minute an attacker can try
+Credential stuffing           -- caps how fast leaked username/password pairs can be tried en masse
+Denial of service              -- prevents a single client from monopolizing server capacity
+API scraping/abuse             -- limits how quickly a client can enumerate or bulk-extract data
+```
+
+Because each of these is a genuinely different threat (a password-guessing attacker, a data scraper, and a DoS attempt all "send a lot of requests," but for different reasons and against different endpoints), rate limiting is best applied deliberately per-endpoint — a strict limit on `/login` (a handful of attempts per minute) and a looser one on a general read-only API, rather than one single blanket limit applied uniformly across an entire application regardless of what each endpoint actually does or how sensitive it is to abuse.
+
+**Common Pitfall:** applying one single, uniform rate limit across an entire application rather than tuning it per-endpoint based on that endpoint's specific sensitivity — a limit loose enough not to bother legitimate users of a read-heavy public endpoint is often far too loose to meaningfully slow down a brute-force attack against a login endpoint, and a limit tight enough to stop brute-forcing would be intolerable for ordinary browsing traffic elsewhere in the same application.
+
+---
+
+## Intermediate — Question 29
+
+**Q29: What is Software Composition Analysis (SCA) / dependency vulnerability scanning, and how does it differ from the typosquatting/Dependency Confusion attacks (covered earlier) by detecting known CVEs in dependencies an application genuinely, legitimately intended to use?**
+
+Covered earlier: typosquatting and Dependency Confusion both involve an attacker tricking a build into pulling in a *malicious* package that was never supposed to be a dependency at all. SCA tooling addresses an entirely different, complementary risk: a dependency the application *correctly and intentionally* uses turns out to have a publicly disclosed vulnerability (a CVE) in a specific version range — the package itself is genuinely legitimate, just outdated or affected.
+
+**A CI pipeline step scanning the dependency graph against known CVEs:**
+```bash
+dotnet list package --vulnerable --include-transitive
+```
+```text
+Project `OrderService` has the following vulnerable packages:
+   [net8.0]:
+   Top-level Package      Requested   Resolved   Severity   Advisory
+   > System.Text.Json     6.0.0       6.0.0      High       GHSA-hh2w-p6rv-4g7w
+```
+Unlike typosquatting (a fake package with a similar name) or Dependency Confusion (a real internal package name hijacked on a public registry), this flags a package that's genuinely the intended, correctly-named dependency — the risk here is purely that a *specific version* has a known, publicly documented flaw, discoverable by cross-referencing the resolved dependency tree (including *transitive* dependencies your code never directly references) against a vulnerability database (the National Vulnerability Database, GitHub Advisory Database).
+
+**Automating this continuously, not just at build time:** tools like Dependabot, Snyk, or `dotnet list package --vulnerable` wired into CI catch this both at build time and on an ongoing schedule — since a dependency that was safe *when originally added* can become vulnerable *later*, when a new CVE is disclosed against a version already sitting untouched in a `csproj`/lock file for months.
+
+**Common Pitfall:** running a vulnerability scan once, at the time a dependency is first added, and never again — a CVE can be disclosed against a package version *long after* it was added and considered safe at the time; continuous, scheduled scanning (not just a one-time check during initial dependency selection) is necessary to catch a newly-disclosed vulnerability in a dependency that's been sitting unchanged in the project for a long time.
+
+---
+
+## Intermediate — Question 30
+
+**Q30: What are the different rate-limiting algorithms — Fixed Window, Sliding Window, and Token Bucket — and what specific trade-off does each make?**
+
+Covered earlier at a conceptual level (why rate limiting matters, and IP-vs-account scoping) — the *algorithm* choice determines a rate limiter's precise behavior at window boundaries and its tolerance for short bursts, each with a genuinely different trade-off.
+
+**Fixed Window — simple, but allows a burst at the window boundary:**
+```csharp
+options.AddFixedWindowLimiter("api", opt => { opt.PermitLimit = 100; opt.Window = TimeSpan.FromMinutes(1); });
+```
+```text
+A client can send 100 requests at 0:59, then ANOTHER 100 at 1:00 (a new window) --
+200 requests within 2 SECONDS, technically satisfying "100 per minute" per window,
+but far burstier than the LIMIT'S INTENT suggests
+```
+
+**Sliding Window — smooths out the boundary-burst problem:**
+```csharp
+options.AddSlidingWindowLimiter("api", opt =>
+{
+    opt.PermitLimit = 100; opt.Window = TimeSpan.FromMinutes(1); opt.SegmentsPerWindow = 6;
+});
+```
+Divides the window into smaller segments and weights the count across the *previous* window's trailing segments as they age out — closing the fixed-window boundary-burst gap at the cost of slightly more bookkeeping overhead.
+
+**Token Bucket — allows controlled bursts while still enforcing a steady average rate:**
+```csharp
+options.AddTokenBucketLimiter("api", opt =>
+{
+    opt.TokenLimit = 100;                              // bucket capacity -- max burst size
+    opt.TokensPerPeriod = 10;
+    opt.ReplenishmentPeriod = TimeSpan.FromSeconds(1);  // refills 10 tokens/sec -- the steady-state rate
+});
+```
+```text
+A client that hasn't made requests recently has a FULL bucket -- can burst up to 100
+requests immediately -- then must wait for tokens to REPLENISH at 10/sec going forward
+-- deliberately ALLOWS a burst, unlike Fixed/Sliding Window's stricter per-interval cap
+```
+
+Because a legitimate client (a mobile app syncing after being offline, a batch job kicking off) often needs to send a brief burst of requests that a strict Fixed/Sliding Window would reject outright, Token Bucket's deliberate burst allowance is often the better fit for genuine API traffic patterns, while Fixed/Sliding Window's stricter, more predictable ceiling is often preferred specifically for security-sensitive endpoints (login, password reset) where tolerating a burst is exactly what you don't want.
+
+**Common Pitfall:** choosing Fixed Window for its simplicity without recognizing its boundary-burst weakness for a genuinely security-sensitive endpoint — an attacker who understands Fixed Window's mechanics can time a brute-force burst around the window reset to effectively double their allowed attempt rate; Sliding Window or a shorter window with a lower per-window limit closes this specific timing-based bypass.
+
+---
+
+## Advanced — Question 23
+
+**Q23: What are the `Cross-Origin-Opener-Policy` (COOP), `Cross-Origin-Embedder-Policy` (COEP), and `Cross-Origin-Resource-Policy` (CORP) headers, and how do they defend against cross-origin data leaks and Spectre-style speculative-execution side-channel attacks — a distinct threat class from the CSP/HSTS/X-Frame-Options headers covered earlier?**
+
+The security headers covered earlier (HSTS, X-Content-Type-Options, X-Frame-Options, CSP) primarily defend against injection and framing attacks — COOP/COEP/CORP defend against a newer, subtler threat: a malicious page using a *browser-level side channel* (exploiting speculative execution, à la Spectre) to read memory belonging to a different origin's page or resource that happens to share the same process/renderer.
+
+**Isolating a page from cross-origin windows that could otherwise share process memory:**
+```http
+Cross-Origin-Opener-Policy: same-origin
+```
+```text
+WITHOUT COOP: a malicious page can open YOUR page via window.open() and retain a
+  JavaScript reference to it (window.opener) -- both pages can end up sharing the
+  SAME browsing context group / OS process, a precondition Spectre-style attacks exploit
+
+WITH COOP: same-origin -- your page gets its OWN, ISOLATED browsing context group --
+  a cross-origin opener/popup relationship is SEVERED at the process-isolation level
+```
+
+**Ensuring every cross-origin resource a page loads has explicitly opted in to being loaded this way:**
+```http
+Cross-Origin-Embedder-Policy: require-corp
+Cross-Origin-Resource-Policy: same-origin
+```
+`COEP: require-corp` requires every cross-origin resource (an image, a script) your page embeds to explicitly serve a `CORP` header granting permission — a resource without it simply fails to load, closing a channel where a malicious page could otherwise embed a sensitive cross-origin resource specifically to read its content via a timing side-channel.
+
+**Why this specifically matters for enabling powerful browser APIs:** `SharedArrayBuffer` and high-resolution timers (needed for genuinely useful features like WebAssembly threading) were largely disabled by browsers after Spectre's disclosure, precisely because they make timing-based memory side-channel attacks practical — a page must opt in to COOP+COEP (achieving "cross-origin isolation") specifically to regain access to these APIs, since the browser can then guarantee the page's process isn't sharing memory with any un-consenting cross-origin content.
+
+**Common Pitfall:** enabling `COEP: require-corp` without first auditing every cross-origin resource (fonts, images, third-party scripts) the page actually loads — resources lacking the required `CORP`/CORS headers are silently blocked from loading at all, which can break a page's layout or functionality in ways that are easy to overlook until cross-origin isolation is actually turned on and something unexpectedly stops rendering.
+
+---
+
+## Advanced — Question 24
+
+**Q24: What is a Software Bill of Materials (SBOM), and how does it extend supply-chain security beyond CVE scanning (covered earlier) by providing verifiable PROVENANCE — proof of exactly how and from what an artifact was built?**
+
+CVE scanning (covered earlier) tells you whether a *known-named* dependency has a *known* vulnerability — it says nothing about whether the artifact you actually deployed was built from the source code and dependencies you think it was, or whether it was tampered with somewhere in the build pipeline itself. An SBOM is a formal, machine-readable inventory of every component (direct and transitive) in a built artifact; build **provenance** (via frameworks like SLSA, signed using tools like Sigstore/`cosign`) additionally proves *how* that artifact came to exist.
+
+**Generating an SBOM as part of the build:**
+```bash
+syft packages dir:. -o cyclonedx-json > sbom.json
+```
+```json
+{ "components": [
+  { "name": "Newtonsoft.Json", "version": "13.0.3", "purl": "pkg:nuget/Newtonsoft.Json@13.0.3" },
+  { "name": "System.Text.Json", "version": "8.0.0", "purl": "pkg:nuget/System.Text.Json@8.0.0" }
+]}
+```
+
+**Signing the build's provenance so a consumer can verify it wasn't tampered with:**
+```bash
+cosign sign --key cosign.key myregistry/order-service:1.4.2
+cosign verify --key cosign.pub myregistry/order-service:1.4.2
+# proves the IMAGE was signed by a key the CONSUMER trusts -- an ATTACKER who compromises
+# the registry and swaps the image CANNOT produce a VALID signature without the PRIVATE key
+```
+An SBOM answers "what's actually in this artifact, precisely" — useful the moment a new CVE is disclosed against some deeply transitive dependency, letting you instantly query every deployed artifact for whether it's affected, without re-scanning from scratch. Signed provenance answers a different question — "was this artifact genuinely produced by our trusted build pipeline from our trusted source, unmodified since" — closing the gap where an attacker who compromises a registry or a CI runner could otherwise substitute a malicious artifact under a legitimate-looking tag.
+
+**Common Pitfall:** treating an SBOM as sufficient supply-chain protection on its own, without also verifying provenance/signatures — an SBOM accurately describes what's inside an artifact, but says nothing about whether that specific artifact was genuinely produced by a trusted build process rather than tampered with afterward; the two are complementary, not substitutes for each other, addressing "what's inside" and "can I trust where this came from" as separate questions.
+
+---
+
+## Advanced — Question 25
+
+**Q25: How does a naive, in-memory rate limiter fail silently once an application is horizontally scaled across multiple instances, and how does a distributed, Redis-backed rate limiter close that gap?**
+
+An in-memory rate limiter (covered earlier for Fixed/Sliding Window/Token Bucket) tracks request counts in that *one process's* own memory — the moment an application runs behind a load balancer across multiple instances, each instance enforces the configured limit independently, against only the fraction of traffic it happens to receive, silently multiplying the *effective* limit by the number of instances.
+
+**The gap — a limit that's quietly N times looser than configured:**
+```csharp
+// EACH of 5 horizontally-scaled instances independently tracks its OWN in-memory count
+options.AddFixedWindowLimiter("login", opt => { opt.PermitLimit = 5; opt.Window = TimeSpan.FromMinutes(1); });
+```
+```text
+Configured intent: "5 login attempts per minute, PER CLIENT"
+ACTUAL enforced behavior, across 5 load-balanced instances: an attacker whose requests
+  happen to spread across all 5 instances gets 5 attempts PER INSTANCE -- 25 attempts/minute
+  TOTAL -- the limiter is TECHNICALLY "working" on every individual instance, while providing
+  FAR weaker protection than the configured PermitLimit suggests
+```
+
+**The fix — a shared, centralized counter every instance checks against, backed by Redis:**
+```csharp
+// Using a distributed rate limiter (e.g., via a Lua script executed ATOMICALLY in Redis)
+var script = @"
+    local count = redis.call('INCR', KEYS[1])
+    if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+    return count";
+var count = await _redis.ScriptEvaluateAsync(script, new RedisKey[] { $"ratelimit:{clientId}" }, new RedisValue[] { 60 });
+if ((long)count > 5) return TooManyRequests();
+```
+Because every instance now increments the *same* shared counter in Redis (via an atomic `INCR`+`EXPIRE`, avoiding the check-then-act race covered under TOCTOU) rather than its own private, per-process count, the configured limit is enforced against the client's *true, aggregate* request volume across the entire fleet — regardless of which specific instance happens to receive any given request.
+
+**Common Pitfall:** deploying an in-memory rate limiter to a horizontally-scaled service without recognizing that the effective limit scales linearly with instance count — this is easy to miss in testing (often run against a single local instance, where the in-memory limiter behaves exactly as configured) and only becomes apparent in production once the service is actually running multiple replicas behind a load balancer, silently weakening a security-critical control like login-attempt limiting by a factor equal to the replica count.
+
+---
+
+## Scenario — Question 6
+
+**Q6: Your application has a "notify my webhook URL when an order ships" feature. A customer sets their webhook URL to `http://169.254.169.254/latest/meta-data/iam/security-credentials/order-service-role`, and your monitoring later shows your server made an outbound request to that address and the response (containing your cloud IAM role's temporary credentials) was logged in your webhook-delivery audit trail, visible to that customer. How did this happen, and how do you fix it?**
+
+This is a classic Server-Side Request Forgery (SSRF) vulnerability, made worse specifically because the webhook feature both *makes the request* and *surfaces the response* back to the requesting customer (via the delivery audit trail/retry UI) — turning an ordinary SSRF into a direct credential-exfiltration channel.
+
+**The vulnerable pattern:**
+```csharp
+[HttpPost("webhooks")]
+public async Task<IActionResult> RegisterWebhook(string url)
+{
+    _db.Webhooks.Add(new Webhook { CustomerId = CurrentCustomerId, Url = url }); // NO validation at all
+    await _db.SaveChangesAsync();
+    return Ok();
+}
+
+// later, when an order ships:
+var response = await _httpClient.PostAsync(webhook.Url, orderPayload);
+await _db.WebhookDeliveries.AddAsync(new WebhookDelivery {
+    ResponseBody = await response.Content.ReadAsStringAsync() // the customer can VIEW this in their dashboard
+});
+```
+The customer never needed to compromise anything — they simply registered the cloud metadata endpoint as their own "webhook URL," and the server's own outbound request (made with the trusted internal network position every SSRF exploits) fetched the metadata endpoint's response and then *displayed it back to them* via a feature explicitly designed to show delivery responses.
+
+**The fix — the same allowlist-based SSRF mitigation covered earlier, applied specifically at webhook registration AND at delivery time:**
+```csharp
+private static readonly HashSet<string> BlockedRanges = new() { /* RFC1918, 169.254.0.0/16, loopback */ };
+
+public bool IsUrlSafeForWebhook(Uri uri)
+{
+    if (uri.Scheme != "https") return false; // require HTTPS -- also closes internal http-only services
+    var addresses = Dns.GetHostAddresses(uri.Host);
+    return addresses.All(a => !IsPrivateOrLinkLocal(a)); // re-resolve and re-check at DELIVERY time too, not just registration
+}
+```
+Re-validating at *delivery* time (not merely at registration) closes a DNS-rebinding bypass, where a URL that resolved to a public IP at registration time could later re-resolve to an internal address by the time the webhook actually fires.
+
+**Common Pitfall:** validating the webhook URL only once, at registration time, and trusting it unconditionally on every subsequent delivery — a URL's DNS resolution isn't fixed forever; an attacker controlling the DNS record for a domain they registered can point it at a public IP during validation and switch it to an internal address before the actual delivery request fires, bypassing a registration-time-only check entirely.
+
+---
+
+## Scenario — Question 7
+
+**Q7: Your team adds `Content-Security-Policy: default-src *; script-src 'self' 'unsafe-inline' 'unsafe-eval'` to satisfy a compliance checklist item requiring "a CSP header must be present." A pen test later reports the header is "present but ineffective," and while investigating, an unrelated production incident reveals the header's `default-src *` also broke an integration that relied on the browser blocking a specific third-party script from loading. What went wrong, and what should the CSP actually look like?**
+
+Both symptoms trace back to the same root cause: the CSP was written to satisfy "a header must exist" rather than to genuinely restrict anything, and `'unsafe-inline'`/`'unsafe-eval'` combined with a wildcard `default-src` makes it functionally almost as permissive as having no CSP at all.
+
+**Why it provides no real protection:**
+```http
+Content-Security-Policy: default-src *; script-src 'self' 'unsafe-inline' 'unsafe-eval'
+```
+```text
+default-src *        -- permits loading resources (images, fonts, connections) from ANY origin --
+                          provides essentially NO restriction at all
+script-src 'unsafe-inline' -- permits ANY inline <script> tag to execute -- including one an
+                          ATTACKER successfully injects via an XSS flaw elsewhere in the app --
+                          this is EXACTLY the gap a nonce-based CSP (covered earlier) closes,
+                          and this policy reintroduces it deliberately
+```
+An attacker who finds *any* XSS injection point anywhere in the application faces zero additional resistance from this CSP — their injected `<script>` tag runs exactly as it would with no CSP configured at all, since `'unsafe-inline'` permits it unconditionally.
+
+**Why it also broke a legitimate integration:** `default-src *` is so permissive it doesn't actually constrain *anything* in the way the team assumed — the breakage the team observed came from a different, unrelated restriction (a `frame-ancestors` or `connect-src` directive elsewhere in the stack) they mistakenly attributed to this CSP while debugging, illustrating a second, common CSP pitfall: an overly broad policy provides a false sense of "we have CSP protection" while a *subsequent* legitimate tightening attempt (once someone actually tries to fix it) is what then surfaces real, previously-hidden dependencies on resources the loose policy had been silently allowing all along.
+
+**The fix — a genuinely restrictive, nonce-based policy, rolled out via `Content-Security-Policy-Report-Only` first:**
+```http
+Content-Security-Policy-Report-Only: default-src 'self'; script-src 'self' 'nonce-{random}'; report-uri /csp-reports
+```
+Running in report-only mode first surfaces every legitimate resource the tightened policy *would* have blocked (via violation reports sent to `/csp-reports`), letting the team build an accurate allowlist before actually enforcing it — rather than discovering breakage in production after enforcement, or overcorrecting back to a permissive policy that "at least passes the compliance checklist."
+
+**Common Pitfall:** treating a compliance requirement to "have a CSP header" as satisfied by the mere *presence* of the header, regardless of its actual restrictiveness — a checklist verifying "header exists" cannot distinguish a genuinely protective, nonce-based policy from a decorative one wide open enough to permit almost anything; a meaningful CSP review must inspect the policy's actual directives, not merely confirm the header's presence.
+
+---
+
+## Scenario — Question 8
+
+**Q8: An external security audit of your legacy ASP.NET application flags a finding: a "remember me" feature serializes a user's login state into a cookie using `BinaryFormatter`, and the auditor demonstrates they can forge a cookie that executes arbitrary code on the server the moment it's deserialized. How do you triage and remediate this, given the feature is used by a large fraction of your active user base?**
+
+This is the Insecure Deserialization / gadget-chain vulnerability covered earlier, now surfaced concretely: `BinaryFormatter` deserializing an untrusted, client-supplied cookie value lets an attacker who can forge (or has captured and can modify) that cookie achieve remote code execution the instant a legitimate request carrying it is processed — regardless of whether the user is otherwise authenticated at all.
+
+**Immediate triage — the vulnerability is live and exploitable right now, treat it as an active incident:**
+```text
+1. Assess: is BinaryFormatter's MachineKey/cookie-protection ALSO compromised (leaked, weak,
+   or the auditor demonstrated FORGING a cookie FROM SCRATCH, not just replaying a captured one)?
+   -- if an attacker can genuinely FORGE a valid cookie unassisted, this is CRITICAL severity,
+      exploitable by ANYONE, not merely someone who has intercepted a legitimate user's cookie
+2. Contain: consider immediately disabling the "remember me" feature (or forcing re-authentication
+   for it) while a proper fix is built, accepting the UX cost against the RCE risk
+3. Rotate: if the underlying MachineKey/data-protection key MAY have been exposed, rotate it --
+   this invalidates ALL existing "remember me" cookies immediately, forcing re-login for everyone
+```
+
+**The remediation — migrate off `BinaryFormatter` entirely, not just patch this one call site:**
+```csharp
+// REMOVED entirely -- BinaryFormatter is deprecated and blocked by default in modern .NET
+// var formatter = new BinaryFormatter();
+// var state = (LoginState)formatter.Deserialize(cookieStream);
+
+// REPLACED with a fixed-type, signed/encrypted token via ASP.NET Core Data Protection
+var state = _dataProtector.Unprotect(cookieValue); // fails cleanly if tampered with, no arbitrary type instantiation
+var loginState = JsonSerializer.Deserialize<LoginState>(state); // fixed, known type -- structurally closes the gadget-chain vector
+```
+Because `ASP.NET Core`'s Data Protection API both encrypts and authenticates (HMAC-signs) the cookie's contents, a tampered cookie fails to even decrypt/validate before deserialization is attempted at all — combined with deserializing into a fixed, known `LoginState` type (rather than `BinaryFormatter`'s type-embedding behavior), this closes both the tampering vector and the arbitrary-type-instantiation vector simultaneously.
+
+**Why a broader codebase audit is also warranted, not just this one finding:** an auditor finding one `BinaryFormatter` call site in a legacy codebase is a strong signal there may be others (a distributed cache serializer, an internal message queue payload, a legacy session-state provider) — the remediation project should include a repository-wide search for `BinaryFormatter`, `SoapFormatter`, and `TypeNameHandling.All`/`Auto` usages, not just the specific one the audit happened to find and demonstrate.
+
+**Common Pitfall:** patching only the specific vulnerable code path the auditor demonstrated, without a broader search for the same insecure pattern elsewhere in a large, legacy codebase — a single finding is often a symptom of a systemic practice (using `BinaryFormatter` for convenience across multiple features written in the same era), and remediating only the demonstrated instance leaves equally-exploitable sibling instances undiscovered until a future audit or incident finds them instead.
+
+---
+
+## Scenario — Question 9
+
+**Q9: Your login endpoint starts seeing a sustained flood of authentication attempts — millions over a few hours, each with a different, valid-looking username/password combination, at a rate too high to be a human typing. Your database shows a small percentage actually succeed. How do you confirm this is credential stuffing, and what combination of mitigations do you put in place?**
+
+Covered earlier at the conceptual level (leaked credentials from an unrelated breach, tried en masse) — confirming it concretely and mitigating it in production requires correlating several signals and layering multiple, complementary defenses, since no single control fully addresses this attack on its own.
+
+**Confirming it's credential stuffing, not a targeted brute-force attack:**
+```text
+Signal: attempts use MANY DIFFERENT usernames (not one account being brute-forced repeatedly)
+Signal: the PASSWORDS tried per username look like PLAUSIBLE, REAL passwords (not sequential
+        guesses like "password1", "password2") -- consistent with being sourced from an ACTUAL leak
+Signal: requests originate from a WIDE, distributed set of IPs (a botnet/proxy pool) --
+        rules out a SINGLE attacker manually trying passwords against a SINGLE account
+Signal: successful logins, when reviewed, correlate with usernames that ALSO appear in
+        known, PUBLIC breach-data dumps (checkable via a service like HaveIBeenPwned's API)
+```
+
+**Layered mitigation — no single control fully addresses this attack alone:**
+```csharp
+// 1. Account/IP-scoped rate limiting (covered earlier) -- slows the attack's throughput
+options.AddFixedWindowLimiter("login", opt => { opt.PermitLimit = 5; opt.Window = TimeSpan.FromMinutes(1); });
+
+// 2. MFA (covered earlier) -- the SINGLE most effective mitigation: a correct password ALONE
+//    is no longer sufficient to complete login, REGARDLESS of how many valid PAIRS the attacker has
+```
+```text
+3. CAPTCHA challenge, triggered adaptively (after N failed attempts from an IP/account) --
+   raises the AUTOMATION cost specifically for BULK, scripted attempts
+4. Breach-corpus checking at PASSWORD-SET time (reject a password already known to be
+   PUBLICLY leaked) -- reduces how MANY of your OWN users' accounts are even VULNERABLE
+   to this attack in the FIRST place, rather than only reacting once an attack is underway
+5. Force a password RESET on accounts whose credentials MATCH a known breach corpus,
+   PROACTIVELY, rather than waiting for an attacker to actually SUCCEED first
+```
+
+**Why rate limiting alone, even correctly configured, doesn't fully solve this:** a sufficiently patient or well-resourced attacker distributing attempts across enough IPs and enough time can stay under almost any account/IP-scoped rate limit while still eventually testing every credential pair — rate limiting slows the attack and reduces its throughput, but MFA is the control that actually makes a correct, leaked password insufficient on its own, which is why it's the mitigation that most fundamentally changes the attack's success rate rather than merely its speed.
+
+**Common Pitfall:** treating this purely as a rate-limiting/infrastructure problem (adding a WAF rule, tightening throttling) without also addressing it at the account-security layer (MFA rollout, proactive breach-corpus checking) — infrastructure-level throttling reduces the attack's *speed* but a sufficiently distributed, patient attacker eventually gets through the same total volume of attempts regardless; only MFA and proactively invalidating known-compromised credentials meaningfully reduce how many accounts are actually *at risk* in the first place.
+
+---
+
+## Scenario — Question 10
+
+**Q10: Your dependency-scanning CI job (covered earlier) flags a `High` severity CVE in a transitive dependency — a logging library three levels deep in your dependency graph, already deployed to production for months. What's the actual remediation process, given you can't simply "delete" a transitive dependency you don't directly reference?**
+
+Unlike a direct dependency (where upgrading is usually a straightforward version bump in your own `csproj`), a transitive dependency's version is normally determined by whatever your *direct* dependencies themselves specify — remediation requires either waiting for (or forcing) an upstream fix, or explicitly overriding the resolved version yourself.
+
+**Step 1 — assess actual exploitability, not just the CVE's headline severity:**
+```text
+A "High" severity CVE rating reflects the vulnerability's WORST-CASE impact IN GENERAL --
+it does NOT automatically mean YOUR specific application is exploitable through it --
+CHECK: does your application actually INVOKE the vulnerable CODE PATH at all? (many CVEs
+are in a SPECIFIC function/feature of a library that many CONSUMERS never actually CALL)
+```
+
+**Step 2 — force the resolved version up, even without changing your direct dependency:**
+```xml
+<!-- csproj: force a specific TRANSITIVE package version, overriding whatever your DIRECT
+     dependency itself would otherwise resolve to -->
+<ItemGroup>
+  <PackageReference Include="VulnerableLoggingLib" Version="2.4.1" />
+  <!-- explicitly pinning the TRANSITIVE dependency to the PATCHED version -->
+</ItemGroup>
+```
+```bash
+dotnet list package --vulnerable --include-transitive  # RE-RUN to confirm the override RESOLVED it
+```
+
+**Step 3 — if no patched version exists yet, apply a compensating control while waiting:**
+```text
+-- if the vulnerable CODE PATH is genuinely reachable and NO patched version exists yet:
+   consider a WAF rule specifically targeting the KNOWN exploit pattern, or DISABLING the
+   specific FEATURE that invokes the vulnerable code path, as a TEMPORARY compensating control
+   UNTIL an upstream FIX is released and can be adopted
+```
+
+**Step 4 — treat this as a process gap, not a one-off fix:** the fact that a High-severity CVE sat undetected/unpatched for months in production is itself worth investigating — was the scanning job only recently added, was it failing silently, or was the finding triaged and deprioritized without the right urgency given to it — closing the *process* gap (continuous scanning wired to actually block/alert on High+ findings, with a defined SLA for triage) matters as much as fixing this one specific instance.
+
+**Common Pitfall:** treating "wait for the upstream maintainer to release a fix" as the only option for a transitive dependency — explicitly overriding the resolved version to a patched release (even one your direct dependency doesn't officially declare compatibility with yet) is usually possible and often the faster remediation path, provided you actually test that the forced version doesn't break compatibility with the rest of your dependency graph.
+
+---
+
+## Scenario — Question 11
+
+**Q11: A bug bounty researcher reports that by changing a numeric `accountId` parameter across several completely different API endpoints (invoices, order history, saved payment methods, support tickets), they can access other customers' data on all of them. Fixing each endpoint's authorization check individually feels inadequate given how many more endpoints probably share the same gap. How do you approach this systemically rather than one endpoint at a time?**
+
+This is the same IDOR/Broken Access Control vulnerability class covered earlier, but the bug bounty report's breadth — the same flaw repeated across many independently-written endpoints — signals a systemic, architectural gap rather than a handful of isolated coding mistakes, and calling for a structural fix rather than patching each reported endpoint individually.
+
+**Why patching only the reported endpoints is inadequate:** if four different developers, working on four different features over time, each independently forgot the same ownership check, the actual root cause isn't "four bugs" — it's that the codebase has no *structural* mechanism making the check the default, easy path; every future endpoint accepting a resource ID is equally likely to reproduce the exact same gap unless something changes architecturally.
+
+**The systemic fix — centralize ownership checks into a resource-based authorization handler, rather than hand-writing the check in every action method:**
+```csharp
+// A single, reusable authorization requirement, applied consistently via a policy
+public class ResourceOwnerRequirement : IAuthorizationRequirement { }
+
+public class ResourceOwnerHandler : AuthorizationHandler<ResourceOwnerRequirement, IOwnedResource>
+{
+    protected override Task HandleRequirementAsync(AuthorizationHandlerContext context,
+        ResourceOwnerRequirement requirement, IOwnedResource resource)
+    {
+        var userId = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (resource.OwnerId == userId) context.Succeed(requirement);
+        return Task.CompletedTask;
+    }
+}
+
+// Every endpoint returning an owned resource goes through the SAME check, structurally:
+[HttpGet("{id}")]
+public async Task<IActionResult> GetInvoice(int id)
+{
+    var invoice = await _db.Invoices.FindAsync(id);
+    var authResult = await _authorizationService.AuthorizeAsync(User, invoice, "ResourceOwner");
+    if (!authResult.Succeeded) return NotFound();
+    return Ok(invoice);
+}
+```
+Rather than each endpoint hand-rolling its own `if (resource.UserId != currentUserId)` check (easy to write correctly, but equally easy to simply forget), routing every resource-returning endpoint through the same authorization handler makes the check structural — a new endpoint author calls the same, established pattern rather than needing to independently remember and correctly reimplement the same logic.
+
+**Auditing the rest of the codebase, not just the reported endpoints:** given the bug bounty report already demonstrated the pattern repeats, a full audit of every endpoint accepting a resource ID parameter (grepping for `.Find(id)`/`.FindAsync(id)`-style patterns immediately followed by a direct `return Ok(...)` with no intervening ownership check) is warranted, rather than assuming the reported four endpoints are the only ones affected.
+
+**Common Pitfall:** fixing exactly the endpoints a bug bounty report happened to demonstrate, treating the engagement as "resolved" once those specific repro steps stop working — a researcher's report is a sample, not an exhaustive list; the same missing-ownership-check pattern, if it was easy enough to introduce independently in four different places, is very likely present in other endpoints the specific report never happened to test, making a systemic architectural fix and a full codebase audit the actually-complete response, not just satisfying the specific reported repro cases.
+
+---
