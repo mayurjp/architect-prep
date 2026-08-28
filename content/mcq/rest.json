@@ -1,0 +1,156 @@
+[
+  {
+    "sourceId": "rest__beginner__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which HTTP method is NOT safe but IS idempotent?",
+      "options": [
+        "PUT",
+        "GET",
+        "POST",
+        "PATCH"
+      ],
+      "correctIndex": 0,
+      "explanation": "PUT modifies server state, so it is not safe, but replacing a resource with the same representation repeatedly leaves it in one final state, so it is idempotent. GET is both safe and idempotent. POST is neither, since each call creates a new resource. PATCH is not safe and is not guaranteed idempotent because an update can be relative to the current value.",
+      "conceptTag": "http-idempotency-safety"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "rest__beginner__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which REST constraint requires that every request carry all the information the server needs, with no client context stored on the server between requests?",
+      "options": [
+        "Statelessness",
+        "Layered system",
+        "Cacheability",
+        "Code on demand"
+      ],
+      "correctIndex": 0,
+      "explanation": "Statelessness means each request is self-contained and the server keeps no session context, so any server instance can handle any request, which aids scaling. Layered system concerns intermediaries between client and server. Cacheability is about responses declaring whether they can be stored. Code on demand is the optional constraint letting the server ship executable code to the client.",
+      "conceptTag": "rest-statelessness"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "rest__beginner__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In an ASP.NET Core API controller, what does returning CreatedAtAction(...) from a POST action produce?",
+      "options": [
+        "A 201 Created response with a Location header pointing to the new resource",
+        "A 200 OK response containing the created resource",
+        "A 204 No Content response after saving",
+        "A 302 redirect to the new resource's URL"
+      ],
+      "correctIndex": 0,
+      "explanation": "CreatedAtAction returns HTTP 201 and adds a Location header built from the named action and its route values so clients can fetch the new resource. Ok() returns 200 with a body, and NoContent() returns 204 with none. 201 is not a redirect; the Location header is informational rather than a 3xx status.",
+      "conceptTag": "aspnet-created-response"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "rest__beginner__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A controller has both [HttpGet(\"{id:int}\")] and [HttpGet(\"{slug:alpha}\")]. How is GET /api/products/keyboard handled?",
+      "options": [
+        "It matches the {slug:alpha} route because the value fails the int constraint",
+        "It throws an ambiguous match exception",
+        "It matches {id:int} and returns 400 for the invalid value",
+        "It matches whichever action is declared first in the file"
+      ],
+      "correctIndex": 0,
+      "explanation": "Route constraints participate in matching: 'keyboard' fails the :int constraint, so that route is skipped, and the :alpha route matches. Constraints exist precisely so similar templates can coexist without ambiguity. A failed constraint means the route does not match, rather than binding the value and returning 400.",
+      "conceptTag": "route-constraints"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "rest__intermediate__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In ASP.NET Core content negotiation, which request header selects the input formatter used to deserialize the request body?",
+      "options": [
+        "Content-Type",
+        "Accept",
+        "Accept-Encoding",
+        "Content-Length"
+      ],
+      "correctIndex": 0,
+      "explanation": "Content-Type describes the format of the body being sent, so it drives input formatter selection. Accept states which formats the client wants back and drives output formatter selection; the two are independent, so a request can send JSON and ask for XML. Accept-Encoding concerns compression, and Content-Length is only the body size.",
+      "conceptTag": "content-negotiation-formatters"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "rest__intermediate__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "An authenticated user with a valid JWT calls an endpoint marked [Authorize(Roles = \"Admin\")] but only holds the \"User\" role. What status code should the API return?",
+      "options": [
+        "403 Forbidden",
+        "401 Unauthorized",
+        "400 Bad Request",
+        "302 Found"
+      ],
+      "correctIndex": 0,
+      "explanation": "The caller is authenticated and their identity is known, but they lack the required role, which is an authorization failure and returns 403 Forbidden. 401 is for missing, invalid, or expired credentials. The request is well-formed so 400 does not apply, and APIs return a status rather than redirecting to a login page.",
+      "conceptTag": "auth-401-vs-403"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "rest__advanced__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which API versioning strategy is considered the most RESTful but also the hardest to test and least discoverable?",
+      "options": [
+        "Media type versioning (version in the Accept header)",
+        "URI path versioning (e.g. /api/v2/products)",
+        "Query string versioning (e.g. ?api-version=2.0)",
+        "Custom header versioning (e.g. X-Api-Version: 2.0)"
+      ],
+      "correctIndex": 0,
+      "explanation": "Media type versioning uses HTTP content negotiation and keeps one URI per resource, which purists consider the most RESTful, but the version is invisible in the URL and awkward to exercise from a browser or simple tools. URI path versioning is the most visible and easiest at the cost of REST purity, with query string and custom header in between.",
+      "conceptTag": "api-versioning-strategies"
+    },
+    "error": null
+  }
+]

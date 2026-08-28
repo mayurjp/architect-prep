@@ -1,0 +1,2026 @@
+[
+  {
+    "sourceId": "gcp__beginner__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "On GCP, which service runs stateless containers you supply as Docker images, scaling them automatically (even to zero) without you provisioning any VMs or managing a cluster?",
+      "options": [
+        "Compute Engine, which provides VMs where you retain full OS control",
+        "Google Kubernetes Engine, where you still size node pools and cluster configuration",
+        "Cloud Run",
+        "App Engine standard environment, restricted to specific supported language runtimes"
+      ],
+      "correctIndex": 2,
+      "explanation": "Cloud Run is a fully managed serverless platform that runs any stateless container and scales it automatically. Compute Engine is IaaS where you patch and scale VMs yourself. GKE is managed Kubernetes but you still manage node pools and cluster config. App Engine standard is serverless too but limited to specific language runtimes rather than arbitrary containers.",
+      "conceptTag": "gcp-compute-options"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In Google Cloud Storage, how do the Nearline, Coldline, and Archive storage classes compare to Standard for data you end up reading frequently?",
+      "options": [
+        "They lower both storage and retrieval costs, making them better for any workload",
+        "They raise storage cost but eliminate retrieval fees entirely",
+        "They offer identical pricing and only add slower first-byte latency",
+        "They lower storage cost but raise per-access retrieval cost, so frequent reads can cost more overall than Standard"
+      ],
+      "correctIndex": 3,
+      "explanation": "Colder classes cut storage cost per GB but charge significant retrieval fees, so reading the data often can exceed Standard's total cost. They do not eliminate retrieval fees or lower both costs, and pricing across classes is clearly not identical. That is why cold tiers fit rarely accessed data, not hot data.",
+      "conceptTag": "gcs-storage-classes"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which statement best captures how Google Cloud Pub/Sub differs architecturally from a traditional broker like RabbitMQ?",
+      "options": [
+        "Pub/Sub guarantees strict FIFO ordering by default, while RabbitMQ never preserves order",
+        "Pub/Sub uses simple topic-to-subscription fan-out and is fully managed, while RabbitMQ offers rich exchange/routing-key topologies on a broker you operate",
+        "Pub/Sub requires you to provision and scale broker nodes, while RabbitMQ is serverless",
+        "Pub/Sub supports complex routing keys and bindings natively, while RabbitMQ only supports fan-out"
+      ],
+      "correctIndex": 1,
+      "explanation": "Pub/Sub is serverless with a simple model: a message on a topic goes to all attached subscriptions, and complex routing must be built in subscriber logic. RabbitMQ gives you exchanges, routing keys, and bindings but you run the broker. RabbitMQ, not Pub/Sub, natively guarantees FIFO within a queue; Pub/Sub historically did not.",
+      "conceptTag": "pubsub-vs-rabbitmq"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "You need a relational database with strict ACID consistency and SQL that scales horizontally across continents without sharding logic in the application. Which GCP service fits, and what makes it possible?",
+      "options": [
+        "Cloud SQL, using cross-region read replicas to spread load",
+        "Bigtable, using eventually consistent multi-region replication",
+        "BigQuery, using slot-based massively parallel query execution",
+        "Cloud Spanner, using the TrueTime API (atomic clocks and GPS) to order distributed transactions globally"
+      ],
+      "correctIndex": 3,
+      "explanation": "Cloud Spanner is a globally distributed, horizontally scalable, strictly consistent relational database; TrueTime's bounded-uncertainty clocks let nodes agree on transaction order without slow global consensus per write. Cloud SQL scales reads but not writes horizontally across regions. Bigtable is NoSQL and not strictly consistent globally. BigQuery is an analytics warehouse, not an OLTP database.",
+      "conceptTag": "cloud-spanner-truetime"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A GKE workload needs to access Cloud SQL and Cloud Storage. Why avoid embedding a downloaded service account JSON key as a Kubernetes Secret, and what should you use instead?",
+      "options": [
+        "Keys are fine but should be stored in a ConfigMap instead of a Secret",
+        "Keys expire too quickly; use a longer-lived key with a manual rotation schedule",
+        "Keys are long-lived and leak-prone; use Workload Identity so a Kubernetes SA impersonates a Google SA and gets short-lived tokens, no key files",
+        "Keys work only for Compute Engine; use a static bearer token mounted from Secret Manager"
+      ],
+      "correctIndex": 2,
+      "explanation": "A leaked long-lived JSON key grants standing access until manually revoked. Workload Identity binds a Kubernetes service account to a Google service account so the SDK fetches short-lived tokens from the metadata server, and no key ever touches disk. ConfigMaps are less secure than Secrets, not more; JSON keys do not auto-expire; and Workload Identity is a GKE feature, not a static token.",
+      "conceptTag": "gke-workload-identity"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A Cloud Run service scales to zero, so the first request after idle takes 8 seconds. Which mitigation most reliably eliminates that cold-start latency?",
+      "options": [
+        "Increase the request timeout so slow first requests still succeed",
+        "Configure a minimum number of instances so at least one container stays warm at all times",
+        "Switch the service to HTTP/2 to speed up connection setup",
+        "Move static assets to a CDN so fewer requests reach the service"
+      ],
+      "correctIndex": 1,
+      "explanation": "Setting a minimum instance count keeps at least one container running and ready, eliminating cold starts for traffic within that capacity (at the cost of paying for the idle instance). A longer timeout hides the symptom but users still wait. HTTP/2 and a CDN do not address container provisioning and app initialization time.",
+      "conceptTag": "cloud-run-cold-start"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "An App Engine app must reach a Cloud SQL instance entirely over Google's internal network, never the public internet, but App Engine has no direct VPC attachment. What bridges this gap?",
+      "options": [
+        "Assigning the App Engine service a static external IP and allowlisting it on Cloud SQL",
+        "Enabling Private Google Access on the App Engine service's subnet",
+        "A Cloud VPN tunnel between App Engine and the Cloud SQL public endpoint",
+        "A Serverless VPC Access connector that routes the service's egress into your VPC to the database's private IP"
+      ],
+      "correctIndex": 3,
+      "explanation": "A Serverless VPC Access connector provisions internal VMs that bridge the serverless tenant network to your VPC, so traffic to the Cloud SQL private IP never traverses the public internet. A static external IP still uses the public internet. Private Google Access is for reaching Google APIs from VMs without external IPs, not for serverless-to-VPC connectivity. A VPN to a public endpoint still exposes that endpoint.",
+      "conceptTag": "serverless-vpc-access"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In GCP's Organization to Folder to Project to Resource hierarchy, how do IAM policies granted at a higher level interact with those at lower levels?",
+      "options": [
+        "A lower-level policy overrides and can restrict any permission inherited from above",
+        "Policies apply only at the exact level where they are attached and never inherit",
+        "A higher-level grant is inherited downward, and effective permissions are the union of all levels; a lower level cannot subtract a permission granted above",
+        "The most restrictive policy across all levels wins, so a project can deny a folder-level grant"
+      ],
+      "correctIndex": 2,
+      "explanation": "IAM policies flow downward and combine additively: the effective permission is the union of grants at every level. There is no mechanism at a lower level to deny or narrow a permission granted higher up. This is why overly broad org-level grants silently reach every current and future project.",
+      "conceptTag": "iam-policy-inheritance"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does BigQuery differ architecturally from Cloud SQL?",
+      "options": [
+        "BigQuery is a serverless columnar warehouse for large analytical scans billed by bytes scanned; Cloud SQL is a row-oriented instance for fast single-row OLTP transactions",
+        "Both are row-oriented, but BigQuery adds automatic read replicas that Cloud SQL lacks",
+        "BigQuery is optimized for high-frequency single-row updates; Cloud SQL is for full-table scans",
+        "BigQuery requires you to provision CPU and RAM per query; Cloud SQL is fully serverless"
+      ],
+      "correctIndex": 0,
+      "explanation": "BigQuery stores data columnar, reads only referenced columns, allocates compute per query, and bills mainly by bytes scanned. Cloud SQL is a managed row-oriented database sized as an instance and optimized for many small transactions. Updating a single row is BigQuery's weak spot, not its purpose, and BigQuery is the serverless one.",
+      "conceptTag": "bigquery-vs-cloudsql"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the key difference between GKE Autopilot and GKE Standard mode?",
+      "options": [
+        "With Autopilot you manage node pools and pay per VM; with Standard Google manages nodes and bills per pod request",
+        "With Autopilot Google manages nodes entirely and bills per pod resource request; with Standard you size node pools and pay for the VMs",
+        "Autopilot and Standard are billed identically; only the control-plane SLA differs",
+        "Autopilot supports all DaemonSets and privileged workloads, while Standard restricts them"
+      ],
+      "correctIndex": 1,
+      "explanation": "Autopilot removes node management: you deploy pods with resource requests and are billed for what pods request. Standard has you choose machine types, size node pools, and pay for the underlying VMs whether fully used or not. Autopilot is the mode that restricts certain DaemonSets and privileged workloads, not Standard.",
+      "conceptTag": "gke-autopilot-vs-standard"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Three environments built by manual Console clicks have drifted apart and a prod-only bug slipped through staging. What is the standard GCP fix?",
+      "options": [
+        "Take a Console snapshot of prod and manually copy its settings to staging each week",
+        "Give every engineer Owner on all three projects so they can fix drift quickly",
+        "Define one reusable Terraform module parameterized per environment, and run terraform plan regularly to detect drift",
+        "Use separate hand-written gcloud scripts per environment, kept in sync by code review"
+      ],
+      "correctIndex": 2,
+      "explanation": "One shared, parameterized Terraform module makes environment differences explicit, reviewable variables, and terraform plan surfaces any manual Console change as a pending diff. Pairing that with revoking Console write access makes Terraform the only path to change. Manual copying and parallel per-env scripts reproduce the drift problem; broad Owner access makes it worse.",
+      "conceptTag": "infrastructure-as-code-drift"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What distinguishes a GCP service account from a regular Google user account?",
+      "options": [
+        "A service account is just a user account without multi-factor authentication enabled",
+        "A service account can only be granted permissions at the organization level",
+        "A service account is a shared human login used by an on-call team",
+        "A service account is an identity for applications and workloads to authenticate as, with no human login flow"
+      ],
+      "correctIndex": 3,
+      "explanation": "A service account represents an application or workload (a Cloud Run service, a GKE pod, a VM), not a person, and it authenticates without an interactive login. It is not a user account minus MFA, not org-scoped only, and not a shared human credential. Because its credentials leak more easily, least privilege matters even more.",
+      "conceptTag": "service-account-identity"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does GCP's global HTTP(S) Load Balancer Anycast IP differ from DNS-based geographic routing?",
+      "options": [
+        "One IP is announced via BGP from many locations so routing sends each user to the nearest edge; failover happens at the routing layer, no DNS wait",
+        "A DNS server hands out a different regional IP per user based on resolver location, with the usual TTL caching",
+        "The single IP is pinned to one region, and clients must update their hosts file to fail over",
+        "Each region gets its own IP, and the client library round-robins between them"
+      ],
+      "correctIndex": 0,
+      "explanation": "Anycast announces the same IP from many locations via BGP, so normal internet routing delivers each user to the nearest edge, and a failed region is bypassed at the routing layer with no DNS propagation delay. DNS-based routing hands out different IPs and is subject to TTL caching. You still need real backends deployed per region.",
+      "conceptTag": "anycast-global-load-balancing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Eventarc provide compared with wiring each GCP event source to each target with bespoke integrations?",
+      "options": [
+        "A guarantee of exactly-once delivery regardless of the underlying event source",
+        "One consistent trigger model that delivers events from many sources to targets in a standard CloudEvents envelope",
+        "Automatic conversion of every event into a Pub/Sub proprietary binary format",
+        "A message broker that you must provision and scale per event type"
+      ],
+      "correctIndex": 1,
+      "explanation": "Eventarc gives one routing model: filter events by type and source, deliver to a target as a standardized CloudEvent, so handlers do not need source-specific parsing. It does not change the source's delivery guarantees (a Pub/Sub-sourced event is still at-least-once), uses the open CNCF CloudEvents format rather than a proprietary one, and is serverless.",
+      "conceptTag": "eventarc-event-routing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does storing a secret in Secret Manager differ from setting it as a plain environment variable in a Cloud Run service's configuration?",
+      "options": [
+        "A plain env var is encrypted at rest while Secret Manager values are stored in plaintext",
+        "Secret Manager can only be used with GKE, not Cloud Run",
+        "There is no practical difference; both expose the value identically",
+        "Secret Manager keeps the value in a dedicated store with its own IAM, versioning, and access audit; a plain env var is visible to anyone who can read the service config"
+      ],
+      "correctIndex": 3,
+      "explanation": "Secret Manager stores the value separately with an IAM policy on the secret itself, keeps every version for rollback, and logs access. A plain environment variable is visible in the service configuration to anyone with read access to it. Cloud Run can mount Secret Manager secrets as env vars at runtime, so the feature is not GKE-only.",
+      "conceptTag": "secret-manager-vs-env-var"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Cloud CDN keys cache entries on the full request URL by default. Why configure a cache-key query-string whitelist for an endpoint with many tracking parameters?",
+      "options": [
+        "So every unique query-string combination is cached separately for maximum freshness",
+        "So the CDN stops forwarding any query string to the origin at all",
+        "So parameters that do not affect the response (like utm_source) are ignored, collapsing many identical responses into one high-hit-ratio entry",
+        "So responses are cached longer regardless of their Cache-Control headers"
+      ],
+      "correctIndex": 2,
+      "explanation": "Whitelisting only the parameters that actually change the response (like category or sortBy) means tracking parameters no longer fragment the cache into many rarely-reused entries, so hit ratio rises and origin load drops. The default already caches each combination separately. The whitelist does not stop origin forwarding or override Cache-Control TTLs.",
+      "conceptTag": "cdn-cache-key"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does GCP Binary Authorization for GKE improve on running a vulnerability scanner in CI?",
+      "options": [
+        "It scans images faster and more thoroughly than a CI-stage scanner",
+        "It automatically patches vulnerabilities it finds before allowing deployment",
+        "It restricts who can push images to the registry, blocking unauthorized builds there",
+        "It enforces required cryptographic attestations at the cluster's admission control, so an unattested image cannot deploy even if someone bypasses CI"
+      ],
+      "correctIndex": 3,
+      "explanation": "Binary Authorization checks at the cluster admission layer that an image carries the required attestations (built by a trusted pipeline, scanned, approved). A CI-only scan is never consulted if a compromised credential or manual kubectl apply bypasses the pipeline. It does not scan, patch, or manage registry push permissions.",
+      "conceptTag": "binary-authorization"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does spreading a deployment across multiple zones in one GCP region differ in protection from spreading across multiple regions?",
+      "options": [
+        "Multi-zone and multi-region protect against exactly the same failures; multi-region is just more expensive",
+        "Multi-zone protects against a single datacenter or facility failure; multi-region protects against a whole geographic area being affected",
+        "Multi-zone protects against natural disasters affecting a metro area; multi-region only against rack failures",
+        "Deploying in a region automatically spreads instances across its zones, so multi-zone needs no configuration"
+      ],
+      "correctIndex": 1,
+      "explanation": "A zone is an isolated facility with its own power, cooling, and networking, so multi-zone survives one facility's outage. A region is a geographic area, so multi-region survives a regional power event or disaster. Deploying in a region does not automatically spread instances across zones; you must configure that explicitly.",
+      "conceptTag": "gcp-region-vs-zone"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "When choosing between Memorystore for Redis and Memorystore for Memcached, what is the real deciding factor?",
+      "options": [
+        "Redis is always faster and cheaper, so it is the correct default for every case",
+        "Memcached supports replication and persistence that Redis lacks",
+        "Only Redis can be accessed from Cloud Run; Memcached requires GKE",
+        "Whether you need only simple key-value caching (Memcached) or richer structures like sorted sets, pub/sub, and scripting (Redis)"
+      ],
+      "correctIndex": 3,
+      "explanation": "Memcached is a simple, multi-threaded distributed hash table that scales horizontally with less operational complexity. Redis adds data structures, pub/sub, Lua scripting, and optional persistence. If the workload needs only plain key-value caching, Memcached's simplicity is an advantage; Redis is required only when its richer capabilities are genuinely used. Redis is not universally cheaper, and it is Redis that offers persistence.",
+      "conceptTag": "memorystore-redis-vs-memcached"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How is Cloud Spanner's 'external consistency' stronger than ordinary 'strong consistency'?",
+      "options": [
+        "It guarantees only that each transaction's own reads see its own prior writes",
+        "It allows reads to return stale data as long as they are internally consistent",
+        "It guarantees that if transaction A completes before B starts, every observer worldwide sees them in that same real-world time order",
+        "It is a marketing synonym for strong consistency with no additional guarantee"
+      ],
+      "correctIndex": 2,
+      "explanation": "External consistency ties the database's commit ordering to genuine real-world wall-clock ordering, globally: if A finishes before B begins, no observer anywhere sees B's effects without A's. Ordinary strong consistency guarantees each transaction sees its own writes but not cross-node real-time ordering. TrueTime's bounded clock uncertainty is what makes this provable.",
+      "conceptTag": "spanner-external-consistency"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In GCP IAM, what is the relationship between a Role and a Permission, and why bind Roles rather than individual Permissions?",
+      "options": [
+        "A Role is a named bundle of many Permissions; binding a Role lets admins grant access by job function instead of enumerating granular permissions",
+        "A Permission is a bundle of Roles; binding Permissions is the finer-grained, preferred approach",
+        "Roles and Permissions are identical; the two words are interchangeable in IAM",
+        "A Role can only be assigned to service accounts, while Permissions are for users"
+      ],
+      "correctIndex": 0,
+      "explanation": "A Permission is the finest-grained unit; a Role bundles many of them, so admins grant meaningful job functions like Storage Object Viewer rather than dozens of individual permissions. Permissions cannot be bound directly. Roles apply to any principal. Overly broad roles like Editor bundle far more than needed and violate least privilege.",
+      "conceptTag": "iam-role-vs-permission"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Because Pub/Sub guarantees at-least-once delivery, what must subscriber code do?",
+      "options": [
+        "Acknowledge every message immediately on receipt, before processing it",
+        "Assume each message arrives exactly once and skip any duplicate handling",
+        "Disable retries on the subscription so messages are never redelivered",
+        "Be idempotent, so processing the same message twice has the same effect as processing it once (for example, dedupe by message ID)"
+      ],
+      "correctIndex": 3,
+      "explanation": "At-least-once means a crash near acknowledgment or a delayed ack can cause redelivery, so subscribers must be idempotent, using a unique message ID check or an UPSERT so reprocessing is harmless. Acking before processing risks losing work on failure. You cannot disable redelivery, and assuming exactly-once is exactly the bug this guarantee warns against.",
+      "conceptTag": "pubsub-idempotent-consumer"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What protection does VPC Service Controls add that IAM permissions alone cannot?",
+      "options": [
+        "Stronger authentication that requires MFA on every service account",
+        "A perimeter that blocks moving data outside its boundary even for a caller with valid IAM access, mitigating exfiltration via stolen credentials",
+        "Automatic encryption of data in memory during processing",
+        "Finer-grained IAM roles scoped to individual rows or objects"
+      ],
+      "correctIndex": 1,
+      "explanation": "VPC Service Controls draws a perimeter around resources and restricts data movement across it, enforced independently of IAM. Even a service account with legitimate read access cannot export the data to a project outside the perimeter or to the internet, which closes the exfiltration path that IAM (who can access) does not address. It is not an auth, memory-encryption, or row-level-IAM feature.",
+      "conceptTag": "vpc-service-controls"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In GCP's Organization to Folder to Project hierarchy, what happens when you apply a policy or constraint at the Folder level?",
+      "options": [
+        "It applies only to projects that existed when the policy was set",
+        "It must be re-applied individually to each project to take effect",
+        "It automatically applies to every project nested beneath the folder, including projects created there later",
+        "It overrides and disables any organization-level policy"
+      ],
+      "correctIndex": 2,
+      "explanation": "Policies attached at a Folder inherit down to every nested project and resource, and automatically cover projects added under that folder in the future, so a baseline can be enforced centrally without per-project setup. It is not limited to existing projects, does not require re-application, and does not disable org-level policy (grants combine additively).",
+      "conceptTag": "resource-hierarchy-inheritance"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does GCP Cloud Tasks differ from Pub/Sub?",
+      "options": [
+        "Cloud Tasks broadcasts each task to every attached subscription; Pub/Sub targets one endpoint",
+        "Both are identical; Cloud Tasks is just the older name for Pub/Sub",
+        "Cloud Tasks has no retry capability, while Pub/Sub retries indefinitely",
+        "Cloud Tasks dispatches individual tasks to a specific HTTP endpoint with per-queue rate limits and retry control; Pub/Sub fans an event out to many subscribers"
+      ],
+      "correctIndex": 3,
+      "explanation": "Cloud Tasks schedules individual units of work against one target endpoint, with a configurable queue dispatch rate that protects a downstream service, plus per-task retry and backoff. Pub/Sub is built for broadcasting events to many independent subscribers and has no per-queue rate control. They are different services, and Cloud Tasks does support retries.",
+      "conceptTag": "cloud-tasks-vs-pubsub"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What threat does GCP Confidential Computing (Confidential VMs) address that at-rest and in-transit encryption do not?",
+      "options": [
+        "Data being readable in plaintext in memory while it is processed, by a privileged host or hypervisor-level actor",
+        "Data being intercepted on the network between two VMs",
+        "Data being read from an unencrypted persistent disk after a VM is deleted",
+        "Credentials being phished from an application's users"
+      ],
+      "correctIndex": 0,
+      "explanation": "Confidential VMs use hardware-based memory encryption so data stays encrypted even while being computed on, addressing a threat model where the host or hypervisor itself is untrusted. In-transit encryption covers the network path; at-rest encryption covers disk. Neither protects data in use. Phishing is unrelated.",
+      "conceptTag": "confidential-computing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does a Cloud Storage Signed URL let you do?",
+      "options": [
+        "Grant a user permanent IAM read access to an entire bucket",
+        "Grant time-limited access to one specific object to someone with no Google Cloud credentials, using a key-signed URL",
+        "Encrypt an object so only holders of a shared password can open it",
+        "Create a public bucket where every object is downloadable indefinitely"
+      ],
+      "correctIndex": 1,
+      "explanation": "A Signed URL is generated with a service account's private key and encodes the exact object, permission, and expiry, so anyone holding the URL can access just that object for just that window without any GCP account. It grants no IAM role, is not password-based encryption, and does not make a bucket public. Keeping the expiry short limits exposure of a leaked URL.",
+      "conceptTag": "gcs-signed-url"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Workload Identity Federation let a workload running in AWS or on-premises call Google Cloud APIs?",
+      "options": [
+        "It requires downloading a long-lived Google service account JSON key and storing it as a secret",
+        "It opens a permanent VPN tunnel from the external environment into a Google VPC",
+        "It exchanges the workload's existing external credential (like an AWS IAM role) for a short-lived Google Cloud token, with no downloaded service account key",
+        "It creates a Google user account for the external workload to log in with a password"
+      ],
+      "correctIndex": 2,
+      "explanation": "Federation lets an external identity trade its own existing credential for a short-lived Google Cloud access token, so no long-lived Google service account key is ever downloaded, stored, or rotated. It is not a VPN and does not create a human login. Avoiding the standing key file is the whole point.",
+      "conceptTag": "workload-identity-federation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What do Cloud Spanner Interleaved Tables optimize, and how?",
+      "options": [
+        "Cross-table analytical scans, by storing all tables in columnar format",
+        "Write throughput, by buffering child inserts in memory until the parent commits",
+        "Schema flexibility, by letting child columns be added without declaring a relationship",
+        "Fetching a parent row with its children, by physically storing child rows adjacent to the parent so one localized read serves both"
+      ],
+      "correctIndex": 3,
+      "explanation": "Interleaving co-locates a child table's rows next to their parent row on disk, so 'fetch this parent and all its children' is a single contiguous read with no distributed join. The interleaving relationship must be declared upfront, trading some flexibility for read speed. It is not columnar, not a write buffer, and not schema-flexibility.",
+      "conceptTag": "spanner-interleaved-tables"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the main benefit of attaching Labels (key-value metadata) to GCP resources?",
+      "options": [
+        "Billing and governance tools can reliably aggregate and filter resources by label, for example total spend for team=payments",
+        "Labels rename the underlying resource so naming conventions become unnecessary",
+        "Labels grant IAM permissions to whoever matches the label value",
+        "Labels are required before any resource can be created"
+      ],
+      "correctIndex": 0,
+      "explanation": "Labels are structured metadata that billing reports and tooling can query directly, so cost allocation and governance do not depend on fragile parsing of resource names. Labels do not rename resources, do not grant permissions, and are not mandatory. They are the reliable alternative to encoding ownership in names.",
+      "conceptTag": "gcp-labels"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does an Organization Policy Constraint (like 'no external IPs on VMs') differ from an IAM permission?",
+      "options": [
+        "It is just a predefined IAM role that bundles networking permissions",
+        "It enforces a structural rule on how resources may be configured, and even a Project Owner cannot bypass it",
+        "It only warns administrators but does not actually block the action",
+        "It applies solely to the user who created the constraint"
+      ],
+      "correctIndex": 1,
+      "explanation": "An Organization Policy Constraint governs how resources may be configured and is enforced independently of IAM, so even a user with full Owner permissions is blocked from violating it. It is not an IAM role, it actually blocks rather than warns, and it applies to everyone in scope. Comprehensive governance needs both IAM and constraints.",
+      "conceptTag": "org-policy-constraint"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does enabling Private Google Access on a subnet allow?",
+      "options": [
+        "External internet clients to reach private VMs without a load balancer",
+        "VMs to bypass all firewall rules for Google-owned IP ranges",
+        "VMs with no external IP address to reach Google APIs (Cloud Storage, BigQuery) over Google's internal network",
+        "Private connectivity between two peered VPCs in different projects"
+      ],
+      "correctIndex": 2,
+      "explanation": "Private Google Access lets a VM that has no external IP still reach Google's own APIs, with that traffic routed over Google's internal network rather than the public internet. It does not expose VMs to inbound internet traffic, does not bypass firewall rules, and is unrelated to VPC peering. It is what makes a no-external-IP VM still functional.",
+      "conceptTag": "private-google-access"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Who or what actually uses a GCP service account?",
+      "options": [
+        "A human administrator logging into the Console with a password and MFA",
+        "The GCP billing system, to charge resources to an account",
+        "Only Google support staff, for troubleshooting customer projects",
+        "A workload such as a Cloud Run service, GKE pod, or VM, authenticating as that identity rather than as a human"
+      ],
+      "correctIndex": 3,
+      "explanation": "A service account is the identity a workload authenticates as, so permissions are granted to the application itself and no human credentials are embedded in code. A compromised app is then limited to what that one service account was granted. Humans log in with user accounts; billing and support are unrelated to what a service account is.",
+      "conceptTag": "service-account-workload-identity"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does BigQuery run a query over petabytes without you provisioning any servers?",
+      "options": [
+        "It keeps a large fixed cluster running that you size in advance per project",
+        "It separates storage from compute and dynamically allocates parallel compute slots for each query, releasing them when it finishes",
+        "It downloads the data to your client and processes it locally",
+        "It requires you to reserve CPU and RAM for the largest query you expect"
+      ],
+      "correctIndex": 1,
+      "explanation": "BigQuery decouples storage from compute: each query dynamically acquires as many parallel slots as it needs, runs across Google's infrastructure, then releases them, and you pay by data scanned rather than for idle capacity. There is no fixed cluster to size, no local processing, and no per-query resource reservation.",
+      "conceptTag": "bigquery-serverless-architecture"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What threat do GCP Shielded VMs address, distinct from what Confidential VMs address?",
+      "options": [
+        "The cloud provider reading VM memory in plaintext during computation",
+        "Network eavesdropping between the VM and the internet",
+        "Tampering with the VM's boot chain or kernel (rootkits and bootkits), via Secure Boot, vTPM, and integrity monitoring",
+        "Excessive IAM permissions on the VM's service account"
+      ],
+      "correctIndex": 2,
+      "explanation": "Shielded VMs verify boot and software-stack integrity: Secure Boot rejects unsigned bootloaders/kernels, the vTPM enables attestation, and integrity monitoring flags drift from a known-good baseline. Confidential VMs address a different threat, protecting in-use memory from the hypervisor. The two are complementary and often enabled together. Neither is about network eavesdropping or IAM scope.",
+      "conceptTag": "shielded-vms"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do a GCP Persistent Disk and a Local SSD differ for a Compute Engine VM?",
+      "options": [
+        "Persistent Disk is network-attached and survives the VM stopping or migrating; Local SSD is physically attached, faster, but its data is lost if the VM stops or moves",
+        "Both survive VM deletion equally; Local SSD is simply a larger Persistent Disk",
+        "Local SSD is network-attached and replicated; Persistent Disk is host-local and ephemeral",
+        "Persistent Disk is faster because it avoids a network hop; Local SSD adds latency"
+      ],
+      "correctIndex": 0,
+      "explanation": "A Persistent Disk is network-attached, replicated, and survives the VM being stopped, deleted, or moved, so it suits durable data. A Local SSD is attached to the host, much faster with no network hop, but its contents vanish when the VM stops or migrates, so it suits scratch or cache data only.",
+      "conceptTag": "persistent-disk-vs-local-ssd"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In GKE, how does Autopilot's model differ from Standard's?",
+      "options": [
+        "Autopilot requires you to patch node OS images; Standard patches them automatically",
+        "Autopilot gives full node-level access for DaemonSets; Standard restricts it",
+        "Both bill per underlying VM; Autopilot just hides the node pool from view",
+        "Autopilot removes node pool management and bills per pod resource request; Standard has you choose machine types, size node pools, and pay for the VMs"
+      ],
+      "correctIndex": 3,
+      "explanation": "With Autopilot you only declare pod resource requests and Google provisions and patches the compute, billing per pod request. With Standard you size and manage node pools and pay for the VMs whether fully used or not. Autopilot, not Standard, restricts certain node-level and DaemonSet patterns.",
+      "conceptTag": "gke-autopilot-node-abstraction"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does GCP Anthos fleet management provide?",
+      "options": [
+        "A way to run a single GKE cluster with a larger control-plane SLA",
+        "One management plane applying consistent policy and service-mesh connectivity across many clusters, even across other clouds and on-premises",
+        "Automatic migration of on-premises VMs into GCP Compute Engine",
+        "A managed Kubernetes distribution that only runs inside GCP regions"
+      ],
+      "correctIndex": 1,
+      "explanation": "A fleet groups many clusters (GCP, other clouds, on-premises) under one plane so policy, config, and a cross-cluster service mesh are defined once and enforced consistently. It is not a single-cluster SLA feature, not a VM migration tool, and explicitly spans beyond GCP regions. It adds real complexity only justified by genuine multi-cloud or hybrid needs.",
+      "conceptTag": "anthos-fleet-management"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__12",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Cloud Monitoring and Cloud Logging give you out of the box for GCP managed compute services?",
+      "options": [
+        "Collection only after you install and configure a logging agent on each service",
+        "Metrics only; logs require a separate third-party product",
+        "Automatic collection of standard metrics and stdout/stderr logs into one unified system, with no per-service agent setup",
+        "Dashboards for Compute Engine only, not Cloud Run or GKE"
+      ],
+      "correctIndex": 2,
+      "explanation": "Compute Engine, Cloud Run, and GKE automatically send standard metrics and their stdout/stderr logs into Cloud Monitoring and Logging, so you can build cross-service dashboards and search logs without configuring shipping per service. It covers logs as well as metrics and is not limited to Compute Engine.",
+      "conceptTag": "cloud-monitoring-logging"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__12",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does choosing a Multi-Regional over a Regional Cloud Storage bucket location affect cost and resilience?",
+      "options": [
+        "Multi-Regional is cheaper because data is spread thinner across more locations",
+        "Regional survives a full region outage; Multi-Regional does not",
+        "The two have identical cost and availability; only the API endpoints differ",
+        "Multi-Regional replicates data across regions for higher availability and lower latency for spread-out clients, at a higher storage cost"
+      ],
+      "correctIndex": 3,
+      "explanation": "A Regional bucket is cheaper and low-latency near that one region but its availability is tied to that region. A Multi-Regional bucket replicates across regions, surviving a single region's outage and serving spread-out clients with lower latency, but costs more per GB. Defaulting to Multi-Regional for concentrated workloads wastes money.",
+      "conceptTag": "gcs-bucket-location-type"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__12",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the effect of setting Cloud Run concurrency higher than 1?",
+      "options": [
+        "One instance serves multiple requests at once, reducing instance count, cold starts, and cost, but the app must be safe for concurrent execution",
+        "Each request still gets a dedicated instance, but startup is faster",
+        "Requests are queued and processed strictly one at a time per service",
+        "It has no cost impact and removes the need for thread-safety"
+      ],
+      "correctIndex": 0,
+      "explanation": "Higher concurrency lets one warm instance handle many simultaneous requests, so fewer instances are needed, cold starts under bursts drop, and utilization and cost improve, provided the code is genuinely concurrency-safe (thread safety, connection pooling). Concurrency of 1 dedicates an instance per request; higher values do not queue serially or make thread-safety optional.",
+      "conceptTag": "cloud-run-concurrency"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__13",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why store a secret in Secret Manager instead of as a plaintext environment variable in a Cloud Run or GKE deployment's own configuration?",
+      "options": [
+        "Environment variables cannot hold strings long enough for real secrets",
+        "The value gets its own IAM access control, versioning, and audit logging, and is not exposed to everyone who can view the deployment config",
+        "Secret Manager injects the secret faster at container startup",
+        "Deployment configs are always public, but environment variables are private"
+      ],
+      "correctIndex": 1,
+      "explanation": "In Secret Manager the value has an independent IAM policy, retains every version for rollback, and logs access; the deployment only references the secret by name. A plaintext env var is visible via kubectl describe, CI logs, or the console to anyone who can read the config. Length limits and injection speed are not the issue.",
+      "conceptTag": "secret-manager-benefits"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__13",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do Pub/Sub Ordering Keys affect message delivery?",
+      "options": [
+        "All messages on the topic are delivered in strict global order once any key is set",
+        "Ordering keys only affect retry behavior, not delivery sequence",
+        "Messages sharing a key are delivered in publish order; messages under different keys stay parallelizable with no ordering between them",
+        "Messages with different keys are still delivered in strict relative order to each other"
+      ],
+      "correctIndex": 2,
+      "explanation": "An ordering key groups messages so that those sharing the key are delivered in publish order, while different keys have no ordering relationship and can be processed in parallel. It is not a global topic-wide ordering and is not just a retry setting. Assigning one shared key to everything serializes the whole topic and kills throughput.",
+      "conceptTag": "pubsub-ordering-keys"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__13",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Binary Authorization enforce for a GKE cluster?",
+      "options": [
+        "That every deployed image has zero known CVEs according to the latest scan",
+        "That only certain users hold permission to run kubectl apply",
+        "That images are pulled only from a specific registry hostname",
+        "That only images carrying a valid attestation from a trusted build pipeline can be deployed, checked at admission time"
+      ],
+      "correctIndex": 3,
+      "explanation": "Binary Authorization requires a cryptographically signed attestation proving an image came through the approved build process, checked by the cluster's admission controller. An image built outside the pipeline is rejected regardless of its contents or who deploys it. It verifies provenance, not CVE count; it is not a kubectl RBAC rule or a registry hostname filter.",
+      "conceptTag": "binary-authorization-attestation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__14",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do Cloud Run Revisions enable gradual rollouts and fast rollback?",
+      "options": [
+        "Each deployment creates a new immutable revision, and traffic can be split by percentage between revisions; rollback just shifts percentages back",
+        "Each deployment mutates the running revision in place, so rollback requires a rebuild",
+        "Only one revision can exist at a time, so rollout is always all-or-nothing",
+        "Revisions are code branches that must be merged before traffic shifts"
+      ],
+      "correctIndex": 0,
+      "explanation": "Every deploy produces a new immutable, independently addressable revision; previous revisions stay intact and traffic can be split across them by percentage for a canary rollout. Rolling back is just shifting traffic to an older revision, with no rebuild. Revisions are not mutated in place, not limited to one at a time, and not code branches.",
+      "conceptTag": "cloud-run-revisions"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__14",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is GCP Cloud Scheduler used for?",
+      "options": [
+        "Autoscaling a GKE node pool based on a time-of-day schedule only",
+        "Invoking an HTTP endpoint, Cloud Run service, or Pub/Sub topic on a cron schedule, without running a cluster or dedicated VM",
+        "Scheduling BigQuery slot reservations for peak hours",
+        "Delaying individual Pub/Sub messages until a future timestamp"
+      ],
+      "correctIndex": 1,
+      "explanation": "Cloud Scheduler is a fully managed cron service that triggers an HTTP target, Cloud Run service, Cloud Function, or Pub/Sub topic on a schedule, giving the same capability as a Kubernetes CronJob without needing a cluster. It is not a node autoscaler, not a BigQuery reservation tool, and not per-message delay scheduling.",
+      "conceptTag": "cloud-scheduler"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__14",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does GCP Shared VPC differ from VPC Peering?",
+      "options": [
+        "Shared VPC connects two independent VPCs; Peering merges them into one network",
+        "They are the same feature with different names for different regions",
+        "Shared VPC has one host project own a single network that other projects attach resources into; Peering connects two separately-owned, independently-administered VPCs",
+        "Shared VPC works only within one project; Peering only across organizations"
+      ],
+      "correctIndex": 2,
+      "explanation": "With Shared VPC a host project owns one network and service projects deploy their resources directly into it, enabling centralized network administration across many project teams. VPC Peering connects two separate, independently managed VPCs so they can communicate privately without merging administration. Peering suits occasional cross-network traffic; Shared VPC suits centralized governance.",
+      "conceptTag": "shared-vpc-vs-peering"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__15",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why is the GCP Project, rather than the Organization or Folder, the fundamental unit of billing and resource isolation?",
+      "options": [
+        "Organizations and Folders hold resources directly, but only Projects can be billed",
+        "Projects cannot be grouped, so isolation must happen at that level by default",
+        "Billing is attributed at the Organization level; Projects only isolate IAM",
+        "Every resource belongs to exactly one project, and each project has its own billing association, IAM boundary, and quota scope"
+      ],
+      "correctIndex": 3,
+      "explanation": "Resources live only in projects, and each project carries its own billing account link, IAM boundary, and quotas, making it the natural unit for cost tracking and isolation. Organizations and Folders only group projects and apply policy; they do not hold resources. Projects can be grouped under Folders, and billing is per project, not per organization.",
+      "conceptTag": "gcp-project-isolation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__15",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does setting a Cloud Run minimum instance count trade off?",
+      "options": [
+        "Nothing; warm instances are free when idle",
+        "Ongoing cost for eliminated cold starts: the reserved instances stay warm and billed even during zero traffic",
+        "Maximum scale for minimum latency: it caps how far the service can scale out",
+        "Consistency for availability: warm instances serve stale responses"
+      ],
+      "correctIndex": 1,
+      "explanation": "A minimum instance count keeps that many containers warm at all times so requests within that capacity never cold-start, but you pay for those instances even when traffic is zero. It does not cap scale-out or affect response freshness. Over-provisioning the minimum for bursty traffic wastes money that scaling to zero would save.",
+      "conceptTag": "cloud-run-min-instances"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__15",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In Cloud Spanner's node (or Processing Unit) provisioning model, what happens when you add compute capacity?",
+      "options": [
+        "Both query throughput and the storage the cluster can efficiently serve scale up together, as data is automatically split and rebalanced",
+        "Only throughput increases; storage capacity is provisioned and billed entirely separately",
+        "Only storage grows; throughput is fixed by the SQL dialect",
+        "Nothing changes until you manually reshard the tables"
+      ],
+      "correctIndex": 0,
+      "explanation": "Spanner provisions compute separately from data volume, and adding nodes raises both throughput and the storage the cluster can efficiently serve, because Spanner automatically splits and rebalances data across the nodes. There is no manual resharding. Sizing should target whichever dimension (throughput or data volume) is the binding constraint.",
+      "conceptTag": "spanner-node-provisioning"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__16",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does a GCP VPC's default firewall posture and rule targeting differ from a traditional flat on-premises network?",
+      "options": [
+        "GCP allows all ingress by default, matching a trusted internal network model",
+        "GCP firewall rules always apply to every VM in the VPC and cannot be scoped",
+        "GCP has no ingress controls; you must use a third-party firewall appliance",
+        "GCP denies all ingress by default, and rules can target specific VMs by network tag or service account, favoring least privilege"
+      ],
+      "correctIndex": 3,
+      "explanation": "A GCP VPC denies all inbound traffic until an explicit allow rule exists, the opposite of many permissive on-prem networks. Rules specify a direction and can be scoped to specific VMs via network tags or service accounts rather than the whole VPC, supporting least privilege. No third-party appliance is required.",
+      "conceptTag": "vpc-firewall-default-deny"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__16",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Google Cloud Armor provide in front of a global external HTTP(S) Load Balancer?",
+      "options": [
+        "TLS termination and certificate management only",
+        "Volumetric DDoS mitigation and Layer 7 WAF rules that filter malicious traffic at Google's edge before it reaches the backend",
+        "Automatic horizontal scaling of backend instances during an attack",
+        "A replacement for application-level input validation, making it unnecessary"
+      ],
+      "correctIndex": 1,
+      "explanation": "Cloud Armor inspects and filters traffic at Google's global edge, absorbing volumetric DDoS and applying WAF-style rules (for example blocking SQL injection signatures) before requests reach the backend. It is not just TLS termination, does not autoscale backends, and is a defense-in-depth layer that complements, not replaces, application input validation.",
+      "conceptTag": "cloud-armor-waf"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__16",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do Two-Phase Locking and TrueTime commit-wait combine in Cloud Spanner read-write transactions?",
+      "options": [
+        "Locking alone provides external consistency; TrueTime only speeds up reads",
+        "TrueTime replaces locking entirely, so no locks are ever taken",
+        "Locking gives serializability among coordinated transactions; TrueTime commit-wait additionally makes commit timestamps match real-world cross-region ordering",
+        "Both are optional optimizations that can be disabled for lower latency"
+      ],
+      "correctIndex": 2,
+      "explanation": "Two-Phase Locking holds locks until commit, guaranteeing serializability among transactions Spanner coordinates. TrueTime assigns a commit timestamp and waits out the clock uncertainty so that global, cross-region commit order provably matches the timestamps. Both mechanisms are needed together for external consistency; locking alone cannot guarantee cross-region real-time ordering.",
+      "conceptTag": "spanner-2pl-truetime"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__17",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What problem does gcloud's Application Default Credentials (ADC) mechanism solve?",
+      "options": [
+        "It encrypts service account key files so they can be safely committed to source control",
+        "It forces every environment to use a downloaded JSON key for consistency",
+        "It grants the application broader permissions when running in production",
+        "The same client-library code authenticates unchanged whether run locally or deployed on GCP, by checking a fixed sequence of credential sources"
+      ],
+      "correctIndex": 3,
+      "explanation": "ADC is a standard lookup order every client library follows: a local credentials file during development, an attached service account when running on GCP. The same code works in both places with no conditional logic. It does not make key files safe to commit, does not force a JSON key everywhere, and does not change permission scope by environment.",
+      "conceptTag": "application-default-credentials"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__17",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What signal does Cloud Run use to decide how many instances to run, unlike Kubernetes HPA?",
+      "options": [
+        "The number of concurrent requests per instance relative to the configured concurrency limit, computed directly from request count",
+        "CPU utilization averaged across all running instances",
+        "Memory pressure reported by the container runtime",
+        "A fixed schedule of instance counts per hour of day"
+      ],
+      "correctIndex": 0,
+      "explanation": "Cloud Run scales on request concurrency: if existing instances are at their concurrency ceiling for the incoming rate, it adds instances; well below it, it scales down. Kubernetes HPA typically scales on CPU or memory utilization or a custom metric. Request count is an immediately observable signal that reacts quickly, which fits Cloud Run's request-driven model.",
+      "conceptTag": "cloud-run-request-based-autoscaling"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__17",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In GCP Datastore/Firestore, how does an ancestor query differ from a broader non-ancestor query in consistency?",
+      "options": [
+        "Both are always strongly consistent regardless of scope",
+        "An ancestor query (scoped to one entity group) is strongly consistent; a non-ancestor query spanning many entity groups is only eventually consistent",
+        "An ancestor query is eventually consistent; the broader query is strongly consistent",
+        "Consistency depends only on the client library version, not the query shape"
+      ],
+      "correctIndex": 1,
+      "explanation": "An ancestor query stays within one entity group, where synchronous coordination is cheap, so it always reflects the latest committed writes. A query spanning many entity groups accepts eventual consistency as the cost of that flexibility. Consistency depends on the query's shape, not the library version, and is not uniform across all queries.",
+      "conceptTag": "firestore-ancestor-query-consistency"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__18",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does a GCP Folder let an organization do?",
+      "options": [
+        "Combine several projects into one so they share a single resource pool",
+        "Replace projects entirely as the unit that holds resources",
+        "Group related projects so a policy applied at the folder inherits to all of them, without merging their resources or billing",
+        "Apply policies that only affect the folder itself, not nested projects"
+      ],
+      "correctIndex": 2,
+      "explanation": "A Folder sits between the Organization and Projects and groups related projects so an IAM policy or org constraint set once at the folder cascades to every nested project. The projects stay separate for billing and resource isolation; the folder provides shared policy inheritance, not a merger, and its policies do affect nested projects.",
+      "conceptTag": "gcp-folder"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__18",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does GCP Cloud NAT enable for a VM that has no external IP address?",
+      "options": [
+        "Inbound internet traffic to reach the VM without a load balancer",
+        "Bidirectional internet connectivity identical to having a public IP",
+        "Private connectivity to Google APIs only, not the broader internet",
+        "Outbound-initiated connections to the internet, while the VM stays completely unreachable for any inbound connection"
+      ],
+      "correctIndex": 3,
+      "explanation": "Cloud NAT provides managed source NAT for outbound traffic, so a VM with no external IP can call out (OS updates, third-party APIs) while remaining unreachable from the internet for any inbound connection. It is strictly one-directional. Reaching only Google APIs is Private Google Access, a different feature.",
+      "conceptTag": "cloud-nat"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__18",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Apache Beam's programming model, run on GCP Dataflow, let you do?",
+      "options": [
+        "Convert any batch job into a streaming job only by rewriting all transforms",
+        "Write pipeline transform logic once and run it over either a bounded (batch) or unbounded (streaming) source; the runtime picks the execution strategy",
+        "Run streaming pipelines only; batch requires a separate framework",
+        "Eliminate the need to specify sources and sinks at all"
+      ],
+      "correctIndex": 1,
+      "explanation": "Beam expresses read, transform, and write with the same abstractions regardless of whether the source is bounded or unbounded, and Dataflow chooses batch or streaming execution based on the source. Only the source and sink change between the two; the transform logic is reused. It supports both batch and streaming, and you still declare sources and sinks.",
+      "conceptTag": "dataflow-beam-unified-model"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__19",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why can a GCP API call fail even when the caller has full Owner IAM permissions on the project?",
+      "options": [
+        "Owner role excludes API access by design; a custom role is required",
+        "APIs are enabled globally per organization and cannot be used in new projects",
+        "The specific API must also be explicitly enabled for that project; enablement is tracked independently of IAM",
+        "IAM changes take 24 hours to propagate before any API works"
+      ],
+      "correctIndex": 2,
+      "explanation": "GCP requires two independent things: sufficient IAM permission and the specific API enabled for the project. Even an Owner gets an 'API not enabled' error if the service was never turned on. This gives explicit control over a project's active service surface. Owner does not exclude API access, and enablement is per project, not per organization.",
+      "conceptTag": "api-enablement"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__19",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Pub/Sub's Dead Letter Topic with maxDeliveryAttempts work?",
+      "options": [
+        "It drops the failing message silently once the attempt limit is reached",
+        "It pauses the entire subscription until an operator intervenes",
+        "It doubles the ack deadline on every retry with no upper bound",
+        "After a message fails to be acknowledged the configured number of times, Pub/Sub republishes it to a designated dead-letter topic instead of retrying forever"
+      ],
+      "correctIndex": 3,
+      "explanation": "This is Pub/Sub's implementation of the dead-letter-queue pattern: once a message has been nacked or timed out maxDeliveryAttempts times, it is republished to a dead-letter topic rather than redelivered indefinitely. It is not dropped silently, does not pause the subscription, and is not an ack-deadline backoff mechanism. Building a custom retry counter is reinventing this.",
+      "conceptTag": "pubsub-dead-letter-topic"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__19",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why is Bigtable suited specifically to massive-scale time-series and IoT workloads, unlike Firestore?",
+      "options": [
+        "Its wide-column store physically sorts and co-locates rows by row key, making range scans over sequential keys extremely fast at petabyte scale",
+        "It offers richer ad-hoc query and secondary-index options than Firestore",
+        "It provides strong multi-document ACID transactions that Firestore lacks",
+        "It automatically caches every row in memory, so all access is constant time"
+      ],
+      "correctIndex": 0,
+      "explanation": "Bigtable sorts rows lexicographically by row key and co-locates them, so a well-designed key (device id plus timestamp) makes range scans over a device's readings extremely efficient even across billions of rows. The trade-off is a narrower, less flexible query model than Firestore's documents. It is not the richer-query or in-memory-cache option.",
+      "conceptTag": "bigtable-vs-firestore"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__20",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does GCP Artifact Registry improve on the older Container Registry?",
+      "options": [
+        "It stores Docker images faster but still requires separate products for language packages",
+        "It supports many artifact types (Docker, npm, Maven, Python) in one service with unified IAM, replication, and vulnerability scanning",
+        "It is a drop-in rename with identical capabilities",
+        "It removes vulnerability scanning to reduce cost"
+      ],
+      "correctIndex": 1,
+      "explanation": "Artifact Registry consolidates Docker images plus npm, Maven, and Python packages into one service with consistent IAM, regional replication, and vulnerability scanning across all artifact types. Container Registry handled only Docker images. Artifact Registry is the actively developed successor, not a rename, and it keeps scanning.",
+      "conceptTag": "artifact-registry"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__20",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does GCP Cloud Deploy provide?",
+      "options": [
+        "A container build service that compiles images from source",
+        "A load balancer that shifts traffic between two production versions",
+        "A managed, declarative delivery pipeline that promotes a release through ordered environments with built-in approval gates",
+        "A secret store for deployment credentials"
+      ],
+      "correctIndex": 2,
+      "explanation": "Cloud Deploy defines a delivery pipeline declaratively as an ordered sequence of target environments (dev, staging, prod) with manual approval gates, and handles the deployment mechanics while giving a single view of which release is where. It is not a build service (that is Cloud Build), not a load balancer, and not a secret store.",
+      "conceptTag": "cloud-deploy"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__20",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why is an ON DELETE CASCADE on a Cloud Spanner Interleaved Table efficient?",
+      "options": [
+        "Spanner defers the deletes to a nightly batch job",
+        "The cascade is skipped and children are left as orphans for a cleanup process",
+        "A global secondary index makes the child lookup free",
+        "The child rows are already physically adjacent to the parent, so no separate index lookup is needed to find them"
+      ],
+      "correctIndex": 3,
+      "explanation": "Because interleaving stores child rows next to the parent row, deleting the parent with ON DELETE CASCADE is a local, contiguous storage operation with no separate index-driven search to locate the children. An ordinary foreign-key cascade needs that extra lookup. The cascade is neither deferred nor skipped; the benefit is the same co-location that speeds reads.",
+      "conceptTag": "spanner-interleaved-cascade-delete"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__21",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the core difference between GCP Cloud Functions and Cloud Run?",
+      "options": [
+        "Cloud Functions deploys one function written to its programming model; Cloud Run deploys any container with any language, framework, or web server",
+        "Cloud Run deploys single functions; Cloud Functions deploys full containers",
+        "Both require a Dockerfile; only the pricing model differs",
+        "Cloud Functions can run existing web apps unchanged; Cloud Run cannot"
+      ],
+      "correctIndex": 0,
+      "explanation": "Cloud Functions runs one function written against its signature-based model. Cloud Run runs any container listening on a port, so an existing web application can run unchanged. The roles in the other options are reversed, and Cloud Functions does not require a Dockerfile while Cloud Run does.",
+      "conceptTag": "cloud-functions-vs-cloud-run"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__21",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Google Cloud Build do, and what is a common misconception about it?",
+      "options": [
+        "It hosts a persistent Jenkins instance you must patch and scale",
+        "It runs declarative build steps in ephemeral managed containers (build, test, push an image); it does not deploy the image unless you add an explicit step",
+        "It automatically deploys every built image to Cloud Run with no configuration",
+        "It only builds images and cannot run tests"
+      ],
+      "correctIndex": 1,
+      "explanation": "Cloud Build runs each step of a cloudbuild.yaml in its own ephemeral container, commonly to build, test, and push an image to Artifact Registry, with no build server to maintain. Actually deploying the image needs an explicit additional step or a tool like Cloud Deploy. It is not a hosted Jenkins, does not auto-deploy, and can run tests.",
+      "conceptTag": "cloud-build"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__21",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What do Cloud Spanner's exact_staleness and max_staleness read options provide?",
+      "options": [
+        "A guarantee of the absolute latest committed data with lower latency than default reads",
+        "Writes that are applied at a scheduled future timestamp",
+        "Reads of slightly old data served from a nearby replica without strong-read coordination, lowering latency and raising throughput for tolerant read paths",
+        "A way to lock rows for longer during long-running reports"
+      ],
+      "correctIndex": 2,
+      "explanation": "A stale read deliberately reads data as of a bounded point in the past, so it can be served from a nearby replica without the coordination a strong read needs, reducing latency and increasing read throughput. It does not return the absolute latest data, is a read option not a write scheduler, and does not extend locks. Use it only for read paths that tolerate staleness.",
+      "conceptTag": "spanner-stale-reads"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__22",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does enabling Object Versioning on a Cloud Storage bucket do, and what should accompany it?",
+      "options": [
+        "It makes objects immutable so they can never be changed or deleted",
+        "It replicates every object to a second region automatically",
+        "It compresses old versions to save space, needing no further configuration",
+        "It retains prior versions when an object is overwritten or deleted, so you can restore them; pair it with a lifecycle rule to purge old noncurrent versions"
+      ],
+      "correctIndex": 3,
+      "explanation": "With versioning on, an overwrite or delete keeps the previous version as a noncurrent generation you can restore, giving a safety net against accidents. Without a lifecycle rule to clean up old noncurrent versions, every overwrite accumulates billed storage forever. It does not make objects immutable, replicate across regions, or compress.",
+      "conceptTag": "gcs-object-versioning"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__22",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What advantage does an IAM Conditional Role Binding with a time-based CEL expression give over a plain role binding?",
+      "options": [
+        "It grants a broader set of permissions than a plain binding",
+        "Access automatically stops when the condition (for example a date) no longer holds, with no manual revocation step required",
+        "It applies the role to all resources in the organization at once",
+        "It prevents the user from ever being granted the role again"
+      ],
+      "correctIndex": 1,
+      "explanation": "A conditional binding attaches a CEL expression that must be true for the grant to apply, so a time-based condition makes the access self-expiring, enforced by IAM without anyone remembering to revoke it. It does not widen permissions, does not change resource scope to the whole org, and does not block future grants.",
+      "conceptTag": "iam-conditional-role-binding"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__22",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What do Cloud Spanner's built-in query statistics tables (spanner_sys.query_stats_top_minute) let a DBA do?",
+      "options": [
+        "Replay any historical query with its exact original execution plan",
+        "Permanently archive every query's full text and metrics",
+        "Identify the most CPU-expensive queries with ordinary SQL against Spanner's own system tables, no external profiler needed",
+        "Automatically rewrite slow queries into faster equivalents"
+      ],
+      "correctIndex": 2,
+      "explanation": "Spanner maintains aggregated per-minute query statistics (CPU time, execution count, latency) queryable via plain SQL against the spanner_sys schema, giving DMV-style visibility with no external tooling. This data is retained only for a limited rolling window, so long-term analysis needs periodic export. It does not replay queries or auto-rewrite them.",
+      "conceptTag": "spanner-query-statistics"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__23",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Deployment Manager is GCP's own first-party IaC tool, yet most GCP teams use Terraform instead. Why?",
+      "options": [
+        "Deployment Manager cannot actually provision GCP resources anymore",
+        "Terraform is maintained by Google and Deployment Manager by a third party",
+        "Deployment Manager only supports imperative scripts, not declarative config",
+        "Terraform's multi-cloud support, larger community, and richer module ecosystem outweigh a single-cloud-native tool's tighter integration"
+      ],
+      "correctIndex": 3,
+      "explanation": "Even GCP-only teams tend to prefer Terraform for its consistent multi-cloud workflow, far larger community and documentation, and broad third-party module ecosystem. Deployment Manager still works and is declarative; it is GCP's own tool, not third-party; being 'official' did not translate into the bigger ecosystem.",
+      "conceptTag": "deployment-manager-vs-terraform"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__23",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do GCP Persistent Disk Snapshots keep frequent backups cheap and fast?",
+      "options": [
+        "After the first full snapshot, each later snapshot stores only the changed blocks, while still being restorable as a complete disk",
+        "Each snapshot is a full independent copy, but compressed to a fixed small size",
+        "Snapshots store only metadata and reconstruct data from the live disk on restore",
+        "Only one snapshot is kept at a time, overwriting the previous one"
+      ],
+      "correctIndex": 0,
+      "explanation": "Snapshots are incremental: the first is a full copy, and each subsequent one stores only blocks that changed since the last, yet every snapshot restores as a complete point-in-time disk because GCP combines unchanged blocks with changed ones. That makes frequent snapshots practical. They are not full copies, not metadata-only, and multiple are retained.",
+      "conceptTag": "persistent-disk-snapshots"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__23",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does a Cloud Spanner Interleaved Index do, versus an ordinary secondary index?",
+      "options": [
+        "It stores index entries in columnar format for analytical scans",
+        "It physically co-locates its entries with the related parent row, so a query filtering via the index that also needs parent data avoids a separate distant lookup",
+        "It automatically covers every column of the base table",
+        "It removes the need to declare which columns are indexed"
+      ],
+      "correctIndex": 1,
+      "explanation": "An ordinary secondary index lives in its own separate structure. An interleaved index co-locates its entries with the parent row they relate to, so a query that filters via the index and also needs parent-row data can retrieve both from the same physical location. It suits tightly coupled parent-child relationships; it is not columnar, not auto-covering, and still needs indexed columns declared.",
+      "conceptTag": "spanner-interleaved-index"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__24",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is Google Compute Engine (GCE)?",
+      "options": [
+        "A serverless platform that runs functions in response to events",
+        "A managed Kubernetes control plane for container orchestration",
+        "GCP's IaaS offering for running virtual machines with full OS control, attached disks, and custom networking",
+        "An object storage service for unstructured data"
+      ],
+      "correctIndex": 2,
+      "explanation": "GCE is GCP's Infrastructure-as-a-Service for VMs, analogous to EC2 or Azure VMs, giving full OS control, persistent disks, and networking configuration, and it is typically used for maximum control or lift-and-shift of hard-to-containerize apps. The other options describe Cloud Functions, GKE, and Cloud Storage.",
+      "conceptTag": "compute-engine-iaas"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__25",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is Google Cloud Storage (GCS) designed for?",
+      "options": [
+        "Running relational SQL queries with ACID transactions",
+        "Hosting a managed Redis cache for low-latency key lookups",
+        "Orchestrating containerized workloads across zones",
+        "Storing unstructured objects (files) in buckets, with storage classes trading retrieval speed against storage cost"
+      ],
+      "correctIndex": 3,
+      "explanation": "GCS is managed object storage for unstructured data such as static assets, media, backups, and datasets, organized as objects inside buckets, with storage classes (Standard, Nearline, Coldline, Archive) balancing access speed and cost. It is not a relational database, a cache, or a container orchestrator.",
+      "conceptTag": "gcs-object-storage"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__26",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do Cloud SQL and Cloud Spanner differ?",
+      "options": [
+        "Cloud SQL scales horizontally across continents; Spanner is single-region only",
+        "Cloud SQL is a managed MySQL/PostgreSQL/SQL Server that scales vertically with read replicas; Spanner is a Google-built relational DB scaling horizontally across regions with strong consistency",
+        "Both are NoSQL; Spanner just adds a SQL query layer",
+        "Cloud SQL offers stronger global consistency guarantees than Spanner"
+      ],
+      "correctIndex": 1,
+      "explanation": "Cloud SQL is a managed standard relational engine that scales up vertically and out only via read replicas, fitting typical web apps. Spanner is Google's globally distributed, horizontally scalable, strongly consistent relational database for enterprises that outgrow Cloud SQL. Spanner is the one that scales globally; both are relational, and Spanner's consistency is at least as strong.",
+      "conceptTag": "cloud-sql-vs-spanner"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__27",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Google Kubernetes Engine (GKE) manage on your behalf?",
+      "options": [
+        "Your application code and its business logic",
+        "Only the container images, not the cluster itself",
+        "The Kubernetes control plane, node provisioning and upgrades, and integration with GCP networking and load balancers",
+        "Nothing; GKE is an unmanaged Kubernetes distribution you install yourself"
+      ],
+      "correctIndex": 2,
+      "explanation": "GKE runs and maintains the Kubernetes control plane, provisions worker node VMs, handles upgrades, and integrates with GCP networking and load balancers, so you specify how many nodes you need rather than building a cluster by hand. It does not write your application code, and it is a managed offering, not a bare distribution.",
+      "conceptTag": "gke-managed-kubernetes"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__28",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What role does a GCP Project play?",
+      "options": [
+        "It is an optional label used only for cost reporting",
+        "It is a network construct equivalent to a VPC subnet",
+        "It is a group of organizations sharing one billing account",
+        "It is the fundamental container every resource belongs to, forming the boundary for billing, IAM, and API enablement"
+      ],
+      "correctIndex": 3,
+      "explanation": "Every GCP resource belongs to a project, which is the boundary for billing (resources bill to the project's billing account), permissions (IAM roles assigned at the project level), and API enablement (enabled per project). A common practice is separate projects per environment. It is not just a label, a subnet, or a grouping of organizations.",
+      "conceptTag": "gcp-project"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__29",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does AlloyDB for PostgreSQL differ from Cloud SQL for PostgreSQL?",
+      "options": [
+        "AlloyDB is PostgreSQL-compatible but runs Google's own re-architected storage and compute engine for much higher performance than stock PostgreSQL",
+        "AlloyDB runs the exact community PostgreSQL binary, while Cloud SQL uses a Google fork",
+        "AlloyDB drops SQL compatibility in exchange for horizontal scaling",
+        "AlloyDB is cheaper than Cloud SQL for every workload size"
+      ],
+      "correctIndex": 0,
+      "explanation": "AlloyDB speaks PostgreSQL's wire protocol and dialect so existing drivers and tools work unchanged, but its storage is disaggregated from compute and it adds a columnar in-memory cache, giving much better performance for mixed transactional and analytical workloads. Cloud SQL runs the actual community PostgreSQL engine. AlloyDB keeps SQL compatibility and costs more, not less.",
+      "conceptTag": "alloydb-vs-cloudsql"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__beginner__30",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does a GCP VPC differ from a traditional on-premises network?",
+      "options": [
+        "It is confined to a single region and requires physical routers you configure",
+        "It is entirely software-defined and global: one VPC can hold subnets in many regions communicating over Google's private backbone",
+        "It allows all internal traffic by default with no firewall rules possible",
+        "It requires leased lines to connect subnets in different regions"
+      ],
+      "correctIndex": 1,
+      "explanation": "A VPC is software-defined with no physical hardware to manage, and it is global: a single VPC can have subnets in multiple regions that communicate over Google's private backbone without traversing the public internet. You still need appropriately scoped firewall rules (GCP defaults to deny-all-ingress), and no leased lines are required.",
+      "conceptTag": "gcp-vpc"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__24",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "When is Cloud Spanner the right choice over Cloud SQL or AlloyDB for a relational database on GCP?",
+      "options": [
+        "Whenever there is any chance the app might need more scale someday",
+        "Whenever the app uses PostgreSQL and wants faster analytical queries",
+        "When the app genuinely needs horizontal scaling across regions with strict ACID and no application-level sharding, as a real current requirement",
+        "For any standard single-region web app, as the safe default"
+      ],
+      "correctIndex": 2,
+      "explanation": "Spanner is the most expensive and constrained of the three and only pays off once an app is genuinely bottlenecked on a single instance's vertical ceiling and needs global horizontal scale now. 'Might need it someday' is the wrong lens. A PostgreSQL app wanting fast analytics points to AlloyDB, and a standard single-region web app to Cloud SQL.",
+      "conceptTag": "choosing-gcp-relational-db"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__intermediate__25",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Pub/Sub's opt-in exactly-once delivery mode NOT protect against?",
+      "options": [
+        "Redelivery of a message that was already successfully acknowledged",
+        "Messages arriving out of publish order within one ordering key",
+        "Loss of a message that was never delivered at all",
+        "Publisher-side duplicates (a retried publish creating a new message) and redelivery after a subscriber crashes before acknowledging"
+      ],
+      "correctIndex": 3,
+      "explanation": "Exactly-once mode strengthens acknowledgment tracking so an already-acked message is not redelivered. It does not collapse genuine publisher-side duplicates (a retried publish is a new distinct message), and it does not help when a subscriber does the side effect then crashes before acking, so idempotent processing is still needed. Ordering is a separate feature.",
+      "conceptTag": "pubsub-exactly-once-limits"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__24",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Cloud Run's --cpu-boost flag do, and when does it help most?",
+      "options": [
+        "It grants extra CPU only during container startup, shortening cold starts, which compounds when a traffic spike starts many instances at once",
+        "It permanently doubles the instance's CPU allocation for all requests",
+        "It keeps instances warm so cold starts never occur",
+        "It boosts CPU only during steady-state load, not startup"
+      ],
+      "correctIndex": 0,
+      "explanation": "--cpu-boost temporarily allocates additional CPU during the startup phase, so JIT, DI wiring, and connection warmup finish faster, then it drops back to the configured steady-state CPU. Under a spike that starts dozens of instances at once, that per-instance saving compounds. It is not a permanent boost, does not keep instances warm, and targets startup, not steady state.",
+      "conceptTag": "cloud-run-cpu-boost"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__25",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "With Pub/Sub ordering keys enabled, what happens when a message for one ordering key keeps failing?",
+      "options": [
+        "The entire subscription stops delivering any message on any key",
+        "Later messages for that same key are held back until it succeeds or is dead-lettered; messages for other keys keep flowing in parallel",
+        "The failing message is skipped immediately and later messages proceed",
+        "Ordering is silently dropped for all keys to keep throughput up"
+      ],
+      "correctIndex": 1,
+      "explanation": "To preserve order, Pub/Sub will not deliver the next message for a key until the current one is acked, so a poison message causes head-of-line blocking scoped to that key while other keys proceed in parallel. The fix is a dead-letter topic with maxDeliveryAttempts so the stuck message is diverted after N tries. The failing message is not skipped, and other keys are unaffected.",
+      "conceptTag": "pubsub-ordering-head-of-line-blocking"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__advanced__26",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is a VPC Service Controls Perimeter Bridge?",
+      "options": [
+        "A one-way tunnel that lets one perimeter read from another but not vice versa",
+        "A merge that combines two perimeters permanently into one",
+        "A bidirectional exception letting resources in two named perimeters access each other, without opening access to any third perimeter or the internet",
+        "An IAM role that grants cross-project data access"
+      ],
+      "correctIndex": 2,
+      "explanation": "A bridge is an explicit, bidirectional exception between two named perimeters so their resources can exchange data, while isolation against every other perimeter, project, and the internet stays enforced. It is not one-way, not a permanent merge (which would give blanket access including future resources), and not an IAM role. It should be treated as reviewable, temporary infrastructure.",
+      "conceptTag": "vpc-sc-perimeter-bridge"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A Cloud Run service with --min-instances=1 still serves a wave of 8 to 10 second requests when traffic jumps 20x in two minutes. Why?",
+      "options": [
+        "min-instances=1 caps the service at one instance, so requests queue",
+        "The warm instance was evicted because min-instances is ignored under load",
+        "Cold starts are unrelated; the database must be the bottleneck",
+        "The spike forces scale-out to many new instances, each still paying a full cold start; min-instances only covers the first request after idle"
+      ],
+      "correctIndex": 3,
+      "explanation": "A minimum instance floor only removes the cold start for the first request after idle. A 20x spike makes Cloud Run provision many new instances in parallel, and every one pays its own cold-start cost. The fix combines a higher min-instances floor sized for the burst, lower concurrency so scale-out starts earlier, and --cpu-boost. min-instances is not a cap and is not ignored.",
+      "conceptTag": "cloud-run-spike-cold-starts"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Order events published in the correct sequence are sometimes processed out of order by a Pub/Sub subscriber, producing wrong shipping labels. Where is the bug?",
+      "options": [
+        "Pub/Sub does not preserve delivery order by default; the fix is an ordering key per order id plus message ordering enabled on the subscription",
+        "The publisher must be sending events in the wrong order despite appearances",
+        "The subscriber is multi-threaded; making it single-threaded fixes ordering",
+        "The topic needs a larger message retention window to preserve order"
+      ],
+      "correctIndex": 0,
+      "explanation": "Publishing in order only controls the order events leave the publisher; without ordering keys Pub/Sub makes no promise about receive order. Set an OrderingKey scoped to the order id on the publisher and create the subscription with message ordering enabled, since both sides are required. Single-threading the subscriber and larger retention do not address delivery order.",
+      "conceptTag": "pubsub-ordering-fix"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A batch job's service account has project-level roles/editor but only reads one bucket and writes one dataset. What is the safest way to narrow it?",
+      "options": [
+        "Immediately remove all roles and add them back only when the job errors",
+        "Use Cloud Audit Logs to see which API calls it actually makes, then grant narrow roles scoped to just that bucket and dataset",
+        "Swap roles/editor for roles/viewer at the project level and stop there",
+        "Leave the role but rotate the service account key monthly"
+      ],
+      "correctIndex": 1,
+      "explanation": "Audit logs (or Policy Analyzer) reveal the permissions the job actually exercises, so you can replace roles/editor with narrow roles bound to the specific bucket and dataset, validating in a non-production run first in case an infrequent code path was missed. Removing everything blindly risks outages. Project-level viewer still grants read on every bucket, and key rotation does not reduce the blast radius.",
+      "conceptTag": "least-privilege-remediation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Cloud SQL rejects new connections with 'too many connections' during a surge, though its CPU and memory look fine. What is the likely cause and structural fix?",
+      "options": [
+        "The database CPU is secretly saturated; upgrade to a larger tier permanently",
+        "The app has a connection leak; restarting the database clears it for good",
+        "Auto-scaled app instances each open a pool, exceeding the instance's hard connection cap; put a connection pooler between the app tier and the database",
+        "Firewall rules are dropping connections; widen the allowed IP range"
+      ],
+      "correctIndex": 2,
+      "explanation": "Cloud SQL instances have a hard max_connections cap by tier, and idle-but-open pooled connections still consume slots. As the app tier scales out, aggregate pool size blows past the cap even with healthy CPU. Shrinking per-instance pool size buys headroom; a connection pooler (like PgBouncer) is the structural fix, decoupling app instance count from database connection count. Upgrading the tier only defers the problem.",
+      "conceptTag": "cloudsql-connection-limits"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A cross-project BigQuery integration inside VPC Service Controls perimeters suddenly returns 403 PERMISSION_DENIED, with no IAM changes and after months of working. Most likely cause?",
+      "options": [
+        "The service account's key expired and must be regenerated",
+        "BigQuery quotas were exhausted for the month",
+        "An IAM role was silently removed by Google and must be re-added",
+        "A perimeter was created or tightened, or a Perimeter Bridge was removed; confirm via VPC-SC audit log entries and fix in Access Context Manager, not IAM"
+      ],
+      "correctIndex": 3,
+      "explanation": "VPC Service Controls enforcement is independent of IAM, so a 403 with no IAM change and a sudden full stop points at the perimeter layer. VPC-SC-specific audit log entries confirm a perimeter-boundary denial rather than an IAM denial, so the fix belongs in Access Context Manager (create or restore a bridge if the access is legitimate). Widening IAM does nothing for a perimeter-blocked request.",
+      "conceptTag": "vpc-sc-troubleshooting"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "gcp__scenario__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A dashboard query scanning an entire multi-terabyte table on every page load tripled the BigQuery bill. What is the immediate fix?",
+      "options": [
+        "Add a partition filter (for example a date predicate on the partitioning column) so the query scans only the partitions it needs",
+        "Move the table to a colder storage class to reduce per-scan cost",
+        "Add more indexes to the table so scans are avoided",
+        "Switch the dashboard to run the same query twice as often but on half the columns"
+      ],
+      "correctIndex": 0,
+      "explanation": "BigQuery bills by bytes scanned, and a query with no partition filter scans the whole table every run. Adding a predicate on the partitioning column lets BigQuery prune to just the needed partitions. Structural follow-ups include requiring partitioning/clustering, setting a maximum-bytes-billed ceiling, and caching dashboard results. Storage class does not change scan cost, and BigQuery has no traditional indexes.",
+      "conceptTag": "bigquery-cost-control"
+    },
+    "error": null
+  }
+]

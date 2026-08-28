@@ -28,6 +28,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      # npm ci installs the @anthropic-ai/sdk devDependency, but the build never
+      # imports it — it is used only by the local, manual `npm run gen:mcq`.
+      # build.js reads the committed content/mcq/*.json cache and needs no API key.
       - run: npm ci
       - run: node scripts/build.js
       - uses: actions/upload-pages-artifact@v3

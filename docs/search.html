@@ -24,12 +24,15 @@
     <a href="topics.html">Topics</a>
     <a href="search.html">Search</a>
     <a href="review.html">Review</a>
+    <a href="quiz.html">Quiz</a>
     <button id="theme-toggle" type="button" aria-label="Toggle theme"></button>
   </nav>
 </header>
 <main>
   <h1>Search</h1>
-  <input type="search" id="q" placeholder="Search questions, e.g. &quot;idempotent&quot; or &quot;DbContext&quot;" autofocus />
+  <div class="search-bar">
+    <input type="search" id="q" placeholder="Search questions, e.g. &quot;idempotent&quot; or &quot;DbContext&quot;" autofocus />
+  </div>
   <div id="results" style="margin-top:1.25rem"></div>
 </main>
 <script src="assets/js/search.js"></script>
@@ -56,6 +59,7 @@ async function init() {
       render(input.value);
     }, 180);
   });
+
   render("");
 }
 

@@ -1,4 +1,5 @@
 node_modules/
 docs/data/*.json
 docs/data/questions/
+docs/data/mcq/
 .claude/

@@ -1,0 +1,2026 @@
+[
+  {
+    "sourceId": "azure__beginner__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In Azure's cloud service models, which responsibility split characterizes PaaS (e.g., Azure App Service) compared with IaaS?",
+      "options": [
+        "With PaaS you manage only your application code and data, while Azure manages the OS, runtime, and middleware",
+        "With PaaS you manage the OS, patching, and runtime, and Azure only provides the virtual machine",
+        "With PaaS you rent finished software over the internet and manage nothing at all",
+        "With PaaS you manage the physical hardware and hypervisor while Azure manages your application code"
+      ],
+      "correctIndex": 0,
+      "explanation": "PaaS like Azure App Service has Azure manage the OS, runtime, middleware, and hardware, leaving the team responsible only for application code and data. Managing the OS and patching on a bare VM describes IaaS. Renting finished software and managing nothing describes SaaS. Managing physical hardware is never the customer's job in any cloud model.",
+      "conceptTag": "iaas-paas-saas-responsibility"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A legacy Windows app writes logs to a UNC path like \\\\server\\share and expects a mountable network drive. Which Azure Storage service fits with the least re-architecting?",
+      "options": [
+        "Azure Blob Storage, using virtual directories via blob name prefixes",
+        "Azure Files, mounted over SMB",
+        "Azure Managed Disks, attached to each client machine",
+        "Azure Blob Storage with the NFS 3.0 blob endpoint"
+      ],
+      "correctIndex": 1,
+      "explanation": "Azure Files exposes fully managed SMB/NFS file shares that mount like a traditional network drive, so a legacy app expecting a UNC path needs no rework. Blob Storage is object storage accessed via REST and has no real directory structure. Managed Disks are block volumes that attach to a single VM, not a shared share. The NFS blob endpoint still is not the SMB network drive the legacy Windows app expects.",
+      "conceptTag": "azure-files-smb-share"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "When designing an active-passive deployment across two Azure regions with a global router in front, why is cross-region database replication almost always asynchronous, and what does that imply?",
+      "options": [
+        "Because Azure forbids synchronous cross-region replication; it implies zero data loss on failover",
+        "Because asynchronous replication is cheaper; it implies the secondary is always perfectly current",
+        "Because speed-of-light latency makes synchronous cross-region commits impractical; it implies a nonzero RPO where recent writes can be lost",
+        "Because the global router handles replication; it implies RPO and RTO are both zero"
+      ],
+      "correctIndex": 2,
+      "explanation": "Physical distance between regions makes a synchronous commit round-trip too slow, so cross-region replication is asynchronous and the secondary lags slightly behind, producing a nonzero Recovery Point Objective. Azure does not forbid synchronous replication as a rule; physics makes it impractical. Async replication does not keep the secondary perfectly current. A global router like Front Door or Traffic Manager routes traffic but does not replicate data.",
+      "conceptTag": "cross-region-async-replication-rpo"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "An Azure App Service must access Azure SQL and Key Vault with no connection strings or passwords in code or config. What is the recommended approach?",
+      "options": [
+        "Store credentials in Key Vault and hard-code the Key Vault access key in app settings",
+        "Generate a service principal client secret and inject it as an encrypted environment variable",
+        "Use a shared access signature token embedded in the deployment pipeline",
+        "Enable a system-assigned managed identity, grant it RBAC roles on SQL and Key Vault, and authenticate with DefaultAzureCredential"
+      ],
+      "correctIndex": 3,
+      "explanation": "A system-assigned managed identity gives the App Service an Entra ID identity; granting it RBAC roles on SQL and Key Vault and using DefaultAzureCredential means no secret is stored anywhere. Hard-coding a Key Vault access key just moves the secret problem. A service principal client secret is still a stored, leakable credential. A SAS token is for storage resources and is also a stored secret.",
+      "conceptTag": "managed-identity-passwordless-auth"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "You must process bursts of up to 100,000 files per minute (5s of CPU-heavy work each) quickly, without paying for idle capacity between bursts. Which architecture fits best?",
+      "options": [
+        "A fixed pool of 50 always-on VMs behind a load balancer to guarantee capacity",
+        "A single large App Service instance with in-process parallelism and a retry loop",
+        "A queue (e.g., Service Bus) buffering work, consumed by Azure Functions on the Consumption plan that scale from zero to many instances",
+        "Direct Blob-trigger processing on a Dedicated App Service Plan sized for peak load"
+      ],
+      "correctIndex": 2,
+      "explanation": "A queue absorbs the burst as a shock absorber while Functions on the Consumption plan scale out to many parallel instances and back to zero, so you pay only for actual execution time. Fifty always-on VMs cost money around the clock for capacity used only in bursts. One large instance cannot process 100,000 items quickly and risks crashing. A Dedicated plan sized for peak also pays for idle peak capacity continuously.",
+      "conceptTag": "queue-buffered-serverless-scaling"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Service A calls Service B synchronously. When B is down or overloaded you want A to keep working, and retries not to hammer B. What should you introduce?",
+      "options": [
+        "A tighter HTTP retry loop in Service A with no backoff",
+        "A Service Bus queue between A and B, so B consumes at its own pace with built-in retry and dead-lettering",
+        "A larger connection pool in Service A so more calls to B succeed",
+        "A shared database table that both services poll continuously"
+      ],
+      "correctIndex": 1,
+      "explanation": "Putting a Service Bus queue between the services decouples them: A keeps working when B is down, and B pulls messages at its own rate with automatic retries and a dead-letter queue for poison messages. A retry loop with no backoff hammers an already-struggling B. A bigger connection pool increases pressure on B rather than relieving it. A polled database table is a fragile, inefficient reimplementation of a message queue.",
+      "conceptTag": "queue-based-load-leveling"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A third-party library leak crashes your Azure App Service with OutOfMemoryException. Until a vendor patch arrives, what built-in mitigation keeps it online?",
+      "options": [
+        "Enable Always On so the process never shuts down",
+        "Scale the App Service Plan to a tier with more RAM so the leak never fills memory",
+        "Configure an Auto-Heal rule that recycles the worker process when private memory exceeds a threshold",
+        "Turn on the Application Insights profiler to garbage-collect the leaked objects"
+      ],
+      "correctIndex": 2,
+      "explanation": "App Service Auto-Heal can watch a memory metric and recycle the worker process before it hits an OutOfMemoryException, keeping the app online until the vendor patch arrives. Always On keeps the app warm but does nothing about a growing leak. More RAM only delays the crash. The Application Insights profiler collects diagnostics; it does not reclaim leaked memory.",
+      "conceptTag": "app-service-auto-heal"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Microsoft Entra ID fundamentally differ from on-premises Active Directory?",
+      "options": [
+        "Entra ID is just AD hosted on Azure VMs, still using Kerberos, GPOs, and organizational units",
+        "Entra ID replaces OAuth with LDAP so cloud apps can bind directly to the directory",
+        "Entra ID only manages domain-joined Windows desktops and cannot authenticate web apps",
+        "Entra ID uses internet protocols (OAuth 2.0, OIDC, SAML) and a flat directory with Conditional Access, not LDAP/Kerberos/GPOs"
+      ],
+      "correctIndex": 3,
+      "explanation": "Entra ID is a cloud-native identity provider built on OAuth 2.0, OpenID Connect, and SAML over HTTPS, with a flat directory governed by Conditional Access policies. It is not on-prem AD in the cloud and has no GPOs, OUs, Kerberos, or NTLM. It does not use LDAP. Its main job is authenticating access to cloud apps and APIs, not managing desktop machines.",
+      "conceptTag": "entra-id-vs-on-prem-ad"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the relationship between a Bicep template and ARM JSON?",
+      "options": [
+        "Bicep is an authoring-time language that compiles to ARM JSON and deploys through the same ARM APIs",
+        "Bicep is a separate deployment engine in Azure that bypasses Azure Resource Manager",
+        "Bicep is a runtime interpreter that executes .bicep files directly on Azure hosts",
+        "Bicep replaces ARM entirely and existing ARM templates must be rewritten to keep working"
+      ],
+      "correctIndex": 0,
+      "explanation": "Bicep is a domain-specific language that transpiles to ARM JSON and deploys through the identical Azure Resource Manager APIs, so it is purely an authoring-time improvement with no runtime difference. There is no separate Bicep engine or runtime in Azure. Existing ARM templates keep working unchanged, which is why adopting Bicep carries essentially no migration risk.",
+      "conceptTag": "bicep-compiles-to-arm"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In Azure Service Bus, when should you choose a Topic with subscriptions instead of a Queue?",
+      "options": [
+        "When you need the fastest possible single-consumer throughput for one worker pool",
+        "When more than one independent service must each receive and process its own copy of the same message",
+        "When you want messages consumed exactly once by whichever consumer grabs them first",
+        "When you need larger message sizes than a Queue allows"
+      ],
+      "correctIndex": 1,
+      "explanation": "A Topic delivers a copy of each message to every subscription, each with its own delivery state, so multiple independent services can react to the same event without blocking one another. A single worker pool consuming each message once is exactly what a Queue provides. Exactly-once competing-consumer delivery is also the Queue model. Message size limits are the same for queues and topics.",
+      "conceptTag": "service-bus-topic-fanout"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A globally distributed Cosmos DB app: customers see stale data written by other customers, but Strong consistency triples checkout latency. What resolves this without an all-or-nothing choice?",
+      "options": [
+        "Eventual consistency everywhere, accepting that users may not see their own writes",
+        "Strong consistency but only in the European region",
+        "Session consistency, giving each client read-your-own-writes without paying Strong's global latency",
+        "Consistent Prefix globally, which guarantees every client sees the latest write"
+      ],
+      "correctIndex": 2,
+      "explanation": "Session consistency guarantees a client sees its own prior writes immediately, so a customer always sees the order they just placed, without the cross-region synchronous round trip Strong requires. Eventual consistency would not even guarantee read-your-own-writes. Strong consistency cannot be scoped to one region for a globally distributed account. Consistent Prefix prevents out-of-order reads but does not guarantee seeing the latest write.",
+      "conceptTag": "cosmos-session-consistency"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why does swapping an App Service deployment slot avoid downtime during a release?",
+      "options": [
+        "The swap redeploys the production slot from scratch but does so faster than a normal deploy",
+        "Azure queues all incoming requests during the swap and replays them once the new version boots",
+        "The swap runs both versions concurrently and load-balances 50/50 permanently",
+        "The new version is already running and warmed up in the staging slot, and the swap just re-points routing to it"
+      ],
+      "correctIndex": 3,
+      "explanation": "The staging slot already runs the fully warmed-up new version, so the swap only re-points the hostname and routing between the two running slots, completing in seconds with no cold start. Nothing is redeployed during a swap. Requests are not queued and replayed. The swap is a role exchange, not a permanent 50/50 split.",
+      "conceptTag": "deployment-slot-swap"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Both Azure Front Door and Azure Application Gateway are Layer 7 load balancers. What is the key difference in scope?",
+      "options": [
+        "Front Door is regional and VNet-integrated; Application Gateway is a global edge service",
+        "Front Door operates at Layer 4 only; Application Gateway is the only Layer 7 option",
+        "They are identical; Front Door is simply the newer name for Application Gateway",
+        "Front Door is a global edge service routing across regions; Application Gateway is a regional service within one VNet"
+      ],
+      "correctIndex": 3,
+      "explanation": "Both are Layer 7, but Front Door is a global, edge-based service that routes across regions and continents, while Application Gateway is a regional service that lives inside one VNet. The first option reverses their scopes. Front Door is not Layer 4 only. They are distinct services often used together, not two names for one thing.",
+      "conceptTag": "front-door-global-vs-app-gateway-regional"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does a Durable Functions Orchestrator maintain state across a long-running, multi-step workflow on stateless serverless compute?",
+      "options": [
+        "It holds an open thread in memory for the entire duration, billed continuously while waiting",
+        "It persists each step's result to storage and replays the function from the start, returning recorded results for already-completed steps",
+        "It writes the current step number to a database table that the developer must manage manually",
+        "It runs on a dedicated always-on VM that Azure provisions behind the scenes"
+      ],
+      "correctIndex": 1,
+      "explanation": "Durable Functions uses event sourcing: every activity result is written to storage, and on resume the orchestrator replays from the beginning, instantly returning recorded results for completed steps and only doing new work past that point. It does not hold a live thread or bill for idle wait time. The developer does not hand-manage a step table; the framework does it. There is no hidden always-on VM.",
+      "conceptTag": "durable-functions-event-sourcing-replay"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Both Key Vault and encrypted App Service settings keep secrets out of source code. What does Key Vault add?",
+      "options": [
+        "It stores secrets in plaintext so apps can read them faster",
+        "It automatically injects secrets into every App Service in the subscription",
+        "Centralized per-secret access control, audit logging of every access, and one-place rotation across all consumers",
+        "It removes the need for any authentication because the vault is private by default"
+      ],
+      "correctIndex": 2,
+      "explanation": "Key Vault centralizes secrets with fine-grained per-secret access policies, a complete audit trail of every read, and rotation in one place that all consumers pick up. It does not store secrets in plaintext. It does not auto-inject secrets everywhere; apps must be granted access and read them. Access still requires authentication, ideally via a managed identity.",
+      "conceptTag": "key-vault-centralized-secrets"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Azure API Management let you enforce rate limiting, caching, and payload transformation without changing the backend services?",
+      "options": [
+        "It injects a shared library into each backend service at deploy time",
+        "It rewrites the backend source code automatically based on an OpenAPI spec",
+        "It requires each backend to implement an APIM SDK callback for every policy",
+        "It sits as a gateway in front of the backends and applies configurable policies to requests and responses at that layer"
+      ],
+      "correctIndex": 3,
+      "explanation": "APIM is a managed gateway that intercepts requests and responses and applies policies such as rate limiting, caching, and transformation, so backend code is untouched. It does not inject libraries into backends, rewrite their source, or require an SDK callback. The backend simply receives already-filtered, already-shaped traffic.",
+      "conceptTag": "apim-gateway-policies"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does a GitHub Actions workflow authenticate to Azure using a federated credential, with no stored Azure client secret?",
+      "options": [
+        "Azure AD is pre-configured to trust GitHub's short-lived OIDC tokens for a specific repo/branch and exchanges one for an Azure access token",
+        "GitHub stores an encrypted copy of the Azure client secret and decrypts it at runtime",
+        "The workflow downloads a certificate from Key Vault using a bootstrap password",
+        "Azure disables authentication for CI pipelines originating from GitHub IP ranges"
+      ],
+      "correctIndex": 0,
+      "explanation": "With a federated credential, Azure AD is told in advance to trust OIDC tokens issued by GitHub Actions for an exact repo, branch, and workflow; at runtime the workflow presents that short-lived token and Azure AD exchanges it for a real access token, so no Azure secret is stored. There is no stored client secret, no bootstrap password, and authentication is never disabled by IP.",
+      "conceptTag": "workload-identity-federation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What failure scope does an Availability Zone protect against that an Availability Set does not?",
+      "options": [
+        "A single VM's guest OS crashing",
+        "The loss of an entire datacenter, since zones are physically separate datacenters within a region",
+        "A single rack losing power within one datacenter",
+        "A region-wide outage affecting every datacenter in the region"
+      ],
+      "correctIndex": 1,
+      "explanation": "An Availability Zone is a physically separate datacenter within a region, so spreading VMs across zones survives an entire datacenter going offline. A guest OS crash is a single-instance concern. A single rack losing power is what an Availability Set already protects against. A full region-wide outage needs multi-region deployment, not just zones.",
+      "conceptTag": "availability-zone-vs-set"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "When is Azure Event Grid a better fit than Azure Service Bus?",
+      "options": [
+        "When you need guaranteed ordered delivery with dead-lettering for a multi-step workflow",
+        "When you need transactional message batching with sessions",
+        "When you need massively scalable, low-latency fan-out of discrete events (e.g., 'a blob was created') to many subscribers",
+        "When you need messages to survive for 14 days with exactly-once processing guarantees"
+      ],
+      "correctIndex": 2,
+      "explanation": "Event Grid is built for high-volume, low-latency routing of discrete 'something happened' events from Azure resources to many subscriber types. Ordered delivery with dead-lettering, transactional batching with sessions, and long retention with strong delivery guarantees are all Service Bus strengths, not Event Grid's design center.",
+      "conceptTag": "event-grid-vs-service-bus"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does a zone-redundant Azure SQL configuration differ from cross-region Active Geo-Replication?",
+      "options": [
+        "Zone-redundant failover is manual and lossy; geo-replication is automatic and lossless",
+        "They are the same feature; 'zone-redundant' is the marketing name for geo-replication",
+        "Zone-redundant protects against a full regional outage; geo-replication only protects a single zone",
+        "Zone-redundant: synchronous in-region replication with automatic near-zero-loss failover. Geo-replication: asynchronous cross-region with a nonzero RPO"
+      ],
+      "correctIndex": 3,
+      "explanation": "Zones within a region are close enough for synchronous replication, so a zone-redundant database fails over automatically with little or no data loss. Cross-region geo-replication must be asynchronous over long distances, so a sudden failover can lose the last few seconds of writes. The other options invert the properties or conflate the two tiers, which are normally layered together.",
+      "conceptTag": "zone-redundant-vs-geo-replication"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does putting related resources in one Azure Resource Group simplify tearing down an environment?",
+      "options": [
+        "Azure automatically prevents any resource in a group from ever being deleted",
+        "Deleting the resource group deletes every resource it contains in one operation",
+        "Resource groups replicate their contents to a backup region for instant restore",
+        "Resources in a group are billed for free once the group exceeds ten items"
+      ],
+      "correctIndex": 1,
+      "explanation": "A resource group bundles resources that share a lifecycle, so deleting the group tears down every resource in it with a single operation, which is ideal for disposable dev or test environments. Resource groups do not block deletion, do not replicate contents to another region, and have no bearing on pricing.",
+      "conceptTag": "resource-group-lifecycle"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How can an App Service authenticate to Key Vault with no secret, connection string, or certificate anywhere in its configuration?",
+      "options": [
+        "It embeds a certificate in the container image, which is not technically 'configuration'",
+        "Its managed identity lets code request a short-lived token from the platform's metadata endpoint, with Azure issuing and rotating the credential",
+        "It uses the storage account key, which Azure considers exempt from secret rules",
+        "It authenticates anonymously because Key Vault trusts all traffic from Azure datacenters"
+      ],
+      "correctIndex": 1,
+      "explanation": "A managed identity gives the resource its own Entra ID identity; the SDK fetches a short-lived token from the platform's instance metadata endpoint, and Azure issues and rotates the underlying credential invisibly. An embedded certificate is still a stored secret. The storage account key is a secret too. Key Vault does not trust traffic just because it comes from Azure; the caller must be an authorized identity.",
+      "conceptTag": "managed-identity-token-flow"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Azure Front Door's 'Split TCP' architecture reduce connection-setup latency for distant clients?",
+      "options": [
+        "It caches all responses at the edge so the origin is never contacted",
+        "It compresses the TLS handshake into a single UDP packet",
+        "It terminates the client's TCP/TLS handshake at the nearest edge over short round trips and reuses a persistent edge-to-origin connection",
+        "It routes the client directly to the origin but over a faster fiber path"
+      ],
+      "correctIndex": 2,
+      "explanation": "Front Door uses anycast to send the client to the nearest edge, where the expensive multi-round-trip TCP and TLS setup happens over a short local distance; the long-haul edge-to-origin leg reuses an already-established persistent connection. This helps even fully dynamic, uncacheable content, so it is not about caching. It does not turn TLS into one UDP packet, and the client does not connect directly to the origin.",
+      "conceptTag": "front-door-split-tcp"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why does Azure keep App Configuration separate from Key Vault?",
+      "options": [
+        "App Configuration is a deprecated predecessor of Key Vault",
+        "Key Vault cannot store strings, only binary certificates",
+        "App Configuration is only available in government cloud regions",
+        "Non-secret settings and feature flags have different sensitivity, access, and update-frequency needs than genuine secrets"
+      ],
+      "correctIndex": 3,
+      "explanation": "App Configuration is optimized for frequent, low-friction updates to non-secret settings and feature flags by a broad set of people, while Key Vault applies stricter access control and audit logging suited to genuine secrets. App Configuration is a current, separate service, not deprecated. Key Vault stores secret strings fine, and App Configuration is broadly available.",
+      "conceptTag": "config-vs-secrets-separation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "An application's VMs are all in one Availability Set. What resilience gap remains?",
+      "options": [
+        "A full datacenter outage still takes down every VM, since an Availability Set only spreads VMs within one datacenter",
+        "None; an Availability Set protects against every category of Azure failure",
+        "The VMs cannot survive a single rack's power failure",
+        "Azure's planned host maintenance will reboot all VMs simultaneously"
+      ],
+      "correctIndex": 0,
+      "explanation": "An Availability Set spreads VMs across fault and update domains inside one datacenter, so it handles rack failures and staggered maintenance but cannot survive the whole datacenter going offline; that requires Availability Zones. It does protect against a single rack failure and against simultaneous maintenance reboots, so those are not the remaining gap.",
+      "conceptTag": "availability-set-datacenter-gap"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the practical benefit of Cosmos DB offering five consistency levels rather than just Strong or Eventual?",
+      "options": [
+        "It lets you disable consistency entirely to maximize write throughput",
+        "Levels like Bounded Staleness and Session fill the middle ground, matching a precise latency/consistency trade-off to the workload",
+        "Each level corresponds to a different pricing tier with no behavioral difference",
+        "The extra levels only apply to single-region accounts"
+      ],
+      "correctIndex": 1,
+      "explanation": "The five levels between Strong and Eventual let an application pick a trade-off that matches its real needs; Session, for instance, gives read-your-own-writes at far lower cost than Strong. No level disables consistency outright. The levels differ in behavior, not just price, and they apply to multi-region accounts too.",
+      "conceptTag": "cosmos-tunable-consistency-spectrum"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does an Azure Storage Shared Access Signature (SAS) token let you do?",
+      "options": [
+        "Grant a client the storage account's master key with a friendlier name",
+        "Encrypt blobs at rest using a customer-managed key",
+        "Grant scoped, time-limited, permission-limited access to a specific storage resource without sharing the account key",
+        "Replicate a container to another region on demand"
+      ],
+      "correctIndex": 2,
+      "explanation": "A SAS token delegates narrow access to a specific blob or container with chosen permissions and an expiry, so an untrusted client never needs the account master key. It is not the master key renamed. It has nothing to do with encryption-at-rest keys or with cross-region replication.",
+      "conceptTag": "sas-token-scoped-access"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do Service Bus Sessions guarantee ordered processing of related messages when multiple consumers compete on one queue?",
+      "options": [
+        "They pause all consumers except one until the queue is empty",
+        "They sort the entire queue by timestamp before any consumer reads",
+        "They disable competing consumers and force a single-threaded receiver",
+        "All messages sharing a Session ID are locked to a single consumer and processed in order, while other sessions run in parallel"
+      ],
+      "correctIndex": 3,
+      "explanation": "A session binds every message with the same Session ID to one consumer that processes them in send order, while other consumers concurrently handle different sessions, so per-entity ordering is preserved without sacrificing overall throughput. Sessions do not pause other consumers, globally sort the queue, or force a single-threaded receiver.",
+      "conceptTag": "service-bus-sessions-ordering"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Azure Managed HSM differ from a standard multi-tenant Key Vault?",
+      "options": [
+        "It is simply a standard Key Vault with a higher request-rate limit",
+        "It stores secrets in multiple regions automatically, unlike standard Key Vault",
+        "It provides dedicated, single-tenant, FIPS 140-2 Level 3 validated hardware, required for specific regulatory mandates",
+        "It removes the need for access policies because the hardware is physically isolated"
+      ],
+      "correctIndex": 2,
+      "explanation": "Managed HSM gives a customer a dedicated, single-tenant hardware security module validated to FIPS 140-2 Level 3, which certain financial and government regulations specifically require. Standard multi-tenant Key Vault is secure and sufficient for most workloads. Managed HSM is not just a rate-limit bump, does not auto-replicate secrets across regions, and still uses access control.",
+      "conceptTag": "managed-hsm-single-tenant"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why use Azure resource tags instead of encoding ownership and cost-center info in resource names?",
+      "options": [
+        "Tags are cheaper to store than long resource names",
+        "Tags are structured key-value metadata that can be queried, filtered, and aggregated reliably, unlike name-string parsing",
+        "Resource names cannot be changed once set, but tags rename the resource",
+        "Tags are required for a resource to be billable at all"
+      ],
+      "correctIndex": 1,
+      "explanation": "Tags attach structured key-value metadata to resources, so cost tools and governance can aggregate by team, project, or environment reliably, whereas parsing that information out of resource names is fragile. Storage cost is not the point, tags do not rename anything, and resources are billable with or without tags.",
+      "conceptTag": "resource-tagging-metadata"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does the Azure Policy 'Deny' effect differ from 'Audit'?",
+      "options": [
+        "Deny deletes the non-compliant resource after creation; Audit leaves it in place",
+        "Deny and Audit both block creation, but Deny also emails an administrator",
+        "Deny blocks the non-compliant resource from being created at all; Audit lets creation succeed and only logs the violation",
+        "Audit blocks creation in production; Deny only applies to dev subscriptions"
+      ],
+      "correctIndex": 2,
+      "explanation": "The Deny effect rejects the creation request outright, so a non-compliant resource never exists, while Audit permits creation and merely records the violation for later review. Deny does not create-then-delete, does not just add an email, and neither effect is scoped to an environment by design.",
+      "conceptTag": "azure-policy-deny-vs-audit"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does an Azure Private Endpoint provide beyond IP firewall rules on a PaaS service's public endpoint?",
+      "options": [
+        "It encrypts the traffic, which firewall rules do not",
+        "It increases the service's throughput limits",
+        "It automatically rotates the service's access keys",
+        "It gives the service a private IP in your VNet so traffic never traverses the public internet, removing the public endpoint from the path"
+      ],
+      "correctIndex": 3,
+      "explanation": "A Private Endpoint projects the PaaS service to a private IP inside your VNet, so traffic stays on Microsoft's backbone and the public endpoint is no longer in the path, a stronger guarantee than IP firewall rules on a still-public endpoint. It is not primarily about encryption, does not change throughput limits, and does not rotate keys.",
+      "conceptTag": "private-link-network-isolation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Azure VNet Peering enable?",
+      "options": [
+        "It lets resources in two VNets communicate via private IPs over Azure's backbone, without public internet transit",
+        "It merges two VNets into one address space, requiring overlapping IP ranges",
+        "It exposes both VNets through a shared public load balancer",
+        "It automatically removes all NSG rules between the two networks"
+      ],
+      "correctIndex": 0,
+      "explanation": "Peering connects two VNets so their resources talk over private IPs on Azure's backbone with no public internet hop. It does not merge address spaces and in fact requires non-overlapping ranges. It adds no public load balancer, and NSGs on either side still apply after peering.",
+      "conceptTag": "vnet-peering-private-connectivity"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the main advantage of enforcing rate limiting and API key validation at an APIM gateway rather than in each backend service?",
+      "options": [
+        "It makes each backend service run faster by removing its business logic",
+        "Cross-cutting concerns are applied uniformly in one place, so a policy change is a config change, not a redeploy across many services",
+        "It lets backends skip authentication entirely because APIM trusts all callers",
+        "It is the only way to expose an OpenAPI definition"
+      ],
+      "correctIndex": 1,
+      "explanation": "Enforcing rate limiting and key validation at the gateway means every backend gets consistent policy, and changing the organization's rate limit is a single APIM configuration change rather than a redeploy across dozens of services. It does not speed up backends by removing logic, does not mean backends trust everything, and is not the only way to publish an OpenAPI spec.",
+      "conceptTag": "apim-centralized-cross-cutting"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In a Durable Functions orchestrator, why must non-deterministic operations (DateTime.Now, Guid.NewGuid, direct HTTP calls) be avoided in the orchestrator body?",
+      "options": [
+        "They are slower than the deterministic context APIs",
+        "The orchestrator is replayed from the start on resume, so non-deterministic calls would return different values than originally recorded, corrupting the run",
+        "Azure bills each such call at a premium rate",
+        "They cause the orchestrator to skip its final step"
+      ],
+      "correctIndex": 1,
+      "explanation": "Because the orchestrator function is replayed from the beginning every time it resumes, a call like DateTime.Now or Guid.NewGuid would produce a different result on replay than it did originally, breaking the event-history consistency the framework relies on. Such work must go through activity functions or deterministic context APIs. Performance and billing are not the reason, and it does not merely skip a step.",
+      "conceptTag": "orchestrator-determinism"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which Azure Storage redundancy option survives an entire region outage?",
+      "options": [
+        "LRS, since keeping three copies in the datacenter covers any failure",
+        "ZRS, since spreading copies across zones also spans regions",
+        "RA-GRS is the only option that survives losing a single disk",
+        "GRS, which asynchronously replicates data to a separate, distant region"
+      ],
+      "correctIndex": 3,
+      "explanation": "GRS and RA-GRS keep an asynchronously replicated copy in a separate, distant region, so data survives a full regional outage. LRS keeps three copies in one datacenter and cannot survive losing that datacenter. ZRS spans zones within one region, not multiple regions. Every tier, including LRS, already survives a single disk failure.",
+      "conceptTag": "storage-redundancy-options"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Azure Container Apps provide compared with running your own AKS cluster?",
+      "options": [
+        "Full, direct access to the Kubernetes API with nodes you size yourself",
+        "A single always-on VM per container with no autoscaling",
+        "A managed container platform (built on Kubernetes and KEDA) with scale-to-zero and event-driven autoscaling, and no cluster to operate",
+        "Identical functionality to AKS but at a fixed higher price"
+      ],
+      "correctIndex": 2,
+      "explanation": "Container Apps runs on Kubernetes and KEDA internally but hides the cluster entirely; you deploy an image plus scaling rules, and it can scale to zero and scale on event sources. Direct Kubernetes API access and node sizing is what AKS gives you. It does autoscale, and it is a lower-overhead middle ground, not an identical, pricier AKS.",
+      "conceptTag": "container-apps-managed-serverless"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why can Azure Front Door fail over faster than Azure Traffic Manager?",
+      "options": [
+        "Front Door has more backend health probes configured by default",
+        "Traffic Manager only decides at DNS resolution and then is out of the path until TTL expires; Front Door proxies every request and reroutes per request",
+        "Traffic Manager caches DNS forever; Front Door never uses DNS",
+        "Front Door replicates the database while Traffic Manager does not"
+      ],
+      "correctIndex": 1,
+      "explanation": "Traffic Manager works purely at DNS: once it returns an answer the client connects directly to that region and Traffic Manager cannot reroute until the cached DNS record's TTL expires. Front Door sits in the request path at the edge and can reroute the very next request when a backend fails. The other options misstate DNS behavior or invent database replication.",
+      "conceptTag": "dns-routing-vs-edge-proxy"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__12",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Application Insights give you 'out of the box' after adding its instrumentation?",
+      "options": [
+        "A separate dashboard for each of logs, metrics, and traces that you correlate manually",
+        "Only server CPU and memory counters, with no request-level data",
+        "Automatically collected requests, dependency calls, and exceptions, correlated into one end-to-end transaction view per request",
+        "Log storage only; metrics require a separate paid add-on"
+      ],
+      "correctIndex": 2,
+      "explanation": "Adding the Application Insights SDK automatically captures incoming requests, outbound dependency calls, and exceptions, all correlated under one operation ID into a single end-to-end transaction view. It is not a set of disconnected dashboards, it captures far more than CPU and memory, and metrics are included, not a paid add-on.",
+      "conceptTag": "app-insights-correlated-telemetry"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__12",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What trade-off does an Azure Proximity Placement Group make?",
+      "options": [
+        "It spreads VMs across more zones for better fault tolerance at higher latency",
+        "It reduces VM cost by packing them onto fewer hosts",
+        "It replicates VM disks synchronously across regions",
+        "It colocates VMs physically close to minimize inter-VM latency, sacrificing the fault isolation of spreading across zones"
+      ],
+      "correctIndex": 3,
+      "explanation": "A Proximity Placement Group asks Azure to place a set of VMs as physically close together as possible for sub-millisecond inter-VM latency, at the cost of losing the datacenter-level fault isolation that spreading across zones provides. It is not about cost packing or cross-region disk replication, and it is the opposite of spreading across zones.",
+      "conceptTag": "proximity-placement-group-tradeoff"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__12",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Azure Arc do?",
+      "options": [
+        "Projects non-Azure servers and Kubernetes clusters into Azure's control plane so Azure Policy and Monitor can govern them",
+        "Migrates on-premises servers into Azure as virtual machines automatically",
+        "Provides a faster network link between on-premises and Azure",
+        "Replaces Azure Resource Manager with an on-premises equivalent"
+      ],
+      "correctIndex": 0,
+      "explanation": "Azure Arc registers on-prem or other-cloud servers and Kubernetes clusters as Azure resources so the same Azure Policy and Azure Monitor tooling applies across a hybrid estate. It does not convert machines into Azure VMs, is not a network link product, and does not replace Azure Resource Manager.",
+      "conceptTag": "azure-arc-hybrid-governance"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__13",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why does Microsoft recommend Key Vault's RBAC permission model over the legacy Access Policy model?",
+      "options": [
+        "RBAC is faster at runtime because it caches permissions locally",
+        "RBAC manages Key Vault access through the same role system, tooling, and audit trail as every other Azure resource",
+        "Access Policies cannot grant read access to secrets at all",
+        "RBAC removes the need to grant any permissions because it trusts managed identities implicitly"
+      ],
+      "correctIndex": 1,
+      "explanation": "The RBAC model folds Key Vault permissions into Azure's general role-based access control, so access reviews, auditing, and tooling work the same as for any other resource, with granular built-in roles like Key Vault Secrets User. It is not about runtime caching, Access Policies can grant secret read access, and RBAC still requires explicit role assignments.",
+      "conceptTag": "key-vault-rbac-vs-access-policy"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__13",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Azure Service Bus Duplicate Detection work?",
+      "options": [
+        "It compares full message bodies and drops byte-identical duplicates forever",
+        "It requires consumers to call a Deduplicate() API on each message",
+        "It discards any message whose MessageId it has already seen within a configured time window",
+        "It prevents a producer from ever sending the same message twice by locking the sender"
+      ],
+      "correctIndex": 2,
+      "explanation": "Duplicate Detection has the broker remember MessageId values for a configured history window and silently drop a resend carrying a MessageId it already saw, making producer retries safe. It keys on MessageId, not the body, and not forever. Consumers need no special API call, and the producer is not locked; it can retry freely.",
+      "conceptTag": "service-bus-duplicate-detection"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__13",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why can one hot partition key in Cosmos DB cause 429 throttling even when the container's total provisioned RU/s is barely used?",
+      "options": [
+        "Because 429s only occur when total RU/s is exceeded, so the metric must be wrong",
+        "Because hot partitions disable autoscale for the whole container",
+        "Because Cosmos DB reserves 90% of RU/s for system operations",
+        "Because RU/s are divided across physical partitions, so a hot key is capped at its partition's share regardless of the container total"
+      ],
+      "correctIndex": 3,
+      "explanation": "Cosmos DB splits a container's provisioned RU/s roughly evenly across its physical partitions, so all traffic for one hot partition-key value competes for just that partition's slice and gets throttled with 429s even though the container's overall budget is mostly idle. The throttling metric is not wrong, hot partitions do not disable autoscale, and there is no 90% system reservation.",
+      "conceptTag": "cosmos-hot-partition-ru-allocation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__14",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What advantage does deploying to a staging slot and swapping give over deploying straight to production?",
+      "options": [
+        "The new version is warmed up and verifiable before it receives live traffic, and swapping back is an instant rollback",
+        "It halves the App Service Plan cost during deployment",
+        "It compiles the application ahead of time so no build server is needed",
+        "It guarantees the new version has no bugs before the swap"
+      ],
+      "correctIndex": 0,
+      "explanation": "Deploying to a staging slot lets the new version fully start, warm up, and pass smoke tests before the swap routes real users to it, and if something is wrong a second swap restores the previous version almost instantly. It does not reduce plan cost, is unrelated to build servers, and cannot guarantee the code is bug-free.",
+      "conceptTag": "staging-slot-warmup-rollback"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__14",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do Azure Functions' Consumption and Premium plans differ regarding cold starts?",
+      "options": [
+        "Both eliminate cold starts; the difference is only in pricing",
+        "Consumption scales to zero and pays a cold-start penalty on the first invocation after idle; Premium keeps pre-warmed instances to avoid that",
+        "Premium scales to zero faster; Consumption never scales to zero",
+        "Consumption has no cold starts because it always keeps one instance running"
+      ],
+      "correctIndex": 1,
+      "explanation": "The Consumption plan scales to zero when idle, so the next invocation after a quiet period pays a real cold-start cost; the Premium plan keeps a configurable set of pre-warmed instances so typical traffic never sees a cold start, at a higher baseline cost. Consumption does scale to zero and does have cold starts, so the other options are wrong.",
+      "conceptTag": "functions-plan-cold-start"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__14",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does a VM acquire a token via its managed identity without any stored secret?",
+      "options": [
+        "A hidden secret is baked into the VM image and obfuscated from the developer",
+        "The VM sends its administrator password to Entra ID over TLS",
+        "The SDK calls a link-local metadata endpoint reachable only from that instance, and Azure issues a short-lived token based on the request's origin",
+        "Azure copies a certificate into the VM's trusted store at every boot"
+      ],
+      "correctIndex": 2,
+      "explanation": "The SDK requests a token from the Instance Metadata Service at a link-local address only reachable from inside that specific VM; Azure's fabric recognizes which instance is asking and returns a short-lived scoped token. There is genuinely no stored secret, no password exchange, and no certificate injection at boot.",
+      "conceptTag": "imds-token-acquisition"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__15",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What characterizes Azure Blob Storage's Archive access tier?",
+      "options": [
+        "Highest storage cost, lowest retrieval latency",
+        "Same storage cost as Hot but with geo-replication included",
+        "The tier cannot be changed once a blob is created in it",
+        "Lowest storage cost, but retrieval requires a rehydration step that takes hours"
+      ],
+      "correctIndex": 3,
+      "explanation": "The Archive tier has the lowest storage price but a blob must be rehydrated to an online tier before it can be read, which can take hours. Lowest retrieval latency and highest cost describe the Hot tier. Archive is not priced like Hot, and a blob's tier can be changed at any time, including moving it out of Archive.",
+      "conceptTag": "blob-archive-tier"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__15",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Azure SQL's vCore purchasing model differ from the DTU model?",
+      "options": [
+        "vCore is always cheaper for the same performance",
+        "vCore exposes CPU and memory as independently chosen dimensions, while DTU bundles CPU, memory, and I/O into one opaque unit",
+        "DTU allows bring-your-own-license; vCore does not",
+        "vCore is only available for serverless databases"
+      ],
+      "correctIndex": 1,
+      "explanation": "The vCore model lets you set virtual cores and memory separately so you can scale the dimension that is actually the bottleneck, and it supports Azure Hybrid Benefit for existing SQL Server licenses; the DTU model blends CPU, memory, and I/O into one abstract number. vCore is not always cheaper, it is the model that supports license reuse, and it is not limited to serverless.",
+      "conceptTag": "sql-dtu-vs-vcore"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__15",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does the Azure Cosmos DB Change Feed let downstream consumers do?",
+      "options": [
+        "Run scheduled queries against a LastModified column more efficiently",
+        "Receive each insert and update as it happens via a persistent ordered log, instead of polling the container",
+        "Subscribe to delete events with full pre-delete document contents by default",
+        "Roll the container back to any prior point in time"
+      ],
+      "correctIndex": 1,
+      "explanation": "The Change Feed is a persistent, ordered, per-partition log of inserts and updates that consumers read as changes occur, removing the need for interval polling. It is a push-style stream, not a better polling query. By default it does not surface deletes, and it is not a point-in-time restore feature.",
+      "conceptTag": "cosmos-change-feed"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__16",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does an Azure Resource Lock (CanNotDelete) do that RBAC alone does not?",
+      "options": [
+        "It grants Owner-level users extra permissions on the resource",
+        "It encrypts the resource's configuration",
+        "It blocks deletion even for a user with full Owner rights until the lock is explicitly removed",
+        "It automatically backs up the resource before any change"
+      ],
+      "correctIndex": 2,
+      "explanation": "A CanNotDelete lock is evaluated independently of RBAC, so even an Owner must remove the lock as a deliberate separate step before deleting the resource, which is the point: a speed bump against accidental or scripted deletion. Locks do not grant permissions, encrypt anything, or create backups.",
+      "conceptTag": "resource-lock-vs-rbac"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__16",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the difference between Application Gateway WAF 'Detection' and 'Prevention' modes?",
+      "options": [
+        "Detection blocks the request and logs it; Prevention only blocks without logging",
+        "Both block matched requests; Prevention additionally quarantines the client IP",
+        "Detection applies only to SQL injection; Prevention applies only to XSS",
+        "Detection logs a matched malicious request but still forwards it to the backend; Prevention blocks the matched request"
+      ],
+      "correctIndex": 3,
+      "explanation": "In Detection mode the WAF records a rule match but passes the request through, which is useful for tuning out false positives; in Prevention mode it actually blocks the matched request and returns an error. Detection does not block, both modes cover the same rule set, and neither is limited to one attack class.",
+      "conceptTag": "waf-detection-vs-prevention"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__16",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "With Cosmos DB Multi-Region Writes, how is a conflict resolved when the same item is written concurrently in two regions?",
+      "options": [
+        "The write in the region geographically closer to the account's home region always wins",
+        "Both writes are rejected and the client must retry",
+        "A conflict resolution policy decides: Last-Write-Wins by timestamp is the default, or a custom stored procedure for application-specific merging",
+        "Cosmos DB locks the item globally before any write, so conflicts cannot occur"
+      ],
+      "correctIndex": 2,
+      "explanation": "With multi-region writes each region commits locally, and conflicts detected during replication are resolved by the configured policy: Last-Write-Wins on a timestamp by default, or a custom merge stored procedure. Geography is not the tiebreaker, writes are not rejected, and there is no global lock; avoiding that lock is the whole point of multi-master.",
+      "conceptTag": "cosmos-multi-region-write-conflicts"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__17",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Azure Bastion let an admin RDP/SSH to a VM securely?",
+      "options": [
+        "It opens the VM's RDP port only to Microsoft's IP ranges",
+        "It proxies the RDP/SSH session through a managed service over HTTPS, so the VM's own 3389/22 ports are never exposed to the internet",
+        "It installs a VPN client on the VM automatically",
+        "It replaces RDP with a passwordless SSH key stored on the VM"
+      ],
+      "correctIndex": 1,
+      "explanation": "Bastion is deployed into the VNet and brokers RDP/SSH through the portal over HTTPS, so the target VM needs no public RDP or SSH port and no inbound NSG rule for those ports, eliminating the port-scanning attack surface. It does not merely restrict the port by IP, install a VPN client, or change the authentication method.",
+      "conceptTag": "azure-bastion-no-public-port"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__17",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Azure Event Hubs' model resemble Kafka rather than Service Bus queues?",
+      "options": [
+        "It delivers each event to exactly one competing consumer, like a queue",
+        "It guarantees transactional, dead-lettered delivery to a single consumer",
+        "It partitions the stream and lets multiple independent consumer groups each read the entire stream at their own pace",
+        "It stores only the most recent event per partition key"
+      ],
+      "correctIndex": 2,
+      "explanation": "Event Hubs mirrors Kafka: events are spread across partitions and each consumer group tracks its own offset while reading the whole stream, so many consumers can process independently. Exactly-once delivery to one competing consumer and transactional dead-lettering are Service Bus semantics. Event Hubs retains a window of events, not just the latest per key.",
+      "conceptTag": "event-hubs-kafka-model"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__17",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Zone-Redundant Storage (ZRS) achieve zone-level fault tolerance without cross-region latency?",
+      "options": [
+        "It replicates asynchronously to a distant region, accepting a small data-loss window",
+        "It keeps three copies on different racks in one datacenter",
+        "It synchronously writes each write to three separate Availability Zones in the same region before acknowledging it",
+        "It caches writes at the edge and flushes them to one zone hourly"
+      ],
+      "correctIndex": 2,
+      "explanation": "ZRS commits every write synchronously to three physically separate zones within one region before acknowledging, so a zone outage causes no data loss and no cross-region latency. Asynchronous distant-region replication describes GRS. Three copies on racks in one datacenter is LRS. There is no hourly edge-cache flush.",
+      "conceptTag": "zrs-synchronous-zone-replication"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__18",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What role does an Azure Subscription play?",
+      "options": [
+        "It is a network boundary that isolates VNets from each other",
+        "It is a synonym for a Resource Group with a different name",
+        "It is the region in which resources are deployed",
+        "It is the top-level container tying billing and access management together; every resource belongs to exactly one"
+      ],
+      "correctIndex": 3,
+      "explanation": "A Subscription links a billing account and serves as a common RBAC scope, and every resource group and resource lives under exactly one Subscription, which is why organizations split prod, dev, and business units into separate Subscriptions. It is not a network boundary, not the same as a resource group, and not a region.",
+      "conceptTag": "azure-subscription-boundary"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__18",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does a Durable Entity model, as distinct from a Durable Functions orchestrator?",
+      "options": [
+        "A multi-step workflow with a defined sequence of activity calls",
+        "A single, individually-addressable stateful object whose state persists automatically across separate invocations",
+        "A stateless HTTP-triggered function with a retry policy",
+        "A timer that fires on a cron schedule"
+      ],
+      "correctIndex": 1,
+      "explanation": "A Durable Entity models one addressable stateful object, such as a specific shopping cart, and the framework persists its state between calls so no external database is needed just to track it. Coordinating a sequence of steps is what an orchestrator does. It is not a stateless HTTP function or a cron timer.",
+      "conceptTag": "durable-entities-stateful-object"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__18",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Azure Chaos Studio provide?",
+      "options": [
+        "A load-testing service that simulates high request volume",
+        "Automatic rollback of any failed deployment",
+        "A managed, declarative way to inject controlled faults into real Azure resources, with built-in safety controls to limit blast radius",
+        "A staging environment that mirrors production traffic"
+      ],
+      "correctIndex": 2,
+      "explanation": "Chaos Studio is Azure's managed chaos-engineering service: you declaratively define fault-injection experiments such as shutting down a VM, adding latency, or throttling the network against real resources, with automatic stop conditions and scoped targets to contain damage. It is not a load tester, a deployment-rollback tool, or a traffic-mirroring environment.",
+      "conceptTag": "chaos-studio-fault-injection"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__19",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Within an Availability Set, what does an Update Domain protect against?",
+      "options": [
+        "An unplanned power failure in one rack",
+        "A guest OS kernel panic on a single VM",
+        "A region-wide network outage",
+        "Azure's planned host maintenance rebooting every VM at once, by restarting update domains at different times"
+      ],
+      "correctIndex": 3,
+      "explanation": "Update Domains group VMs that Azure reboots together during planned host maintenance, and staggering those reboots keeps some replicas running throughout a maintenance window. An unplanned rack power failure is what Fault Domains address. A single guest OS panic and a region-wide outage are outside what an Availability Set's domains protect against.",
+      "conceptTag": "fault-domain-vs-update-domain"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__19",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What happens when a Service Bus message's delivery attempts reach the configured MaxDeliveryCount?",
+      "options": [
+        "Service Bus automatically moves it to the queue's Dead-Letter sub-queue, with no consumer code required",
+        "The message is permanently deleted",
+        "The consumer must call MoveToDeadLetter() explicitly",
+        "The message is redelivered indefinitely until it succeeds"
+      ],
+      "correctIndex": 0,
+      "explanation": "The broker itself counts delivery attempts, and once MaxDeliveryCount is reached it moves the message to the dead-letter sub-queue so a poison message stops blocking the main queue, with no application logic involved. The message is preserved, not deleted; the consumer need not call an API; and redelivery stops at the threshold.",
+      "conceptTag": "max-delivery-count-dlq"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__19",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In APIM's policy pipeline, where should a policy that rejects unauthorized requests be placed, and why?",
+      "options": [
+        "In the Outbound section, so the response can be inspected first",
+        "In the Inbound section, so the request is rejected before the backend is ever called",
+        "In the Backend section, so the backend can veto the rejection",
+        "In the On-Error section, since a rejection is an error"
+      ],
+      "correctIndex": 1,
+      "explanation": "Authentication and authorization checks belong in the Inbound stage so an invalid request is rejected before APIM ever calls the backend, saving the wasted downstream work. Rejecting in Outbound means the backend already ran. The Backend stage governs the call itself, and On-Error only runs after a failure has occurred.",
+      "conceptTag": "apim-policy-pipeline-stages"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__20",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Azure Container Registry geo-replication improve for a multi-region deployment?",
+      "options": [
+        "It reduces image storage cost by deduplicating layers globally",
+        "It signs images automatically for supply-chain security",
+        "Clusters pull images from a nearby regional replica, reducing pull latency and speeding scale-out",
+        "It compresses images so they transfer faster from a single central registry"
+      ],
+      "correctIndex": 2,
+      "explanation": "Geo-replication copies pushed images to regional ACR replicas so a cluster pulls from the closest one, cutting image-pull latency and letting new pods start faster during a scale-out. It adds regional copies rather than reducing storage cost, does not sign images, and is not about compression from one central registry.",
+      "conceptTag": "acr-geo-replication"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__20",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does federated credential authentication remove the stored secret from a CI/CD pipeline's Azure login?",
+      "options": [
+        "It stores the service principal secret in the pipeline's Key Vault instead of a variable",
+        "It uses the pipeline agent's IP address as the sole authentication factor",
+        "It rotates the client secret automatically every hour",
+        "The pipeline presents its own short-lived OIDC token, which Azure AD trusts via a pre-configured federation and exchanges for an access token"
+      ],
+      "correctIndex": 3,
+      "explanation": "Federated credentials configure a trust between Azure AD and the CI platform's token issuer for a specific repo and branch; the pipeline then presents its own short-lived OIDC token and Azure AD exchanges it for an access token, so no Azure secret is stored anywhere. It is not a relocated secret, not IP-based, and there is no client secret left to rotate.",
+      "conceptTag": "cicd-federated-credentials"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__20",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Cosmos DB Autoscale throughput differ from manually-provisioned RU/s?",
+      "options": [
+        "Autoscale removes all throughput limits and bills purely per request",
+        "Autoscale provisions a fixed RU/s but discounts it by 50%",
+        "You set a maximum RU/s; Cosmos scales actual throughput between 10% of max and max based on demand, billing the hourly peak used",
+        "Autoscale only scales up, never down, once a spike occurs"
+      ],
+      "correctIndex": 2,
+      "explanation": "With Autoscale you specify a maximum RU/s and Cosmos DB continuously adjusts provisioned throughput between 10% of that max and the max according to real-time demand, billing on the highest RU/s actually used each hour. It still has a ceiling, is not a flat discount on fixed capacity, and it scales both up and down.",
+      "conceptTag": "cosmos-autoscale-throughput"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__21",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Azure Static Web Apps bundle into a single resource?",
+      "options": [
+        "A static frontend plus a managed relational database",
+        "A static frontend built from a connected repo plus an automatically provisioned serverless Functions API",
+        "A container registry plus an AKS cluster",
+        "A CDN plus a dedicated always-on App Service Plan"
+      ],
+      "correctIndex": 1,
+      "explanation": "Azure Static Web Apps builds and hosts a static frontend from a linked GitHub or Azure DevOps repo and provisions a companion Azure Functions API under a conventional /api route, all as one resource with one deployment workflow. It does not bundle a database, a container registry with AKS, or a dedicated App Service Plan.",
+      "conceptTag": "static-web-apps-integrated-model"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__21",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What distinguishes Azure Logic Apps from Azure Functions?",
+      "options": [
+        "Logic Apps runs only on dedicated servers; Functions is the only serverless option",
+        "Logic Apps supports only C#; Functions supports many languages",
+        "Logic Apps is a design-first workflow built from pre-built connectors with little code; Functions is code-first",
+        "Logic Apps cannot be triggered by events, only on a schedule"
+      ],
+      "correctIndex": 2,
+      "explanation": "Logic Apps composes workflows visually from a large catalog of connectors with minimal code, aimed at integrating existing SaaS and enterprise systems; Functions is writing actual code that runs on a trigger. Both are serverless, Logic Apps is not a C# tool at all, and it supports many event triggers, not just schedules.",
+      "conceptTag": "logic-apps-vs-functions"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__21",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Azure Synapse Link for Cosmos DB enable analytics on operational data without a custom ETL pipeline?",
+      "options": [
+        "It runs analytical queries directly against the transactional container, sharing its RU budget",
+        "It exports the container to Blob Storage nightly as Parquet files",
+        "It converts Cosmos DB into a relational database for the duration of each query",
+        "It maintains an auto-synced columnar replica of the container, queryable from Synapse with no impact on the operational RU budget"
+      ],
+      "correctIndex": 3,
+      "explanation": "Synapse Link keeps a fully managed, near-real-time columnar copy of the Cosmos container that Synapse queries directly, isolated from the operational store so heavy analytics cannot degrade transactional throughput, and with no ETL pipeline to build. It does not share the RU budget, is not a nightly Parquet export, and does not turn Cosmos into a relational engine.",
+      "conceptTag": "synapse-link-htap"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__22",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does an Azure Blob Storage Lifecycle Management policy do?",
+      "options": [
+        "It applies declarative age-based rules that automatically transition blobs between tiers or delete them, with no custom code",
+        "It replicates blobs to a second region on a schedule",
+        "It compresses blobs older than 30 days to save space",
+        "It encrypts blobs with a new key each month"
+      ],
+      "correctIndex": 0,
+      "explanation": "A Lifecycle Management policy is a declarative set of rules on the storage account that Azure evaluates continuously, moving aging blobs from Hot to Cool to Archive or deleting them, without any script or scheduled job. It is not a replication, compression, or key-rotation feature.",
+      "conceptTag": "blob-lifecycle-management"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__22",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Azure Service Bus Auto-Forwarding let you do?",
+      "options": [
+        "Forward messages to an external HTTP webhook automatically",
+        "Have a queue or subscription automatically send its messages onward to another queue/topic, server-side, with no custom relay code",
+        "Duplicate every message to all subscriptions regardless of filters",
+        "Replay dead-lettered messages back to the main queue on a timer"
+      ],
+      "correctIndex": 1,
+      "explanation": "Auto-Forwarding chains a queue or subscription to another queue or topic within the same namespace, so messages flow onward server-side and you can compose multi-stage pipelines without writing a relay consumer. It targets Service Bus entities, not external webhooks; it does not bypass subscription filters; and it is not a dead-letter replay mechanism.",
+      "conceptTag": "service-bus-auto-forwarding"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__22",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does a Cosmos DB custom merge procedure improve on Last-Write-Wins for cross-region conflicts?",
+      "options": [
+        "It always keeps whichever write has the larger document size",
+        "It blocks concurrent writes in different regions so conflicts never arise",
+        "It receives both conflicting versions and returns a merged result, combining changes to different fields instead of discarding one write",
+        "It picks the write from the region with the most replicas"
+      ],
+      "correctIndex": 2,
+      "explanation": "A registered merge stored procedure is invoked on conflict with both versions of the item and returns a merged document, so concurrent edits to different fields are combined rather than one being thrown away as Last-Write-Wins would. It does not compare document sizes, does not block cross-region writes, and does not count replicas.",
+      "conceptTag": "cosmos-custom-merge-procedure"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__23",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What problem does an Azure DevOps Variable Group solve?",
+      "options": [
+        "It speeds up pipeline runs by caching build artifacts",
+        "It encrypts the pipeline YAML file itself",
+        "It grants every pipeline admin access to the subscription",
+        "It defines shared configuration and secrets once, referenced by many pipelines, so an update happens in one place"
+      ],
+      "correctIndex": 3,
+      "explanation": "A Variable Group holds shared values, and when linked to Key Vault, secrets, defined once and referenced by name from many pipelines, so rotating a secret or changing an endpoint is a single edit. It is not an artifact cache, does not encrypt YAML, and does not grant subscription admin rights.",
+      "conceptTag": "devops-variable-group"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__23",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is an Azure Managed Disk Snapshot, and what caveat applies to a running VM?",
+      "options": [
+        "A live mirror of the disk; it always reflects the latest writes",
+        "A point-in-time read-only copy; taken on a busy VM without quiescing, it captures only a crash-consistent state",
+        "A backup that requires stopping the VM first in all cases",
+        "A copy that replaces the original disk when created"
+      ],
+      "correctIndex": 1,
+      "explanation": "A snapshot is a point-in-time read-only copy taken while the source disk keeps running; if the VM is actively writing and the disk was not quiesced, the snapshot is only crash-consistent, which is usually recoverable but weaker than a clean copy. It is not a live mirror, does not always require stopping the VM, and does not replace the original disk.",
+      "conceptTag": "managed-disk-snapshot"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__23",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do Cosmos DB Hierarchical Partition Keys address a hot partition when a single-level key like TenantId is too coarse?",
+      "options": [
+        "They randomly hash all documents to eliminate any locality",
+        "They add key sub-levels (e.g., TenantId then UserId), spreading one big tenant's data across more partitions while keeping tenant-scoped queries efficient",
+        "They automatically increase the container's RU/s when a partition gets hot",
+        "They merge small partitions to balance load"
+      ],
+      "correctIndex": 1,
+      "explanation": "Hierarchical Partition Keys define up to three key levels, so even a single large tenant's data is subdivided, for example by UserId, across many physical partitions, while a query filtering on the top level still targets just that tenant efficiently. They do not randomly hash away locality, auto-scale RU/s, or merge partitions.",
+      "conceptTag": "hierarchical-partition-keys"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__24",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the core difference between Azure App Service and Azure Functions on the Consumption plan?",
+      "options": [
+        "App Service is serverless and pay-per-execution; Functions requires a fixed VM",
+        "They are identical; Functions is just App Service with a different portal blade",
+        "App Service hosts always-on apps, billed by the plan even when idle; Consumption-plan Functions are event-driven and bill per execution, scaling from zero",
+        "App Service cannot host REST APIs; only Functions can"
+      ],
+      "correctIndex": 2,
+      "explanation": "App Service is for traditional always-on web apps and APIs where you pay for the App Service Plan continuously; Azure Functions on the Consumption plan runs event-driven code, billing only for execution time and scaling from zero to many instances. The first option reverses the two, they are not the same product, and App Service hosts REST APIs perfectly well.",
+      "conceptTag": "app-service-vs-functions"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__25",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which statement about an Azure Resource Group is correct?",
+      "options": [
+        "A resource can belong to several resource groups at once for redundancy",
+        "A resource group is a physical datacenter location",
+        "Deleting a resource group leaves its resources running but unmanaged",
+        "Every resource belongs to exactly one resource group, which serves as a unit for lifecycle management, RBAC, and cost tracking"
+      ],
+      "correctIndex": 3,
+      "explanation": "A resource group is a logical container; each resource sits in exactly one, and the group is the natural unit for deploying or deleting an app's resources together, scoping RBAC, and viewing costs. A resource cannot be in multiple groups, a group is not a datacenter, and deleting a group deletes its resources.",
+      "conceptTag": "resource-group-basics"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__26",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is Azure Blob Storage designed for?",
+      "options": [
+        "Low-latency transactional row-and-column data with SQL queries",
+        "Block-level virtual disks attached to a single VM",
+        "Massively scalable storage of unstructured objects (images, video, logs, backups) accessed over HTTP/HTTPS",
+        "In-memory caching of frequently accessed keys"
+      ],
+      "correctIndex": 2,
+      "explanation": "Blob Storage is Azure's object store for large volumes of unstructured data, reachable over HTTP/HTTPS, and often used to serve files or back a data lake. Transactional tabular data with SQL is Azure SQL; block-level disks for a VM are Managed Disks; in-memory key caching is Azure Cache for Redis.",
+      "conceptTag": "blob-storage-object-store"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__27",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is Microsoft Entra ID (formerly Azure AD)?",
+      "options": [
+        "A managed Windows Server AD domain controller running on an Azure VM",
+        "A cloud identity and access management service using OAuth 2.0, OpenID Connect, and SAML to secure apps, APIs, and the portal",
+        "A network firewall service for filtering traffic between subnets",
+        "A key management service for encrypting storage accounts"
+      ],
+      "correctIndex": 1,
+      "explanation": "Microsoft Entra ID is Microsoft's cloud identity provider, handling authentication and authorization for cloud apps, APIs, the Azure portal, and Microsoft 365 using modern web protocols rather than Kerberos or NTLM. It is not a hosted domain controller, a firewall, or a key vault.",
+      "conceptTag": "entra-id-overview"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__28",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the purpose of an Azure Virtual Network (VNet)?",
+      "options": [
+        "To provide a public CDN endpoint for static content",
+        "To store and version application configuration",
+        "To provide a private, isolated network where Azure resources communicate securely, with custom IP spaces, subnets, routes, and NSGs",
+        "To load-balance HTTP traffic across regions"
+      ],
+      "correctIndex": 2,
+      "explanation": "A Virtual Network is the fundamental private-network building block in Azure, letting resources talk to each other, the internet, and on-prem securely, with your own address spaces, subnets, route tables, and Network Security Groups. It is not a CDN, a configuration store, or a global load balancer.",
+      "conceptTag": "vnet-purpose"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__29",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does a Log Analytics Workspace relate to Azure Monitor and Application Insights?",
+      "options": [
+        "It is an unrelated product that only stores VM performance counters",
+        "It is a dashboard tool that cannot store data itself",
+        "It replaces Azure Monitor entirely in newer subscriptions",
+        "It is the underlying KQL-queryable data store that logs and metrics land in, including workspace-based Application Insights telemetry"
+      ],
+      "correctIndex": 3,
+      "explanation": "A Log Analytics Workspace is the Kusto-queryable database beneath Azure Monitor, and modern workspace-based Application Insights stores its telemetry there too, so one query can join app data with infrastructure logs. It handles far more than VM counters, it does store data, and it complements rather than replaces Azure Monitor.",
+      "conceptTag": "log-analytics-workspace"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__beginner__30",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why do containerized Azure deployments typically pull from Azure Container Registry rather than Docker Hub?",
+      "options": [
+        "Docker Hub cannot host private images at all",
+        "ACR images are automatically smaller than the same images on Docker Hub",
+        "Azure blocks all outbound traffic to Docker Hub by default",
+        "ACR supports private-endpoint access, identity-based AcrPull via managed identity, and avoids Docker Hub's pull rate limits"
+      ],
+      "correctIndex": 3,
+      "explanation": "ACR is a private registry in your subscription that can be reached over a Private Endpoint, grants pull access to AKS or App Service via managed identity with no stored credential, and is not subject to Docker Hub's anonymous or free-tier pull throttling. Docker Hub does host private images, image size is unchanged, and Azure does not block Docker Hub by default.",
+      "conceptTag": "acr-vs-docker-hub"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__24",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the practical difference between a managed identity and a manually-created service principal?",
+      "options": [
+        "A managed identity is not a security principal and cannot be assigned RBAC roles",
+        "Both are service principals; Azure auto-rotates a managed identity's credential for on-Azure workloads, while a manual SP needs a stored, self-rotated secret",
+        "A service principal can only be used by humans, not applications",
+        "A managed identity works for workloads running anywhere, including other clouds, with no configuration"
+      ],
+      "correctIndex": 1,
+      "explanation": "A managed identity is itself a service principal in Entra ID; the difference is credential lifecycle. Azure provisions and rotates the credential automatically for workloads on Azure compute, whereas a manually created service principal requires you to store and rotate a client secret, which is the option for workloads outside Azure. Managed identities can hold RBAC roles, service principals represent apps, and managed identities do not work off-Azure.",
+      "conceptTag": "managed-identity-vs-service-principal"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__intermediate__25",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why assign an Azure Policy Initiative at the Management Group level?",
+      "options": [
+        "Management Groups are the only scope where the Deny effect works",
+        "It makes the policies advisory-only, removing enforcement",
+        "It applies the bundled policies to every subscription beneath, and new subscriptions added later inherit them automatically",
+        "It restricts the policies to a single resource group per subscription"
+      ],
+      "correctIndex": 2,
+      "explanation": "An Initiative bundles many policy definitions so they assign and report as one unit, and assigning it at a Management Group cascades to every subscription underneath, with future subscriptions inheriting it automatically so governance does not drift. Deny works at other scopes too, an Initiative does not weaken enforcement, and it is not limited to one resource group.",
+      "conceptTag": "policy-initiative-management-group"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__24",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does the Durable Functions Fan-out/Fan-in pattern run many activities concurrently?",
+      "options": [
+        "It spawns OS threads inside the orchestrator function",
+        "It merges all activities into one giant activity call",
+        "It requires a dedicated App Service Plan with many cores",
+        "It starts all activity calls without awaiting each individually, then awaits them together, letting them run on different instances in parallel"
+      ],
+      "correctIndex": 3,
+      "explanation": "Fan-out/fan-in kicks off many activity calls without awaiting each, collects the tasks, then awaits them all together with Task.WhenAll, so the activities run concurrently across multiple Function instances before the orchestrator resumes to aggregate. It does not spawn raw threads, combine activities into one, or need a dedicated multi-core plan.",
+      "conceptTag": "durable-functions-fan-out-fan-in"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__25",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In APIM, when should an API change be a new Version rather than a Revision?",
+      "options": [
+        "When the change is contract-breaking, so old and new consumers can run side by side and migrate on their own schedule",
+        "Whenever the change touches more than one endpoint",
+        "Only when the backend URL changes",
+        "Never; Revisions can safely carry any change"
+      ],
+      "correctIndex": 0,
+      "explanation": "A Version is a separately addressable API meant for breaking contract changes, letting v1 and v2 coexist while consumers opt in and migrate deliberately; a Revision is a non-breaking change silently promoted to the same URL. The deciding factor is whether the change breaks the contract, not how many endpoints it touches or whether the backend URL changes, and Revisions must not carry breaking changes.",
+      "conceptTag": "apim-version-vs-revision"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__advanced__26",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Application Insights correlate one logical request across independently-deployed microservices?",
+      "options": [
+        "Each service writes to a shared in-memory correlation cache",
+        "Every outbound call propagates W3C trace-context headers (a shared trace-id, per-hop span-id), which each service re-emits with its own telemetry",
+        "Application Insights infers the chain from wall-clock timestamps alone",
+        "A central coordinator service assigns request IDs synchronously"
+      ],
+      "correctIndex": 1,
+      "explanation": "Correlation relies on propagating W3C Trace Context headers: the trace-id stays constant across every hop while each hop gets its own span-id, and each service logs those alongside its telemetry so the backend can reassemble the end-to-end transaction. There is no shared memory cache, no timestamp guessing, and no synchronous central ID coordinator.",
+      "conceptTag": "distributed-tracing-trace-context"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A Function works in staging but gets 'Access denied' from Key Vault after promotion to production. Managed identity is enabled and code is unchanged. Most likely cause?",
+      "options": [
+        "DefaultAzureCredential is broken and needs a fallback client secret",
+        "Key Vault does not support managed identities in production tiers",
+        "Production's own managed identity was never granted access on the Key Vault; the grant is per-environment",
+        "The Function code must be recompiled for the production region"
+      ],
+      "correctIndex": 2,
+      "explanation": "The managed identity mechanism is identical across environments; what differs is the Key Vault access grant, which is configured per environment, so production's distinct identity needs its own access policy or Key Vault Secrets User role. Adding a fallback client secret just reintroduces stored-secret risk, Key Vault supports managed identities in all tiers, and recompiling per region is not a thing.",
+      "conceptTag": "per-environment-keyvault-grant"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "An Azure Function scales to hundreds of instances during a burst and outbound calls to Azure SQL start failing with connection errors, though SQL CPU is low. Most likely cause?",
+      "options": [
+        "Azure SQL silently throttles connections from serverless callers",
+        "The SQL Database has hit its storage size limit",
+        "The Function runtime caps total invocations per minute",
+        "SNAT port exhaustion: outbound connections consume a limited per-instance port pool, worsened by not reusing pooled connections"
+      ],
+      "correctIndex": 3,
+      "explanation": "Each outbound connection from an App Service or Function instance uses a SNAT port from a limited pool; hundreds of instances opening fresh, non-pooled SQL connections exhaust that pool and new connections fail, which looks database-side but is a networking limit. Fixes are genuine connection pooling and routing to SQL over a Private Endpoint. SQL is not throttling, out of storage, or the invocation cap.",
+      "conceptTag": "snat-port-exhaustion"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Your app is deployed to both East US and Southeast Asia behind Front Door, server-side processing time is identical, yet Asian users are slower. Most likely cause?",
+      "options": [
+        "Front Door cannot route to Asian backends and always uses US",
+        "A data dependency (e.g., Cosmos DB, a cache, or a third-party API) is single-region, so Asian requests pay a cross-continent round trip",
+        "The Asian region runs a slower VM SKU",
+        "TLS is disabled on the Asian endpoint"
+      ],
+      "correctIndex": 1,
+      "explanation": "When compute is multi-region but a dependency like Cosmos DB without the Asia region, a cache, or an external API stays single-region, every Asian request makes a cross-continent round trip that server-side CPU time does not capture. Front Door does route to regional backends, VM SKU parity is a deployment choice, and disabled TLS would break the site, not just slow it.",
+      "conceptTag": "single-region-dependency-latency"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Thousands of orders silently piled up in a Service Bus dead-letter queue for weeks with no alert. What is the key prevention step?",
+      "options": [
+        "Disable dead-lettering so messages stay in the main queue",
+        "Add a metric alert on the dead-letter message count (greater than 0) wired to an on-call action group",
+        "Increase MaxDeliveryCount so messages are retried more times",
+        "Move order processing off Service Bus entirely"
+      ],
+      "correctIndex": 1,
+      "explanation": "A dead-letter queue doing its job is fine; the failure was that nobody watched it, so the key prevention is a metric alert on the dead-lettered message count greater than zero routed to on-call, catching the first dead-lettered message in minutes. Disabling dead-lettering would let a poison message block the queue, raising MaxDeliveryCount only delays dead-lettering, and switching messaging platforms does not add observability.",
+      "conceptTag": "dlq-alerting"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "An Azure SQL Database's cost jumped with no code or traffic change. What is the most productive first investigation?",
+      "options": [
+        "Assume genuine new demand and pre-emptively scale the database up further",
+        "Rewrite the application's queries to use fewer joins",
+        "Compare actual DTU/vCore utilization against what it's provisioned at, looking for a sizing or purchasing-model mismatch",
+        "Migrate the database to Cosmos DB to reduce cost"
+      ],
+      "correctIndex": 2,
+      "explanation": "A single resource's cost jumping with no code or traffic change points to a configuration or sizing mismatch, such as being left scaled up after a one-time load event, a DTU-to-vCore mapping that landed on a pricier tier, or a serverless auto-pause misconfiguration, so the first step is comparing real utilization against the provisioned tier. Scaling up further, rewriting queries, or migrating engines does not address the likely cause.",
+      "conceptTag": "sql-cost-sizing-mismatch"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "azure__scenario__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "An App Service slot swap hangs and afterward requests intermittently get old vs new behavior. What is the safest recovery?",
+      "options": [
+        "Hot-patch the new version in production while users are affected",
+        "Delete the staging slot and redeploy production from scratch",
+        "Restart every instance and wait for the swap to complete on its own",
+        "Swap back immediately to restore the last-known-good version, since a swap is a fast metadata re-point"
+      ],
+      "correctIndex": 3,
+      "explanation": "Because a slot swap is a near-instant re-pointing of routing between two running slots, swapping back is the fastest route to a stable state when a swap hangs or yields mixed old and new behavior. Hot-patching in production under user impact, redeploying from scratch, or restarting and waiting are all slower and riskier than reversing the swap.",
+      "conceptTag": "slot-swap-recovery"
+    },
+    "error": null
+  }
+]

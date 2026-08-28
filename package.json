@@ -4,9 +4,13 @@
   "private": true,
   "description": "Static learning-question bank for .NET-centric backend interview prep. Content lives in /content as markdown; scripts/build.js compiles it into /docs for GitHub Pages.",
   "scripts": {
-    "build": "node scripts/build.js"
+    "build": "node scripts/build.js",
+    "gen:mcq": "node scripts/gen-mcq.js"
   },
   "dependencies": {
     "markdown-it": "^14.1.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.68.0"
   }
 }

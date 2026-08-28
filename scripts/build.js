@@ -10,7 +10,9 @@ const MarkdownIt = require("markdown-it");
 const ROOT = path.resolve(__dirname, "..");
 const CONTENT_DIR = path.join(ROOT, "content");
 const DATA_DIR = path.join(ROOT, "docs", "data");
+const MCQ_CACHE_DIR = path.join(CONTENT_DIR, "mcq");
 const LEVELS = ["Beginner", "Intermediate", "Advanced", "Scenario"];
+const LEVEL_ORDER = ["beginner", "intermediate", "advanced", "scenario"];
 const PLANNED_MARKER = "*(Planned — not yet answered.)*";
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
@@ -183,6 +185,237 @@ function snippetFromHtml(html) {
   return text.length > 200 ? `${text.slice(0, 200).trim()}…` : text;
 }
 
+// Plain-text clip of rendered answer HTML, for use as an MCQ option string.
+function mcqOptionText(html, max = 160) {
+  const text = html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > max ? `${text.slice(0, max).trim()}…` : text;
+}
+
+function normOption(s) {
+  return s.toLowerCase().replace(/\s+/g, " ").replace(/[.\s]+$/, "").trim();
+}
+
+// Builds docs/data/mcq/<topic>.json + index.json from two sources, in priority order:
+//   1. content/mcq/<topic>.json — LLM-pre-generated MCQs (status "ok"), committed to the repo.
+//   2. a deterministic "match the answer" fallback synthesised here: the stem is the real
+//      question, the correct option is this question's own answer snippet, and three
+//      distractors are answer snippets from other questions (same topic+level first).
+// Pure, synchronous, deterministic — no network, no randomness. CI runs this with no API key.
+function buildMcqData(byTopic, topics) {
+  const outDir = path.join(DATA_DIR, "mcq");
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const index = {};
+  let totGenerated = 0;
+  let totFallback = 0;
+  let totUnquizzable = 0;
+
+  // Flat list of every answered question, for widening the distractor pool beyond one topic.
+  const allAnswered = [];
+  for (const qs of byTopic.values()) {
+    for (const q of qs) if (q.status === "answered") allAnswered.push(q);
+  }
+
+  const orderedTopicIds = topics.map((t) => t.id);
+  for (const topicId of orderedTopicIds) {
+    const qs = (byTopic.get(topicId) || []).filter((q) => q.status === "answered");
+    if (qs.length === 0) continue;
+
+    const generatedById = loadGeneratedMcq(topicId);
+
+    const sorted = qs.slice().sort((a, b) => {
+      const lv = LEVEL_ORDER.indexOf(a.level) - LEVEL_ORDER.indexOf(b.level);
+      return lv !== 0 ? lv : a.seq - b.seq;
+    });
+
+    const items = [];
+    const byLevel = {};
+    const genByLevel = {};
+    const fbByLevel = {};
+    let generated = 0;
+    let fallback = 0;
+    let unquizzable = 0;
+
+    for (const q of sorted) {
+      const gen = generatedById.get(q.id);
+      let item = null;
+
+      if (gen) {
+        item = {
+          id: q.id,
+          topic: q.topic,
+          level: q.level,
+          seq: q.seq,
+          sourceQuestion: q.question,
+          stem: gen.stem,
+          options: gen.options,
+          correctIndex: gen.correctIndex,
+          explanation: gen.explanation,
+          origin: "generated",
+        };
+        generated += 1;
+        genByLevel[q.level] = (genByLevel[q.level] || 0) + 1;
+      } else {
+        const fb = buildFallbackMcq(q, sorted, allAnswered);
+        if (fb) {
+          item = fb;
+          fallback += 1;
+          fbByLevel[q.level] = (fbByLevel[q.level] || 0) + 1;
+        } else {
+          unquizzable += 1;
+        }
+      }
+
+      if (item) {
+        items.push(item);
+        byLevel[q.level] = (byLevel[q.level] || 0) + 1;
+      }
+    }
+
+    fs.writeFileSync(
+      path.join(outDir, `${topicId}.json`),
+      JSON.stringify(items, null, 2)
+    );
+
+    index[topicId] = {
+      total: items.length,
+      byLevel,
+      genByLevel,
+      fbByLevel,
+      generated,
+      fallback,
+      unquizzable,
+    };
+    totGenerated += generated;
+    totFallback += fallback;
+    totUnquizzable += unquizzable;
+  }
+
+  fs.writeFileSync(
+    path.join(outDir, "index.json"),
+    JSON.stringify(index, null, 2)
+  );
+
+  const stats = {
+    total: totGenerated + totFallback,
+    generated: totGenerated,
+    fallback: totFallback,
+    unquizzable: totUnquizzable,
+  };
+  if (stats.total > 0 && stats.generated / stats.total < 0.9) {
+    console.warn(
+      `MCQ: only ${stats.generated}/${stats.total} items are LLM-generated ` +
+        `(${stats.fallback} using the match-the-answer fallback). Run "npm run gen:mcq" to fill the gap.`
+    );
+  }
+  return stats;
+}
+
+// Reads content/mcq/<topic>.json (committed cache). Returns Map<sourceId, mcq> of entries
+// whose status is "ok" and whose payload passes a light structural check. Missing file -> empty.
+function loadGeneratedMcq(topicId) {
+  const out = new Map();
+  const file = path.join(MCQ_CACHE_DIR, `${topicId}.json`);
+  if (!fs.existsSync(file)) return out;
+
+  let entries;
+  try {
+    entries = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (err) {
+    console.warn(`MCQ: could not parse ${path.relative(ROOT, file)} — ignoring (${err.message})`);
+    return out;
+  }
+  if (!Array.isArray(entries)) return out;
+
+  for (const e of entries) {
+    if (!e || e.status !== "ok" || !e.mcq || typeof e.sourceId !== "string") continue;
+    const m = e.mcq;
+    const ok =
+      typeof m.stem === "string" &&
+      m.stem.trim().length > 0 &&
+      Array.isArray(m.options) &&
+      m.options.length === 4 &&
+      m.options.every((o) => typeof o === "string" && o.trim().length > 0) &&
+      new Set(m.options.map(normOption)).size === 4 &&
+      Number.isInteger(m.correctIndex) &&
+      m.correctIndex >= 0 &&
+      m.correctIndex <= 3 &&
+      typeof m.explanation === "string" &&
+      m.explanation.trim().length > 0;
+    if (!ok) {
+      console.warn(`MCQ: ${e.sourceId} in ${topicId}.json failed structural check — using fallback`);
+      continue;
+    }
+    out.set(e.sourceId, {
+      stem: m.stem.trim(),
+      options: m.options.map((o) => o.trim()),
+      correctIndex: m.correctIndex,
+      explanation: m.explanation.trim(),
+    });
+  }
+  return out;
+}
+
+// Deterministic "match the answer" MCQ: stem = the question, correct = its own answer snippet,
+// distractors = answer snippets from three other questions. Returns null when three distinct
+// distractors cannot be found (very small level pools).
+function buildFallbackMcq(q, sameTopicSorted, allAnswered) {
+  const correct = mcqOptionText(q.answerHtml);
+  if (!correct) return null;
+  const used = new Set([normOption(correct)]);
+
+  // Candidate pools, widening: same topic+level -> same topic -> everything. Each sorted by
+  // a stable key so the output only changes when content changes.
+  const sameLevel = sameTopicSorted.filter((o) => o.id !== q.id && o.level === q.level);
+  const sameTopic = sameTopicSorted.filter((o) => o.id !== q.id);
+  const everything = allAnswered
+    .filter((o) => o.id !== q.id)
+    .slice()
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+  const distractors = [];
+  for (const pool of [sameLevel, sameTopic, everything]) {
+    if (pool.length === 0) continue;
+    // Fixed stride walk seeded from this question's seq, so picks are spread across the pool
+    // rather than always the first few, but stay deterministic.
+    const stride = Math.max(1, Math.floor(pool.length / 3));
+    const start = q.seq % pool.length;
+    for (let k = 0; k < pool.length && distractors.length < 3; k++) {
+      const cand = pool[(start + k * stride) % pool.length];
+      const text = mcqOptionText(cand.answerHtml);
+      if (!text) continue;
+      const key = normOption(text);
+      if (used.has(key)) continue;
+      used.add(key);
+      distractors.push(text);
+    }
+    if (distractors.length >= 3) break;
+  }
+
+  if (distractors.length < 3) return null;
+
+  const options = distractors.slice(0, 3);
+  const correctIndex = q.seq % 4;
+  options.splice(correctIndex, 0, correct);
+
+  return {
+    id: q.id,
+    topic: q.topic,
+    level: q.level,
+    seq: q.seq,
+    sourceQuestion: q.question,
+    stem: q.question,
+    options,
+    correctIndex,
+    explanation:
+      "The correct choice is this question's own reference answer. Open the full question for the complete explanation.",
+    origin: "fallback",
+  };
+}
+
 function main() {
   const topics = loadTopics();
   const knownIds = new Set(topics.map((t) => t.id));
@@ -267,6 +500,8 @@ function main() {
     JSON.stringify(topicsWithCounts, null, 2)
   );
 
+  const mcqStats = buildMcqData(byTopic, topicsWithCounts);
+
   const totalAnswered = allQuestions.filter((q) => q.status === "answered").length;
   const publishedAt = new Date().toISOString();
 
@@ -277,6 +512,10 @@ function main() {
         publishedAt,
         totalQuestions: totalAnswered,
         totalTopics: files.length,
+        mcqTotal: mcqStats.total,
+        mcqGenerated: mcqStats.generated,
+        mcqFallback: mcqStats.fallback,
+        mcqUnquizzable: mcqStats.unquizzable,
       },
       null,
       2
@@ -289,6 +528,10 @@ function main() {
     `Built ${allQuestions.length} questions (${totalAnswered} answered, ${
       allQuestions.length - totalAnswered
     } planned) across ${files.length} content files -> docs/data/`
+  );
+  console.log(
+    `MCQ: ${mcqStats.total} quizzable (${mcqStats.generated} generated, ` +
+      `${mcqStats.fallback} fallback, ${mcqStats.unquizzable} unquizzable) -> docs/data/mcq/`
   );
 }
 
@@ -318,12 +561,24 @@ function updateHomepageMeta(totalQuestions, totalTopics, publishedAt) {
   }
 }
 
-try {
-  main();
-} catch (err) {
-  if (err instanceof BuildError) {
-    console.error(`Build failed: ${err.message}`);
-    process.exit(1);
+// Reusable pieces for scripts/gen-mcq.js (which parses content/*.md directly, since the
+// docs/data/questions/*.json outputs are git-ignored / CI-only).
+module.exports = {
+  parseContentFile,
+  loadTopics,
+  snippetFromHtml,
+  CONTENT_DIR,
+  LEVEL_ORDER,
+};
+
+if (require.main === module) {
+  try {
+    main();
+  } catch (err) {
+    if (err instanceof BuildError) {
+      console.error(`Build failed: ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
   }
-  throw err;
 }

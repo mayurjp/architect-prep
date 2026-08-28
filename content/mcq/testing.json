@@ -1,0 +1,2004 @@
+[
+  {
+    "sourceId": "testing__beginner__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What most fundamentally distinguishes a unit test from an integration test?",
+      "options": [
+        "A unit test isolates one unit by replacing its dependencies with fakes, while an integration test exercises real collaborators like a database or API to verify their wiring.",
+        "A unit test always runs in CI, while an integration test only runs on a developer's machine before commit.",
+        "A unit test can contain assertions, while an integration test only checks that no exception is thrown.",
+        "A unit test targets private methods directly, while an integration test is limited to public endpoints."
+      ],
+      "correctIndex": 0,
+      "explanation": "Unit tests deliberately mock external dependencies so only one unit's logic is under test and they run fast. Integration tests keep real dependencies to prove the code and the external system work together, such as EF mappings against a real schema. The other choices describe where or how tests run, not the defining difference.",
+      "conceptTag": "unit-vs-integration-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why is a mocking library like Moq used when unit testing a class such as OrderService that depends on IEmailSender?",
+      "options": [
+        "It substitutes a controllable fake for the real dependency so the test exercises only the class's own logic, without real side effects like sending email.",
+        "It compiles the dependency's real implementation faster by generating an optimized proxy at runtime.",
+        "It guarantees the class under test is thread-safe by serializing all calls to its dependencies.",
+        "It replaces the need for integration tests by connecting to a real SMTP server in a sandbox."
+      ],
+      "correctIndex": 0,
+      "explanation": "Moq generates a runtime proxy of an interface whose behavior you configure and whose interactions you can verify, isolating the unit under test from real dependencies and side effects. It is not a performance tool, does nothing for thread safety, and does not connect to real services or remove the need for integration tests.",
+      "conceptTag": "mocking-for-isolation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "For ASP.NET Core integration tests, why is Testcontainers often preferred over the EF Core in-memory provider when the database matters to what is being tested?",
+      "options": [
+        "The in-memory provider cannot be combined with WebApplicationFactory, whereas Testcontainers can.",
+        "Testcontainers runs tests faster because it avoids Docker image downloads after the first run.",
+        "It runs against a real database engine, exercising foreign keys, constraints, and SQL translation the in-memory provider does not reproduce faithfully.",
+        "The in-memory provider requires a paid license for production-grade constraint checking."
+      ],
+      "correctIndex": 2,
+      "explanation": "The in-memory provider is a different engine that does not enforce relational constraints or match SQL Server's query translation, so it gives false confidence. Testcontainers starts a real database in Docker for full fidelity, then disposes it. It does work with WebApplicationFactory, is generally slower not faster, and needs no license.",
+      "conceptTag": "integration-test-database-fidelity"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__1",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "An integration test calls Service A, which makes a real HTTP call to Service B. How do you stabilize the test without running Service B, given Moq cannot help here?",
+      "options": [
+        "Replace HttpClient with a Moq mock of the HttpClient class and set up the JSON responses directly.",
+        "Run a local WireMock server on a dynamic port, point Service A's HttpClient at it, and script the canned HTTP responses it should return.",
+        "Add a Polly retry policy so transient failures from Service B are absorbed during the test run.",
+        "Move the assertion into a loop that retries until Service B happens to be reachable."
+      ],
+      "correctIndex": 1,
+      "explanation": "Moq only fakes in-process C# interfaces, not an HTTP server, so you stand up a real stub HTTP server on a local port and repoint the client. It returns canned responses, including error codes, so you can test serialization and error handling offline. Retry policies and retry loops mask flakiness rather than removing the external dependency.",
+      "conceptTag": "http-stubbing-wiremock"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A team has 95% unit-test coverage but frequent production bugs. What best explains the gap?",
+      "options": [
+        "95% coverage is too low; only 100% line and branch coverage reliably prevents production defects.",
+        "The unit tests are running too fast for the CI environment to record failures accurately.",
+        "Coverage below 100% means the uncovered 5% contains all the bugs by definition.",
+        "Coverage records which lines ran, not whether tests asserted correct behavior; unit tests that mock everything never verify real queries or integration."
+      ],
+      "correctIndex": 3,
+      "explanation": "Coverage is an execution metric; tests can run code with weak or no assertions, and mocking the database or collaborators hides real SQL errors and integration mismatches. The fix is meaningful assertions plus integration and end-to-end tests, not a higher coverage number, which this bug would still have satisfied.",
+      "conceptTag": "coverage-is-not-correctness"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A discount method branches on DateTime.Now.DayOfWeek, and its test fails intermittently near date boundaries. What is the correct fix?",
+      "options": [
+        "Inject an abstraction over the current time (such as TimeProvider) and use a fake time source in the test to freeze the clock at a known instant.",
+        "Add Thread.Sleep calls so the test never executes exactly at a date boundary.",
+        "Mark the test to be skipped automatically on Fridays and at midnight.",
+        "Catch the assertion failure and retry the test up to three times before reporting a failure."
+      ],
+      "correctIndex": 0,
+      "explanation": "Code coupled to DateTime.Now has non-deterministic input; treating time as an injected dependency lets the test set an exact instant, making it fully deterministic. Sleeping, skipping, and retrying all work around the non-determinism instead of removing it.",
+      "conceptTag": "abstracting-time-for-tests"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Fifty xUnit tests share a mock database initialized in the test class constructor. Tests pass alone but fail in the full suite. What is the most likely cause?",
+      "options": [
+        "xUnit runs the 50 tests in random order, so the constructor runs only once for the first test.",
+        "The constructor throws on the 51st invocation because xUnit caps test-class instantiation.",
+        "The shared context is actually static or a stateful singleton, so data one test writes leaks into another that expects it empty.",
+        "Running the whole suite disables assertions unless each test is marked with a collection attribute."
+      ],
+      "correctIndex": 2,
+      "explanation": "xUnit creates a fresh test-class instance per test, so a plain constructor-initialized mock is safe; cross-test failures point to static fields or a stateful singleton retaining data between tests. The fix is eliminating static state or using a fixture with explicit cleanup, not reordering or disabling anything.",
+      "conceptTag": "shared-state-test-isolation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "One integration test fails about 1 run in 20 in CI with a different error each time (sometimes NullReferenceException, sometimes timeout) but always passes alone. What does the varying symptom indicate, and what is the fix?",
+      "options": [
+        "A deterministic logic bug in the assertion; fix the expected value and add a CI retry as backup.",
+        "A race or resource-lifecycle problem, likely teardown calling an async shutdown without awaiting it; fix by awaiting disposal via IAsyncLifetime.",
+        "A compiler optimization difference between local and CI builds; fix by disabling optimizations in CI.",
+        "Network flakiness talking to an external service; fix by adding a Polly retry around the call."
+      ],
+      "correctIndex": 1,
+      "explanation": "A logic bug fails the same way every time; differing failure modes signal timing or shared-state issues. Here Dispose calls StopAsync without awaiting it, so the next test starts while the hosted service is still shutting down. Implementing IAsyncLifetime with an awaited DisposeAsync fixes the root cause, whereas a CI retry only hides it.",
+      "conceptTag": "async-teardown-race"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "IsEligible(int orderCount) has 100% line and branch coverage, yet a customer with exactly 10 orders was wrongly denied a discount that starts at 10. What process change would have caught this?",
+      "options": [
+        "Boundary-value testing discipline, and periodic mutation testing, for comparison-heavy logic, since coverage cannot tell \"every branch ran\" from \"every boundary was tested\".",
+        "Mandating 100% code coverage on every future pull request.",
+        "Requiring every method to have at least three unit tests regardless of complexity.",
+        "Switching from branch coverage to line coverage as the tracked metric."
+      ],
+      "correctIndex": 0,
+      "explanation": "The bug already had 100% branch coverage because tests hit both branches without ever using the exact boundary value 10. Only a boundary-value test, or a mutation test flagging the surviving greater-than versus greater-or-equal mutant, exposes it. A higher coverage threshold would have been satisfied by the buggy code anyway.",
+      "conceptTag": "boundary-value-analysis"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "You must refactor a 200,000-line legacy billing module with no tests and no specification. What is the safest way to add coverage first?",
+      "options": [
+        "Write specification-style tests asserting the behavior you believe is correct, then refactor to match them.",
+        "Rewrite the module from scratch behind a feature flag and compare aggregate revenue totals monthly.",
+        "Skip tests and rely on a staged rollout with fast rollback if numbers look wrong.",
+        "Introduce a minimal seam to make the code testable, then write characterization tests that lock in current output for representative inputs, bugs and all."
+      ],
+      "correctIndex": 3,
+      "explanation": "Without a spec you only know what the code currently does; characterization tests capture that as-is so any behavior change during refactoring is flagged for a deliberate decision. Guessing correct values risks encoding wrong expectations that mask real regressions.",
+      "conceptTag": "characterization-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "An OrderService developer removes a customerName field, believing it unused; the change is blocked in CI before production. Why did nobody need to manually poll the consumer teams?",
+      "options": [
+        "Each consumer's real expectations are already recorded as executable contracts, and the provider's CI verification replays them against the candidate code and blocks the merge if one breaks.",
+        "The API gateway automatically restores removed fields until all consumers opt in to the change.",
+        "TypeScript and C# clients regenerate from the OpenAPI spec on every build and fail to compile.",
+        "A schema-registry linter rejects any pull request that deletes a JSON property."
+      ],
+      "correctIndex": 0,
+      "explanation": "Consumer-driven contract testing records each consumer's actual dependency as a Pact file; the provider pipeline verifies the candidate build against every published consumer contract and fails automatically, naming which consumer broke and why. No gateway auto-restore, client codegen, or generic linter is involved.",
+      "conceptTag": "consumer-driven-contract-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Nightly integration tests were found inserting and deleting rows in the production database for weeks after a config merge conflict. Beyond fixing the connection string, what is the most durable safeguard?",
+      "options": [
+        "Add a code-review checklist item requiring two approvers on any change to configuration files.",
+        "Make the mistake structurally hard: assert the environment name in test setup, isolate the CI runner from prod's network, or use ephemeral Testcontainers with no shared connection string.",
+        "Rename the production database so the old connection string no longer resolves.",
+        "Switch nightly runs to weekly so there are fewer opportunities for corruption."
+      ],
+      "correctIndex": 1,
+      "explanation": "A connection string is exactly the kind of artifact a future merge conflict can silently break again, so the fix is structural: an explicit staging-environment assertion that refuses to run, network isolation removing any route to prod, or per-run disposable databases. Review checklists and scheduling changes still rely on humans not making the mistake.",
+      "conceptTag": "test-environment-safeguards"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__scenario__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "With one week left and no time to test a large feature at uniform depth, how should you decide what to test thoroughly versus lightly?",
+      "options": [
+        "Test whatever is quickest to write first, and revisit the rest only if bugs are reported later.",
+        "Spread the effort evenly so that every file in the feature gets the same shallow smoke test.",
+        "Focus depth on money and compliance logic, complex branchy code, and public contracts; lightly test or defer thin wrappers and cosmetic UI, noting it in the PR.",
+        "Test only the code paths that changed most recently according to version control history."
+      ],
+      "correctIndex": 2,
+      "explanation": "Risk-based prioritization directs scrutiny where a defect is most costly, using concrete signals like business impact, cyclomatic complexity, and external consumers, while deferring low-risk pass-through and cosmetic code with an explicit, reviewable note and follow-up ticket. Cutting whatever is tedious correlates poorly with where bugs actually hurt.",
+      "conceptTag": "risk-based-test-prioritization"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In the TDD Red-Green-Refactor cycle, what happens during the Green step?",
+      "options": [
+        "You write an additional failing test to cover an edge case before touching the implementation.",
+        "You write the minimum code needed to make the currently failing test pass, not the most polished version.",
+        "You clean up and restructure the implementation while keeping all tests passing.",
+        "You run the full regression suite to confirm no other tests broke."
+      ],
+      "correctIndex": 1,
+      "explanation": "Green means doing just enough to turn the red test green; elegance comes later in Refactor, which is a distinct step. Writing another failing test is still Red, and running the whole suite is not what defines the Green step.",
+      "conceptTag": "red-green-refactor"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which statement correctly distinguishes a stub, a mock, and a fake?",
+      "options": [
+        "A stub verifies interactions, a mock supplies canned data, and a fake throws on every call.",
+        "All three are identical; the words are interchangeable synonyms for test doubles.",
+        "A stub is generated at runtime, a mock is hand-written, and a fake is the real production class.",
+        "A stub supplies canned answers, a mock also lets you verify how it was called, and a fake is a real but simplified working implementation such as an in-memory store."
+      ],
+      "correctIndex": 3,
+      "explanation": "Stubs feed data with no assertion about their use; mocks add interaction verification where the assertion is about behavior; fakes contain real logic like a dictionary-backed repository that stays consistent across calls. The other options swap these roles or deny the distinction.",
+      "conceptTag": "test-double-taxonomy"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__2",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In xUnit, when must you use [MemberData] instead of [InlineData] for a [Theory]?",
+      "options": [
+        "When the test cases involve values that cannot be expressed as compile-time constants, or the same dataset is shared across multiple test methods.",
+        "When you want all cases combined into a single pass/fail result instead of reported individually.",
+        "When the test method is async and returns a Task.",
+        "When there are more than ten cases, which is the maximum [InlineData] allows."
+      ],
+      "correctIndex": 0,
+      "explanation": "Attribute arguments must be compile-time constants, so complex objects or reusable datasets require a static member returning IEnumerable of object arrays via [MemberData]. Both attributes report each case individually, work with async tests, and have no ten-case limit.",
+      "conceptTag": "parameterized-tests-xunit"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Beyond readability, what is a concrete benefit of separating a test into Arrange, Act, and Assert sections?",
+      "options": [
+        "It allows the test runner to execute the three sections on separate threads for speed.",
+        "It lets you skip the Assert section when the Act section throws no exception.",
+        "A clearly separated Assert section makes it obvious which expectation failed, and the structure discourages testing several unrelated behaviors in one method.",
+        "It guarantees the test needs no mocks because Arrange handles all dependencies."
+      ],
+      "correctIndex": 2,
+      "explanation": "With setup, execution, and verification visually distinct, a failure points straight at the unmet expectation, and needing multiple Act blocks signals the test should be split. AAA is not about threading, skipping assertions, or eliminating mocks.",
+      "conceptTag": "arrange-act-assert"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why does EF Core's documentation caution against the InMemory provider for anything beyond simple cases?",
+      "options": [
+        "It is a separate database engine, so it does not enforce relational constraints, translates LINQ differently, and has no real transaction or isolation behavior.",
+        "It stores data on disk, making tests slower than a real SQL Server would be.",
+        "It only supports a single DbContext instance per process, breaking parallel tests.",
+        "It requires a Docker daemon to be running on the build agent."
+      ],
+      "correctIndex": 0,
+      "explanation": "InMemory is not SQL Server running in memory but a different provider, so foreign-key and unique constraints go unenforced, some LINQ queries translate differently or not at all, and concurrency-token and isolation semantics cannot be exercised. It is acceptable for pure business-logic tests that happen to touch a DbContext, not for validating database-level correctness.",
+      "conceptTag": "ef-inmemory-limitations"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__3",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does a surviving mutant in mutation testing indicate?",
+      "options": [
+        "The mutation caused a compiler error, so it was discarded before the suite ran.",
+        "The code's behavior changed but the entire test suite still passed, revealing that no test actually verifies that behavior.",
+        "At least one test failed, so the suite successfully detected the introduced bug.",
+        "The line containing the mutation had zero code coverage."
+      ],
+      "correctIndex": 1,
+      "explanation": "A mutant survives when the deliberately altered code still passes every test, showing the suite would not notice that behavioral change even at 100% coverage. A killed mutant is one that makes a test fail; surviving mutants are unrelated to compiler errors and often occur on fully covered lines.",
+      "conceptTag": "mutation-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which of these is a common root cause of a flaky test?",
+      "options": [
+        "Using the Arrange-Act-Assert structure with clearly labeled sections.",
+        "Asserting on a method's return value instead of verifying interactions.",
+        "Running the test in isolation before adding it to the suite.",
+        "Asserting on the result of asynchronous work that the test never awaited to completion."
+      ],
+      "correctIndex": 3,
+      "explanation": "Unawaited async work makes the assertion race the operation it depends on, so the outcome varies with timing. AAA structure, choosing state-based assertions, and running a test in isolation are all healthy practices, not causes of flakiness.",
+      "conceptTag": "flaky-test-causes"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What kind of regression does snapshot testing catch that targeted assertions typically miss?",
+      "options": [
+        "An unanticipated change anywhere in a large output, such as a reformatted date or a newly added field nobody wrote an assertion for.",
+        "A performance regression where the operation becomes slower but produces identical output.",
+        "A concurrency bug that only appears when the code runs on multiple threads.",
+        "A security flaw where user input is not sanitized before being stored."
+      ],
+      "correctIndex": 0,
+      "explanation": "Snapshot testing compares the whole serialized output to a saved reference, so any deviation the author never thought to assert on fails the test. It says nothing about timing, thread-safety, or input sanitization.",
+      "conceptTag": "snapshot-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__4",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does property-based testing fundamentally differ from writing specific [InlineData] example cases?",
+      "options": [
+        "It runs the same hand-picked inputs repeatedly to check for timing-related flakiness.",
+        "It replaces assertions with code-coverage measurement across generated inputs.",
+        "It asserts a general rule that should hold for any valid input, then has the framework generate many random inputs trying to find one that breaks the rule.",
+        "It requires the correct output to be known in advance for every generated input."
+      ],
+      "correctIndex": 2,
+      "explanation": "Example-based tests check specific input/output pairs a developer chose; property-based tests state an invariant such as \"output is always sorted\" and let the framework search broadly for a counterexample, often shrinking any failure to a minimal case. It does not need a known expected output per input, and it is not about repetition or coverage.",
+      "conceptTag": "property-based-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "When does a simple stub that returns a fixed value stop being sufficient, requiring a fake instead?",
+      "options": [
+        "As soon as the dependency is an interface rather than a concrete class.",
+        "When the test needs the double to behave statefully across calls, so data added earlier is reflected by a later query.",
+        "When the test asserts on a return value rather than verifying a method was called.",
+        "When the test runs in parallel with other tests in the same collection."
+      ],
+      "correctIndex": 1,
+      "explanation": "A stub gives the same canned answer regardless of input or call history; a test that exercises a sequence like add-then-update-then-read needs genuine in-memory logic, which is what a fake provides. Interface versus class, assertion style, and parallelism do not determine this.",
+      "conceptTag": "stub-vs-fake"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does provider-driven contract testing differ from consumer-driven contract testing?",
+      "options": [
+        "Provider-driven contracts are written in JSON while consumer-driven contracts are written in YAML.",
+        "Provider-driven testing skips CI verification, relying on documentation review instead.",
+        "The provider authors and publishes one authoritative contract that any consumer validates against, which scales better when there are many or unknown consumers.",
+        "Provider-driven testing requires every consumer to run the provider's full test suite locally."
+      ],
+      "correctIndex": 2,
+      "explanation": "In consumer-driven testing each consumer encodes its own expectations and the provider verifies them; provider-driven inverts authorship so the provider publishes one contract, such as an OpenAPI spec used as a testable contract, suitable for large platforms or public APIs with consumers it cannot enumerate. Format and CI enforcement are not the distinction.",
+      "conceptTag": "provider-driven-contracts"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__5",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What distinguishes chaos engineering from traditional failure testing with mocked exceptions?",
+      "options": [
+        "It injects real failures such as latency or node loss into a running system to surface weaknesses nobody anticipated, rather than verifying handling of a failure someone already mocked.",
+        "It runs only in unit-test form, replacing integration tests entirely.",
+        "It proves correctness mathematically rather than empirically.",
+        "It is primarily a load-testing technique for measuring peak throughput."
+      ],
+      "correctIndex": 0,
+      "explanation": "Mocked-exception tests only cover failure modes an author anticipated; chaos engineering deliberately introduces real infrastructure failures into a production-like system to reveal emergent, unforeseen weaknesses in actual resilience mechanisms. It is not a unit test, a proof technique, or a throughput benchmark, and it presupposes baseline resilience already exists.",
+      "conceptTag": "chaos-engineering"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A test passes most runs but occasionally fails with no code change. Which pair of causes is most typical?",
+      "options": [
+        "Too many assertions in one test, and overly descriptive test names.",
+        "Using [Theory] instead of [Fact], and running tests in Release configuration.",
+        "Excessive mocking, and testing through the public API instead of private methods.",
+        "Shared mutable state left uncleaned between tests, and timing-dependent assertions against asynchronous or concurrent code."
+      ],
+      "correctIndex": 3,
+      "explanation": "Order-dependent shared state and a fixed delay that assumes async work finished in time are the two classic sources of non-deterministic pass/fail on unchanged code. The durable fix is real isolation or waiting on the actual condition, not re-running or lengthening a sleep.",
+      "conceptTag": "flaky-test-root-causes"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What problem does the Test Data Builder pattern primarily solve?",
+      "options": [
+        "It eliminates the need for mocks by constructing real dependencies automatically.",
+        "It provides sensible defaults for every field so each test overrides only the one or two fields relevant to its assertion, keeping the Arrange section focused.",
+        "It generates random values for every property so tests exercise a wide input space.",
+        "It runs setup once per test class instead of once per test method."
+      ],
+      "correctIndex": 1,
+      "explanation": "A builder supplies realistic defaults and fluent overrides, so a test about order status does not have to spell out totals and dates, and adding a new required field means updating one place. Random generation describes AutoFixture; once-per-class setup describes a fixture; neither is the builder's purpose.",
+      "conceptTag": "test-data-builder"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__6",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why is snapshot testing well suited to verifying a large, structured output like an API response DTO?",
+      "options": [
+        "It measures how many fields of the response were executed during the test.",
+        "It automatically fixes any field that diverges from the reference so the test stays green.",
+        "It captures the entire structure at once and flags any deviation, including an extra field appearing or a field's type subtly changing, without an assertion per field.",
+        "It compares only the fields explicitly listed in a schema file, ignoring the rest."
+      ],
+      "correctIndex": 2,
+      "explanation": "Hand-writing an equality assertion for every field of a big object is tedious and easy to leave incomplete; a snapshot diffs the whole serialized shape and fails on any unreviewed change. It does not auto-fix divergences or limit itself to a schema subset, and it is not a coverage measure.",
+      "conceptTag": "snapshot-large-output"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the main reason to use a shared test fixture, such as xUnit's IClassFixture?",
+      "options": [
+        "To run genuinely expensive setup, like migrating and seeding a test database, once and share the result across all tests that need it.",
+        "To force every test in the class to run on a single thread for determinism.",
+        "To provide random default values for object properties a test does not care about.",
+        "To automatically roll back any database changes a test makes."
+      ],
+      "correctIndex": 0,
+      "explanation": "A fixture runs costly setup a single time and hands the same instance to every test, avoiding per-test repetition of expensive work; the tradeoff is that shared mutable state needs deliberate resetting to avoid cross-test interference. It does not control threading, generate data, or roll back changes on its own.",
+      "conceptTag": "test-fixture"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the key advantage of having a framework generate hundreds of random inputs to check a property, versus hand-writing example cases?",
+      "options": [
+        "Random generation runs faster than example-based tests because fewer assertions execute.",
+        "It frequently surfaces edge cases the test author never thought to include, because generation is not limited to what a human imagined.",
+        "It removes the need to define what correct behavior looks like.",
+        "It guarantees 100% branch coverage of the code under test."
+      ],
+      "correctIndex": 1,
+      "explanation": "Hand-picked examples only cover inputs the author imagined; randomized generation of many varied inputs such as empty, huge, duplicate-filled, or negative routinely finds unanticipated breakages. You still must define the property, and it offers no coverage guarantee.",
+      "conceptTag": "property-based-edge-cases"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__7",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does mutation testing measure that a code-coverage percentage cannot?",
+      "options": [
+        "How many lines of code were executed at least once during the test run.",
+        "Whether the test suite runs fast enough to gate every commit.",
+        "How much of the codebase is reachable from the public API.",
+        "Whether the existing tests would actually fail if the code's behavior were subtly changed."
+      ],
+      "correctIndex": 3,
+      "explanation": "Coverage only confirms a line ran; mutation testing injects a subtle behavioral change and checks whether any test notices, exposing lines that are executed but not meaningfully asserted. The other options are all things coverage or timing already describe.",
+      "conceptTag": "mutation-vs-coverage"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Under the test double umbrella, which description matches a Dummy?",
+      "options": [
+        "An object passed only to satisfy a required parameter, never actually used by the code under test.",
+        "An object pre-programmed with expectations that fails the test if a specific call does not occur.",
+        "A working, simplified implementation such as an in-memory list standing in for a database.",
+        "An object that records how it was called so the test can inspect those calls afterward."
+      ],
+      "correctIndex": 0,
+      "explanation": "A Dummy exists only to fill a parameter slot and is never invoked; the strict Mock verifies pre-set expectations, a Fake has real simplified logic, and a Spy records calls for later assertions. Calling all of these mocks blurs these distinct purposes.",
+      "conceptTag": "test-double-umbrella"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What makes deliberate testing in production a responsible practice rather than a reckless one?",
+      "options": [
+        "It only runs during off-peak hours when few users are affected.",
+        "It replaces pre-production testing entirely, saving the cost of a staging environment.",
+        "It limits blast radius with controlled exposure such as a flag on 1% of traffic, close monitoring, and instant rollback, while gaining signal from real load and data.",
+        "It relies on the assumption that production bugs are always cheaper to fix than staging bugs."
+      ],
+      "correctIndex": 2,
+      "explanation": "The responsible version deliberately constrains exposure, watches health metrics for that slice, and can revert instantly, capturing production-scale load and real data shapes that staging cannot fully reproduce. It complements rather than replaces pre-production testing, and it is not merely about timing.",
+      "conceptTag": "testing-in-production"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__8",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does a central Pact Broker give a provider team that bilateral, manually-shared contracts do not?",
+      "options": [
+        "It rewrites the provider's API automatically to satisfy every consumer contract.",
+        "A single authoritative, always-current view of every consumer's requirements, plus an automatable can-i-deploy gate that blocks a breaking deployment.",
+        "It removes the need for consumers to write contracts by inferring them from traffic logs.",
+        "It converts REST contracts into GraphQL schemas for unified verification."
+      ],
+      "correctIndex": 1,
+      "explanation": "The broker centralizes every published consumer contract so the provider can verify a candidate build against all of them and gate deployment via can-i-deploy, replacing manual per-pair coordination that does not scale. It does not author APIs, infer contracts from logs, or translate protocols.",
+      "conceptTag": "pact-broker"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does consistently structuring every test as Arrange-Act-Assert help a future reader?",
+      "options": [
+        "It lets the reader skip tests that have no Assert section.",
+        "It signals which tests are integration tests versus unit tests.",
+        "Every test follows the same predictable shape, so a reader can locate the setup, the single action tested, and the expected result without parsing every line.",
+        "It ensures the test compiles even when the class under test changes."
+      ],
+      "correctIndex": 2,
+      "explanation": "A uniform structure makes intent scannable across an unfamiliar codebase; mixing the phases forces the reader to mentally untangle plumbing from the actual check. It does not categorize test types or affect compilation.",
+      "conceptTag": "aaa-readability"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the trade-off between creating fresh state per test and sharing one fixture across tests?",
+      "options": [
+        "Fresh state per test costs more setup but structurally eliminates cross-test interference; a shared fixture saves that cost but risks state leaking between tests.",
+        "Fresh state per test is always faster because the runtime caches identical setup automatically.",
+        "A shared fixture provides stronger isolation because xUnit resets it between every test.",
+        "There is no trade-off; fresh state per test is strictly worse in every dimension."
+      ],
+      "correctIndex": 0,
+      "explanation": "Independent state per test removes an entire class of order-dependent flakiness at the price of repeating setup; a shared fixture is worth that repetition only when setup is genuinely expensive, and then you must reset mutable state yourself. xUnit does not auto-reset a shared fixture.",
+      "conceptTag": "fresh-state-vs-fixture"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__9",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Approval (Golden Master) testing typically differ from snapshot testing?",
+      "options": [
+        "Approval testing asserts specific field values while snapshot testing compares whole objects.",
+        "It applies the same capture-compare-review philosophy to much larger, more complex outputs such as whole reports or generated files where field-by-field assertions would be impractical.",
+        "Approval testing never requires human review because the golden master is authoritative.",
+        "Approval testing runs only in production against live data."
+      ],
+      "correctIndex": 1,
+      "explanation": "Both capture a reference and flag any deviation for human review; approval testing scales that idea up to multi-page documents and generated files. It still needs a human to approve intentional changes, and volatile content like timestamps must be normalized first.",
+      "conceptTag": "approval-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does the Test Pyramid recommend about where a team invests most of its testing effort?",
+      "options": [
+        "Mostly end-to-end tests, since they provide the most realistic confidence.",
+        "An equal split across unit, integration, and end-to-end tests.",
+        "Mostly integration tests, with unit and end-to-end tests as small supplements.",
+        "Mostly fast, cheap, isolated unit tests, with fewer integration tests and only a small number of slow end-to-end tests."
+      ],
+      "correctIndex": 3,
+      "explanation": "Unit tests are fast and cheap enough to cover logic exhaustively; E2E tests are slow and brittle, so a healthy suite keeps few of them for critical whole-system journeys. An E2E-heavy inverted pyramid produces a slow, fragile suite that discourages frequent runs.",
+      "conceptTag": "test-pyramid"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why can't a class that calls new StripePaymentGateway() inside its method be unit tested in isolation?",
+      "options": [
+        "Because constructors in C# cannot be marked async, so the gateway cannot initialize.",
+        "Because the new keyword triggers garbage-collection pauses that make tests flaky.",
+        "Because a test has no way to substitute a fake for the internally constructed dependency, so every test invokes the real gateway.",
+        "Because Stripe's SDK is not thread-safe under parallel test execution."
+      ],
+      "correctIndex": 2,
+      "explanation": "When a class instantiates its own concrete dependency, nothing lets a test replace it, so the test hits the real service. Injecting the dependency through the constructor lets the test pass a mock; the practical test of doing DI correctly is whether each dependency can be substituted without editing the class.",
+      "conceptTag": "di-enables-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__10",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Metamorphic testing is most useful in which situation?",
+      "options": [
+        "When you cannot compute the correct output for a given input, but you can state a relationship that must hold between the outputs of two related inputs.",
+        "When you need to verify exact output values against a hand-maintained expected-results table.",
+        "When you want to measure how test inputs partition the code's branches.",
+        "When the system is deterministic and every input has one well-known answer."
+      ],
+      "correctIndex": 0,
+      "explanation": "For systems like search ranking or ML where no single output is knowably correct, you instead assert a metamorphic relation, such as adding a price filter yielding a subset with price at or above the threshold, or decompressing compressed data restoring the original. If exact answers are known, ordinary example-based assertions suffice.",
+      "conceptTag": "metamorphic-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the purpose of a smoke test suite?",
+      "options": [
+        "To exhaustively verify every business rule before a release is approved.",
+        "A small, fast set of critical checks run right after deployment to catch a badly broken build before the full regression suite runs.",
+        "To measure the application's memory usage under sustained load over several hours.",
+        "To replace unit tests by exercising the same logic through the UI."
+      ],
+      "correctIndex": 1,
+      "explanation": "Smoke tests check only coarse is-anything-alive paths such as app starts, homepage loads, and health endpoint OK, so a catastrophic deployment fails fast without waiting on a long suite. They deliberately do not cover subtle logic, which remains the full suite's job.",
+      "conceptTag": "smoke-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does Boundary Value Analysis add on top of Equivalence Partitioning?",
+      "options": [
+        "It runs every possible input value in a partition to guarantee exhaustive coverage.",
+        "It randomly samples inputs from across all partitions to find unexpected failures.",
+        "It deliberately tests the exact edges of each partition, and values just inside and outside them, where off-by-one errors concentrate.",
+        "It merges adjacent partitions so fewer test cases are needed overall."
+      ],
+      "correctIndex": 2,
+      "explanation": "Equivalence Partitioning picks one representative per behavior class; Boundary Value Analysis then targets the partition edges, such as 0, 120, and 121 for a 0-to-120 range, because comparison-operator mistakes surface exactly there. Testing many mid-partition values gives a false sense of coverage.",
+      "conceptTag": "equivalence-partitioning-bva"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__11",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why does the existence of equivalent mutants mean a mutation score cannot reliably reach 100%?",
+      "options": [
+        "Because mutation tools stop generating mutants once the score passes 95%.",
+        "An equivalent mutant changes the code's text but not its observable behavior for any input, so no test can distinguish it, yet the tool still counts it as not killed.",
+        "Because equivalent mutants always cause compiler errors that abort the run.",
+        "Because test suites are never fast enough to run against every generated mutant."
+      ],
+      "correctIndex": 1,
+      "explanation": "Some mutations are behaviorally identical to the original for all inputs, so they are impossible to kill, but a tool generally cannot prove equivalence since it is undecidable in general, and reports them as survivors, holding the score below 100%. Mature practice is to review survivors and classify each as a real gap or an equivalent mutant.",
+      "conceptTag": "equivalent-mutants"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__12",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why should you write the Golden Path test before enumerating edge-case tests for a new feature?",
+      "options": [
+        "A broken Golden Path affects essentially every user of the feature, so verifying it first catches the highest-impact class of bug with minimal effort.",
+        "Edge cases can only be written after the Golden Path test compiles successfully.",
+        "Golden Path tests run faster because they use fewer assertions.",
+        "Test runners execute Golden Path tests first regardless of declaration order."
+      ],
+      "correctIndex": 0,
+      "explanation": "The Golden Path is the common, expected usage, so a defect there hits everyone; covering it first gives the best early return, then edge cases expand robustness. The other statements are not real constraints or behaviors.",
+      "conceptTag": "golden-path-vs-edge-case"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__12",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is a key downside of interaction-based (mockist) testing compared to state-based testing?",
+      "options": [
+        "Interaction-based tests cannot verify that a dependency was called at all.",
+        "Interaction-based tests require a real database, making them slower.",
+        "State-based tests cannot check return values, so they miss most bugs.",
+        "Interaction-based tests couple tightly to internal implementation, so a behavior-preserving refactor that calls a dependency differently can still break them."
+      ],
+      "correctIndex": 3,
+      "explanation": "Verifying exactly which dependency methods were called ties the test to how the code is wired, so harmless refactors break it even when observable behavior is unchanged; state-based tests, checking outcomes, tolerate that. Interaction tests can verify calls and do not require a real database.",
+      "conceptTag": "state-vs-interaction-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__12",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does it mean when a test that reliably passes is said to have a test smell like Mystery Guest?",
+      "options": [
+        "The test is failing intermittently and needs a retry policy.",
+        "The test has too few assertions to be meaningful.",
+        "It relies on external state not visible in the test itself, such as a seeded row or a file, making it hard to understand and fragile to unrelated changes, though it passes.",
+        "The test covers code that has no corresponding production requirement."
+      ],
+      "correctIndex": 2,
+      "explanation": "A test smell is a design problem in passing test code; Mystery Guest specifically means the test relies on setup defined elsewhere and unseen, so a reader cannot tell where its data comes from and it breaks when that hidden setup changes. Naming such patterns gives reviewers precise, teachable feedback.",
+      "conceptTag": "test-smells"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__13",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the specific value of adding a regression test for every bug you fix?",
+      "options": [
+        "It documents the bug for the release notes without needing a separate changelog.",
+        "If a later change accidentally reintroduces that exact bug, the test fails immediately in CI instead of the bug reaching production again.",
+        "It increases code coverage enough to satisfy the team's minimum threshold.",
+        "It proves the original fix was the most elegant possible solution."
+      ],
+      "correctIndex": 1,
+      "explanation": "A regression test reproduces the fixed defect and stays in the suite as a permanent tripwire, so a future refactor that removes the guard is caught automatically. Coverage effects and elegance are incidental, and it is not a substitute for a changelog.",
+      "conceptTag": "regression-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__13",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How is a Pact file (the JSON contract artifact) produced, and how is it used by the provider?",
+      "options": [
+        "The provider hand-writes it from its OpenAPI spec, and consumers import it as a client SDK.",
+        "A shared architecture team authors it up front, and both sides generate code from it.",
+        "It is generated automatically from the consumer's own test run, recording the requests it made and responses it expected, then the provider replays those requests against its real implementation.",
+        "It is captured from production traffic logs and diffed against the provider's access logs nightly."
+      ],
+      "correctIndex": 2,
+      "explanation": "The consumer's contract test exercises a provider mock and emits a Pact file of concrete request/response pairs; the provider's verification test replays those exact requests against its real code and checks the responses match. Because it is a byproduct of the consumer's actual tests, it cannot drift from what the consumer really needs.",
+      "conceptTag": "pact-file-artifact"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__13",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the main limitation of differential testing (running the same input through two implementations and comparing)?",
+      "options": [
+        "If both implementations share the same underlying bug, they agree and the defect goes undetected.",
+        "It requires knowing the correct output in advance for every test input.",
+        "It can only compare implementations written in the same programming language.",
+        "It cannot be automated because a human must inspect every comparison."
+      ],
+      "correctIndex": 0,
+      "explanation": "Differential testing only flags disagreement, so a bug present identically in both implementations, such as the same misread business rule, yields no discrepancy. It specifically avoids needing known-correct outputs, works across languages, and is fully automatable.",
+      "conceptTag": "differential-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__14",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does a Spy test double differ from a strict Mock?",
+      "options": [
+        "A Spy returns canned data by input, while a Mock always returns null.",
+        "A Spy is generated by a framework, while a Mock must be hand-written.",
+        "A Spy records the calls made to it for the test to assert on afterward, whereas a Mock is pre-configured with expectations and can fail automatically if they are not met.",
+        "A Spy can only be used for void methods, while a Mock works for any return type."
+      ],
+      "correctIndex": 2,
+      "explanation": "A Spy passively accumulates a call record that the test inspects after the fact; a strict Mock declares expected calls up front and fails if they do not occur. This is about when and how interaction is verified, not about codegen, return types, or canned data.",
+      "conceptTag": "spy-test-double"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__14",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "xUnit runs different test collections in parallel by default. What hazard does this create?",
+      "options": [
+        "Tests within a single class run out of declaration order, breaking setup assumptions.",
+        "Tests in different collections that mutate the same shared resource, such as a database row, a file, or a static cache, can run simultaneously and observe each other's writes, causing intermittent failures.",
+        "The test runner silently skips tests that exceed a per-collection time budget.",
+        "Assertions from one collection are reported under a different collection's results."
+      ],
+      "correctIndex": 1,
+      "explanation": "Parallel collections plus shared mutable external state means one test can see a value another just wrote, producing failures that only appear in the full suite. The targeted fix is per-test data isolation such as unique IDs or a fresh database or transaction, not globally disabling parallelization.",
+      "conceptTag": "parallel-test-shared-state"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__14",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the goal of fuzz testing, as distinct from property-based testing?",
+      "options": [
+        "To verify a mathematical invariant holds for every randomly generated input.",
+        "To measure throughput by flooding the system with high request volume.",
+        "To confirm the code produces identical output when run twice on the same input.",
+        "To find inputs that cause a crash, hang, or memory-safety or security violation, without any correctness property being checked."
+      ],
+      "correctIndex": 3,
+      "explanation": "Fuzzing bombards a parser or protocol handler with malformed input purely to trigger unhandled crashes, infinite loops, or vulnerabilities; property-based testing instead assumes the code should satisfy a stated invariant for every input. Both generate random inputs but for different purposes.",
+      "conceptTag": "fuzz-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__15",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the job of a test runner, as opposed to a testing framework like xUnit?",
+      "options": [
+        "It discovers the tests in a project, executes them, and reports pass/fail results, whether invoked from a CLI, an IDE, or CI.",
+        "It provides the [Fact] attribute and the Assert methods used to express a test.",
+        "It defines the lifecycle hooks that run setup and teardown around each test.",
+        "It generates the test data sets consumed by parameterized tests."
+      ],
+      "correctIndex": 0,
+      "explanation": "The framework supplies the vocabulary for writing tests such as attributes, assertions, and lifecycle; the runner is the separate tool that finds, runs, and reports them, so the same xUnit tests work under dotnet test, Visual Studio, or a CI plugin unchanged.",
+      "conceptTag": "test-runner-vs-framework"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__15",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why does a naming convention like MethodName_Scenario_ExpectedBehavior matter most when a test fails?",
+      "options": [
+        "It lets the test runner group tests by method for parallel execution.",
+        "It enforces that each test has exactly one assertion.",
+        "The CI failure list itself communicates what scenario broke and what was expected, so triage does not have to start by opening and reading the test body.",
+        "It prevents two tests from accidentally having the same name in a class."
+      ],
+      "correctIndex": 2,
+      "explanation": "A descriptive name turns a bare CI failure line into useful diagnostic information for whoever triages it, often not the author; a name like Test3 conveys nothing until someone opens the file. It is not about grouping, assertion counts, or name collisions.",
+      "conceptTag": "test-naming-convention"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__15",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does deterministic simulation testing make a rare distributed race condition reproducible?",
+      "options": [
+        "It runs the real system thousands of times in parallel until the race happens to occur.",
+        "It runs the whole system single-threaded inside a simulator that controls message order, network delay, and a virtual clock, so a given seed replays the exact same event sequence every time.",
+        "It adds detailed logging so the race can be diagnosed from production traces after it occurs.",
+        "It inserts random sleeps to widen timing windows and make the race more likely."
+      ],
+      "correctIndex": 1,
+      "explanation": "By replacing every source of real-world non-determinism with seeded, simulator-controlled scheduling, the same seed always produces the same sequence of events, turning a one-in-ten-thousand race into a deterministically replayable local test. Brute-force reruns, logging, and sleep injection do not give reproducibility.",
+      "conceptTag": "deterministic-simulation-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__16",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What defines a Dummy object among the test double types?",
+      "options": [
+        "It is passed only to fill a required parameter and is never actually called or read by the code under test.",
+        "It returns carefully chosen canned values that the assertion depends on.",
+        "It records every interaction so the test can verify call counts afterward.",
+        "It is a fully working in-memory implementation of the dependency."
+      ],
+      "correctIndex": 0,
+      "explanation": "A Dummy just satisfies a parameter's type and is never exercised, so a reasonable implementation even throws on any method call to catch a wrong assumption. Canned values describe a Stub, recorded calls a Spy, and working logic a Fake.",
+      "conceptTag": "dummy-object"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__16",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why do characterization tests deliberately capture a legacy system's current behavior, bugs and all, rather than its intended behavior?",
+      "options": [
+        "Because the intended behavior is always documented and does not need testing.",
+        "Because capturing buggy behavior automatically fixes it on the next refactor.",
+        "Without a spec you only know what the code does now; locking that in flags any accidental behavior change while refactoring, leaving bug fixes as separate deliberate steps.",
+        "Because characterization tests run faster when assertions match existing output."
+      ],
+      "correctIndex": 2,
+      "explanation": "The goal is a safety net that flags whether the refactor changed anything observable, not a judgment of correctness; a captured bug should still be fixed later, deliberately and separately, not accidentally during restructuring. Guessing correct values risks masking real regressions.",
+      "conceptTag": "characterization-testing-purpose"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__16",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the rationale behind pairwise (all-pairs) testing?",
+      "options": [
+        "Every combination of three or more parameters is guaranteed to be covered by at least one case.",
+        "Most real bugs are triggered by an interaction between just two parameters, so covering every pair of values in a small case set catches most interaction bugs cheaply.",
+        "Testing parameters one at a time in isolation finds the same bugs as testing them together.",
+        "Random sampling of the full combination space is statistically equivalent to exhaustive testing."
+      ],
+      "correctIndex": 1,
+      "explanation": "Exhaustive combination testing explodes multiplicatively; pairwise testing exploits the empirical observation that the large majority of interaction bugs involve only two parameters, so ensuring every value pair appears together gives strong coverage at a fraction of the cost. It does not guarantee three-way interactions are covered.",
+      "conceptTag": "pairwise-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__17",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the biggest practical benefit of a library like FluentAssertions over a framework's built-in Assert class?",
+      "options": [
+        "It runs assertions asynchronously so tests complete faster.",
+        "It removes the need to arrange test data before acting.",
+        "On failure it produces far more detailed messages, including property-by-property diffs for complex objects, instead of a bare objects were not equal.",
+        "It automatically retries a failed assertion in case of transient timing issues."
+      ],
+      "correctIndex": 2,
+      "explanation": "The main payoff is diagnostic detail: a fluent library reports exactly which properties differed and how, eliminating manual field-by-field inspection of a failing complex-object comparison. It does not change execution timing, arrangement, or retry behavior.",
+      "conceptTag": "assertion-library"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__17",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does giving each test its own freshly created in-memory database eliminate a whole category of flakiness?",
+      "options": [
+        "Each test operates on a completely isolated instance, so no other test's data can collide with or mutate it, regardless of execution order or parallelism.",
+        "In-memory databases enforce stricter constraints than the production engine, catching more bugs.",
+        "The test runner detects the in-memory provider and disables parallel execution automatically.",
+        "Fresh databases are faster to query, so timing-dependent assertions stop racing."
+      ],
+      "correctIndex": 0,
+      "explanation": "A unique database per test removes shared state entirely, so order-dependent and parallel-execution interference simply cannot happen, at the cost of small per-test setup. In-memory providers actually enforce fewer constraints, and this has nothing to do with disabling parallelism or query speed.",
+      "conceptTag": "per-test-database-isolation"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__17",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What category of regression does screenshot / visual regression testing catch that DOM-based assertions miss?",
+      "options": [
+        "A backend API returning the wrong JSON field for a component to render.",
+        "A slow database query that delays the page load beyond its budget.",
+        "An accessibility violation where an element lacks an ARIA label.",
+        "A CSS change that leaves every expected element present and labeled but renders them overlapping, off-screen, or unreadable."
+      ],
+      "correctIndex": 3,
+      "explanation": "DOM tests only confirm structure and text, so a purely visual break passes them; pixel comparison against an approved baseline catches misalignment, overlap, and color regressions. API, performance, and ARIA issues are separate concerns.",
+      "conceptTag": "visual-regression-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__18",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why doesn't 100% code coverage guarantee a codebase is well-tested?",
+      "options": [
+        "Coverage tools undercount lines in async methods, so the real figure is always lower.",
+        "Coverage only proves lines executed, not that any test asserted the correct behavior for them.",
+        "100% coverage is impossible to achieve, so the number is always misleading.",
+        "Coverage counts test code as well as production code, inflating the percentage."
+      ],
+      "correctIndex": 1,
+      "explanation": "A test can call a method and boost coverage without asserting anything meaningful about the result, so a fully covered codebase can still ship serious bugs. Coverage is an execution metric; mutation testing targets whether assertions would actually catch a change.",
+      "conceptTag": "coverage-limitations"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__18",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In interaction testing, how does the Spy style differ from the Mock style?",
+      "options": [
+        "The Spy records what happened and the test asserts on that history afterward; the Mock declares expected calls before execution and can fail automatically if they do not occur.",
+        "The Spy can only observe void methods; the Mock handles methods with return values.",
+        "The Spy verifies state changes; the Mock verifies return values.",
+        "The Spy requires reflection to read private fields; the Mock does not."
+      ],
+      "correctIndex": 0,
+      "explanation": "A Mock sets expectations up front, such as expect this call once, and enforces them; a Spy passively logs calls for the test to inspect and assert on after the fact. Both verify interactions and neither is limited by return type or needs reflection.",
+      "conceptTag": "spy-vs-mock-style"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__18",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "In approval testing, what is the correct response when a test fails because the output legitimately changed?",
+      "options": [
+        "Loosen the assertion so small differences no longer fail the test.",
+        "Delete the approved file so the next run recreates it automatically without review.",
+        "A human reviews the diff between the old approved file and the new output, and if the change is intentional, explicitly re-approves it, committing the new reference to version control.",
+        "Add a normalization step that strips whichever lines changed."
+      ],
+      "correctIndex": 2,
+      "explanation": "The workflow depends on a human reading the diff and deliberately approving an intentional change, which the version-controlled reference and its commit history record as an audit trail; an unintended regression means do not approve and fix the code instead. Loosening, auto-recreating, or blindly stripping changes defeats the pattern.",
+      "conceptTag": "approval-test-workflow"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__19",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does bootstrapping a Golden Master test suite differ from writing a test first in TDD?",
+      "options": [
+        "Both define correct behavior up front; Golden Master just uses a larger output file.",
+        "TDD's test defines the intended behavior before any code exists; a Golden Master captures an already-running system's current output as-is, making no claim that it is correct.",
+        "Golden Master tests are written before implementation; TDD tests are written after.",
+        "TDD applies only to UI code; Golden Master applies only to backend code."
+      ],
+      "correctIndex": 1,
+      "explanation": "A TDD test is a specification written ahead of the implementation; a Golden Master baseline is simply whatever an existing system currently produces, captured to detect unintended change during a refactor, with no assertion of correctness. It is characterization testing at whole-output scale.",
+      "conceptTag": "golden-master-vs-tdd"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__19",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why does test data anonymization matter even when production-derived data is used only internally by the dev/QA team?",
+      "options": [
+        "Anonymized data compresses better, reducing test-database storage costs.",
+        "Real data cannot be loaded into a test schema without transformation anyway.",
+        "Test environments typically have looser access controls and more people with access than production, so raw sensitive data there widens exposure beyond its original protections.",
+        "Anonymization makes queries run faster by removing large text fields."
+      ],
+      "correctIndex": 2,
+      "explanation": "A test environment is deliberately less locked down, so copying unscrubbed production data exposes real customers' information to more people and weaker controls than intended, a genuine privacy and compliance risk. Anonymized data keeps realistic shape and volume without exposing anyone.",
+      "conceptTag": "test-data-anonymization"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__19",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does querying the Pact Broker's can-i-deploy check before a deployment accomplish?",
+      "options": [
+        "It regenerates all consumer contracts from the provider's latest code.",
+        "It deploys the provider and automatically rolls back if any consumer errors within five minutes.",
+        "It measures how many consumers are currently calling each endpoint in production.",
+        "It checks whether this provider version has passed contract verification against every consumer version currently deployed to the target environment, and blocks the deployment if not."
+      ],
+      "correctIndex": 3,
+      "explanation": "can-i-deploy turns recorded verification results into an automated deployment gate: given every consumer version live in the target environment, has this provider version been verified compatible with all of them. Without such a gate, a verification failure is merely visible in logs and does not prevent an incompatible deploy.",
+      "conceptTag": "can-i-deploy-gate"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__20",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which set of definitions correctly maps test case, test suite, and test fixture?",
+      "options": [
+        "Test case is the shared setup; test suite is one scenario; test fixture is a group of scenarios.",
+        "Test case is one specific scenario being verified; test suite is a collection of related test cases; test fixture is the shared context or state a group of tests runs against.",
+        "Test case is the whole project's tests; test suite is one assertion; test fixture is the test runner.",
+        "All three terms mean the same thing and differ only by framework."
+      ],
+      "correctIndex": 1,
+      "explanation": "A test case is the smallest unit, one scenario; a suite groups related cases; and a fixture is the shared setup or state, sometimes loosely the test class itself. Frameworks use these terms with varying precision, so knowing the general distinction helps when reading their docs.",
+      "conceptTag": "test-terminology"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__20",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why must a snapshot test scrub non-deterministic fields like timestamps and GUIDs before comparing?",
+      "options": [
+        "Otherwise those fields differ on every run, so the test fails constantly regardless of real behavior, training the team to ignore or blindly re-approve failures.",
+        "Timestamps and GUIDs are too large to store in a snapshot file efficiently.",
+        "The snapshot library cannot serialize GUID or DateTime types without a custom converter.",
+        "Scrubbing converts the values to a canonical time zone so cross-machine runs agree."
+      ],
+      "correctIndex": 0,
+      "explanation": "A freshly generated GUID or current timestamp changes every run, so an unscrubbed snapshot always shows a diff, producing constant noise that leads people to rubber-stamp failures and miss a real regression. Normalizing those fields to fixed placeholders leaves only meaningful changes to fail the test.",
+      "conceptTag": "snapshot-scrubbing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__20",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does a soak test reveal that a short-duration load or stress test cannot?",
+      "options": [
+        "The maximum requests per second the system can handle before errors spike.",
+        "Slow-accumulating problems like a memory leak or gradual resource exhaustion that only become measurable after hours or days of sustained operation.",
+        "Whether the system returns correct results under a sudden traffic spike.",
+        "How quickly the system recovers after a dependency is killed."
+      ],
+      "correctIndex": 1,
+      "explanation": "A soak test's defining trait is sustained duration, not peak intensity, so a leak of a few megabytes per hour accumulates into something visible; a 30-minute load test never gives it time to matter. Peak throughput, spike handling, and recovery are what other test types measure.",
+      "conceptTag": "soak-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__21",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How can a codebase report high line coverage while still having significant branch coverage gaps?",
+      "options": [
+        "Branch coverage counts test code, while line coverage counts only production code.",
+        "Line coverage includes comments and blank lines, deflating the branch figure by comparison.",
+        "A test can execute every line of an if/else while only ever taking one direction of each decision, leaving else branches, catch blocks, and short-circuited conditions unexercised.",
+        "Branch coverage requires a separate paid tool that most teams do not run."
+      ],
+      "correctIndex": 2,
+      "explanation": "Line coverage only asks whether a line ran; branch coverage asks whether each decision went both ways. If the untested else or catch shares lines with the happy path, line coverage looks high while whole decision outcomes are never taken.",
+      "conceptTag": "line-vs-branch-coverage"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__21",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Testcontainers avoid the trade-offs of both a shared test database and an in-memory provider?",
+      "options": [
+        "It mocks the database driver so no real engine is needed, but mimics constraint behavior in code.",
+        "It starts a real, disposable database instance in Docker per test run, giving genuine engine behavior plus per-run isolation, at the cost of a Docker dependency and slower startup.",
+        "It runs the production database in read-only mode so tests cannot corrupt shared data.",
+        "It records production queries and replays them against an embedded database."
+      ],
+      "correctIndex": 1,
+      "explanation": "Testcontainers spins up an actual database container for a run and tears it down, so tests get real query translation and constraint enforcement without a shared stateful database's interference. The price is requiring Docker and container startup time.",
+      "conceptTag": "testcontainers"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__21",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the main risk of record/replay (VCR-pattern) testing for HTTP dependencies?",
+      "options": [
+        "The first recording run permanently alters state in the external service.",
+        "Replayed fixtures make tests hit the real network on every run, defeating the purpose.",
+        "A fixture that is never re-recorded after the real API's response shape changes lets tests keep passing against a shape the service no longer returns.",
+        "Recorded fixtures cannot capture response headers, only the body."
+      ],
+      "correctIndex": 2,
+      "explanation": "Record/replay captures a real exchange once and replays it offline, so it stays faithful only if fixtures are periodically re-recorded; a stale fixture silently diverges from reality, exactly what the pattern was meant to prevent. Replay does not touch the network, and fixtures capture full requests and responses.",
+      "conceptTag": "record-replay-testing"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__22",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "When is Moq's mock.Verify(...) the appropriate check instead of asserting on a return value?",
+      "options": [
+        "When the method under test is void and its entire observable effect is calling a dependency, such as sending an email or publishing an event.",
+        "Whenever the method under test returns a value, to confirm the value is non-null.",
+        "When you want to measure how long the dependency call took.",
+        "When the dependency is a concrete class rather than an interface."
+      ],
+      "correctIndex": 0,
+      "explanation": "Verify confirms an interaction happened with the expected arguments and count, which is the only observable behavior for a void method whose job is to trigger a side effect on a collaborator. Over-using it to check every internal call makes tests brittle to harmless refactors.",
+      "conceptTag": "verify-interaction"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__22",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "A test suite passes only when tests run in a particular order because of shared static state. What is the correct fix?",
+      "options": [
+        "Pin the test runner to declaration order so the passing order is always used.",
+        "Add a small delay between tests so shared state settles before the next test reads it.",
+        "Move the dependent test's assertions into the test that sets up the state it needs.",
+        "Make each test independently establish its own required starting state instead of relying on what a previous test left behind."
+      ],
+      "correctIndex": 3,
+      "explanation": "Order-dependent passing reveals hidden coupling through shared mutable static state; the durable fix is full isolation so every test sets up its own state. Pinning the order or merging tests only re-hides the fragility, which resurfaces when the run order next changes.",
+      "conceptTag": "test-order-independence"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__22",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is Test Impact Analysis in a CI pipeline, and what safeguard does it still require?",
+      "options": [
+        "It runs tests in parallel across more agents; it needs no safeguard because all tests still run.",
+        "It runs only tests related to the changed code, via call-graph or coverage analysis, but still needs periodic full-suite runs since the mapping can be stale.",
+        "It reruns failed tests up to three times to filter out flakiness before reporting.",
+        "It deletes tests that have not failed in the last year to keep the suite small."
+      ],
+      "correctIndex": 1,
+      "explanation": "TIA selects the subset of tests capable of catching a regression in the changed area, giving fast feedback for the common case; because coverage maps drift and static analysis cannot see reflection or dynamic dispatch, a nightly or pre-release full run remains a necessary backstop.",
+      "conceptTag": "test-impact-analysis"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__23",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What trade-off does tuning a test runner's parallelization level (e.g. xUnit's maxParallelThreads) involve?",
+      "options": [
+        "Higher values always run the suite faster; the only cost is more memory usage.",
+        "Lower values are always safer and the speed difference is negligible on modern hardware.",
+        "Too low leaves CPU cores idle; too high causes CPU oversubscription and contention over shared resources, which can slow the suite or introduce flakiness.",
+        "The setting only affects how results are displayed, not how tests execute."
+      ],
+      "correctIndex": 2,
+      "explanation": "The level caps true concurrency: set it too low and cores sit idle, too high and you oversubscribe the CPU and create contention over any shared database or file, trading speed for reliability. The right value depends on core count and whether the tests are genuinely isolated.",
+      "conceptTag": "parallelization-tuning"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__23",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does Contract-First API development differ from Consumer-Driven Contract Testing in who authors the contract?",
+      "options": [
+        "Contract-First starts from one central spec generating both server stub and client code; CDC has each consumer author its own expectations from real usage.",
+        "Contract-First lets each consumer write the spec; CDC has the producer write one shared spec.",
+        "Both are identical; Contract-First is just the newer name for CDC.",
+        "Contract-First contracts are verified only manually; CDC contracts are always CI-enforced."
+      ],
+      "correctIndex": 0,
+      "explanation": "Contract-First is design-first: a single authoritative spec precedes implementation and generates both sides. CDC captures each consumer's real dependencies after the fact. Contract-First does not remove the value of CDC, since actual usage can still drift from what the spec permits.",
+      "conceptTag": "contract-first-vs-cdc"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__24",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does AutoFixture reduce Arrange boilerplate beyond what a hand-written Test Data Builder provides?",
+      "options": [
+        "It caches constructed objects so identical test setups are reused across the suite.",
+        "It validates that every property holds a business-valid value before the test runs.",
+        "It reflects over the type and auto-generates plausible values for every property, so no defaults are hand-maintained and a newly added field is populated automatically.",
+        "It replaces mocks by generating working fake implementations of dependency interfaces."
+      ],
+      "correctIndex": 2,
+      "explanation": "A builder still requires someone to write and maintain default values; AutoFixture generates non-null, non-zero values by reflection at runtime, so adding a required field to the entity needs no builder update. Any property the assertion depends on must still be set explicitly, since generated values are arbitrary.",
+      "conceptTag": "autofixture"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__intermediate__25",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What problem does xUnit's IAsyncLifetime interface solve?",
+      "options": [
+        "It lets a test method run without the async keyword while still awaiting internally.",
+        "A C# constructor cannot be async, so IAsyncLifetime provides awaitable InitializeAsync and DisposeAsync hooks for genuinely asynchronous fixture setup and teardown.",
+        "It forces all tests in a class to run sequentially so async work does not overlap.",
+        "It automatically disposes any IDisposable field on the test class after each test."
+      ],
+      "correctIndex": 1,
+      "explanation": "Because a constructor cannot be async, async setup like starting a Testcontainers instance has no correct home there; IAsyncLifetime's InitializeAsync is awaited before dependent tests run and DisposeAsync during teardown, avoiding the sync-over-async blocking people otherwise resort to.",
+      "conceptTag": "iasynclifetime"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__23",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does shrinking do in property-based testing?",
+      "options": [
+        "It reduces the number of random inputs generated so the test suite runs faster.",
+        "It compresses the failing input's serialized form to save space in the test report.",
+        "After finding a failing random input, it systematically simplifies that input, checking each smaller version still fails, to converge on a minimal reproducing case.",
+        "It removes generated inputs that are duplicates of earlier ones."
+      ],
+      "correctIndex": 2,
+      "explanation": "A raw failing input is often large and mostly irrelevant; shrinking repeatedly tries simpler variants that still reproduce the failure, yielding something small and easy to debug. Shrinking heuristics can settle at a local minimum rather than the absolute simplest case.",
+      "conceptTag": "shrinking"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__24",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is the test-induced design damage criticism of the Mockist (London school) approach?",
+      "options": [
+        "Mockist tests run too slowly because they always use a real database.",
+        "Mockist tests cannot verify observable state, so they miss most logic bugs.",
+        "Mockist tests require writing more test code per behavior than classicist tests.",
+        "Aggressively mocking every collaborator pressures the design into many small interfaces that exist only to be mockable, adding indirection that serves tests rather than the design."
+      ],
+      "correctIndex": 3,
+      "explanation": "Taken to the extreme, mocking every collaborator forces even naturally concrete internal details behind interfaces purely for isolation, and the resulting web of interfaces and Verify calls couples tests to internal wiring. Both schools are legitimate trade-offs; many teams mock only at true external boundaries and use state-based tests for internal logic.",
+      "conceptTag": "test-induced-design-damage"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__25",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How do [Trait] attributes plus dotnet test --filter support CI test staging?",
+      "options": [
+        "They measure each test's runtime and automatically move slow ones to a nightly job.",
+        "Tests self-declare a category via [Trait], and each pipeline stage runs --filter for the categories it wants, so fast tests gate PRs and slow ones run post-merge.",
+        "They select only the tests affected by the current code change for a fast PR run.",
+        "They disable parallelization for tests marked slow so they do not destabilize the run."
+      ],
+      "correctIndex": 1,
+      "explanation": "A trait lets a test carry a category label and --filter selects by it, so a PR gate runs only fast unit tests and a nightly stage runs the slow integration and E2E suite. Selecting tests by what changed is Test Impact Analysis, a complementary but different technique; the risk here is forgetting to tag a new test correctly.",
+      "conceptTag": "trait-based-test-staging"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__advanced__26",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does it usually signal when a private method's logic feels impossible to exercise adequately through its class's public API?",
+      "options": [
+        "That the test suite needs a reflection helper to invoke private members directly.",
+        "That the private method should be made public so it can be tested in isolation.",
+        "That the private method represents a distinct responsibility that should be extracted into its own class with its own public API.",
+        "That the public API is missing test coverage and needs more [Theory] cases."
+      ],
+      "correctIndex": 2,
+      "explanation": "Private methods are implementation details meant to change freely, so testing them via reflection is brittle; real difficulty reaching one through its callers typically means it is a separate responsibility that deserves its own properly public, independently testable unit. Widening visibility or using reflection just works around encapsulation.",
+      "conceptTag": "test-through-public-api"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__24",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which best describes a unit test?",
+      "options": [
+        "An automated test that verifies a small, isolated piece of code such as a single method, running fast without touching databases, files, or external APIs.",
+        "A test that exercises a full user journey through the UI against a deployed environment.",
+        "A test that confirms two or more components work correctly together against real infrastructure.",
+        "A test that runs the system under sustained load to detect resource leaks."
+      ],
+      "correctIndex": 0,
+      "explanation": "A unit test targets the smallest testable piece in isolation and runs in milliseconds because it avoids external systems, forming the base of the testing pyramid. The other options describe end-to-end, integration, and soak tests.",
+      "conceptTag": "unit-test-definition"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__25",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does an integration test primarily verify?",
+      "options": [
+        "That a single method's business logic produces the right result in isolation.",
+        "That two or more components work correctly together, often using real infrastructure to check the boundary between your code and an external system.",
+        "That the rendered UI matches an approved screenshot pixel for pixel.",
+        "That the system stays responsive during a sudden traffic spike."
+      ],
+      "correctIndex": 1,
+      "explanation": "Integration tests deliberately keep real dependencies such as a test database, the file system, or a real endpoint to prove the wiring between your code and external systems is correct. Isolated logic is a unit test's job; the other options are visual regression and stress testing.",
+      "conceptTag": "integration-test-definition"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__26",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What is mocking in the context of unit testing?",
+      "options": [
+        "Running the same test with many generated random inputs to find a counterexample.",
+        "Recording a real dependency's responses once and replaying them on later runs.",
+        "Capturing a method's entire output and comparing it to a saved reference.",
+        "Creating fake versions of external dependencies so the code under test gets controlled data instead of hitting a real database or service, keeping the test fast and isolated."
+      ],
+      "correctIndex": 3,
+      "explanation": "Mocking substitutes a fake dependency that returns hardcoded results, so a unit test exercises only the function's own logic rather than the reliability of a real database or API. The other options describe property-based testing, record/replay, and snapshot testing.",
+      "conceptTag": "mocking-definition"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__27",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Which sequence correctly describes the TDD cycle?",
+      "options": [
+        "Write the implementation, write a test that passes, then delete the test if it is redundant.",
+        "Refactor the code, write a test, then write the implementation to match.",
+        "Write a failing test first, write the minimum code to make it pass, then refactor while keeping it green.",
+        "Write a passing test, add a failing test, then remove the failing test before committing."
+      ],
+      "correctIndex": 2,
+      "explanation": "TDD is Red, a failing test written before the code; Green, just enough code to pass; Refactor, clean up under the safety of the passing test, repeated in short cycles. The other sequences invert or corrupt that order.",
+      "conceptTag": "tdd-cycle"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__28",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "What does a code coverage percentage measure, and what does it not tell you?",
+      "options": [
+        "It measures the ratio of test code to production code, and does not tell you if tests pass.",
+        "It measures how many lines or branches were executed while tests ran, and does not tell you whether the tests asserted the correct behavior.",
+        "It measures how many requirements have tests, and does not tell you how fast they run.",
+        "It measures how many tests exist, and does not tell you which ones are flaky."
+      ],
+      "correctIndex": 1,
+      "explanation": "Coverage is the fraction of lines or branches exercised by the test run; it proves code executed, not that meaningful assertions verified it, so 80% coverage says nothing directly about test quality. It is not a count of tests, requirements, or a code ratio.",
+      "conceptTag": "code-coverage-definition"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__29",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "How does BDD's Given-When-Then relate to the Arrange-Act-Assert pattern?",
+      "options": [
+        "Given-When-Then replaces AAA with a fundamentally different testing discipline that skips explicit setup.",
+        "Given-When-Then applies only to UI tests, while AAA applies only to unit tests.",
+        "Same underlying discipline (Given maps to Arrange, When to Act, Then to Assert) plus a plain-language layer so non-technical stakeholders can read and help write scenarios.",
+        "Given-When-Then requires no code because the framework infers the implementation from the text."
+      ],
+      "correctIndex": 2,
+      "explanation": "BDD's structure mirrors AAA one-to-one; its real contribution is a human-readable specification that business and engineering can review together. Each Gherkin line still binds to step-definition code, and adopting the syntax without involving stakeholders yields only extra indirection.",
+      "conceptTag": "bdd-given-when-then"
+    },
+    "error": null
+  },
+  {
+    "sourceId": "testing__beginner__30",
+    "sourceHash": null,
+    "promptVersion": 1,
+    "model": "claude-sonnet-5 (Claude Code session)",
+    "generatedAt": "2026-08-28T00:00:00.000Z",
+    "curated": true,
+    "status": "ok",
+    "mcq": {
+      "stem": "Why is Assert.Throws<T> preferred over a manual try/catch for testing that a method throws?",
+      "options": [
+        "A try/catch that omits an explicit fail call passes even when nothing throws; Assert.Throws<T> fails automatically then and returns the exception to inspect.",
+        "Assert.Throws<T> catches exceptions on a background thread, which try/catch cannot do.",
+        "try/catch cannot inspect the exception message, while Assert.Throws<T> can.",
+        "Assert.Throws<T> runs faster because it skips stack-trace capture."
+      ],
+      "correctIndex": 0,
+      "explanation": "The manual pattern has a silent trap: forget the fail call after the invocation and a test where nothing throws still passes, losing its coverage. Assert.Throws<T> structurally fails if the expected exception does not occur and hands back the instance for further assertions. A try/catch can read the message too; threading and speed are not the point.",
+      "conceptTag": "assert-throws"
+    },
+    "error": null
+  }
+]
