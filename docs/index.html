@@ -38,6 +38,10 @@ if (location.hostname === "mayurjp.github.io") {
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/css/style.css" />
 <script src="assets/js/theme.js"></script>
+<!-- Cloudflare Web Analytics: replace YOUR_CF_BEACON_TOKEN with the token from
+     Cloudflare dashboard -> Analytics & Logs -> Web Analytics -> Add a site
+     (manual setup works for a Workers-hosted site with no DNS zone). -->
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "YOUR_CF_BEACON_TOKEN"}'></script>
 </head>
 <body>
 <header class="site">
@@ -56,6 +60,9 @@ if (location.hostname === "mayurjp.github.io") {
 </header>
 <main>
   <h1>Topics</h1>
+  <p class="muted" style="margin-top:-1rem;margin-bottom:1.5rem">
+    <img src="https://visitor-badge.laobi.icu/badge?page_id=architect-prep.mayur-jp.workers.dev" alt="Visitor count" style="vertical-align:middle" />
+  </p>
   <div id="topic-grid" class="grid"></div>
 </main>
 <script>

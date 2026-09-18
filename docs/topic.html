@@ -38,6 +38,10 @@ if (location.hostname === "mayurjp.github.io") {
   hljs.registerAliases(["hcl"], { languageName: "ini" });
 </script>
 <script src="assets/js/theme.js"></script>
+<!-- Cloudflare Web Analytics: replace YOUR_CF_BEACON_TOKEN with the token from
+     Cloudflare dashboard -> Analytics & Logs -> Web Analytics -> Add a site
+     (manual setup works for a Workers-hosted site with no DNS zone). -->
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "YOUR_CF_BEACON_TOKEN"}'></script>
 </head>
 <body>
 <div id="focus-modal">
