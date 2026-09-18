@@ -93,7 +93,7 @@ function render(query) {
     .map((q, i) => {
       const topic = topicsById[q.topic];
       const delayClass = `delay-${(i % 10) + 1}`;
-      return `<a class="card ${delayClass}" style="display:block" href="topic.html?t=${q.topic}&q=${q.id}">
+      return `<a class="card ${delayClass}" style="display:block" href="question.html?t=${q.topic}&q=${q.id}">
         <span class="badge ${q.level}">${q.level}</span>
         <span class="muted" style="margin-left:0.5rem">${topic ? topic.title : q.topic}</span>
         <p class="question-text">${escapeHtml(q.question)}</p>
